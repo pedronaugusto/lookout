@@ -118,12 +118,14 @@ pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollErro
     const started: Io.Timestamp = .now(k.io, .awake);
 
     while (true) {
+        // Clamped rather than returned on, so that a `timeout_ms` of zero
+        // still performs one non-blocking call. Returning early here would
+        // make `poll(0)` report nothing, ever.
         var timeout: std.c.timespec = undefined;
         const timeout_ptr: ?*const std.c.timespec = ptr: {
             const total = timeout_ms orelse break :ptr null;
             const elapsed = started.durationTo(Io.Timestamp.now(k.io, .awake)).toMilliseconds();
-            if (elapsed >= total) return;
-            const remaining: u32 = @intCast(@as(i64, total) - elapsed);
+            const remaining: u64 = @intCast(@max(0, @as(i64, total) - elapsed));
             timeout = .{
                 .sec = @intCast(remaining / std.time.ms_per_s),
                 .nsec = @intCast((remaining % std.time.ms_per_s) * std.time.ns_per_ms),

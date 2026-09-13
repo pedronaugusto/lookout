@@ -66,8 +66,11 @@ const read_buffer_len = 8192;
 /// Creates the inotify descriptor.
 pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.InitError!Inotify {
     _ = options;
+    // `linux.errno`, not `posix.errno`: these are raw syscalls, and on a
+    // target that links libc `posix.errno` reads libc's thread-local
+    // variable, which a raw syscall never writes.
     const rc = linux.inotify_init1(linux.IN.CLOEXEC);
-    switch (posix.errno(rc)) {
+    switch (linux.errno(rc)) {
         .SUCCESS => {},
         .MFILE => return error.ProcessFdQuotaExceeded,
         .NFILE => return error.SystemFdQuotaExceeded,
@@ -101,6 +104,9 @@ pub fn fd(n: *const Inotify) ?posix.fd_t {
 
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(n: *Inotify, id: WatchId, abs_path: []const u8, options: zwatch.AddOptions) zwatch.Watcher.AddError!void {
+    for (n.watches.values()) |watch| {
+        if (std.mem.eql(u8, watch.root, abs_path)) return error.PathAlreadyWatched;
+    }
     const stat = try Io.Dir.cwd().statFile(n.io, abs_path, .{});
 
     const root = try n.gpa.dupe(u8, abs_path);
@@ -157,11 +163,13 @@ pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollErr
     const started: Io.Timestamp = .now(n.io, .awake);
 
     while (true) {
+        // Clamped rather than returned on, so that a `timeout_ms` of zero
+        // still performs one non-blocking check. Returning early here
+        // would make `poll(0)` report nothing, ever.
         const timeout: i32 = timeout: {
             const total = timeout_ms orelse break :timeout -1;
             const elapsed = started.durationTo(Io.Timestamp.now(n.io, .awake)).toMilliseconds();
-            if (elapsed >= total) return;
-            break :timeout @intCast(@as(i64, total) - elapsed);
+            break :timeout @intCast(@max(0, @as(i64, total) - elapsed));
         };
 
         var fds: [1]posix.pollfd = .{.{ .fd = n.ifd, .events = posix.POLL.IN, .revents = 0 }};
@@ -203,13 +211,15 @@ fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) zwatch.
     const base = try n.gpa.dupe(u8, registration.path);
     defer n.gpa.free(base);
 
+    // IN_IGNORED is the kernel saying the watch is already gone, and it
+    // follows IN_DELETE_SELF, so neither asks for `inotify_rm_watch`.
     if (event.mask & linux.IN.IGNORED != 0) {
-        n.forget(event.wd);
+        n.drop(event.wd);
         return;
     }
     if (event.mask & linux.IN.DELETE_SELF != 0) {
         try batch.push(n.gpa, watch, base, .removed);
-        n.forget(event.wd);
+        n.drop(event.wd);
         return;
     }
     if (event.mask & linux.IN.MOVE_SELF != 0) {
@@ -243,29 +253,47 @@ fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) zwatch.
     }
 }
 
-/// Registers a directory that appeared inside a recursive watch, and
-/// reports whatever is already inside it as created — a directory can be
-/// populated before the watch on it exists, and those events would
+/// Registers directories that appeared inside a recursive watch, and
+/// reports whatever is already inside them as created -- a directory can
+/// be populated before the watch on it exists, and those events would
 /// otherwise be lost.
+///
+/// Iterative rather than recursive: the tree being adopted is one an
+/// unrelated process just created, so its depth is not this library's to
+/// bound.
 fn adopt(n: *Inotify, id: WatchId, path: []const u8, batch: *Batch) Allocator.Error!void {
-    const owned = n.gpa.dupe(u8, path) catch return error.OutOfMemory;
-    errdefer n.gpa.free(owned);
-    n.register(id, owned) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => {
-            n.gpa.free(owned);
-            return;
-        },
-    };
+    var frontier: std.ArrayList([]u8) = .empty;
+    defer {
+        for (frontier.items) |item| n.gpa.free(item);
+        frontier.deinit(n.gpa);
+    }
+    try frontier.append(n.gpa, try n.gpa.dupe(u8, path));
 
-    var dir = Io.Dir.openDirAbsolute(n.io, path, .{ .iterate = true }) catch return;
-    defer dir.close(n.io);
-    var it = dir.iterate();
-    while (it.next(n.io) catch return) |entry| {
-        const child = try std.fs.path.join(n.gpa, &.{ path, entry.name });
-        defer n.gpa.free(child);
-        try batch.push(n.gpa, id, child, .created);
-        if (entry.kind == .directory) try n.adopt(id, child, batch);
+    var i: usize = 0;
+    while (i < frontier.items.len) : (i += 1) {
+        const current = frontier.items[i];
+        const owned = try n.gpa.dupe(u8, current);
+        n.register(id, owned) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // `register` freed it. A directory that is gone again, or is
+            // not ours to read, is reported through its parent and no
+            // further.
+            else => continue,
+        };
+
+        var dir = Io.Dir.openDirAbsolute(n.io, current, .{ .iterate = true }) catch continue;
+        defer dir.close(n.io);
+        var it = dir.iterate();
+        while (it.next(n.io) catch null) |entry| {
+            const child = try std.fs.path.join(n.gpa, &.{ current, entry.name });
+            errdefer n.gpa.free(child);
+            try batch.push(n.gpa, id, child, .created);
+            if (entry.kind == .directory) {
+                try frontier.append(n.gpa, child);
+            } else {
+                n.gpa.free(child);
+            }
+        }
     }
 }
 
@@ -276,7 +304,7 @@ fn register(n: *Inotify, id: WatchId, path: []u8) zwatch.Watcher.AddError!void {
         return error.NameTooLong;
     };
     const rc = linux.inotify_add_watch(n.ifd, &path_z, mask);
-    switch (posix.errno(rc)) {
+    switch (linux.errno(rc)) {
         .SUCCESS => {},
         .NOSPC => {
             n.gpa.free(path);
@@ -308,10 +336,16 @@ fn register(n: *Inotify, id: WatchId, path: []u8) zwatch.Watcher.AddError!void {
     gop.value_ptr.* = .{ .watch = id, .path = path };
 }
 
-/// Drops one kernel watch and the path it stood for.
+/// Asks the kernel to drop one watch, and forgets the path it stood for.
 fn forget(n: *Inotify, wd: i32) void {
-    const entry = n.wds.fetchSwapRemove(wd) orelse return;
+    if (!n.wds.contains(wd)) return;
     _ = linux.inotify_rm_watch(n.ifd, wd);
+    n.drop(wd);
+}
+
+/// Forgets a watch the kernel has already dropped.
+fn drop(n: *Inotify, wd: i32) void {
+    const entry = n.wds.fetchSwapRemove(wd) orelse return;
     n.gpa.free(entry.value.path);
 }
 

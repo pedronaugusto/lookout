@@ -96,11 +96,16 @@ pub const Kind = enum {
     /// The path no longer exists. A rename of an entry inside a watched
     /// directory is reported as `removed` on the old name and `created` on
     /// the new one, on every backend.
+    ///
+    /// When the path is a watch's own root, that watch stops there: a
+    /// path is watched, not a name, and the name is now empty. The id
+    /// stays valid and `Watcher.remove` still releases it.
     removed,
-    /// The watched path itself was renamed and the watch now follows a
-    /// path that no longer has that name. Produced by the `kqueue` and
-    /// `inotify` backends; the `poll` backend cannot tell this from
-    /// `removed` and reports `removed`.
+    /// The watched path itself was renamed, so the watch no longer stands
+    /// for the name it was added under and stops, exactly as for a
+    /// `removed` root. Produced by the `kqueue` and `inotify` backends;
+    /// the `poll` backend cannot tell a rename from a deletion and
+    /// reports `removed`.
     renamed,
     /// Metadata other than the contents changed — permissions, ownership,
     /// link count, or the status-change time.
@@ -191,17 +196,20 @@ pub const Watcher = struct {
         poll: Poll,
     };
 
-    /// Errors `init` can return.
+    /// Errors `init` can return. No allocation happens here -- a watcher
+    /// that holds no watches holds no memory -- so this is only what
+    /// creating the kernel queue can fail with.
     pub const InitError = error{
         /// `Options.backend` names a backend this target was not built
         /// with. See `native_backend`.
         BackendUnavailable,
-        /// The process or the system is out of file descriptors.
+        /// The system-wide descriptor table is full.
         SystemFdQuotaExceeded,
+        /// This process may not open another descriptor.
         ProcessFdQuotaExceeded,
         /// The kernel could not allocate for the notification queue.
         SystemResources,
-    } || Allocator.Error || UnexpectedError;
+    } || UnexpectedError;
 
     /// Errors `add` can return, on top of the file-system errors of
     /// resolving and opening the path.
@@ -263,8 +271,14 @@ pub const Watcher = struct {
     ///
     /// The path is resolved to a canonical absolute path once, here; the
     /// watch follows that path and the events it produces are spelled
-    /// against it. Adding the same path twice produces two independent
-    /// watches and two events per change.
+    /// against it.
+    ///
+    /// One watcher watches a path once: a second `add` of a path already
+    /// watched fails with `error.PathAlreadyWatched`, on every backend.
+    /// The rule exists because `inotify` returns the same kernel watch
+    /// descriptor for the same inode, so a second registration would
+    /// quietly take the first one's events over; refusing it is the same
+    /// answer everywhere instead of a difference to discover.
     ///
     /// The returned id is valid until `remove` is called with it or the
     /// watcher is deinitialized.
@@ -297,11 +311,11 @@ pub const Watcher = struct {
     /// Waits for something to happen and returns what did.
     ///
     /// Blocks until at least one event arrives or `timeout_ms`
-    /// milliseconds pass; `null` blocks indefinitely, and `0` reports
-    /// whatever is already queued without waiting. Once the first event of
-    /// a batch arrives, collection continues for `Options.latency_ms`
-    /// more so that a burst on one path becomes one event; a `timeout_ms`
-    /// of `0` skips that wait.
+    /// milliseconds pass; `null` blocks indefinitely, and `0` performs a
+    /// single non-blocking check and returns. Once the first event of a
+    /// batch arrives, collection continues for `Options.latency_ms` more
+    /// so that a burst on one path becomes one event; a `timeout_ms` of
+    /// `0` skips that wait.
     ///
     /// The returned slice, and every path in it, is owned by the watcher
     /// and is invalidated by the next call to `poll` or by `deinit`. An

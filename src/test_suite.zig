@@ -331,6 +331,49 @@ test "a backend this target was not built with is refused, not a compile error" 
     );
 }
 
+test "one watcher watches a path once" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{});
+        try std.testing.expectError(
+            error.PathAlreadyWatched,
+            f.watcher.add(f.root, .{}),
+        );
+    }
+}
+
+test "a zero timeout is one check, not a refusal to look" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{});
+        // Nothing has happened, so a zero timeout must come straight back
+        // empty rather than block.
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+
+        try f.write("a.txt", "one");
+
+        // And it must still ask the kernel. A zero timeout that returned
+        // before making the call reported nothing, ever, which no amount
+        // of retrying would have fixed.
+        const gpa = std.testing.allocator;
+        const wanted = try f.path("a.txt");
+        defer gpa.free(wanted);
+
+        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        var found = false;
+        while (!found) {
+            for (try f.watcher.poll(0)) |event| {
+                if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
+            }
+            const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
+            if (elapsed.toMilliseconds() > timeout_ms) break;
+        }
+        try std.testing.expect(found);
+    }
+}
+
 test "adding a path that does not exist fails" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

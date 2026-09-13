@@ -57,6 +57,11 @@ jobs:
   # and of the ones it can, under the other libc. The default step
   # compiles the test binary as well as the archive, so these really do
   # analyse the backend sources rather than an empty library.
+  #
+  # x86_64-windows-gnu is the gate that matters most here: Windows is the
+  # one host where zwatch has no kernel backend at all, so the polling
+  # backend's portable path has to compile for it before the Windows
+  # runner above can run it.
   cross-compile:
     name: cross (${{ matrix.target }})
     runs-on: ubuntu-latest

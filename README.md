@@ -68,7 +68,7 @@ exe.root_module.addImport("zwatch", zwatch_dep.module("zwatch"));
 |---|---|
 | `Watcher.init(gpa, io, options)` | A watcher holding no watches. `io` is the `std.Io` every file-system operation goes through, captured for the watcher's lifetime. |
 | `Watcher.deinit()` | Releases the watches, the descriptors and the last batch of events. |
-| `Watcher.add(path, options)` | Watches a file or a directory, optionally recursively. Returns a `WatchId`. |
+| `Watcher.add(path, options)` | Watches a file or a directory, optionally recursively. Returns a `WatchId`. A path already watched by this watcher is `error.PathAlreadyWatched`. |
 | `Watcher.remove(id)` | Stops a watch and releases its descriptors. |
 | `Watcher.poll(timeout_ms)` | Blocks until something happens, and returns the coalesced events. `null` blocks indefinitely; `0` reports what is already queued. |
 | `Watcher.fd()` | The descriptor to wait on, or `null` for the polling backend. |
@@ -112,7 +112,9 @@ than something you discover.
   release. `ReadDirectoryChangesW` is the right answer there and it is
   not written yet, so on Windows a change is seen up to
   `poll_interval_ms` after it happens and a file created and deleted
-  between two scans is never seen at all.
+  between two scans is never seen at all. A watched directory is also
+  held open for the life of the watch, which on Windows can stop another
+  process from deleting or renaming it.
 - **No FSEvents on macOS.** `kqueue` watches descriptors, so a watched
   tree costs one descriptor per directory and one per file inside a
   watched directory, against the per-process limit. If the process runs
@@ -146,6 +148,17 @@ than something you discover.
   tree.
 - **One watcher, one thread.** A `Watcher` is not thread-safe. Several
   may exist in one process.
+- **One watcher watches a path once.** A second `add` of a path already
+  watched fails with `error.PathAlreadyWatched`. Two watchers may watch
+  the same path; one watcher may not watch it twice, because `inotify`
+  hands back the same kernel watch descriptor for the same inode and the
+  second registration would quietly take the first one's events over.
+- **Overlapping watches are not fully independent on Linux.** Watching a
+  tree recursively and also watching a directory inside it means two
+  watches meeting at one inode, which `inotify` represents once; the
+  events for the shared directory arrive under whichever watch
+  registered it last. The BSD and polling backends keep them separate.
+  Watch either the tree or the subdirectory, not both.
 - **`renamed` means the watched path itself.** A rename of an entry
   inside a watched directory is `removed` on the old name and `created`
   on the new one, on every backend, because the listing comparison the
@@ -165,6 +178,24 @@ than something you discover.
 `Options.backend` selects one explicitly. Asking for a backend this
 target was not built with fails `init` with `error.BackendUnavailable`
 rather than failing to compile, so a program can ask and fall back.
+
+## What has run where
+
+Test results are a claim like any other, so here is the shape of the
+evidence. The suite is executed on Linux, macOS and Windows by CI --
+`zig build test` in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall on
+each, plus `zig build examples` -- and every target in the cross-compile
+matrix is compiled including the test binary, so a backend source cannot
+break unnoticed behind an empty archive.
+
+What that leaves unverified between CI runs: the `inotify` and Windows
+paths have no local execution behind them, only compilation. Two
+Windows-specific behaviours in particular rest on `std.Io.Dir` and are
+asserted by the suite rather than by reading Win32: that a directory
+opened with `.iterate` can be listed while entries are being created and
+removed, and that `statFile` reports a modification time with enough
+resolution to see two writes close together. Both hold on the POSIX
+targets this was developed on.
 
 ## Requirements
 

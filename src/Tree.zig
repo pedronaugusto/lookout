@@ -77,7 +77,10 @@ pub const Node = struct {
 };
 
 /// Errors adding a watch can return.
-pub const AddError = Allocator.Error || Io.Dir.OpenError || Io.Dir.StatFileError ||
+pub const AddError = error{
+    /// This watcher already watches that path. See `zwatch.Watcher.add`.
+    PathAlreadyWatched,
+} || Allocator.Error || Io.Dir.OpenError || Io.Dir.StatFileError ||
     Io.Dir.RealPathFileAllocError || Snapshot.RefreshError;
 
 /// Errors rescanning a watch can return.
@@ -120,6 +123,7 @@ pub fn addWatch(
     recursive: bool,
     added: *std.ArrayList(NodeId),
 ) AddError!void {
+    if (t.watched(abs_path)) return error.PathAlreadyWatched;
     const stat = try Io.Dir.cwd().statFile(t.io, abs_path, .{});
 
     const root = try t.gpa.dupe(u8, abs_path);
@@ -306,6 +310,14 @@ fn destroy(t: *Tree, node: *Node) void {
         node.snapshot.deinit(t.gpa);
     }
     t.gpa.free(node.path);
+}
+
+/// Whether some watch already has `abs_path` as its root.
+pub fn watched(t: *const Tree, abs_path: []const u8) bool {
+    for (t.watches.values()) |watch| {
+        if (std.mem.eql(u8, watch.root, abs_path)) return true;
+    }
+    return false;
 }
 
 /// The absolute path of the watch a node belongs to, for reporting
