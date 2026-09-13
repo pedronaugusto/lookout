@@ -2,13 +2,14 @@
 
 [![CI](https://github.com/pedronaugusto/zwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/pedronaugusto/zwatch/actions/workflows/ci.yml)
 
-A file-system watcher for Zig: one API over `kqueue` on macOS and the
-BSDs, `inotify` on Linux, and a polling backend that needs nothing from
-the kernel and runs everywhere else.
+A file-system watcher for Zig: one API over FSEvents and `kqueue` on
+Apple platforms, `inotify` on Linux, and a polling backend that needs
+nothing from the kernel and runs everywhere else.
 
-- **Pure Zig, no dependencies.** Nothing to vendor, nothing to link, no
-  `libc` requirement beyond what your target already has. Add the import
-  and build.
+- **Pure Zig, no dependencies.** Nothing to vendor, no C to compile, no
+  build script of your own. The system interfaces are reached through
+  hand-written `extern` declarations; the only thing linked is
+  CoreServices, on Apple targets, where FSEvents lives.
 - **One contract, not three.** The backends do not merely share a type
   name: the test suite runs once per backend the host can execute, so the
   polling backend is held to the same assertions as the kernel one on the
@@ -17,10 +18,18 @@ the kernel and runs everywhere else.
 - **No threads, no callbacks.** Everything happens on the thread that
   calls `poll`. A program with a wait loop of its own takes
   `Watcher.fd` and waits on the watcher alongside its sockets and pipes.
-- **Coalesced by default.** An editor saving a file writes it in several
-  pieces; a build system unpacking an archive touches a directory a
-  thousand times. Events on one path inside a short window arrive as one
-  event, so a rebuild is triggered once.
+- **Coalesced by default, and debounced on request.** An editor saving a
+  file writes it in several pieces; a build system unpacking an archive
+  touches a directory a thousand times. Events on one path inside
+  `latency_ms` arrive as one event, so a rebuild is triggered once. Set
+  `settle_ms` and a `modified` waits until the file has stopped changing,
+  which is the difference between reading a copied file and reading half
+  of one.
+- **Renames arrive whole where the kernel knows they are renames.**
+  `Event.kind == .renamed` carries `Event.from`, so a program that
+  follows a file does not have to guess which removal goes with which
+  creation. Where the kernel cannot say, the removal and the creation are
+  reported as themselves rather than guessed at -- see the table below.
 
 ## Usage
 
@@ -73,11 +82,13 @@ exe.root_module.addImport("zwatch", zwatch_dep.module("zwatch"));
 | `Watcher.poll(timeout_ms)` | Blocks until something happens, and returns the coalesced events. `null` blocks indefinitely; `0` reports what is already queued. |
 | `Watcher.fd()` | The descriptor to wait on, or `null` for the polling backend. |
 | `Watcher.backend()` | Which backend this watcher resolved to. |
-| `Event` | `{ id, path, kind }`. `path` is absolute and canonical. |
+| `Event` | `{ id, path, kind, from }`. `path` is absolute and canonical; `from` is where a paired rename came from. |
 | `Kind` | `created`, `modified`, `removed`, `renamed`, `attributes`, `overflow`. |
-| `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `max_dir_entries`. |
+| `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `max_dir_entries`. |
 | `AddOptions` | `recursive`. |
-| `native_backend` | The backend `.auto` resolves to here, or `null` where polling is the only choice. |
+| `default_backend` | The backend `.auto` resolves to on this target. |
+| `supported(backend)` | Whether this target was built with a backend. |
+| `pairsRenames(backend)` | Whether it reports `renamed` with a `from`, or a removal and a creation. |
 
 The events a `poll` returns, and every path in them, belong to the
 watcher and are invalidated by the next `poll`. Copy anything you intend
@@ -108,20 +119,29 @@ kernel had queued.
 The point of this section is that the list is short and explicit, rather
 than something you discover.
 
-- **No native Windows backend.** Windows gets the polling backend in this
-  release. `ReadDirectoryChangesW` is the right answer there and it is
-  not written yet, so on Windows a change is seen up to
-  `poll_interval_ms` after it happens and a file created and deleted
-  between two scans is never seen at all. A watched directory is also
-  held open for the life of the watch, which on Windows can stop another
-  process from deleting or renaming it.
-- **No FSEvents on macOS.** `kqueue` watches descriptors, so a watched
-  tree costs one descriptor per directory and one per file inside a
-  watched directory, against the per-process limit. If the process runs
-  out of descriptors, the files inside a watched directory are still
-  reported as appearing, disappearing and being renamed, but not as
-  being modified. FSEvents has no such cost and would suit a very large
-  tree better.
+- **No native Windows backend yet.** Windows gets the polling backend, so
+  a change is seen up to `poll_interval_ms` after it happens and a file
+  created and deleted between two scans is never seen at all.
+- **`kqueue` costs a descriptor per file.** It watches descriptors, not
+  names, so a watched tree costs one per directory and one per file
+  inside a watched directory, against the per-process limit. If the
+  process runs out, the files inside a watched directory are still
+  reported as appearing, disappearing and being renamed, but not as being
+  modified. This is why FSEvents and not `kqueue` is the default on Apple
+  platforms; `kqueue` remains the better answer for a handful of paths
+  watched without recursion.
+- **FSEvents coalesces before zwatch sees anything.** It has a latency
+  window of its own, and within it several changes to one path arrive as
+  one delivery with several flags set. zwatch keeps that window as short
+  as the API allows and does its own coalescing in one place, so that
+  every backend coalesces by the same rule; what it cannot do is
+  reconstruct an order FSEvents did not keep.
+- **FSEvents delivers on a thread zwatch does not own.** The library
+  starts none and calls nothing back: the dispatch queue appends to a
+  fixed buffer and writes one byte to a pipe, and every event a caller
+  sees is produced on the thread that called `poll`. If a burst outruns
+  that buffer, the excess becomes `Kind.overflow` rather than a blocked
+  system callback.
 - **Recursion is not a kernel feature.** Neither `kqueue` nor `inotify`
   recurses. zwatch walks the tree at `add` time, registers each
   directory, and registers new directories as they appear. A directory
@@ -160,8 +180,11 @@ than something you discover.
   tree recursively and also watching a directory inside it means two
   watches meeting at one inode, which `inotify` represents once; the
   events for the shared directory arrive under whichever watch
-  registered it last. The BSD and polling backends keep them separate.
-  Watch either the tree or the subdirectory, not both.
+  registered it last. The other backends keep them separate. Watch
+  either the tree or the subdirectory, not both.
+- **`settle_ms` delays only `modified`.** A creation, a removal and a
+  rename are facts about a name rather than about contents, and are
+  reported at once whatever it is set to.
 - **`renamed` means the watched path itself.** A rename of an entry
   inside a watched directory is `removed` on the old name and `created`
   on the new one, on every backend, because the listing comparison the
@@ -172,15 +195,40 @@ than something you discover.
 
 ## Backends
 
-| Backend | Targets | Mechanism |
-|---|---|---|
-| `kqueue` | macOS, iOS, FreeBSD, NetBSD, OpenBSD, DragonFly | `EVFILT_VNODE` on a descriptor per watched path, plus a directory-listing comparison to name the entry that changed. |
-| `inotify` | Linux | One kernel watch per directory; the kernel names the entry. |
-| `poll` | everywhere, including Windows | Re-stat and re-list on a timer. |
+| Backend | Targets | Default | Mechanism | Recursion costs | Renames |
+|---|---|---|---|---|---|
+| `fsevents` | macOS, iOS and the rest of Apple's | yes | One FSEvents stream per watch, delivered on a dispatch queue into a pipe the watcher owns. | one stream, and one remembered path per file | paired |
+| `kqueue` | Apple platforms, FreeBSD, NetBSD, OpenBSD, DragonFly | on the BSDs | `EVFILT_VNODE` on a descriptor per watched path, plus a listing comparison to name the entry that changed. | one descriptor per directory **and per file** | removal + creation |
+| `inotify` | Linux | yes | One kernel watch per directory; the kernel names the entry and gives each rename a cookie. | one kernel watch per directory | paired |
+| `poll` | everywhere | where there is no kernel backend | Re-stat and re-list on a timer. | one listing per directory per tick | removal + creation |
 
-`Options.backend` selects one explicitly. Asking for a backend this
-target was not built with fails `init` with `error.BackendUnavailable`
-rather than failing to compile, so a program can ask and fall back.
+`Options.backend` selects one explicitly; `supported` says whether this
+target has it. Asking for a backend this target was not built with fails
+`init` with `error.BackendUnavailable` rather than failing to compile, so
+a program can ask and fall back.
+
+### Where the backends disagree, and what the contract does about it
+
+Two differences are real and cannot be papered over, so they are in the
+API rather than in the small print.
+
+**Renames.** FSEvents, `inotify` and `ReadDirectoryChangesW` each say
+which removal goes with which creation -- by reporting both halves in one
+delivery, by a cookie, by an old-name/new-name pair. `kqueue` and polling
+learn what changed by comparing directory listings, where a rename and a
+delete-plus-create are the same listing. So `pairsRenames(backend)` tells
+you which shape to expect, `Event.from` carries the answer where there is
+one, and neither backend guesses. `Kind.renamed` with `from == null` is a
+third thing: the watched path itself was moved, which has no second half.
+
+**Flags versus facts.** `inotify` reports a sequence of things that
+happened. FSEvents reports flags accumulated per path which it never
+clears, so a file created an hour ago and written now still arrives with
+the created bit set. The FSEvents backend therefore remembers which
+paths it believes exist -- seeded by one listing walk per watch, kept
+current from what it reports -- and asks that, not the flags, whether
+something is a creation. It costs one string per watched file, which is
+still nothing beside `kqueue`'s descriptor per watched file.
 
 ## What has run where
 
@@ -191,14 +239,15 @@ each, plus `zig build examples` -- and every target in the cross-compile
 matrix is compiled including the test binary, so a backend source cannot
 break unnoticed behind an empty archive.
 
-What that leaves unverified between CI runs: the `inotify` and Windows
-paths have no local execution behind them, only compilation. Two
-Windows-specific behaviours in particular rest on `std.Io.Dir` and are
-asserted by the suite rather than by reading Win32: that a directory
-opened with `.iterate` can be listed while entries are being created and
-removed, and that `statFile` reports a modification time with enough
-resolution to see two writes close together. Both hold on the POSIX
-targets this was developed on.
+`ci/linux.sh` closes the gap for `inotify`, which now runs rather than
+merely compiling. What is left compile-only is Windows: nothing in
+`src/backend/windows.zig` has been executed on the machine it was written
+on, and the Windows runner in CI is the only place it runs. The polling
+backend's Windows path has the same status, and rests on `std.Io.Dir`
+behaving there as it does on POSIX -- that a directory opened with
+`.iterate` can be listed while entries are being created and removed, and
+that `statFile` reports a modification time with enough resolution to see
+two writes close together.
 
 ## Testing
 

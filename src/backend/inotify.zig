@@ -38,12 +38,29 @@ watches: std.AutoArrayHashMapUnmanaged(WatchId, Watch),
 wds: std.AutoArrayHashMapUnmanaged(i32, Registration),
 /// Mirrors `zwatch.Options.max_dir_entries`.
 max_dir_entries: usize,
+/// The `IN_MOVED_FROM` halves of renames whose `IN_MOVED_TO` has not
+/// arrived, keyed by the cookie the kernel pairs them with. Paths owned
+/// here.
+///
+/// The kernel emits the two halves back to back, so this is normally
+/// empty by the end of the read that filled it. What stays behind is a
+/// path that moved out of the watch, and `flushRenames` reports it as a
+/// removal -- which, from inside the watch, is what it is.
+pending_renames: std.AutoArrayHashMapUnmanaged(u32, Pending),
 
 /// What the caller asked for.
 const Watch = struct {
     /// Absolute, canonical path, owned by the backend.
     root: []u8,
     recursive: bool,
+};
+
+/// One half of a rename, waiting for the other.
+const Pending = struct {
+    watch: WatchId,
+    /// Absolute path the entry moved from, owned by the backend.
+    path: []u8,
+    is_dir: bool,
 };
 
 /// One kernel watch descriptor.
@@ -94,6 +111,7 @@ pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.Init
         .watches = .empty,
         .wds = .empty,
         .max_dir_entries = options.max_dir_entries,
+        .pending_renames = .empty,
     };
 }
 
@@ -103,6 +121,8 @@ pub fn deinit(n: *Inotify) void {
     n.wds.deinit(n.gpa);
     for (n.watches.values()) |watch| n.gpa.free(watch.root);
     n.watches.deinit(n.gpa);
+    for (n.pending_renames.values()) |half| n.gpa.free(half.path);
+    n.pending_renames.deinit(n.gpa);
     _ = linux.close(n.ifd);
     n.* = undefined;
 }
@@ -202,6 +222,9 @@ pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollErr
             offset += @sizeOf(linux.inotify_event) + event.len;
             try n.handle(event, batch);
         }
+        // The kernel puts both halves of a rename in one read, so a half
+        // still held at the end of one is a path that left the watch.
+        try n.flushRenames(batch);
         if (batch.events.items.len > before) return;
     }
 }
@@ -251,8 +274,38 @@ fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) zwatch.
     const appeared = event.mask & (linux.IN.CREATE | linux.IN.MOVED_TO) != 0;
     const vanished = event.mask & (linux.IN.DELETE | linux.IN.MOVED_FROM) != 0;
 
-    if (appeared) try batch.push(n.gpa, watch, path, .created);
-    if (vanished) try batch.push(n.gpa, watch, path, .removed);
+    // A move is held rather than reported: the kernel gives both halves a
+    // cookie, and two halves make one `renamed` instead of a removal and
+    // a creation nobody can connect.
+    var paired = false;
+    if (event.mask & linux.IN.MOVED_FROM != 0) {
+        const owned = try n.gpa.dupe(u8, path);
+        errdefer n.gpa.free(owned);
+        if (n.pending_renames.fetchSwapRemove(event.cookie)) |stale| n.gpa.free(stale.value.path);
+        try n.pending_renames.put(n.gpa, event.cookie, .{
+            .watch = watch,
+            .path = owned,
+            .is_dir = is_dir,
+        });
+        paired = true;
+    }
+    if (event.mask & linux.IN.MOVED_TO != 0) {
+        if (n.pending_renames.fetchSwapRemove(event.cookie)) |half| {
+            defer n.gpa.free(half.value.path);
+            try batch.pushRename(n.gpa, watch, path, half.value.path);
+            // The watches below a moved directory are still on the right
+            // inodes but under the wrong names, so they are dropped and
+            // taken again at the name the tree now has.
+            if (is_dir) {
+                n.forgetSubtree(half.value.path);
+                if (recursive) try n.adopt(watch, path, batch);
+            }
+            paired = true;
+        }
+    }
+
+    if (appeared and !paired) try batch.push(n.gpa, watch, path, .created);
+    if (vanished and !paired) try batch.push(n.gpa, watch, path, .removed);
     if (event.mask & linux.IN.MODIFY != 0) {
         try batch.push(n.gpa, watch, path, .modified);
     }
@@ -273,8 +326,23 @@ fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) zwatch.
     }
 
     // Last, because both can rehash `wds` and invalidate the pointer above.
-    if (appeared and is_dir and recursive) try n.adopt(watch, path, batch);
-    if (vanished and is_dir) n.forgetSubtree(path);
+    if (appeared and !paired and is_dir and recursive) try n.adopt(watch, path, batch);
+    if (vanished and !paired and is_dir) n.forgetSubtree(path);
+}
+
+/// Reports every held `IN_MOVED_FROM` whose other half never came as a
+/// removal: the entry moved somewhere this watch cannot see it, which
+/// from inside the watch is indistinguishable from a deletion.
+fn flushRenames(n: *Inotify, batch: *Batch) zwatch.Watcher.PollError!void {
+    while (n.pending_renames.count() != 0) {
+        const half = n.pending_renames.values()[0];
+        const cookie = n.pending_renames.keys()[0];
+        n.pending_renames.swapRemoveAt(0);
+        defer n.gpa.free(half.path);
+        _ = cookie;
+        try batch.push(n.gpa, half.watch, half.path, .removed);
+        if (half.is_dir) n.forgetSubtree(half.path);
+    }
 }
 
 /// Registers directories that appeared inside a recursive watch, and

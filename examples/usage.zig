@@ -65,9 +65,14 @@ pub fn main() !void {
     std.debug.print("backend: {s}\n", .{@tagName(watcher.backend())});
 }
 
-/// Polls once and prints whatever came back.
+/// Polls once and prints whatever came back, including where a renamed
+/// path came from on the backends that can say.
 fn report(watcher: *zwatch.Watcher) !void {
     for (try watcher.poll(2_000)) |event| {
-        std.debug.print("{s} {s}\n", .{ @tagName(event.kind), event.path });
+        if (event.from) |from| {
+            std.debug.print("{s} {s} (from {s})\n", .{ @tagName(event.kind), event.path, from });
+        } else {
+            std.debug.print("{s} {s}\n", .{ @tagName(event.kind), event.path });
+        }
     }
 }

@@ -9,9 +9,20 @@ breaking one.
 
 First release.
 
-- `Watcher` over three backends behind one API: `kqueue` on macOS and the
-  BSDs, `inotify` on Linux, and a polling backend that needs nothing from
-  the kernel and is what Windows uses.
+- `Watcher` over four backends behind one API: FSEvents and `kqueue` on
+  Apple platforms, `inotify` on Linux, and a polling backend that needs
+  nothing from the kernel and runs everywhere. `Options.backend` picks
+  one; `supported` says which this target has.
+- Renames arrive whole where the kernel knows they are renames:
+  `Event.from` carries where a path came from, and `pairsRenames` says
+  which backends can tell. Where they cannot -- `kqueue` and polling
+  compare directory listings, in which a rename and a delete-plus-create
+  are the same thing -- the removal and the creation are reported as
+  themselves rather than guessed at.
+- `Options.settle_ms` waits for a file to stop changing before reporting
+  it as modified, which is the difference between reading a copied file
+  and reading half of one. `latency_ms` merges the writes that arrive
+  together; this waits for the writing to be over.
 - Events are coalesced per path within a window, so a file written in
   four chunks is one `modified` rather than four.
 - `Watcher.fd` exposes the kernel descriptor, so a program with a wait

@@ -12,11 +12,18 @@ pub fn build(b: *std.Build) void {
     // a consumer adds the import and nothing else.
     //=====================================================================
 
+    // FSEvents lives in CoreServices, and the externs that reach it are
+    // the only thing in the package that needs a system library. Every
+    // other target stays free-standing Zig.
+    const darwin = target.result.os.tag.isDarwin();
+
     const module = b.addModule("zwatch", .{
         .root_source_file = b.path("src/zwatch.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = darwin,
     });
+    if (darwin) module.linkFramework("CoreServices", .{});
 
     //=====================================================================
     // Tests.
@@ -32,8 +39,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/zwatch.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = darwin,
         }),
     });
+    if (darwin) tests.root_module.linkFramework("CoreServices", .{});
 
     const test_step = b.step("test", "Run the zwatch tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);

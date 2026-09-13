@@ -13,12 +13,23 @@ const zwatch = @import("zwatch.zig");
 const Kind = zwatch.Kind;
 const Watcher = zwatch.Watcher;
 
-/// Every backend that can run here: the kernel one, when this target has
-/// one, and always `poll`.
-const backends: []const zwatch.Backend = if (zwatch.native_backend) |native|
-    &.{ native, .poll }
-else
-    &.{.poll};
+/// Every backend this target was built with. The suite runs whole
+/// against each of them, which is the package's central claim made
+/// checkable: a program written against `zwatch.Watcher` sees the same
+/// events whichever mechanism is underneath.
+const backends: []const zwatch.Backend = all: {
+    const names = @typeInfo(zwatch.Backend).@"enum".fields;
+    var list: [names.len]zwatch.Backend = undefined;
+    var len: usize = 0;
+    for (names) |field| {
+        const backend: zwatch.Backend = @enumFromInt(field.value);
+        if (backend == .auto or !zwatch.supported(backend)) continue;
+        list[len] = backend;
+        len += 1;
+    }
+    const final = list[0..len].*;
+    break :all &final;
+};
 
 /// Long enough that a loaded machine still gets there, short enough that
 /// the suite stays a suite. Nothing waits a fixed time: every assertion
@@ -30,8 +41,17 @@ const Fixture = struct {
     tmp: std.testing.TmpDir,
     root: [:0]u8,
     watcher: Watcher,
+    /// `Event.from` of the last event `expectEvents` matched, copied
+    /// before the next poll invalidates it.
+    seen_from: ?[]u8,
 
     fn init(backend: zwatch.Backend) !Fixture {
+        // A short interval keeps the poll backend's latency in the same
+        // order as the kernel backends' so one timeout fits both.
+        return initOptions(.{ .backend = backend, .poll_interval_ms = 20 });
+    }
+
+    fn initOptions(options: zwatch.Options) !Fixture {
         const gpa = std.testing.allocator;
         const io = std.testing.io;
         var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -43,14 +63,14 @@ const Fixture = struct {
         return .{
             .tmp = tmp,
             .root = root,
-            // A short interval keeps the poll backend's latency in the
-            // same order as the kernel backends' so one timeout fits both.
-            .watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 }),
+            .watcher = try .init(gpa, io, options),
+            .seen_from = null,
         };
     }
 
     fn deinit(f: *Fixture) void {
         f.watcher.deinit();
+        if (f.seen_from) |from| std.testing.allocator.free(from);
         std.testing.allocator.free(f.root);
         f.tmp.cleanup();
     }
@@ -97,7 +117,12 @@ const Fixture = struct {
         while (waited < timeout_ms) : (waited += 200) {
             for (try f.watcher.poll(200)) |event| {
                 for (wants, paths, seen) |want, p, *hit| {
-                    if (event.kind == want.kind and std.mem.eql(u8, event.path, p)) hit.* = true;
+                    if (event.kind != want.kind or !std.mem.eql(u8, event.path, p)) continue;
+                    hit.* = true;
+                    if (event.from) |from| {
+                        if (f.seen_from) |old| gpa.free(old);
+                        f.seen_from = try gpa.dupe(u8, from);
+                    }
                 }
             }
             if (std.mem.allEqual(bool, seen, true)) return;
@@ -153,7 +178,7 @@ test "a file deleted from a watched directory is removed" {
     }
 }
 
-test "a rename inside a watched directory is a removal and a creation" {
+test "a rename is reported in the shape the backend documents" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
@@ -162,11 +187,69 @@ test "a rename inside a watched directory is a removal and a creation" {
         try f.settle();
 
         try f.tmp.dir.rename("before.txt", f.tmp.dir, "after.txt", std.testing.io);
-        try f.expectEvents(&.{
-            .{ .sub_path = "before.txt", .kind = .removed },
-            .{ .sub_path = "after.txt", .kind = .created },
-        });
+
+        // The two shapes describe the same thing happening. Which one a
+        // backend produces is `zwatch.pairsRenames`, and it is asserted
+        // rather than accepted either way: a table in the README nobody
+        // checks is a table that goes stale.
+        if (zwatch.pairsRenames(backend)) {
+            try f.expectEvents(&.{.{ .sub_path = "after.txt", .kind = .renamed }});
+            const from = try f.path("before.txt");
+            defer std.testing.allocator.free(from);
+            try std.testing.expectEqualStrings(from, f.seen_from.?);
+        } else {
+            try f.expectEvents(&.{
+                .{ .sub_path = "before.txt", .kind = .removed },
+                .{ .sub_path = "after.txt", .kind = .created },
+            });
+        }
     }
+}
+
+test "settling holds a modification back until the writing stops" {
+    // The poll backend only: this is about the clock, and the clock is
+    // the one thing a kernel backend adds jitter to. What is being
+    // tested lives in `Batch` and is the same code under every backend.
+    var f = try Fixture.initOptions(.{
+        .backend = .poll,
+        .poll_interval_ms = 20,
+        .settle_ms = 400,
+        .latency_ms = 0,
+    });
+    defer f.deinit();
+    try f.write("a.txt", "one");
+    _ = try f.watcher.add(f.root, .{});
+    try f.settle();
+
+    const gpa = std.testing.allocator;
+    const wanted = try f.path("a.txt");
+    defer gpa.free(wanted);
+
+    // Four writes inside the settle window, each a different length so no
+    // backend can miss one for want of clock resolution.
+    const chunks = [_][]const u8{ "two.", "three..", "four....", "five....." };
+    const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+    for (chunks) |chunk| {
+        try f.write("a.txt", chunk);
+        _ = try f.watcher.poll(40);
+    }
+
+    var seen: usize = 0;
+    var waited: u32 = 0;
+    while (waited < timeout_ms and seen == 0) : (waited += 100) {
+        for (try f.watcher.poll(100)) |event| {
+            if (std.mem.eql(u8, event.path, wanted)) {
+                try std.testing.expectEqual(Kind.modified, event.kind);
+                seen += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), seen);
+
+    // And it arrived after the window, not during it: a debounce that
+    // fires early is not a debounce.
+    const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
+    try std.testing.expect(elapsed.toMilliseconds() >= 400);
 }
 
 test "a watch on a single file reports writes to it" {
@@ -310,10 +393,11 @@ test "the descriptor is present exactly when the backend has one" {
     try std.testing.expectEqual(zwatch.Backend.poll, polling.backend());
     try std.testing.expectEqual(@as(?std.posix.fd_t, null), polling.fd());
 
-    if (zwatch.native_backend) |native| {
-        var kernel: Watcher = try .init(gpa, io, .{ .backend = native });
+    for (backends) |backend| {
+        if (backend == .poll) continue;
+        var kernel: Watcher = try .init(gpa, io, .{ .backend = backend });
         defer kernel.deinit();
-        try std.testing.expectEqual(native, kernel.backend());
+        try std.testing.expectEqual(backend, kernel.backend());
         try std.testing.expect(kernel.fd() != null);
     }
 }
@@ -321,10 +405,8 @@ test "the descriptor is present exactly when the backend has one" {
 test "a backend this target was not built with is refused, not a compile error" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const absent: zwatch.Backend = switch (zwatch.native_backend orelse .poll) {
-        .inotify => .kqueue,
-        else => .inotify,
-    };
+    const absent: zwatch.Backend = if (zwatch.supported(.inotify)) .kqueue else .inotify;
+    try std.testing.expect(!zwatch.supported(absent));
     try std.testing.expectError(
         error.BackendUnavailable,
         Watcher.init(gpa, io, .{ .backend = absent }),

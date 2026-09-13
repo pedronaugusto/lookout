@@ -27,9 +27,10 @@ io: Io,
 interval_ms: u32,
 tree: Tree,
 
-/// Creates a backend that watches nothing. Cannot fail: this backend holds
-/// no kernel resource.
-pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) Poll {
+/// Creates a backend that watches nothing. Never actually fails -- this
+/// backend holds no kernel resource -- and returns the error union every
+/// backend returns, so that `zwatch.Watcher.init` can treat them alike.
+pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.InitError!Poll {
     return .{
         .gpa = gpa,
         .io = io,
@@ -42,6 +43,14 @@ pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) Poll {
 pub fn deinit(p: *Poll) void {
     p.tree.deinit();
     p.* = undefined;
+}
+
+/// No descriptor: this backend has nothing to wait on, so a program
+/// cannot fold it into a wait loop of its own and must call
+/// `zwatch.Watcher.poll`.
+pub fn fd(p: *const Poll) ?std.posix.fd_t {
+    _ = p;
+    return null;
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.

@@ -21,16 +21,19 @@ const Tree = @import("Tree.zig");
 
 /// The mechanism a `Watcher` uses to learn that something changed.
 ///
-/// Which of these can be selected depends on the target: see
-/// `native_backend`. `poll` is available everywhere.
+/// Which of these this target was built with is `supported`; which one
+/// `auto` picks is `default_backend`. `poll` is built everywhere.
 pub const Backend = enum {
-    /// Pick `native_backend` if this target has one, otherwise `poll`.
+    /// Pick `default_backend`.
     auto,
+    /// Apple's FSEvents. Recursive in the kernel, so a tree costs no
+    /// descriptor per directory, and renames arrive paired.
+    fsevents,
     /// BSD `kqueue` with the `EVFILT_VNODE` filter. One descriptor is held
     /// open per watched file and per watched directory.
     kqueue,
     /// Linux `inotify`. One kernel watch descriptor is held per watched
-    /// file and per watched directory.
+    /// file and per watched directory, and renames arrive paired.
     inotify,
     /// Re-stat and re-list watched paths on a timer. Needs no kernel
     /// support and holds no descriptor, at the cost of latency and of
@@ -38,14 +41,41 @@ pub const Backend = enum {
     poll,
 };
 
-/// The backend `Backend.auto` resolves to on this target, or `null` when
-/// this target has no kernel notification mechanism zwatch implements and
-/// `Backend.poll` is the only choice.
+/// Whether this target was built with `backend`.
 ///
-/// Selecting a backend other than this one or `.poll` fails
-/// `Watcher.init` with `error.BackendUnavailable`; it is not a compile
-/// error, so a program may ask for a backend and fall back at run time.
-pub const native_backend: ?Backend = switch (builtin.os.tag) {
+/// Asking `Watcher.init` for one that was not fails with
+/// `error.BackendUnavailable` rather than failing to compile, so a
+/// program may ask and fall back at run time; this is how it asks first.
+pub fn supported(backend: Backend) bool {
+    return switch (backend) {
+        .auto => true,
+        inline else => |tag| @hasField(Watcher.Impl, @tagName(tag)),
+    };
+}
+
+/// Whether `backend` pairs a rename, reporting one `Kind.renamed` event
+/// carrying `Event.from`, or cannot and reports `Kind.removed` on the old
+/// path and `Kind.created` on the new one.
+///
+/// Both shapes describe the same thing happening. A program that only
+/// wants to know that a path needs re-reading can ignore the difference;
+/// one that follows a file across a rename needs this.
+pub fn pairsRenames(backend: Backend) bool {
+    return switch (backend) {
+        .auto => pairsRenames(default_backend),
+        .fsevents, .inotify => true,
+        .kqueue, .poll => false,
+    };
+}
+
+/// The backend `Backend.auto` resolves to on this target: the kernel one
+/// where there is a kernel one, and `poll` where there is not.
+///
+/// On Apple targets this is `fsevents` rather than `kqueue`, because
+/// FSEvents recurses without a descriptor per directory and pairs
+/// renames. `kqueue` remains selectable, and is the better answer for a
+/// handful of paths watched without recursion.
+pub const default_backend: Backend = switch (builtin.os.tag) {
     .driverkit,
     .ios,
     .maccatalyst,
@@ -53,24 +83,14 @@ pub const native_backend: ?Backend = switch (builtin.os.tag) {
     .tvos,
     .visionos,
     .watchos,
-    .dragonfly,
-    .freebsd,
-    .netbsd,
-    .openbsd,
-    => .kqueue,
+    => .fsevents,
+    .dragonfly, .freebsd, .netbsd, .openbsd => .kqueue,
     .linux => .inotify,
-    else => null,
+    else => .poll,
 };
 
-/// The compiled-in native backend implementation, or `void` on a target
-/// that has none. The switch is comptime, so a target's build contains one
-/// native backend and never the others.
-const Native = if (native_backend) |backend| switch (backend) {
-    .kqueue => @import("backend/kqueue.zig"),
-    .inotify => @import("backend/inotify.zig"),
-    else => unreachable,
-} else void;
-
+/// The backend every target has. Named here rather than inside `Impl`
+/// because every one of that union's shapes has it.
 const Poll = @import("backend/poll.zig");
 
 /// Identifies one watch within one `Watcher`.
@@ -125,14 +145,25 @@ pub const Event = struct {
     /// including for an entry inside a watched directory, which is the
     /// watch root joined with the entry name. Owned by the `Watcher` and
     /// valid until the next call to `Watcher.poll` or `Watcher.deinit`.
+    ///
+    /// For `Kind.renamed` this is where the path is now.
     path: []const u8,
     /// What happened.
     kind: Kind,
+    /// Where a renamed path was before, when the operating system paired
+    /// the two halves of the rename. `null` for every other kind, and for
+    /// `Kind.renamed` on a backend that cannot pair -- see `pairsRenames`
+    /// -- and when the watched path itself was renamed, which has no
+    /// second half to pair with.
+    ///
+    /// Owned by the `Watcher` on the same terms as `path`.
+    from: ?[]const u8 = null,
 };
 
 /// How a `Watcher` behaves, fixed for its lifetime.
 pub const Options = struct {
-    /// Which mechanism to use. See `Backend` and `native_backend`.
+    /// Which mechanism to use. See `Backend`, `default_backend` and
+    /// `supported`.
     backend: Backend = .auto,
     /// How long the `poll` backend waits between scans. Ignored by every
     /// other backend.
@@ -143,6 +174,19 @@ pub const Options = struct {
     /// of a file being saved. Zero disables the wait and reports whatever
     /// is already queued.
     latency_ms: u32 = 50,
+    /// How long a file must stop changing before its `Kind.modified` is
+    /// reported. Zero, the default, reports it as soon as it is seen.
+    ///
+    /// `latency_ms` merges the writes that arrive together; this waits
+    /// for the writing to be over. A build system copying a large file
+    /// produces `modified` the moment it starts, which is the wrong
+    /// moment to read it; with `settle_ms` the event arrives once the
+    /// file has been still for that long.
+    ///
+    /// It delays only `modified`. A creation, a removal and a rename are
+    /// facts about a name rather than about contents, and are reported at
+    /// once whatever this is set to.
+    settle_ms: u32 = 0,
     /// The largest number of entries zwatch will account for in one
     /// watched directory. A directory holding more reports
     /// `Kind.overflow` against its watch root, which means: this one is
@@ -191,14 +235,28 @@ pub const Watcher = struct {
     next_id: u32,
     impl: Impl,
 
-    /// The backend, chosen at `init` from what this target was built
-    /// with. A target with no native backend has no prong for one, which
-    /// is what keeps Windows from carrying a dead `kqueue` branch.
-    const Impl = if (Native == void) union(enum) {
-        poll: Poll,
-    } else union(enum) {
-        native: Native,
-        poll: Poll,
+    /// Every backend this target was built with, and the one the watcher
+    /// chose. Written out per target rather than generated, because the
+    /// set really is different per target and a reader should be able to
+    /// see which. The tag names match `Backend`'s, which is what lets
+    /// `init`, `supported` and `backend` be one line each.
+    const Impl = switch (builtin.os.tag) {
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => union(enum) {
+            fsevents: @import("backend/fsevents.zig"),
+            kqueue: @import("backend/kqueue.zig"),
+            poll: Poll,
+        },
+        .dragonfly, .freebsd, .netbsd, .openbsd => union(enum) {
+            kqueue: @import("backend/kqueue.zig"),
+            poll: Poll,
+        },
+        .linux => union(enum) {
+            inotify: @import("backend/inotify.zig"),
+            poll: Poll,
+        },
+        else => union(enum) {
+            poll: Poll,
+        },
     };
 
     /// Errors `init` can return. No allocation happens here -- a watcher
@@ -206,7 +264,7 @@ pub const Watcher = struct {
     /// creating the kernel queue can fail with.
     pub const InitError = error{
         /// `Options.backend` names a backend this target was not built
-        /// with. See `native_backend`.
+        /// with. See `supported`.
         BackendUnavailable,
         /// The system-wide descriptor table is full.
         SystemFdQuotaExceeded,
@@ -242,20 +300,22 @@ pub const Watcher = struct {
     /// descriptors.
     pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Watcher {
         const resolved: Backend = switch (options.backend) {
-            .auto => native_backend orelse .poll,
+            .auto => default_backend,
             else => |b| b,
         };
-        const impl: Impl = impl: {
-            if (resolved == .poll) break :impl .{ .poll = Poll.init(gpa, io, options) };
-            if (Native == void) return error.BackendUnavailable;
-            if (resolved != native_backend.?) return error.BackendUnavailable;
-            break :impl .{ .native = try Native.init(gpa, io, options) };
+        const impl: Impl = switch (resolved) {
+            .auto => unreachable,
+            inline else => |tag| impl: {
+                const name = @tagName(tag);
+                if (!@hasField(Impl, name)) return error.BackendUnavailable;
+                break :impl @unionInit(Impl, name, try @FieldType(Impl, name).init(gpa, io, options));
+            },
         };
         return .{
             .gpa = gpa,
             .io = io,
             .options = options,
-            .batch = .empty,
+            .batch = .init(io, options),
             .next_id = 0,
             .impl = impl,
         };
@@ -327,55 +387,77 @@ pub const Watcher = struct {
     /// empty slice means the timeout expired with nothing to report.
     pub fn poll(w: *Watcher, timeout_ms: ?u32) PollError![]const Event {
         w.batch.reset(w.gpa);
+        const started: Io.Timestamp = .now(w.io, .awake);
 
-        switch (w.impl) {
-            inline else => |*impl| try impl.wait(&w.batch, timeout_ms),
+        while (true) {
+            // A path that is settling has a deadline of its own, so the
+            // wait is the shorter of the caller's timeout and the next
+            // one due; otherwise a `poll(null)` would sleep through a
+            // deadline the watcher set itself.
+            const left = remainingMs(w.io, started, timeout_ms);
+            const wait_ms: ?u32 = if (w.batch.nextDueMs()) |due|
+                if (left) |l| @min(l, due) else due
+            else
+                left;
+
+            switch (w.impl) {
+                inline else => |*impl| try impl.wait(&w.batch, wait_ms),
+            }
+            try w.batch.promote(w.gpa);
+            if (w.batch.events.items.len > 0) break;
+            if (remainingMs(w.io, started, timeout_ms)) |l| {
+                if (l == 0) return &.{};
+            }
         }
-        if (w.batch.events.items.len == 0) return &.{};
         if (timeout_ms == 0 or w.options.latency_ms == 0) return w.batch.events.items;
 
         // The coalescing tail: keep reading for `latency_ms` past the first
         // event so that an editor writing a file in four chunks is one
         // `modified` and not four.
-        const started: Io.Timestamp = .now(w.io, .awake);
-        const window = Io.Duration.fromMilliseconds(w.options.latency_ms);
+        const tail: Io.Timestamp = .now(w.io, .awake);
         while (true) {
-            const elapsed = started.durationTo(Io.Timestamp.now(w.io, .awake));
-            const remaining = window.nanoseconds - elapsed.nanoseconds;
-            if (remaining <= 0) break;
-            const remaining_ms: u32 = @intCast(@divTrunc(remaining, std.time.ns_per_ms) + 1);
+            const left = remainingMs(w.io, tail, w.options.latency_ms) orelse 0;
+            if (left == 0) break;
             switch (w.impl) {
-                inline else => |*impl| try impl.wait(&w.batch, remaining_ms),
+                inline else => |*impl| try impl.wait(&w.batch, left),
             }
+            try w.batch.promote(w.gpa);
         }
         return w.batch.events.items;
+    }
+
+    /// Milliseconds left of `timeout_ms` since `started`, or `null` when
+    /// there is no timeout at all. Zero means it has expired.
+    fn remainingMs(io: Io, started: Io.Timestamp, timeout_ms: ?u32) ?u32 {
+        const total = timeout_ms orelse return null;
+        const elapsed = started.durationTo(Io.Timestamp.now(io, .awake)).toMilliseconds();
+        return @intCast(@max(0, @as(i64, total) - elapsed));
     }
 
     /// The descriptor the watcher waits on, for a program that runs a
     /// wait loop of its own: it becomes readable when there is something
     /// for `poll` to report.
     ///
-    /// `null` for the `poll` backend, which has no descriptor — such a
-    /// watcher can only be driven by calling `poll`.
+    /// `null` where the backend has no descriptor to give: the `poll`
+    /// backend, which has nothing to wait on, and the Windows backend,
+    /// which waits on an I/O completion port rather than on a handle
+    /// anything else can wait for. Such a watcher is driven by calling
+    /// `poll`.
     ///
     /// The descriptor belongs to the watcher. Reading from it, closing it,
     /// or registering it for anything other than readability is illegal
     /// behavior; use it to decide when to call `poll`, and nothing else.
     pub fn fd(w: *const Watcher) ?std.posix.fd_t {
-        if (Native == void) return null;
         return switch (w.impl) {
-            .poll => null,
-            .native => |*impl| impl.fd(),
+            inline else => |*impl| impl.fd(),
         };
     }
 
     /// The backend this watcher actually uses, with `Backend.auto`
     /// resolved.
     pub fn backend(w: *const Watcher) Backend {
-        if (Native == void) return .poll;
         return switch (w.impl) {
-            .poll => .poll,
-            .native => native_backend.?,
+            inline else => |_, tag| @field(Backend, @tagName(tag)),
         };
     }
 };

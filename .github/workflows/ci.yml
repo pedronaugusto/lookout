@@ -58,10 +58,15 @@ jobs:
   # compiles the test binary as well as the archive, so these really do
   # analyse the backend sources rather than an empty library.
   #
-  # x86_64-windows-gnu is the gate that matters most here: Windows is the
-  # one host where zwatch has no kernel backend at all, so the polling
-  # backend's portable path has to compile for it before the Windows
-  # runner above can run it.
+  # The Windows targets are the gate that matters most here, because the
+  # Windows backend is the one this package was written without ever
+  # running: it must compile under both ABIs before the Windows runner
+  # above can run it.
+  #
+  # The Apple targets are absent deliberately. FSEvents needs the macOS
+  # SDK, which a Linux runner does not have and which Zig only finds for
+  # a native build, so what proves those targets is the macOS leg of the
+  # `test` job, which builds and runs them natively.
   cross-compile:
     name: cross (${{ matrix.target }})
     runs-on: ubuntu-latest
@@ -72,9 +77,8 @@ jobs:
           - x86_64-linux-gnu
           - aarch64-linux-gnu
           - x86_64-linux-musl
-          - x86_64-macos
-          - aarch64-macos
           - x86_64-windows-gnu
+          - x86_64-windows-msvc
           - aarch64-windows-gnu
           - x86_64-freebsd
           - x86_64-netbsd
