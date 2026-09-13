@@ -72,6 +72,29 @@ pub fn pairsRenames(backend: Backend) bool {
     };
 }
 
+/// Whether `backend` can tell that the watched path itself was moved,
+/// reporting `Kind.renamed` against it, or can only see that the path is
+/// no longer there and reports `Kind.removed`.
+///
+/// The watched path disappearing is reported by every backend; which of
+/// the two kinds it arrives as is the only difference, and this is how a
+/// program asks rather than discovers.
+///
+/// `kqueue` and `inotify` watch the object and are told that it moved.
+/// The other three learn it from the name: `poll` compares listings, in
+/// which a move and a deletion are the same absence; FSEvents reports
+/// both with one flag against a root that is no longer at its name; and
+/// `windows` holds a handle that a move does not disturb, so a move is
+/// not reported at all until the path is read again. All three report the
+/// deletion as `Kind.removed` and lookout does not guess which it was.
+pub fn reportsRootMove(backend: Backend) bool {
+    return switch (backend) {
+        .auto => reportsRootMove(default_backend),
+        .kqueue, .inotify => true,
+        .fsevents, .windows, .poll => false,
+    };
+}
+
 /// The backend `Backend.auto` resolves to on this target: the kernel one
 /// where there is a kernel one, and `poll` where there is not.
 ///
@@ -163,6 +186,15 @@ pub const Event = struct {
     ///
     /// Owned by the `Watcher` on the same terms as `path`.
     from: ?[]const u8 = null,
+    /// When lookout first saw this path change in this window, read from
+    /// the `Io` the watcher was created with on the `awake` clock. It is
+    /// comparable with the caller's own `std.Io.Timestamp.now(io, .awake)`
+    /// and is not a wall clock.
+    ///
+    /// Coalescing merges several changes into one event, and this is the
+    /// first of them rather than the last: the caller wants to know when
+    /// the path started changing, not when lookout stopped collecting.
+    time: Io.Timestamp = .zero,
 };
 
 /// How a `Watcher` behaves, fixed for its lifetime.
@@ -192,6 +224,25 @@ pub const Options = struct {
     /// facts about a name rather than about contents, and are reported at
     /// once whatever this is set to.
     settle_ms: u32 = 0,
+    /// How long a path must be quiet before it is reported at all. Zero,
+    /// the default, is off.
+    ///
+    /// This is the third and strongest of the three windows, and it
+    /// answers a different question from the other two. `latency_ms`
+    /// merges what arrives together and reports the most significant kind
+    /// seen; `settle_ms` waits for a file's contents to stop changing.
+    /// `debounce_ms` holds *every* kind until the path has been quiet for
+    /// the window and then reports it once, carrying the kind seen
+    /// **last** rather than the most significant one. A file created and
+    /// then deleted inside one window is one `removed`; a file deleted
+    /// and then recreated is one `created`, which coalescing cannot say
+    /// because `removed` outranks `created`.
+    ///
+    /// That is what a caller rebuilding from the end state wants, and it
+    /// is why it supersedes both of the others: a non-zero `debounce_ms`
+    /// takes over from `settle_ms`, and `poll` returns as soon as a
+    /// window closes rather than collecting for `latency_ms` more.
+    debounce_ms: u32 = 0,
     /// The largest number of entries lookout will account for in one
     /// watched directory. A directory holding more reports
     /// `Kind.overflow` against its watch root, which means: this one is
@@ -418,7 +469,10 @@ pub const Watcher = struct {
                 if (l == 0) return &.{};
             }
         }
-        if (timeout_ms == 0 or w.options.latency_ms == 0) return w.batch.events.items;
+        // Debouncing has already waited for the path to be quiet, so
+        // there is nothing left for a coalescing tail to merge.
+        if (timeout_ms == 0 or w.options.latency_ms == 0 or w.options.debounce_ms > 0)
+            return w.batch.events.items;
 
         // The coalescing tail: keep reading for `latency_ms` past the first
         // event so that an editor writing a file in four chunks is one
@@ -441,6 +495,47 @@ pub const Watcher = struct {
         const total = timeout_ms orelse return null;
         const elapsed = started.durationTo(Io.Timestamp.now(io, .awake)).toMilliseconds();
         return @intCast(@max(0, @as(i64, total) - elapsed));
+    }
+
+    /// What a watcher is currently holding. See `stats`.
+    pub const Stats = struct {
+        /// Watches `add` has returned an id for and `remove` has not
+        /// taken back.
+        watches: usize,
+        /// Paths the operating system has been told about on this
+        /// watcher's behalf: one per kernel watch on `inotify`, one per
+        /// open descriptor on `kqueue`, one per stream on `fsevents`, one
+        /// per directory handle on `windows`, and one per path scanned on
+        /// `poll`.
+        ///
+        /// This is the number that runs into the limits — the per-user
+        /// cap on `inotify` watches, the per-process cap on descriptors —
+        /// and the reason a recursive watch on a deep tree is not free on
+        /// every backend. See the per-backend table in README.md.
+        registrations: usize,
+        /// Paths held back by `Options.settle_ms` or
+        /// `Options.debounce_ms` and not yet reported.
+        held: usize,
+        /// Events the last `poll` returned, which the next one drops.
+        events: usize,
+    };
+
+    /// What this watcher currently holds, for a program that wants to log
+    /// it, cap it, or notice it growing.
+    ///
+    /// Cheap: every field is a count already kept, and nothing here asks
+    /// the operating system anything.
+    pub fn stats(w: *const Watcher) Stats {
+        return .{
+            .watches = switch (w.impl) {
+                inline else => |*impl| impl.watchCount(),
+            },
+            .registrations = switch (w.impl) {
+                inline else => |*impl| impl.registrationCount(),
+            },
+            .held = w.batch.held.count(),
+            .events = w.batch.events.items.len,
+        };
     }
 
     /// The descriptor the watcher waits on, for a program that runs a

@@ -93,6 +93,17 @@ pub fn fd(k: *const Kqueue) ?posix.fd_t {
     return k.kq;
 }
 
+/// How many watches the caller has added. See `lookout.Watcher.Stats`.
+pub fn watchCount(k: *const Kqueue) usize {
+    return k.tree.watches.count();
+}
+
+/// How many descriptors this backend holds open for watched paths. See
+/// `lookout.Watcher.Stats`.
+pub fn registrationCount(k: *const Kqueue) usize {
+    return k.tree.nodes.count();
+}
+
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(k: *Kqueue, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
@@ -114,7 +125,7 @@ pub fn remove(k: *Kqueue, id: WatchId) void {
 /// Waits on the kernel queue until it reports something `batch` did not
 /// already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
-    const before = batch.events.items.len;
+    const before = batch.revision;
     const started: Io.Timestamp = .now(k.io, .awake);
 
     while (true) {
@@ -143,7 +154,7 @@ pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
         if (count == 0 and timeout_ptr != null) return;
 
         for (events[0..@intCast(count)]) |event| try k.handle(event, batch);
-        if (batch.events.items.len > before) return;
+        if (batch.revision != before) return;
     }
 }
 

@@ -476,3 +476,173 @@ test "polling a watcher with nothing to report returns nothing" {
     defer watcher.deinit();
     try std.testing.expectEqual(@as(usize, 0), (try watcher.poll(100)).len);
 }
+
+test "the watched path's own removal is reported against it" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "target");
+
+        const target = try f.path("target");
+        defer std.testing.allocator.free(target);
+        _ = try f.watcher.add(target, .{});
+        try f.settle();
+
+        try f.tmp.dir.deleteDir(std.testing.io, "target");
+        try f.expectEvent("target", .removed);
+    }
+}
+
+test "the watched path's own move is reported in the shape the backend documents" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "target");
+
+        const target = try f.path("target");
+        defer std.testing.allocator.free(target);
+        _ = try f.watcher.add(target, .{});
+        try f.settle();
+
+        try f.tmp.dir.rename("target", f.tmp.dir, "moved", std.testing.io);
+
+        // Two shapes, one fact: the watched path is no longer at the name
+        // it was added under. Which one a backend produces is
+        // `lookout.reportsRootMove`, and it is asserted rather than
+        // accepted either way, so the table in the README cannot go
+        // stale without the suite saying so.
+        const kind: Kind = if (lookout.reportsRootMove(backend)) .renamed else .removed;
+        try f.expectEvent("target", kind);
+    }
+}
+
+test "stats count what the watcher holds" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "sub");
+
+        try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().watches);
+        try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().registrations);
+
+        const id = try f.watcher.add(f.root, .{ .recursive = true });
+        const added = f.watcher.stats();
+        try std.testing.expectEqual(@as(usize, 1), added.watches);
+        // How many registrations one watch costs is the whole difference
+        // between the backends -- one stream, one handle, or one per
+        // directory -- so the contract is only that it holds at least one
+        // and releases all of them.
+        try std.testing.expect(added.registrations >= 1);
+
+        f.watcher.remove(id);
+        const removed = f.watcher.stats();
+        try std.testing.expectEqual(@as(usize, 0), removed.watches);
+        try std.testing.expectEqual(@as(usize, 0), removed.registrations);
+    }
+}
+
+test "an event carries when it was seen" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{});
+
+        const before: std.Io.Timestamp = .now(std.testing.io, .awake);
+        try f.write("a.txt", "one");
+        try f.expectEvent("a.txt", .created);
+        const after: std.Io.Timestamp = .now(std.testing.io, .awake);
+
+        var found = false;
+        for (f.watcher.batch.events.items) |event| {
+            if (event.kind != .created) continue;
+            try std.testing.expect(event.time.nanoseconds >= before.nanoseconds);
+            try std.testing.expect(event.time.nanoseconds <= after.nanoseconds);
+            found = true;
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "a symbolic link is an entry, not a doorway" {
+    // Creating one on Windows needs a privilege the CI runner does not
+    // have, and the claim being tested is about the POSIX backends.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "real");
+        try f.tmp.dir.symLink(std.testing.io, "real", "link", .{ .is_directory = true });
+
+        _ = try f.watcher.add(f.root, .{ .recursive = true });
+        try f.settle();
+
+        try f.write("real/inside.txt", "one");
+        try f.expectEvent("real/inside.txt", .created);
+
+        // The same file is reachable through the link. A watcher that
+        // followed links would report it twice, under two names, and a
+        // watch would silently widen into a tree nobody asked for.
+        const gpa = std.testing.allocator;
+        const through_link = try f.path("link");
+        defer gpa.free(through_link);
+        var waited: u32 = 0;
+        while (waited < 600) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                try std.testing.expect(!std.mem.startsWith(u8, event.path, through_link) or
+                    event.path.len == through_link.len);
+            }
+        }
+    }
+}
+
+test "debouncing reports one event per path carrying the kind seen last" {
+    // The poll backend only: this is about the clock, and the clock is
+    // the one thing a kernel backend adds jitter to. What is being
+    // tested lives in `Batch` and is the same code under every backend.
+    var f = try Fixture.initOptions(.{
+        .backend = .poll,
+        .poll_interval_ms = 20,
+        .debounce_ms = 300,
+        .latency_ms = 0,
+    });
+    defer f.deinit();
+    _ = try f.watcher.add(f.root, .{});
+
+    const gpa = std.testing.allocator;
+    const wanted = try f.path("a.txt");
+    defer gpa.free(wanted);
+
+    // The file appears and is then written. Coalescing would report
+    // `created`, which outranks `modified`; a debounce reports the end
+    // state, which is the whole point of having both.
+    try f.write("a.txt", "one");
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(100)).len);
+    try f.write("a.txt", "one and two");
+
+    var seen: usize = 0;
+    var kind: Kind = undefined;
+    var waited: u32 = 0;
+    while (waited < timeout_ms and seen == 0) : (waited += 100) {
+        for (try f.watcher.poll(100)) |event| {
+            if (!std.mem.eql(u8, event.path, wanted)) continue;
+            kind = event.kind;
+            seen += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), seen);
+    try std.testing.expectEqual(Kind.modified, kind);
+}
+
+test "the watch limit is one error, named the same on every backend" {
+    // Exhausting the limit takes a machine configured to have a small
+    // one, which a test may not assume. What a test can hold is the
+    // shape: one error, in the set `add` publishes, whichever backend is
+    // underneath -- so a caller writes one arm and not five.
+    const set = @typeInfo(Watcher.AddError).error_set.?;
+    var named = false;
+    for (set) |err| {
+        if (std.mem.eql(u8, err.name, "WatchLimitReached")) named = true;
+    }
+    try std.testing.expect(named);
+}

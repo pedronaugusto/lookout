@@ -238,6 +238,18 @@ pub fn fd(f: *const FsEvents) ?posix.fd_t {
     return f.sink.wake_r;
 }
 
+/// How many watches the caller has added. See `lookout.Watcher.Stats`.
+pub fn watchCount(f: *const FsEvents) usize {
+    return f.streams.count();
+}
+
+/// How many FSEvents streams this backend holds: one per watch, because
+/// the kernel recurses and a whole tree costs no more than a single path.
+/// See `lookout.Watcher.Stats`.
+pub fn registrationCount(f: *const FsEvents) usize {
+    return f.streams.count();
+}
+
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     for (f.streams.values()) |stream| {
@@ -354,12 +366,12 @@ fn deliver(
 /// Waits on the wake pipe until the drain produces something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
-    const before = batch.events.items.len;
+    const before = batch.revision;
     const started: Io.Timestamp = .now(f.io, .awake);
 
     while (true) {
         try f.drain(batch);
-        if (batch.events.items.len > before) return;
+        if (batch.revision != before) return;
 
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still performs one non-blocking check.
@@ -453,11 +465,14 @@ fn report(f: *FsEvents, batch: *Batch, run: []const Record) lookout.Watcher.Poll
     {
         try batch.push(f.gpa, record.id, stream.root, .overflow);
     }
-    // The watched path itself moved or vanished. FSEvents reports this
-    // against the root rather than as an item event, and keeps watching
-    // the inode; lookout reports it and lets the caller decide.
+    // The watched path itself moved or vanished. FSEvents reports both
+    // against the root with one flag and does not say which, so lookout
+    // asks the file system: a root that is still there was moved, and one
+    // that is not was deleted. FSEvents keeps watching the inode either
+    // way; lookout reports it and lets the caller decide.
     if (record.flags & c.kFSEventStreamEventFlagRootChanged != 0) {
-        try batch.push(f.gpa, record.id, stream.root, .renamed);
+        const kind: lookout.Kind = if (f.exists(stream.root)) .renamed else .removed;
+        try batch.push(f.gpa, record.id, stream.root, kind);
         return 0;
     }
 

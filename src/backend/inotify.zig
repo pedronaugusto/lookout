@@ -133,6 +133,17 @@ pub fn fd(n: *const Inotify) ?posix.fd_t {
     return n.ifd;
 }
 
+/// How many watches the caller has added. See `lookout.Watcher.Stats`.
+pub fn watchCount(n: *const Inotify) usize {
+    return n.watches.count();
+}
+
+/// How many kernel watches this backend holds, which is what the
+/// per-user `max_user_watches` cap counts. See `lookout.Watcher.Stats`.
+pub fn registrationCount(n: *const Inotify) usize {
+    return n.wds.count();
+}
+
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(n: *Inotify, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     for (n.watches.values()) |watch| {
@@ -190,7 +201,7 @@ pub fn remove(n: *Inotify, id: WatchId) void {
 /// Waits on the inotify descriptor until it reports something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
-    const before = batch.events.items.len;
+    const before = batch.revision;
     const started: Io.Timestamp = .now(n.io, .awake);
 
     while (true) {
@@ -225,7 +236,7 @@ pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
         // The kernel puts both halves of a rename in one read, so a half
         // still held at the end of one is a path that left the watch.
         try n.flushRenames(batch);
-        if (batch.events.items.len > before) return;
+        if (batch.revision != before) return;
     }
 }
 

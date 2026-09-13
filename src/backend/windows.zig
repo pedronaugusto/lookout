@@ -114,6 +114,18 @@ pub fn fd(w: *const Windows) ?std.posix.fd_t {
     return null;
 }
 
+/// How many watches the caller has added. See `lookout.Watcher.Stats`.
+pub fn watchCount(w: *const Windows) usize {
+    return w.watches.count();
+}
+
+/// How many directory handles this backend holds: one per watch, because
+/// recursion is a flag on the read rather than a handle per directory.
+/// See `lookout.Watcher.Stats`.
+pub fn registrationCount(w: *const Windows) usize {
+    return w.watches.count();
+}
+
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(w: *Windows, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     for (w.watches.values()) |existing| {
@@ -231,7 +243,7 @@ fn free(w: *Windows, watch: *Watch) void {
 /// Waits on the completion port until a read produces something `batch`
 /// did not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
-    const before = batch.events.items.len;
+    const before = batch.revision;
     const started: Io.Timestamp = .now(w.io, .awake);
 
     while (true) {
@@ -253,9 +265,34 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
                 c.WAIT_TIMEOUT => {},
                 else => error.Unexpected,
             };
-            // A failed read: the watch is going away, or its directory
-            // did. Retire whatever it belonged to and carry on.
-            w.retire(@enumFromInt(@as(u32, @truncate(key))));
+            const failed: WatchId = @enumFromInt(@as(u32, @truncate(key)));
+            const err = c.GetLastError();
+            const watch = w.watches.get(failed) orelse {
+                // The completion of a read cancelled by `remove`. Its
+                // buffer has been waiting for exactly this.
+                w.retire(failed);
+                continue;
+            };
+            if (err == c.ERROR_NOTIFY_ENUM_DIR) {
+                // The kernel's other way of saying the buffer overflowed:
+                // more change than it could hold, so re-read the tree.
+                // The handle is still good, so the watch is re-armed.
+                try batch.push(w.gpa, failed, watch.root, .overflow);
+                w.arm(watch) catch |e| switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {},
+                };
+                if (batch.revision != before) return;
+                continue;
+            }
+            // Anything else means the directory the handle is on is gone:
+            // deleted, or on a volume that went away. The handle was
+            // opened with FILE_SHARE_DELETE precisely so that this can
+            // happen, and a watched path that no longer exists is a
+            // removal like any other.
+            try batch.push(w.gpa, failed, watch.root, .removed);
+            w.discard(failed);
+            if (batch.revision != before) return;
             continue;
         }
 
@@ -275,8 +312,17 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
             error.OutOfMemory => return error.OutOfMemory,
             else => {},
         };
-        if (batch.events.items.len > before) return;
+        if (batch.revision != before) return;
     }
+}
+
+/// Drops a watch whose directory is gone. The read that failed is the
+/// one that was outstanding, so nothing of the kernel's is left pointing
+/// at the buffer and it can be freed here rather than retired.
+fn discard(w: *Windows, id: WatchId) void {
+    const entry = w.watches.fetchSwapRemove(id) orelse return;
+    _ = c.CloseHandle(entry.value.handle);
+    w.free(entry.value);
 }
 
 /// Frees a retiring watch once its cancelled read has been accounted for.
@@ -388,6 +434,9 @@ const c = struct {
     const ERROR_OUTOFMEMORY: DWORD = 14;
     const ERROR_TOO_MANY_OPEN_FILES: DWORD = 4;
     const ERROR_IO_PENDING: DWORD = 997;
+    /// The kernel could not hold everything that changed between two
+    /// reads: the buffer overflowed and the tree must be re-read.
+    const ERROR_NOTIFY_ENUM_DIR: DWORD = 1022;
 
     const FILE_LIST_DIRECTORY: DWORD = 0x0001;
     const FILE_SHARE_READ: DWORD = 0x0001;

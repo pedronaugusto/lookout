@@ -53,6 +53,17 @@ pub fn fd(p: *const Poll) ?std.posix.fd_t {
     return null;
 }
 
+/// How many watches the caller has added. See `lookout.Watcher.Stats`.
+pub fn watchCount(p: *const Poll) usize {
+    return p.tree.watches.count();
+}
+
+/// How many paths this backend re-lists or re-stats on every tick. See
+/// `lookout.Watcher.Stats`.
+pub fn registrationCount(p: *const Poll) usize {
+    return p.tree.nodes.count();
+}
+
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(p: *Poll, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
@@ -69,12 +80,12 @@ pub fn remove(p: *Poll, id: WatchId) void {
 /// `batch` did not already hold or `timeout_ms` expires. `null` never
 /// gives up.
 pub fn wait(p: *Poll, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
-    const before = batch.events.items.len;
+    const before = batch.revision;
     const started: Io.Timestamp = .now(p.io, .awake);
 
     while (true) {
         try p.scan(batch);
-        if (batch.events.items.len > before) return;
+        if (batch.revision != before) return;
 
         const nap_ms = nap: {
             const timeout = timeout_ms orelse break :nap p.interval_ms;
@@ -90,6 +101,8 @@ pub fn wait(p: *Poll, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError
 
 /// Re-examines every watched path once.
 fn scan(p: *Poll, batch: *Batch) Tree.ScanError!void {
+    try p.checkRoots(batch);
+
     // The node list is copied first: a scan can both add nodes, when a
     // recursive watch sees a new subdirectory, and drop them, when a
     // watched directory disappears.
@@ -107,4 +120,57 @@ fn scan(p: *Poll, batch: *Batch) Tree.ScanError!void {
             .file => try p.tree.rescanFile(id, batch),
         }
     }
+}
+
+/// Reports a watch root that is no longer there, and stops watching
+/// below it.
+///
+/// A directory node is listed through the handle opened for it, and on
+/// POSIX that handle outlives the name: the listing of a deleted
+/// directory still succeeds and still says nothing changed, so the one
+/// disappearance the comparison cannot see is the watch's own. The name
+/// is what the caller asked for, so the name is what is checked -- one
+/// `stat` per watch per tick, which is nothing beside the listing the
+/// tick is already doing.
+///
+/// A move is reported as `lookout.Kind.removed` rather than
+/// `lookout.Kind.renamed`, because a comparison of names cannot tell the
+/// two apart. See `lookout.reportsRootMove`.
+fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
+    var gone: std.ArrayList([]u8) = .empty;
+    defer {
+        for (gone.items) |path| p.gpa.free(path);
+        gone.deinit(p.gpa);
+    }
+
+    for (p.tree.watches.keys(), p.tree.watches.values()) |id, watch| {
+        // Only a watch that still has nodes: one already reported gone
+        // keeps its id, and must not be reported twice.
+        if (!p.hasNodes(id)) continue;
+        _ = Io.Dir.cwd().statFile(p.io, watch.root, .{ .follow_symlinks = false }) catch {
+            try gone.append(p.gpa, try p.gpa.dupe(u8, watch.root));
+            continue;
+        };
+    }
+
+    for (gone.items) |root| {
+        try batch.push(p.gpa, p.watchOf(root), root, .removed);
+        p.tree.removeSubtree(root);
+    }
+}
+
+/// Whether any node of `id` is still registered.
+fn hasNodes(p: *const Poll, id: WatchId) bool {
+    for (p.tree.nodes.values()) |node| {
+        if (node.watch == id) return true;
+    }
+    return false;
+}
+
+/// The watch whose root is `root`.
+fn watchOf(p: *const Poll, root: []const u8) WatchId {
+    for (p.tree.watches.keys(), p.tree.watches.values()) |id, watch| {
+        if (std.mem.eql(u8, watch.root, root)) return id;
+    }
+    unreachable;
 }
