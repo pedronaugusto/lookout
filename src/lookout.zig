@@ -1,4 +1,4 @@
-//! zwatch — one file-system watching API over `kqueue`, `inotify` and
+//! lookout — one file-system watching API over `kqueue`, `inotify` and
 //! polling.
 //!
 //! A `Watcher` owns a set of watches. Each watch is a path — a file or a
@@ -192,7 +192,7 @@ pub const Options = struct {
     /// facts about a name rather than about contents, and are reported at
     /// once whatever this is set to.
     settle_ms: u32 = 0,
-    /// The largest number of entries zwatch will account for in one
+    /// The largest number of entries lookout will account for in one
     /// watched directory. A directory holding more reports
     /// `Kind.overflow` against its watch root, which means: this one is
     /// past the budget you set, rescan it yourself.
@@ -212,14 +212,14 @@ pub const AddOptions = struct {
     /// created below it afterwards.
     ///
     /// Recursion is not a kernel feature on either `kqueue` or `inotify`:
-    /// zwatch walks the tree at `add` time and registers each directory
+    /// lookout walks the tree at `add` time and registers each directory
     /// individually, then registers newly created directories as it sees
     /// them. Three consequences are worth knowing:
     ///
     /// * A deep tree costs one descriptor (`kqueue`) or one kernel watch
     ///   (`inotify`) per directory, against a per-process limit.
-    /// * A directory created and populated faster than zwatch can register
-    ///   it can lose the events for the files inside. zwatch scans each
+    /// * A directory created and populated faster than lookout can register
+    ///   it can lose the events for the files inside. lookout scans each
     ///   directory immediately after registering it and reports whatever
     ///   it finds as `created`, which closes the race for files that still
     ///   exist, not for files already gone again.
@@ -295,7 +295,7 @@ pub const Watcher = struct {
     /// re-reading watched directories.
     pub const PollError = Tree.ScanError || Io.Cancelable || UnexpectedError;
 
-    /// A system call failed with a code zwatch does not model. This is
+    /// A system call failed with a code lookout does not model. This is
     /// the escape hatch every backend shares, so that an error set is a
     /// promise about the whole API rather than about one platform.
     pub const UnexpectedError = error{Unexpected};

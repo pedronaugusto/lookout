@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# zwatch -- run the suite on Linux, from a machine that is not Linux.
+# lookout -- run the suite on Linux, from a machine that is not Linux.
 #
 # The inotify backend cannot be executed on macOS or Windows, and a
 # backend that only compiles is a backend nobody has run. This builds a
@@ -16,13 +16,13 @@
 #   ci/linux.sh Debug ReleaseFast     # only these
 #
 # Environment:
-#   ZWATCH_LINUX_IMAGE   use an existing image instead of building one
+#   LOOKOUT_LINUX_IMAGE   use an existing image instead of building one
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ZIG_VERSION=0.16.0
-IMAGE=${ZWATCH_LINUX_IMAGE:-zwatch-linux-zig-$ZIG_VERSION}
+IMAGE=${LOOKOUT_LINUX_IMAGE:-lookout-linux-zig-$ZIG_VERSION}
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "==> building $IMAGE (Zig $ZIG_VERSION)"

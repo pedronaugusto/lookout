@@ -10,12 +10,12 @@
 //!
 //! Three things follow from that shape:
 //!
-//! * `zwatch.Watcher.fd` is `null` here. A completion port is not a
+//! * `lookout.Watcher.fd` is `null` here. A completion port is not a
 //!   waitable object another loop can fold in, so a program on Windows
 //!   drives the watcher by calling `poll`.
 //! * The kernel buffers changes between reads, and says so by completing
 //!   a read with zero bytes when it could not. That becomes
-//!   `zwatch.Kind.overflow`.
+//!   `lookout.Kind.overflow`.
 //! * The handle is opened with `FILE_SHARE_DELETE` so that watching a
 //!   directory does not stop anyone from deleting it.
 //!
@@ -29,9 +29,9 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const windows = std.os.windows;
 
-const zwatch = @import("../zwatch.zig");
+const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
-const WatchId = zwatch.WatchId;
+const WatchId = lookout.WatchId;
 
 const Windows = @This();
 
@@ -44,12 +44,12 @@ watches: std.AutoArrayHashMapUnmanaged(WatchId, *Watch),
 /// have finished with. Freed when their completion arrives, or at
 /// `deinit` once the port is closed.
 retiring: std.ArrayList(*Watch),
-/// Mirrors `zwatch.Options.max_dir_entries`.
+/// Mirrors `lookout.Options.max_dir_entries`.
 max_dir_entries: usize,
 
 /// How much change the kernel may buffer between two reads. Past this a
-/// read completes with zero bytes and zwatch reports
-/// `zwatch.Kind.overflow`.
+/// read completes with zero bytes and lookout reports
+/// `lookout.Kind.overflow`.
 const read_buffer_len = 64 * 1024;
 
 /// One watch: one directory handle with one read outstanding.
@@ -72,12 +72,12 @@ const Watch = struct {
     /// The old name of a rename whose new name has not arrived yet.
     pending_rename: ?[]u8,
     /// How many entries the watched directory holds, for the
-    /// `zwatch.Options.max_dir_entries` budget.
+    /// `lookout.Options.max_dir_entries` budget.
     entries: usize,
 };
 
 /// Creates the completion port.
-pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.InitError!Windows {
+pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!Windows {
     const port = c.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 0) orelse
         return error.SystemResources;
     return .{
@@ -108,14 +108,14 @@ pub fn deinit(w: *Windows) void {
 
 /// No descriptor: a completion port is not something another wait loop
 /// can take, so a Windows program drives the watcher by calling
-/// `zwatch.Watcher.poll`.
+/// `lookout.Watcher.poll`.
 pub fn fd(w: *const Windows) ?std.posix.fd_t {
     _ = w;
     return null;
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
-pub fn add(w: *Windows, id: WatchId, abs_path: []const u8, options: zwatch.AddOptions) zwatch.Watcher.AddError!void {
+pub fn add(w: *Windows, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     for (w.watches.values()) |existing| {
         if (std.mem.eql(u8, existing.root, abs_path)) return error.PathAlreadyWatched;
     }
@@ -156,7 +156,7 @@ pub fn add(w: *Windows, id: WatchId, abs_path: []const u8, options: zwatch.AddOp
 }
 
 /// Opens a directory for overlapped change notification.
-fn open(gpa: Allocator, path: []const u8) zwatch.Watcher.AddError!windows.HANDLE {
+fn open(gpa: Allocator, path: []const u8) lookout.Watcher.AddError!windows.HANDLE {
     const wide = std.unicode.wtf8ToWtf16LeAllocZ(gpa, path) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidWtf8 => return error.BadPathName,
@@ -187,7 +187,7 @@ fn open(gpa: Allocator, path: []const u8) zwatch.Watcher.AddError!windows.HANDLE
 /// Posts the outstanding read for a watch. Every completion re-posts,
 /// because a change that arrives while no read is outstanding is a change
 /// the kernel has to buffer.
-fn arm(w: *Windows, watch: *Watch) zwatch.Watcher.AddError!void {
+fn arm(w: *Windows, watch: *Watch) lookout.Watcher.AddError!void {
     _ = w;
     watch.overlapped = std.mem.zeroes(c.OVERLAPPED);
     const filter: u32 = c.FILE_NOTIFY_CHANGE_FILE_NAME | c.FILE_NOTIFY_CHANGE_DIR_NAME |
@@ -230,7 +230,7 @@ fn free(w: *Windows, watch: *Watch) void {
 
 /// Waits on the completion port until a read produces something `batch`
 /// did not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollError!void {
+pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
     const before = batch.events.items.len;
     const started: Io.Timestamp = .now(w.io, .awake);
 
@@ -290,7 +290,7 @@ fn retire(w: *Windows, id: WatchId) void {
 }
 
 /// Turns one completed read into events.
-fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) zwatch.Watcher.PollError!void {
+fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.Watcher.PollError!void {
     const dir = if (watch.only == null) watch.root else std.fs.path.dirname(watch.root) orelse watch.root;
 
     var offset: usize = 0;
@@ -322,7 +322,7 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) zwatch.Wa
     }
 }
 
-fn reportOne(w: *Windows, watch: *Watch, action: u32, path: []const u8, batch: *Batch) zwatch.Watcher.PollError!void {
+fn reportOne(w: *Windows, watch: *Watch, action: u32, path: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
     switch (action) {
         c.FILE_ACTION_ADDED => {
             try batch.push(w.gpa, watch.id, path, .created);
@@ -365,7 +365,7 @@ fn countEntries(io: Io, path: []const u8) usize {
     return count;
 }
 
-/// The Win32 surface zwatch uses, declared against `std.os.windows`'
+/// The Win32 surface lookout uses, declared against `std.os.windows`'
 /// types.
 ///
 /// `std.os.windows` in Zig 0.16.0 declares neither

@@ -10,10 +10,10 @@
 //!
 //! * The number of watches is capped per user by
 //!   `/proc/sys/fs/inotify/max_user_watches`. Exhausting it fails
-//!   `zwatch.Watcher.add` with `error.WatchLimitReached`.
+//!   `lookout.Watcher.add` with `error.WatchLimitReached`.
 //! * The kernel event queue is bounded. When it overflows, the kernel says
-//!   so and says nothing about what was lost; zwatch reports
-//!   `zwatch.Kind.overflow` against every watch root and the caller should
+//!   so and says nothing about what was lost; lookout reports
+//!   `lookout.Kind.overflow` against every watch root and the caller should
 //!   rescan.
 
 const std = @import("std");
@@ -22,21 +22,21 @@ const Io = std.Io;
 const posix = std.posix;
 const linux = std.os.linux;
 
-const zwatch = @import("../zwatch.zig");
+const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
-const WatchId = zwatch.WatchId;
+const WatchId = lookout.WatchId;
 
 const Inotify = @This();
 
 gpa: Allocator,
 io: Io,
-/// The inotify descriptor, which is what `zwatch.Watcher.fd` hands out.
+/// The inotify descriptor, which is what `lookout.Watcher.fd` hands out.
 ifd: posix.fd_t,
 /// The caller's watches.
 watches: std.AutoArrayHashMapUnmanaged(WatchId, Watch),
 /// Kernel watch descriptor to the directory or file it stands for.
 wds: std.AutoArrayHashMapUnmanaged(i32, Registration),
-/// Mirrors `zwatch.Options.max_dir_entries`.
+/// Mirrors `lookout.Options.max_dir_entries`.
 max_dir_entries: usize,
 /// The `IN_MOVED_FROM` halves of renames whose `IN_MOVED_TO` has not
 /// arrived, keyed by the cookie the kernel pairs them with. Paths owned
@@ -73,13 +73,13 @@ const Registration = struct {
     /// the kernel reports. Zero for a file.
     ///
     /// inotify needs no listing to name what changed, so this exists for
-    /// one reason: `zwatch.Options.max_dir_entries` is a budget the
-    /// caller set, and a directory past it must say `zwatch.Kind.overflow`
+    /// one reason: `lookout.Options.max_dir_entries` is a budget the
+    /// caller set, and a directory past it must say `lookout.Kind.overflow`
     /// here exactly as it does on the backends that compare listings.
     entries: usize,
 };
 
-/// Everything zwatch asks the kernel to report. `IN.EXCL_UNLINK` keeps a
+/// Everything lookout asks the kernel to report. `IN.EXCL_UNLINK` keeps a
 /// still-open but unlinked file from producing events nobody can act on;
 /// `IN.DONT_FOLLOW` keeps a symbolic link from silently widening a watch.
 const mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
@@ -92,7 +92,7 @@ const mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
 const read_buffer_len = 8192;
 
 /// Creates the inotify descriptor.
-pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.InitError!Inotify {
+pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!Inotify {
     // `linux.errno`, not `posix.errno`: these are raw syscalls, and on a
     // target that links libc `posix.errno` reads libc's thread-local
     // variable, which a raw syscall never writes.
@@ -127,14 +127,14 @@ pub fn deinit(n: *Inotify) void {
     n.* = undefined;
 }
 
-/// The inotify descriptor. Readable exactly when `zwatch.Watcher.poll` has
+/// The inotify descriptor. Readable exactly when `lookout.Watcher.poll` has
 /// something to report.
 pub fn fd(n: *const Inotify) ?posix.fd_t {
     return n.ifd;
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
-pub fn add(n: *Inotify, id: WatchId, abs_path: []const u8, options: zwatch.AddOptions) zwatch.Watcher.AddError!void {
+pub fn add(n: *Inotify, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     for (n.watches.values()) |watch| {
         if (std.mem.eql(u8, watch.root, abs_path)) return error.PathAlreadyWatched;
     }
@@ -189,7 +189,7 @@ pub fn remove(n: *Inotify, id: WatchId) void {
 
 /// Waits on the inotify descriptor until it reports something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollError!void {
+pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
     const before = batch.events.items.len;
     const started: Io.Timestamp = .now(n.io, .awake);
 
@@ -229,8 +229,8 @@ pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollErr
     }
 }
 
-/// Turns one kernel event into zwatch events.
-fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) zwatch.Watcher.PollError!void {
+/// Turns one kernel event into lookout events.
+fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout.Watcher.PollError!void {
     if (event.mask & linux.IN.Q_OVERFLOW != 0) {
         // The kernel does not say what was lost, so every watch is suspect.
         for (n.watches.keys(), n.watches.values()) |id, watch| {
@@ -333,7 +333,7 @@ fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) zwatch.
 /// Reports every held `IN_MOVED_FROM` whose other half never came as a
 /// removal: the entry moved somewhere this watch cannot see it, which
 /// from inside the watch is indistinguishable from a deletion.
-fn flushRenames(n: *Inotify, batch: *Batch) zwatch.Watcher.PollError!void {
+fn flushRenames(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!void {
     while (n.pending_renames.count() != 0) {
         const half = n.pending_renames.values()[0];
         const cookie = n.pending_renames.keys()[0];
@@ -390,7 +390,7 @@ fn adopt(n: *Inotify, id: WatchId, path: []const u8, batch: *Batch) Allocator.Er
 }
 
 /// Asks the kernel for a watch on `path`, taking ownership of it.
-fn register(n: *Inotify, id: WatchId, path: []u8) zwatch.Watcher.AddError!void {
+fn register(n: *Inotify, id: WatchId, path: []u8) lookout.Watcher.AddError!void {
     const path_z = posix.toPosixPath(path) catch {
         n.gpa.free(path);
         return error.NameTooLong;

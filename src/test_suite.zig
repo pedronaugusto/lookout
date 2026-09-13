@@ -1,29 +1,29 @@
 //! One suite, run once per backend this target can execute.
 //!
 //! The point of the repetition is the package's central claim: a program
-//! written against `zwatch.Watcher` sees the same events whichever
+//! written against `lookout.Watcher` sees the same events whichever
 //! mechanism is underneath. A behaviour that only the kernel backend has
 //! is a behaviour a caller cannot rely on, so it does not belong in the
 //! contract, and the way to keep it out is to hold the `poll` backend to
 //! the same assertions on the same machine.
 
 const std = @import("std");
-const zwatch = @import("zwatch.zig");
+const lookout = @import("lookout.zig");
 
-const Kind = zwatch.Kind;
-const Watcher = zwatch.Watcher;
+const Kind = lookout.Kind;
+const Watcher = lookout.Watcher;
 
 /// Every backend this target was built with. The suite runs whole
 /// against each of them, which is the package's central claim made
-/// checkable: a program written against `zwatch.Watcher` sees the same
+/// checkable: a program written against `lookout.Watcher` sees the same
 /// events whichever mechanism is underneath.
-const backends: []const zwatch.Backend = all: {
-    const names = @typeInfo(zwatch.Backend).@"enum".fields;
-    var list: [names.len]zwatch.Backend = undefined;
+const backends: []const lookout.Backend = all: {
+    const names = @typeInfo(lookout.Backend).@"enum".fields;
+    var list: [names.len]lookout.Backend = undefined;
     var len: usize = 0;
     for (names) |field| {
-        const backend: zwatch.Backend = @enumFromInt(field.value);
-        if (backend == .auto or !zwatch.supported(backend)) continue;
+        const backend: lookout.Backend = @enumFromInt(field.value);
+        if (backend == .auto or !lookout.supported(backend)) continue;
         list[len] = backend;
         len += 1;
     }
@@ -45,13 +45,13 @@ const Fixture = struct {
     /// before the next poll invalidates it.
     seen_from: ?[]u8,
 
-    fn init(backend: zwatch.Backend) !Fixture {
+    fn init(backend: lookout.Backend) !Fixture {
         // A short interval keeps the poll backend's latency in the same
         // order as the kernel backends' so one timeout fits both.
         return initOptions(.{ .backend = backend, .poll_interval_ms = 20 });
     }
 
-    fn initOptions(options: zwatch.Options) !Fixture {
+    fn initOptions(options: lookout.Options) !Fixture {
         const gpa = std.testing.allocator;
         const io = std.testing.io;
         var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -189,10 +189,10 @@ test "a rename is reported in the shape the backend documents" {
         try f.tmp.dir.rename("before.txt", f.tmp.dir, "after.txt", std.testing.io);
 
         // The two shapes describe the same thing happening. Which one a
-        // backend produces is `zwatch.pairsRenames`, and it is asserted
+        // backend produces is `lookout.pairsRenames`, and it is asserted
         // rather than accepted either way: a table in the README nobody
         // checks is a table that goes stale.
-        if (zwatch.pairsRenames(backend)) {
+        if (lookout.pairsRenames(backend)) {
             try f.expectEvents(&.{.{ .sub_path = "after.txt", .kind = .renamed }});
             const from = try f.path("before.txt");
             defer std.testing.allocator.free(from);
@@ -390,7 +390,7 @@ test "the descriptor is present exactly when the backend has one" {
 
     var polling: Watcher = try .init(gpa, io, .{ .backend = .poll });
     defer polling.deinit();
-    try std.testing.expectEqual(zwatch.Backend.poll, polling.backend());
+    try std.testing.expectEqual(lookout.Backend.poll, polling.backend());
     try std.testing.expectEqual(@as(?std.posix.fd_t, null), polling.fd());
 
     for (backends) |backend| {
@@ -407,8 +407,8 @@ test "the descriptor is present exactly when the backend has one" {
 test "a backend this target was not built with is refused, not a compile error" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const absent: zwatch.Backend = if (zwatch.supported(.inotify)) .kqueue else .inotify;
-    try std.testing.expect(!zwatch.supported(absent));
+    const absent: lookout.Backend = if (lookout.supported(.inotify)) .kqueue else .inotify;
+    try std.testing.expect(!lookout.supported(absent));
     try std.testing.expectError(
         error.BackendUnavailable,
         Watcher.init(gpa, io, .{ .backend = absent }),
@@ -465,7 +465,7 @@ test "adding a path that does not exist fails" {
     defer watcher.deinit();
     try std.testing.expectError(
         error.FileNotFound,
-        watcher.add("zwatch-no-such-path-exists-here", .{}),
+        watcher.add("lookout-no-such-path-exists-here", .{}),
     );
 }
 

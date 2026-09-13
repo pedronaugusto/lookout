@@ -5,7 +5,7 @@
 //! snippet a reader copies is code CI executes.
 
 const std = @import("std");
-const zwatch = @import("zwatch");
+const lookout = @import("lookout");
 
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
@@ -16,9 +16,9 @@ pub fn main() !void {
 
     // A scratch directory beside the executable, remade on every run.
     const cwd = std.Io.Dir.cwd();
-    cwd.deleteTree(io, "zwatch-example") catch {};
-    defer cwd.deleteTree(io, "zwatch-example") catch {};
-    var scratch = try cwd.createDirPathOpen(io, "zwatch-example", .{});
+    cwd.deleteTree(io, "lookout-example") catch {};
+    defer cwd.deleteTree(io, "lookout-example") catch {};
+    var scratch = try cwd.createDirPathOpen(io, "lookout-example", .{});
     defer scratch.close(io);
     const dir_path = try scratch.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(dir_path);
@@ -27,7 +27,7 @@ pub fn main() !void {
 
     // One watcher, one watch. `auto` means kqueue on macOS and the BSDs,
     // inotify on Linux, and polling anywhere else.
-    var watcher: zwatch.Watcher = try .init(gpa, io, .{});
+    var watcher: lookout.Watcher = try .init(gpa, io, .{});
     defer watcher.deinit();
 
     const id = try watcher.add(dir_path, .{ .recursive = true });
@@ -67,7 +67,7 @@ pub fn main() !void {
 
 /// Polls once and prints whatever came back, including where a renamed
 /// path came from on the backends that can say.
-fn report(watcher: *zwatch.Watcher) !void {
+fn report(watcher: *lookout.Watcher) !void {
     for (try watcher.poll(2_000)) |event| {
         if (event.from) |from| {
             std.debug.print("{s} {s} (from {s})\n", .{ @tagName(event.kind), event.path, from });

@@ -1,4 +1,4 @@
-//! The events one `zwatch.Watcher.poll` call has collected so far, and
+//! The events one `lookout.Watcher.poll` call has collected so far, and
 //! the writes it is still waiting to see the end of.
 //!
 //! Backends push raw, uncoalesced events in as they read them from the
@@ -6,7 +6,7 @@
 //! path and merges each new kind into the one already recorded, which is
 //! what turns a burst of writes on one file into a single `modified`.
 //!
-//! When `zwatch.Options.settle_ms` is set, `modified` does not go into
+//! When `lookout.Options.settle_ms` is set, `modified` does not go into
 //! the batch at all until the path has been still for that long; see
 //! `promote`.
 
@@ -14,16 +14,16 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const zwatch = @import("zwatch.zig");
-const Event = zwatch.Event;
-const Kind = zwatch.Kind;
-const WatchId = zwatch.WatchId;
+const lookout = @import("lookout.zig");
+const Event = lookout.Event;
+const Kind = lookout.Kind;
+const WatchId = lookout.WatchId;
 
 const Batch = @This();
 
 /// Read for the timestamps `settle_ms` compares. Unused when it is zero.
 io: Io,
-/// `zwatch.Options.settle_ms` in nanoseconds. Zero means report a
+/// `lookout.Options.settle_ms` in nanoseconds. Zero means report a
 /// modification as soon as it is seen.
 settle_ns: i96,
 /// The events of the current window, in the order their paths were first
@@ -45,7 +45,7 @@ const Settling = struct {
 };
 
 /// A batch that owns nothing.
-pub fn init(io: Io, options: zwatch.Options) Batch {
+pub fn init(io: Io, options: lookout.Options) Batch {
     return .{
         .io = io,
         .settle_ns = @as(i96, options.settle_ms) * std.time.ns_per_ms,
@@ -157,7 +157,7 @@ pub fn promote(b: *Batch, gpa: Allocator) Allocator.Error!void {
 }
 
 /// How long until the earliest settling path is due, or `null` when none
-/// is. `zwatch.Watcher.poll` uses it to wake in time rather than sleep
+/// is. `lookout.Watcher.poll` uses it to wake in time rather than sleep
 /// through a deadline it set itself.
 pub fn nextDueMs(b: *const Batch) ?u32 {
     if (b.settling.count() == 0) return null;
@@ -186,7 +186,7 @@ fn record(b: *Batch, gpa: Allocator, id: WatchId, path: []const u8, kind: Kind) 
 }
 
 /// How much a kind outranks another when two land on one path in one
-/// window. The order is documented on `zwatch.Kind`: a stronger statement
+/// window. The order is documented on `lookout.Kind`: a stronger statement
 /// about the path wins, and `overflow` — which says the record is
 /// incomplete — wins over every claim that it is complete.
 fn rank(kind: Kind) u3 {

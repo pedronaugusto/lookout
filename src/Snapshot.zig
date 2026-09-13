@@ -9,8 +9,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const zwatch = @import("zwatch.zig");
-const Kind = zwatch.Kind;
+const lookout = @import("lookout.zig");
+const Kind = lookout.Kind;
 
 const Snapshot = @This();
 

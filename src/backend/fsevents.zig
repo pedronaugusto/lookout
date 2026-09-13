@@ -5,33 +5,33 @@
 //! one descriptor per directory and per file; it names the entry that
 //! changed, where `kqueue` says only that a directory moved; and it pairs
 //! the two halves of a rename. That is why it, and not `kqueue`, is
-//! `zwatch.default_backend` on Apple targets.
+//! `lookout.default_backend` on Apple targets.
 //!
 //! What it costs in exchange:
 //!
 //! * FSEvents delivers on a dispatch queue, which is a thread the system
-//!   owns. zwatch starts none of its own and never calls the caller back
+//!   owns. lookout starts none of its own and never calls the caller back
 //!   on it: the delivery thread appends to a fixed buffer and writes one
 //!   byte to a pipe, and everything else happens on the thread that calls
-//!   `zwatch.Watcher.poll`. `zwatch.Watcher.fd` hands out the read end of
+//!   `lookout.Watcher.poll`. `lookout.Watcher.fd` hands out the read end of
 //!   that pipe, so a program with a wait loop of its own still works.
-//! * FSEvents coalesces on its own, before zwatch sees anything, over a
-//!   window of `zwatch.Options.latency_ms`. Several changes to one path
+//! * FSEvents coalesces on its own, before lookout sees anything, over a
+//!   window of `lookout.Options.latency_ms`. Several changes to one path
 //!   inside that window can arrive as one event with several flags set,
 //!   which is why a single delivery can produce a `created` and a
 //!   `modified` for one path.
 //! * It is not a queue of facts but a report of what changed, so it can
 //!   say "I lost track, look again": `kFSEventStreamEventFlagMustScanSubDirs`
-//!   and the two dropped-event flags all become `zwatch.Kind.overflow`.
+//!   and the two dropped-event flags all become `lookout.Kind.overflow`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
 
-const zwatch = @import("../zwatch.zig");
+const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
-const WatchId = zwatch.WatchId;
+const WatchId = lookout.WatchId;
 
 const FsEvents = @This();
 
@@ -46,7 +46,7 @@ sink: *Sink,
 streams: std.AutoArrayHashMapUnmanaged(WatchId, *Stream),
 /// Scratch the drain copies the sink into, reused between polls.
 staging: std.ArrayList(u8),
-/// Mirrors `zwatch.Options.max_dir_entries`.
+/// Mirrors `lookout.Options.max_dir_entries`.
 max_dir_entries: usize,
 /// Every path the backend believes exists, seeded by walking each watch
 /// when it is added and kept current from what it reports. Keys owned
@@ -57,23 +57,23 @@ max_dir_entries: usize,
 /// them, so a file created an hour ago and written now still arrives
 /// with `ItemCreated` set beside `ItemModified`, and no reading of the
 /// flags alone can tell a creation from a write. What can tell them
-/// apart is whether zwatch has seen the path before. It costs one string
+/// apart is whether lookout has seen the path before. It costs one string
 /// per watched file -- still nothing against `kqueue`'s descriptor per
 /// watched file, which is the comparison that matters on this platform.
 known: std.StringArrayHashMapUnmanaged(void),
-/// How many entries each directory zwatch has been told about holds,
+/// How many entries each directory lookout has been told about holds,
 /// counted the first time it is mentioned and kept current afterwards.
 /// Keys are owned here.
 ///
 /// FSEvents needs no listing to name what changed, so this exists for one
-/// reason: `zwatch.Options.max_dir_entries` is a budget the caller set,
-/// and a directory past it must say `zwatch.Kind.overflow` here exactly
+/// reason: `lookout.Options.max_dir_entries` is a budget the caller set,
+/// and a directory past it must say `lookout.Kind.overflow` here exactly
 /// as it does on the backends that compare listings.
 counts: std.StringArrayHashMapUnmanaged(usize),
 
 /// How much of a delivery burst the watcher can hold between polls.
 /// Past this the delivery thread stops copying and raises `overflowed`,
-/// which the drain turns into `zwatch.Kind.overflow`: losing a name is
+/// which the drain turns into `lookout.Kind.overflow`: losing a name is
 /// recoverable, blocking the delivery thread is not.
 const sink_buffer_len = 64 * 1024;
 
@@ -82,7 +82,7 @@ const sink_buffer_len = 64 * 1024;
 /// A spin lock rather than `std.Io.Mutex`, which needs an `Io` to block
 /// on and cannot be taken from a system callback that has none. Both
 /// critical sections are a bounded `memcpy` and nothing else -- no
-/// syscall, no allocation, no zwatch logic -- so there is nothing to wait
+/// syscall, no allocation, no lookout logic -- so there is nothing to wait
 /// through.
 const SpinLock = struct {
     held: std.atomic.Value(bool) = .init(false),
@@ -99,7 +99,7 @@ const SpinLock = struct {
 /// What the delivery thread writes and `drain` reads.
 ///
 /// Deliberately a byte buffer and not a list of allocations: the thread
-/// filling it is not zwatch's, and a backend that allocates there would
+/// filling it is not lookout's, and a backend that allocates there would
 /// be holding a general-purpose allocator's lock inside a system
 /// callback.
 const Sink = struct {
@@ -169,7 +169,7 @@ const Stream = struct {
 };
 
 /// Creates the delivery queue and the pipe the watcher is woken through.
-pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.InitError!FsEvents {
+pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!FsEvents {
     var fds: [2]posix.fd_t = undefined;
     if (std.c.pipe(&fds) != 0) return switch (posix.errno(@as(c_int, -1))) {
         .MFILE => error.ProcessFdQuotaExceeded,
@@ -199,7 +199,7 @@ pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.Init
         .wake_w = fds[1],
     };
 
-    const queue = c.dispatch_queue_create("dev.zwatch.fsevents", null) orelse
+    const queue = c.dispatch_queue_create("dev.lookout.fsevents", null) orelse
         return error.SystemResources;
 
     return .{
@@ -233,13 +233,13 @@ pub fn deinit(f: *FsEvents) void {
 }
 
 /// The read end of the wake pipe. Readable when a delivery has arrived
-/// that `zwatch.Watcher.poll` has not drained yet.
+/// that `lookout.Watcher.poll` has not drained yet.
 pub fn fd(f: *const FsEvents) ?posix.fd_t {
     return f.sink.wake_r;
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
-pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: zwatch.AddOptions) zwatch.Watcher.AddError!void {
+pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     for (f.streams.values()) |stream| {
         if (std.mem.eql(u8, stream.root, abs_path)) return error.PathAlreadyWatched;
     }
@@ -279,7 +279,7 @@ pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: zwatch.AddO
 }
 
 /// Builds the CoreFoundation array FSEvents wants and creates the stream.
-fn createStream(stream: *Stream, path: []const u8, io: Io) zwatch.Watcher.AddError!c.FSEventStreamRef {
+fn createStream(stream: *Stream, path: []const u8, io: Io) lookout.Watcher.AddError!c.FSEventStreamRef {
     _ = io;
     const cf_path = c.CFStringCreateWithBytes(
         null,
@@ -305,7 +305,7 @@ fn createStream(stream: *Stream, path: []const u8, io: Io) zwatch.Watcher.AddErr
     const flags: u32 = c.kFSEventStreamCreateFlagFileEvents |
         c.kFSEventStreamCreateFlagNoDefer |
         c.kFSEventStreamCreateFlagWatchRoot;
-    // The latency here is FSEvents' own coalescing window. zwatch keeps it
+    // The latency here is FSEvents' own coalescing window. lookout keeps it
     // short and does its own in `Batch`, so that every backend coalesces
     // by the same rule rather than by whichever one the kernel has.
     return c.FSEventStreamCreate(null, deliver, &context, paths, c.kFSEventStreamEventIdSinceNow, 0.01, flags) orelse
@@ -330,7 +330,7 @@ fn destroy(f: *FsEvents, stream: *Stream) void {
 }
 
 /// What FSEvents calls on the dispatch queue. Copies and gets out: no
-/// allocation, no parsing, no zwatch logic on a thread zwatch does not
+/// allocation, no parsing, no lookout logic on a thread lookout does not
 /// own.
 fn deliver(
     ref: c.FSEventStreamRef,
@@ -353,7 +353,7 @@ fn deliver(
 
 /// Waits on the wake pipe until the drain produces something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollError!void {
+pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
     const before = batch.events.items.len;
     const started: Io.Timestamp = .now(f.io, .awake);
 
@@ -382,7 +382,7 @@ pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollEr
 
 /// Takes everything the delivery thread has left and turns it into
 /// events.
-fn drain(f: *FsEvents, batch: *Batch) zwatch.Watcher.PollError!void {
+fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
     f.staging.clearRetainingCapacity();
     var overflowed = false;
     {
@@ -442,7 +442,7 @@ const Record = struct {
 /// and how old it is. A path that is gone was removed; a path younger
 /// than the window being reported was created in it; anything else that
 /// is still there was modified.
-fn report(f: *FsEvents, batch: *Batch, run: []const Record) zwatch.Watcher.PollError!usize {
+fn report(f: *FsEvents, batch: *Batch, run: []const Record) lookout.Watcher.PollError!usize {
     const record = run[0];
     const stream = f.streams.get(record.id) orelse return 0;
     if (!stream.wants(record.path)) return 0;
@@ -455,7 +455,7 @@ fn report(f: *FsEvents, batch: *Batch, run: []const Record) zwatch.Watcher.PollE
     }
     // The watched path itself moved or vanished. FSEvents reports this
     // against the root rather than as an item event, and keeps watching
-    // the inode; zwatch reports it and lets the caller decide.
+    // the inode; lookout reports it and lets the caller decide.
     if (record.flags & c.kFSEventStreamEventFlagRootChanged != 0) {
         try batch.push(f.gpa, record.id, stream.root, .renamed);
         return 0;
@@ -474,7 +474,7 @@ fn report(f: *FsEvents, batch: *Batch, run: []const Record) zwatch.Watcher.PollE
 
     if (!there) {
         // Gone. Whatever the flags remember about it, the fact now is
-        // that the path is not there. A path zwatch never knew about came
+        // that the path is not there. A path lookout never knew about came
         // and went between two polls, and the tree is as it was.
         if (seen) {
             try batch.push(f.gpa, record.id, record.path, .removed);
@@ -569,7 +569,7 @@ const itemChangeFlags: u32 = c.kFSEventStreamEventFlagItemCreated |
 /// the file was renamed and then deleted, or renamed out of the watch --
 /// there is nothing to pair, and the caller gets the removal and the
 /// creation the other backends would have given.
-fn reportRename(f: *FsEvents, batch: *Batch, run: []const Record, stream: *const Stream) zwatch.Watcher.PollError!usize {
+fn reportRename(f: *FsEvents, batch: *Batch, run: []const Record, stream: *const Stream) lookout.Watcher.PollError!usize {
     if (run.len < 2) return 0;
     const next = run[1];
     if (next.id != run[0].id) return 0;
@@ -598,8 +598,8 @@ fn exists(f: *const FsEvents, path: []const u8) bool {
 }
 
 /// Keeps the entry budget of the directory a change happened in, and
-/// reports `zwatch.Kind.overflow` when it is past.
-fn recount(f: *FsEvents, batch: *Batch, record: Record, stream: *const Stream) zwatch.Watcher.PollError!void {
+/// reports `lookout.Kind.overflow` when it is past.
+fn recount(f: *FsEvents, batch: *Batch, record: Record, stream: *const Stream) lookout.Watcher.PollError!void {
     const appeared = record.flags & c.kFSEventStreamEventFlagItemCreated != 0;
     const vanished = record.flags & c.kFSEventStreamEventFlagItemRemoved != 0;
     const renamed = record.flags & c.kFSEventStreamEventFlagItemRenamed != 0;
@@ -642,7 +642,7 @@ fn countEntries(f: *FsEvents, path: []const u8) usize {
     return count;
 }
 
-/// The CoreFoundation, CoreServices and libdispatch surface zwatch uses.
+/// The CoreFoundation, CoreServices and libdispatch surface lookout uses.
 ///
 /// Hand-written rather than `@cImport`ed: this is nine functions and a
 /// handful of constants against a stable system ABI, and declaring them

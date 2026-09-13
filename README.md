@@ -1,6 +1,6 @@
-# zwatch
+# lookout
 
-[![CI](https://github.com/pedronaugusto/zwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/pedronaugusto/zwatch/actions/workflows/ci.yml)
+[![CI](https://github.com/pedronaugusto/lookout/actions/workflows/ci.yml/badge.svg)](https://github.com/pedronaugusto/lookout/actions/workflows/ci.yml)
 
 A file-system watcher for Zig: one API over FSEvents and `kqueue` on
 Apple platforms, `inotify` on Linux, `ReadDirectoryChangesW` on Windows,
@@ -42,11 +42,11 @@ is a claim something executes.
 
 <!-- BEGIN GENERATED ci/readme_usage.sh -->
 ```zig
-const zwatch = @import("zwatch");
+const lookout = @import("lookout");
 
 // One watcher, one watch. `auto` means kqueue on macOS and the BSDs,
 // inotify on Linux, and polling anywhere else.
-var watcher: zwatch.Watcher = try .init(gpa, io, .{});
+var watcher: lookout.Watcher = try .init(gpa, io, .{});
 defer watcher.deinit();
 
 const id = try watcher.add(dir_path, .{ .recursive = true });
@@ -68,8 +68,8 @@ for (try watcher.poll(1_000)) |event| {
 Add it as a dependency and link the module:
 
 ```zig
-const zwatch_dep = b.dependency("zwatch", .{ .target = target, .optimize = optimize });
-exe.root_module.addImport("zwatch", zwatch_dep.module("zwatch"));
+const lookout_dep = b.dependency("lookout", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("lookout", lookout_dep.module("lookout"));
 ```
 
 ## The API
@@ -134,23 +134,23 @@ than something you discover.
   modified. This is why FSEvents and not `kqueue` is the default on Apple
   platforms; `kqueue` remains the better answer for a handful of paths
   watched without recursion.
-- **FSEvents coalesces before zwatch sees anything.** It has a latency
+- **FSEvents coalesces before lookout sees anything.** It has a latency
   window of its own, and within it several changes to one path arrive as
-  one delivery with several flags set. zwatch keeps that window as short
+  one delivery with several flags set. lookout keeps that window as short
   as the API allows and does its own coalescing in one place, so that
   every backend coalesces by the same rule; what it cannot do is
   reconstruct an order FSEvents did not keep.
-- **FSEvents delivers on a thread zwatch does not own.** The library
+- **FSEvents delivers on a thread lookout does not own.** The library
   starts none and calls nothing back: the dispatch queue appends to a
   fixed buffer and writes one byte to a pipe, and every event a caller
   sees is produced on the thread that called `poll`. If a burst outruns
   that buffer, the excess becomes `Kind.overflow` rather than a blocked
   system callback.
 - **Recursion is not a kernel feature.** Neither `kqueue` nor `inotify`
-  recurses. zwatch walks the tree at `add` time, registers each
+  recurses. lookout walks the tree at `add` time, registers each
   directory, and registers new directories as they appear. A directory
-  created and populated faster than zwatch can register it can lose the
-  events for files inside; zwatch scans each new directory immediately
+  created and populated faster than lookout can register it can lose the
+  events for files inside; lookout scans each new directory immediately
   and reports what it finds as `created`, which closes the race for
   files that still exist and not for files already gone again.
 - **Symbolic links are not followed.** A link inside a watched tree is an
@@ -268,7 +268,7 @@ builds a Debian image with the pinned Zig from
 nothing installed on the host — mounts the working tree read-only, and
 runs `zig build test` inside it in Debug, ReleaseSafe, ReleaseFast and
 ReleaseSmall. Pass mode names to run fewer, or set
-`ZWATCH_LINUX_IMAGE` to reuse an image you already have.
+`LOOKOUT_LINUX_IMAGE` to reuse an image you already have.
 
 ## Requirements
 

@@ -23,23 +23,23 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
 
-const zwatch = @import("../zwatch.zig");
+const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
 const Tree = @import("../Tree.zig");
-const WatchId = zwatch.WatchId;
+const WatchId = lookout.WatchId;
 
 const Kqueue = @This();
 
 gpa: Allocator,
 io: Io,
-/// The kqueue descriptor, which is what `zwatch.Watcher.fd` hands out.
+/// The kqueue descriptor, which is what `lookout.Watcher.fd` hands out.
 kq: posix.fd_t,
 tree: Tree,
 /// The descriptors opened for watched files. Directories are registered
 /// through the handle `Tree` already holds open.
 file_fds: std.AutoArrayHashMapUnmanaged(Tree.NodeId, posix.fd_t),
 
-/// Everything `EVFILT_VNODE` can report. zwatch asks for all of it and
+/// Everything `EVFILT_VNODE` can report. lookout asks for all of it and
 /// decides what to do with each bit when it arrives.
 const interest: u32 = std.c.NOTE.DELETE | std.c.NOTE.WRITE | std.c.NOTE.EXTEND |
     std.c.NOTE.ATTRIB | std.c.NOTE.LINK | std.c.NOTE.RENAME | std.c.NOTE.REVOKE;
@@ -61,7 +61,7 @@ const file_open_flags: posix.O = switch (builtin.os.tag) {
 };
 
 /// Creates the kernel queue.
-pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.InitError!Kqueue {
+pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!Kqueue {
     const rc = std.c.kqueue();
     if (rc < 0) return switch (posix.errno(rc)) {
         .MFILE => error.ProcessFdQuotaExceeded,
@@ -87,14 +87,14 @@ pub fn deinit(k: *Kqueue) void {
     k.* = undefined;
 }
 
-/// The kqueue descriptor. Readable exactly when `zwatch.Watcher.poll` has
+/// The kqueue descriptor. Readable exactly when `lookout.Watcher.poll` has
 /// something to report.
 pub fn fd(k: *const Kqueue) ?posix.fd_t {
     return k.kq;
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
-pub fn add(k: *Kqueue, id: WatchId, abs_path: []const u8, options: zwatch.AddOptions) zwatch.Watcher.AddError!void {
+pub fn add(k: *Kqueue, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(k.gpa);
     // A watch the kernel only half accepted is worse than none: it would
@@ -113,7 +113,7 @@ pub fn remove(k: *Kqueue, id: WatchId) void {
 
 /// Waits on the kernel queue until it reports something `batch` did not
 /// already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollError!void {
+pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
     const before = batch.events.items.len;
     const started: Io.Timestamp = .now(k.io, .awake);
 
@@ -147,8 +147,8 @@ pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollErro
     }
 }
 
-/// Turns one kernel event into zwatch events.
-fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) zwatch.Watcher.PollError!void {
+/// Turns one kernel event into lookout events.
+fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollError!void {
     const node_id: Tree.NodeId = @enumFromInt(event.udata);
     const node = k.tree.nodes.get(node_id) orelse return;
     const flags = event.fflags;
@@ -159,7 +159,7 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) zwatch.Watcher.PollErr
     defer k.gpa.free(path);
     const watch = node.watch;
 
-    const gone: ?zwatch.Kind = gone: {
+    const gone: ?lookout.Kind = gone: {
         if (flags & (std.c.NOTE.DELETE | std.c.NOTE.REVOKE) != 0) break :gone .removed;
         if (flags & std.c.NOTE.RENAME != 0) break :gone .renamed;
         break :gone null;
@@ -205,7 +205,7 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) zwatch.Watcher.PollErr
 }
 
 /// Tells the kernel about newly created nodes.
-fn register(k: *Kqueue, ids: []const Tree.NodeId) zwatch.Watcher.AddError!void {
+fn register(k: *Kqueue, ids: []const Tree.NodeId) lookout.Watcher.AddError!void {
     for (ids) |id| {
         const node = k.tree.nodes.get(id) orelse continue;
         const target: posix.fd_t = switch (node.role) {
@@ -263,9 +263,9 @@ fn closeOrphanedFiles(k: *Kqueue) void {
     }
 }
 
-/// Maps the POSIX open errors onto the error set `zwatch.Watcher.add`
+/// Maps the POSIX open errors onto the error set `lookout.Watcher.add`
 /// publishes, which is the same on every backend.
-fn translateOpen(err: posix.OpenError) zwatch.Watcher.AddError {
+fn translateOpen(err: posix.OpenError) lookout.Watcher.AddError {
     return switch (err) {
         error.FileNotFound => error.FileNotFound,
         error.NotDir => error.NotDir,

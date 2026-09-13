@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# zwatch -- README.md's Usage snippet, extracted from examples/usage.zig.
+# lookout -- README.md's Usage snippet, extracted from examples/usage.zig.
 #
 # A code snippet in a README is a claim about how the library is used, and
 # nothing compiles it. This one is a region of an example that `zig build
@@ -30,10 +30,10 @@ if len(parts) != 3:
 # The import is the one line a reader needs that cannot live inside main, so
 # it is read from the file too rather than written out here.
 imports = [
-    line for line in text.splitlines() if line.startswith('const zwatch = @import(')
+    line for line in text.splitlines() if line.startswith('const lookout = @import(')
 ]
 if len(imports) != 1:
-    sys.exit("%s: expected exactly one `const zwatch = @import(...)` line" % source)
+    sys.exit("%s: expected exactly one `const lookout = @import(...)` line" % source)
 
 body = []
 for line in parts[1].splitlines():

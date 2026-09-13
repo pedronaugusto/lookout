@@ -1,4 +1,4 @@
-//! The paths one `zwatch.Watcher` holds an individual registration for.
+//! The paths one `lookout.Watcher` holds an individual registration for.
 //!
 //! A watch is one path the caller asked for; a node is one path the
 //! operating system is told about. For a file, or for a non-recursive
@@ -13,16 +13,16 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const zwatch = @import("zwatch.zig");
+const lookout = @import("lookout.zig");
 const Batch = @import("Batch.zig");
 const Snapshot = @import("Snapshot.zig");
-const WatchId = zwatch.WatchId;
+const WatchId = lookout.WatchId;
 
 const Tree = @This();
 
 gpa: Allocator,
 io: Io,
-/// Mirrors `zwatch.Options.max_dir_entries`.
+/// Mirrors `lookout.Options.max_dir_entries`.
 max_dir_entries: usize,
 /// Whether a directory node also gets a node per regular file inside it.
 ///
@@ -34,7 +34,7 @@ max_dir_entries: usize,
 track_entries: bool,
 /// Every registered path, keyed by an id that is never reused.
 nodes: std.AutoArrayHashMapUnmanaged(NodeId, Node),
-/// The caller's watches, keyed by the id `zwatch.Watcher.add` returned.
+/// The caller's watches, keyed by the id `lookout.Watcher.add` returned.
 watches: std.AutoArrayHashMapUnmanaged(WatchId, Watch),
 next_node: u64,
 /// Scratch reused by every scan so that a steady-state watcher does not
@@ -48,9 +48,9 @@ pub const NodeId = enum(u64) { _ };
 /// What the caller asked for.
 pub const Watch = struct {
     /// Absolute, canonical path, owned by the tree. This is the path
-    /// `zwatch.Kind.overflow` is reported against.
+    /// `lookout.Kind.overflow` is reported against.
     root: []u8,
-    /// `zwatch.AddOptions.recursive`.
+    /// `lookout.AddOptions.recursive`.
     recursive: bool,
 };
 
@@ -78,7 +78,7 @@ pub const Node = struct {
 
 /// Errors adding a watch can return.
 pub const AddError = error{
-    /// This watcher already watches that path. See `zwatch.Watcher.add`.
+    /// This watcher already watches that path. See `lookout.Watcher.add`.
     PathAlreadyWatched,
 } || Allocator.Error || Io.Dir.OpenError || Io.Dir.StatFileError ||
     Io.Dir.RealPathFileAllocError || Snapshot.RefreshError;
@@ -321,7 +321,7 @@ pub fn watched(t: *const Tree, abs_path: []const u8) bool {
 }
 
 /// The absolute path of the watch a node belongs to, for reporting
-/// `zwatch.Kind.overflow`.
+/// `lookout.Kind.overflow`.
 pub fn watchRoot(t: *Tree, id: WatchId) []const u8 {
     return (t.watches.get(id) orelse return "").root;
 }
@@ -336,7 +336,7 @@ pub fn isRecursive(t: *Tree, id: WatchId) bool {
 /// `added`.
 ///
 /// A node whose directory has disappeared is dropped along with everything
-/// below it, and reported as `zwatch.Kind.removed`.
+/// below it, and reported as `lookout.Kind.removed`.
 pub fn rescanDirectory(
     t: *Tree,
     id: NodeId,

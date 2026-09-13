@@ -1,12 +1,12 @@
 //! The portable backend: re-stat and re-list the watched paths on a timer.
 //!
 //! It needs nothing from the kernel, so it is the backend on every target
-//! zwatch has no notification mechanism for — Windows today — and it is
+//! lookout has no notification mechanism for — Windows today — and it is
 //! selectable everywhere else, which is what lets one test suite hold
 //! every backend to the same contract.
 //!
 //! The costs are the obvious ones: a change is seen up to
-//! `zwatch.Options.poll_interval_ms` after it happens, every watched
+//! `lookout.Options.poll_interval_ms` after it happens, every watched
 //! directory is listed and stat-ed on every tick, and a file created and
 //! deleted between two ticks is never seen at all.
 
@@ -14,11 +14,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const zwatch = @import("../zwatch.zig");
+const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
 const Snapshot = @import("../Snapshot.zig");
 const Tree = @import("../Tree.zig");
-const WatchId = zwatch.WatchId;
+const WatchId = lookout.WatchId;
 
 const Poll = @This();
 
@@ -29,8 +29,8 @@ tree: Tree,
 
 /// Creates a backend that watches nothing. Never actually fails -- this
 /// backend holds no kernel resource -- and returns the error union every
-/// backend returns, so that `zwatch.Watcher.init` can treat them alike.
-pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.InitError!Poll {
+/// backend returns, so that `lookout.Watcher.init` can treat them alike.
+pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!Poll {
     return .{
         .gpa = gpa,
         .io = io,
@@ -47,14 +47,14 @@ pub fn deinit(p: *Poll) void {
 
 /// No descriptor: this backend has nothing to wait on, so a program
 /// cannot fold it into a wait loop of its own and must call
-/// `zwatch.Watcher.poll`.
+/// `lookout.Watcher.poll`.
 pub fn fd(p: *const Poll) ?std.posix.fd_t {
     _ = p;
     return null;
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
-pub fn add(p: *Poll, id: WatchId, abs_path: []const u8, options: zwatch.AddOptions) zwatch.Watcher.AddError!void {
+pub fn add(p: *Poll, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(p.gpa);
     try p.tree.addWatch(id, abs_path, options.recursive, &added);
@@ -68,7 +68,7 @@ pub fn remove(p: *Poll, id: WatchId) void {
 /// Scans, then sleeps and scans again until the scan produces an event
 /// `batch` did not already hold or `timeout_ms` expires. `null` never
 /// gives up.
-pub fn wait(p: *Poll, batch: *Batch, timeout_ms: ?u32) zwatch.Watcher.PollError!void {
+pub fn wait(p: *Poll, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
     const before = batch.events.items.len;
     const started: Io.Timestamp = .now(p.io, .awake);
 

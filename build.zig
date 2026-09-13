@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
     // The module.
     //
     // Pure Zig, no dependencies, nothing to link: which backend is
-    // compiled in is decided by `builtin.os.tag` inside src/zwatch.zig, so
+    // compiled in is decided by `builtin.os.tag` inside src/lookout.zig, so
     // a consumer adds the import and nothing else.
     //=====================================================================
 
@@ -17,8 +17,8 @@ pub fn build(b: *std.Build) void {
     // other target stays free-standing Zig.
     const darwin = target.result.os.tag.isDarwin();
 
-    const module = b.addModule("zwatch", .{
-        .root_source_file = b.path("src/zwatch.zig"),
+    const module = b.addModule("lookout", .{
+        .root_source_file = b.path("src/lookout.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = darwin,
@@ -34,9 +34,9 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
 
     const tests = b.addTest(.{
-        .name = "zwatch-tests",
+        .name = "lookout-tests",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/zwatch.zig"),
+            .root_source_file = b.path("src/lookout.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = darwin,
@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
     });
     if (darwin) tests.root_module.linkFramework("CoreServices", .{});
 
-    const test_step = b.step("test", "Run the zwatch tests");
+    const test_step = b.step("test", "Run the lookout tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
     //=====================================================================
@@ -65,7 +65,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(source),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{.{ .name = "zwatch", .module = module }},
+                .imports = &.{.{ .name = "lookout", .module = module }},
             }),
         });
         const run = b.addRunArtifact(example);
@@ -88,7 +88,7 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
 
     b.installArtifact(b.addLibrary(.{
-        .name = "zwatch",
+        .name = "lookout",
         .root_module = module,
     }));
     b.getInstallStep().dependOn(&tests.step);
