@@ -398,7 +398,9 @@ test "the descriptor is present exactly when the backend has one" {
         var kernel: Watcher = try .init(gpa, io, .{ .backend = backend });
         defer kernel.deinit();
         try std.testing.expectEqual(backend, kernel.backend());
-        try std.testing.expect(kernel.fd() != null);
+        // Windows waits on a completion port, which nothing else can
+        // wait on, so it has no descriptor to give either.
+        try std.testing.expectEqual(backend != .windows, kernel.fd() != null);
     }
 }
 

@@ -35,6 +35,10 @@ pub const Backend = enum {
     /// Linux `inotify`. One kernel watch descriptor is held per watched
     /// file and per watched directory, and renames arrive paired.
     inotify,
+    /// Windows `ReadDirectoryChangesW` with overlapped reads drained
+    /// through an I/O completion port. Recursive by flag, and renames
+    /// arrive paired.
+    windows,
     /// Re-stat and re-list watched paths on a timer. Needs no kernel
     /// support and holds no descriptor, at the cost of latency and of
     /// walking every watched directory on every tick.
@@ -63,7 +67,7 @@ pub fn supported(backend: Backend) bool {
 pub fn pairsRenames(backend: Backend) bool {
     return switch (backend) {
         .auto => pairsRenames(default_backend),
-        .fsevents, .inotify => true,
+        .fsevents, .inotify, .windows => true,
         .kqueue, .poll => false,
     };
 }
@@ -86,6 +90,7 @@ pub const default_backend: Backend = switch (builtin.os.tag) {
     => .fsevents,
     .dragonfly, .freebsd, .netbsd, .openbsd => .kqueue,
     .linux => .inotify,
+    .windows => .windows,
     else => .poll,
 };
 
@@ -252,6 +257,10 @@ pub const Watcher = struct {
         },
         .linux => union(enum) {
             inotify: @import("backend/inotify.zig"),
+            poll: Poll,
+        },
+        .windows => union(enum) {
+            windows: @import("backend/windows.zig"),
             poll: Poll,
         },
         else => union(enum) {

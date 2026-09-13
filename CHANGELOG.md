@@ -9,10 +9,11 @@ breaking one.
 
 First release.
 
-- `Watcher` over four backends behind one API: FSEvents and `kqueue` on
-  Apple platforms, `inotify` on Linux, and a polling backend that needs
-  nothing from the kernel and runs everywhere. `Options.backend` picks
-  one; `supported` says which this target has.
+- `Watcher` over five backends behind one API: FSEvents and `kqueue` on
+  Apple platforms, `inotify` on Linux, `ReadDirectoryChangesW` on
+  Windows, and a polling backend that needs nothing from the kernel and
+  runs everywhere. `Options.backend` picks one; `supported` says which
+  this target has.
 - Renames arrive whole where the kernel knows they are renames:
   `Event.from` carries where a path came from, and `pairsRenames` says
   which backends can tell. Where they cannot -- `kqueue` and polling

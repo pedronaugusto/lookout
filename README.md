@@ -3,8 +3,9 @@
 [![CI](https://github.com/pedronaugusto/zwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/pedronaugusto/zwatch/actions/workflows/ci.yml)
 
 A file-system watcher for Zig: one API over FSEvents and `kqueue` on
-Apple platforms, `inotify` on Linux, and a polling backend that needs
-nothing from the kernel and runs everywhere else.
+Apple platforms, `inotify` on Linux, `ReadDirectoryChangesW` on Windows,
+and a polling backend that needs nothing from the kernel and runs
+everywhere.
 
 - **Pure Zig, no dependencies.** Nothing to vendor, no C to compile, no
   build script of your own. The system interfaces are reached through
@@ -119,9 +120,12 @@ kernel had queued.
 The point of this section is that the list is short and explicit, rather
 than something you discover.
 
-- **No native Windows backend yet.** Windows gets the polling backend, so
-  a change is seen up to `poll_interval_ms` after it happens and a file
-  created and deleted between two scans is never seen at all.
+- **The Windows backend has never been run by its author.** It compiles
+  for `x86_64-windows-gnu`, `x86_64-windows-msvc` and
+  `aarch64-windows-gnu`, and the shared suite runs it on the Windows CI
+  runner. That is the whole of the evidence behind it. `Watcher.fd` is
+  `null` there, because a completion port is not something another wait
+  loop can take.
 - **`kqueue` costs a descriptor per file.** It watches descriptors, not
   names, so a watched tree costs one per directory and one per file
   inside a watched directory, against the per-process limit. If the
@@ -200,6 +204,7 @@ than something you discover.
 | `fsevents` | macOS, iOS and the rest of Apple's | yes | One FSEvents stream per watch, delivered on a dispatch queue into a pipe the watcher owns. | one stream, and one remembered path per file | paired |
 | `kqueue` | Apple platforms, FreeBSD, NetBSD, OpenBSD, DragonFly | on the BSDs | `EVFILT_VNODE` on a descriptor per watched path, plus a listing comparison to name the entry that changed. | one descriptor per directory **and per file** | removal + creation |
 | `inotify` | Linux | yes | One kernel watch per directory; the kernel names the entry and gives each rename a cookie. | one kernel watch per directory | paired |
+| `windows` | Windows | yes | `ReadDirectoryChangesW` with overlapped reads drained through a completion port. | nothing: recursion is a flag | paired |
 | `poll` | everywhere | where there is no kernel backend | Re-stat and re-list on a timer. | one listing per directory per tick | removal + creation |
 
 `Options.backend` selects one explicitly; `supported` says whether this
