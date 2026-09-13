@@ -32,6 +32,9 @@ everywhere.
   creation. Where the kernel cannot say, the removal and the creation are
   reported as themselves rather than guessed at -- see the table below.
 
+What lookout does not do is under its own heading below, gaps included,
+rather than left to be found.
+
 ## Usage
 
 The block below is not written here: it is a region of
@@ -44,8 +47,9 @@ is a claim something executes.
 ```zig
 const lookout = @import("lookout");
 
-// One watcher, one watch. `auto` means kqueue on macOS and the BSDs,
-// inotify on Linux, and polling anywhere else.
+// One watcher, one watch. `auto` means FSEvents on Apple platforms,
+// kqueue on the BSDs, inotify on Linux, ReadDirectoryChangesW on
+// Windows, and polling anywhere else.
 var watcher: lookout.Watcher = try .init(gpa, io, .{});
 defer watcher.deinit();
 
@@ -83,13 +87,15 @@ exe.root_module.addImport("lookout", lookout_dep.module("lookout"));
 | `Watcher.poll(timeout_ms)` | Blocks until something happens, and returns the coalesced events. `null` blocks indefinitely; `0` reports what is already queued. |
 | `Watcher.fd()` | The descriptor to wait on, or `null` for the polling backend. |
 | `Watcher.backend()` | Which backend this watcher resolved to. |
-| `Event` | `{ id, path, kind, from }`. `path` is absolute and canonical; `from` is where a paired rename came from. |
+| `Watcher.stats()` | What the watcher is holding: watches, registrations the operating system is keeping, paths held back by a window, events the last `poll` returned. |
+| `Event` | `{ id, path, kind, from, time }`. `path` is absolute and canonical; `from` is where a paired rename came from; `time` is when lookout first saw the path change in this window. |
 | `Kind` | `created`, `modified`, `removed`, `renamed`, `attributes`, `overflow`. |
-| `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `max_dir_entries`. |
+| `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `debounce_ms`, `max_dir_entries`. |
 | `AddOptions` | `recursive`. |
 | `default_backend` | The backend `.auto` resolves to on this target. |
 | `supported(backend)` | Whether this target was built with a backend. |
 | `pairsRenames(backend)` | Whether it reports `renamed` with a `from`, or a removal and a creation. |
+| `reportsRootMove(backend)` | Whether a move of the watched path itself arrives as `renamed` or as `removed`. |
 
 The events a `poll` returns, and every path in them, belong to the
 watcher and are invalidated by the next `poll`. Copy anything you intend
@@ -114,6 +120,23 @@ as "look at this path again" rather than as a replay of what happened.
 
 Set `latency_ms` to zero to switch coalescing off and get whatever the
 kernel had queued.
+
+### Three windows, and which question each answers
+
+| Option | Waits for | Reports |
+|---|---|---|
+| `latency_ms` | everything that arrives together | the most significant kind of the burst |
+| `settle_ms` | a file's contents to stop changing | `modified`, once the writing is over |
+| `debounce_ms` | a path to go quiet, whatever happened to it | one event, carrying the kind seen **last** |
+
+`debounce_ms` is the one to reach for when you rebuild from the end
+state rather than react to each change. A file created and then deleted
+inside one window is one `removed`; a file deleted and then recreated is
+one `created`, which coalescing cannot say, because `removed` outranks
+`created` and the burst is reported by its strongest kind. Being the
+strongest of the three, it supersedes the other two: a non-zero
+`debounce_ms` takes over from `settle_ms`, and `poll` returns as soon as
+a window closes rather than collecting for `latency_ms` more.
 
 ## What it does not do
 
@@ -173,6 +196,29 @@ than something you discover.
   overflowing looks like on Linux. Either way the answer is the same:
   the watcher's record is incomplete and the caller should re-read the
   tree.
+- **There is no filtering.** No globs, no ignore list, no predicate:
+  everything under a recursive watch is watched, so a tree with a large
+  build directory in it costs a kernel watch or a descriptor for every
+  file in that directory. Watch the subdirectories you mean, or drop the
+  events you do not want after the fact.
+- **A path must exist before it can be watched.** `add` on a path that
+  is not there fails with `error.FileNotFound` rather than waiting for
+  it to appear. Watch the containing directory and add the real watch
+  when it is created.
+- **`overflow` comes with no rescan helper.** lookout says the record is
+  incomplete; re-reading the tree and working out what was missed is the
+  caller's, with no API here to do it for them.
+- **The watch limit is one error.** `error.WatchLimitReached` is what
+  `add` returns when the operating system refuses another watch --
+  `ENOSPC` from `inotify_add_watch`, which is the per-user
+  `max_user_watches` cap; `ENOMEM` from `kevent`; a stream FSEvents will
+  not start; a handle Windows will not take. The same error on every
+  backend, so a caller writes one arm rather than five. A file that
+  merely happens to sit inside a watched directory is dropped rather
+  than failing the `add`, because the directory still reports it
+  appearing and disappearing -- only the path the caller named is an
+  error. `Watcher.stats().registrations` is the number that runs into
+  the limit.
 - **One watcher, one thread.** A `Watcher` is not thread-safe. Several
   may exist in one process.
 - **One watcher watches a path once.** A second `add` of a path already
@@ -194,8 +240,9 @@ than something you discover.
   on the new one, on every backend, because the listing comparison the
   BSD and polling backends make cannot tell a rename from a deletion and
   a creation. `renamed` is reserved for the watched path itself being
-  moved, which `kqueue` and `inotify` do report and the polling backend
-  reports as `removed`.
+  moved, which `kqueue` and `inotify` do report and the other three
+  backends report as `removed` -- see `reportsRootMove`. The watched
+  path being *deleted* is `removed` on every backend.
 
 ## Backends
 

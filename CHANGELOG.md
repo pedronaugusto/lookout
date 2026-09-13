@@ -5,6 +5,51 @@ reason and not only the diff. Versions follow
 [semantic versioning](https://semver.org); before 1.0 the minor is the
 breaking one.
 
+## Unreleased
+
+- `Event.time` says when lookout first saw the path change in this
+  window, on the same clock a caller reads with
+  `std.Io.Timestamp.now(io, .awake)`. An event that says only what
+  happened leaves a caller unable to order two batches or to tell a
+  change from a backlog.
+- `Options.debounce_ms` is the third window, and it answers the question
+  the other two cannot. `latency_ms` merges what arrives together and
+  reports the most significant kind; `settle_ms` waits for a file's
+  contents to stop changing. `debounce_ms` holds every kind until the
+  path is quiet and then reports it once, carrying the kind seen
+  **last** -- so a path deleted and recreated inside one window is one
+  `created`, which coalescing cannot say because `removed` outranks it.
+  A caller rebuilding from the end state wants the end state.
+- The watched path's own disappearance is reported by every backend.
+  Deleting it is `Kind.removed` everywhere; moving it is `Kind.renamed`
+  where the backend watches the object rather than the name, and
+  `reportsRootMove` is how a program asks which to expect instead of
+  discovering it. Three backends were wrong before: FSEvents reported a
+  deletion as a move, the polling backend saw neither because it lists a
+  directory through a handle that outlives the name, and the Windows
+  backend dropped the failed read that says the directory is gone.
+- `ERROR_NOTIFY_ENUM_DIR`, the kernel's other spelling of a
+  `ReadDirectoryChangesW` buffer overflow, is `Kind.overflow` like the
+  zero-length read that says the same thing. It was previously taken for
+  a watch going away, which lost the watch as well as the events.
+- `Watcher.stats()` reports what a watcher holds: watches,
+  registrations the operating system is keeping on its behalf, paths
+  held back by a window, and the size of the last batch. The
+  registration count is the one that runs into `max_user_watches` and
+  the per-process descriptor limit, and there was no way to see it.
+- A backend now waits until the batch has *changed* rather than until it
+  has *grown*. Under `debounce_ms` a push produces no event for a while,
+  and a backend watching the event count would have slept through its
+  own deadline -- with no timeout at all, forever.
+- "What it does not do" names three gaps that were there all along and
+  were left to be found: there is no filtering, so a recursive watch
+  over a tree with a large build directory in it costs a kernel watch
+  or a descriptor for every file in that directory; a path must exist
+  before `add` will watch it; and `overflow` comes with no rescan
+  helper. It also states `error.WatchLimitReached`, which every backend
+  returns when the operating system refuses another watch and which the
+  README had never mentioned.
+
 ## 0.1.0
 
 First release.

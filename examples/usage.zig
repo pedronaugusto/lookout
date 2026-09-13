@@ -25,8 +25,9 @@ pub fn main() !void {
 
     // --- README:usage ---
 
-    // One watcher, one watch. `auto` means kqueue on macOS and the BSDs,
-    // inotify on Linux, and polling anywhere else.
+    // One watcher, one watch. `auto` means FSEvents on Apple platforms,
+    // kqueue on the BSDs, inotify on Linux, ReadDirectoryChangesW on
+    // Windows, and polling anywhere else.
     var watcher: lookout.Watcher = try .init(gpa, io, .{});
     defer watcher.deinit();
 
