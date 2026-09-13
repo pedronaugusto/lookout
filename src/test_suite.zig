@@ -1,0 +1,351 @@
+//! One suite, run once per backend this target can execute.
+//!
+//! The point of the repetition is the package's central claim: a program
+//! written against `zwatch.Watcher` sees the same events whichever
+//! mechanism is underneath. A behaviour that only the kernel backend has
+//! is a behaviour a caller cannot rely on, so it does not belong in the
+//! contract, and the way to keep it out is to hold the `poll` backend to
+//! the same assertions on the same machine.
+
+const std = @import("std");
+const zwatch = @import("zwatch.zig");
+
+const Kind = zwatch.Kind;
+const Watcher = zwatch.Watcher;
+
+/// Every backend that can run here: the kernel one, when this target has
+/// one, and always `poll`.
+const backends: []const zwatch.Backend = if (zwatch.native_backend) |native|
+    &.{ native, .poll }
+else
+    &.{.poll};
+
+/// Long enough that a loaded machine still gets there, short enough that
+/// the suite stays a suite. Nothing waits a fixed time: every assertion
+/// polls until the event arrives or this expires.
+const timeout_ms = 5_000;
+
+/// A temporary directory, a watcher, and the plumbing to ask it questions.
+const Fixture = struct {
+    tmp: std.testing.TmpDir,
+    root: [:0]u8,
+    watcher: Watcher,
+
+    fn init(backend: zwatch.Backend) !Fixture {
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        errdefer tmp.cleanup();
+
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        errdefer gpa.free(root);
+
+        return .{
+            .tmp = tmp,
+            .root = root,
+            // A short interval keeps the poll backend's latency in the
+            // same order as the kernel backends' so one timeout fits both.
+            .watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 }),
+        };
+    }
+
+    fn deinit(f: *Fixture) void {
+        f.watcher.deinit();
+        std.testing.allocator.free(f.root);
+        f.tmp.cleanup();
+    }
+
+    fn write(f: *Fixture, sub_path: []const u8, data: []const u8) !void {
+        try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = data });
+    }
+
+    fn path(f: *Fixture, sub_path: []const u8) ![]u8 {
+        return std.fs.path.join(std.testing.allocator, &.{ f.root, sub_path });
+    }
+
+    /// One event the suite is waiting for.
+    const Want = struct { sub_path: []const u8, kind: Kind };
+
+    /// Polls until `sub_path` is reported with `kind`, or gives up.
+    ///
+    /// Waiting for a specific event rather than for a fixed time is what
+    /// makes the suite the same on a fast kernel backend and on a backend
+    /// that only looks every 20 ms.
+    fn expectEvent(f: *Fixture, sub_path: []const u8, kind: Kind) !void {
+        return f.expectEvents(&.{.{ .sub_path = sub_path, .kind = kind }});
+    }
+
+    /// Polls until every one of `wants` has been reported, or gives up.
+    ///
+    /// One call rather than one per event, because a single poll can
+    /// return several of them and the caller must not throw the rest
+    /// away: one rename is a removal and a creation in the same window.
+    fn expectEvents(f: *Fixture, wants: []const Want) !void {
+        const gpa = std.testing.allocator;
+        const paths = try gpa.alloc([]u8, wants.len);
+        defer {
+            for (paths) |p| gpa.free(p);
+            gpa.free(paths);
+        }
+        for (wants, paths) |want, *p| p.* = try f.path(want.sub_path);
+
+        const seen = try gpa.alloc(bool, wants.len);
+        defer gpa.free(seen);
+        @memset(seen, false);
+
+        var waited: u32 = 0;
+        while (waited < timeout_ms) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                for (wants, paths, seen) |want, p, *hit| {
+                    if (event.kind == want.kind and std.mem.eql(u8, event.path, p)) hit.* = true;
+                }
+            }
+            if (std.mem.allEqual(bool, seen, true)) return;
+        }
+        for (wants, paths, seen) |want, p, hit| {
+            if (!hit) std.debug.print("no {s} event for {s} within {d} ms\n", .{
+                @tagName(want.kind), p, timeout_ms,
+            });
+        }
+        return error.EventNotObserved;
+    }
+
+    /// Drains whatever is pending so the next assertion starts clean.
+    fn settle(f: *Fixture) !void {
+        while ((try f.watcher.poll(120)).len != 0) {}
+    }
+};
+
+test "a file appearing in a watched directory is created" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{});
+
+        try f.write("a.txt", "one");
+        try f.expectEvent("a.txt", .created);
+    }
+}
+
+test "a file written in a watched directory is modified" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("a.txt", "one");
+        _ = try f.watcher.add(f.root, .{});
+        try f.settle();
+
+        try f.write("a.txt", "one and two");
+        try f.expectEvent("a.txt", .modified);
+    }
+}
+
+test "a file deleted from a watched directory is removed" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("a.txt", "one");
+        _ = try f.watcher.add(f.root, .{});
+        try f.settle();
+
+        try f.tmp.dir.deleteFile(std.testing.io, "a.txt");
+        try f.expectEvent("a.txt", .removed);
+    }
+}
+
+test "a rename inside a watched directory is a removal and a creation" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("before.txt", "one");
+        _ = try f.watcher.add(f.root, .{});
+        try f.settle();
+
+        try f.tmp.dir.rename("before.txt", f.tmp.dir, "after.txt", std.testing.io);
+        try f.expectEvents(&.{
+            .{ .sub_path = "before.txt", .kind = .removed },
+            .{ .sub_path = "after.txt", .kind = .created },
+        });
+    }
+}
+
+test "a watch on a single file reports writes to it" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("a.txt", "one");
+
+        const target = try f.path("a.txt");
+        defer std.testing.allocator.free(target);
+        _ = try f.watcher.add(target, .{});
+        try f.settle();
+
+        try f.write("a.txt", "one and two");
+        try f.expectEvent("a.txt", .modified);
+    }
+}
+
+test "a burst of writes on one path is one event" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("a.txt", "one");
+        _ = try f.watcher.add(f.root, .{});
+        try f.settle();
+
+        // Each write leaves a different size, so no backend can miss one
+        // for want of clock resolution -- and yet one event is expected.
+        try f.write("a.txt", "two.");
+        try f.write("a.txt", "three..");
+        try f.write("a.txt", "four....");
+
+        const gpa = std.testing.allocator;
+        const wanted = try f.path("a.txt");
+        defer gpa.free(wanted);
+
+        var seen: usize = 0;
+        var waited: u32 = 0;
+        while (waited < timeout_ms) : (waited += 200) {
+            const events = try f.watcher.poll(200);
+            for (events) |event| {
+                if (std.mem.eql(u8, event.path, wanted)) seen += 1;
+            }
+            if (seen != 0) break;
+        }
+        try std.testing.expectEqual(@as(usize, 1), seen);
+    }
+}
+
+test "removing a watch stops its events" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const id = try f.watcher.add(f.root, .{});
+        try f.write("a.txt", "one");
+        try f.expectEvent("a.txt", .created);
+
+        f.watcher.remove(id);
+        try f.settle();
+
+        try f.write("b.txt", "two");
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(400)).len);
+    }
+}
+
+test "a recursive watch follows directories created after it" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{ .recursive = true });
+
+        try f.tmp.dir.createDirPath(std.testing.io, "sub");
+        try f.expectEvent("sub", .created);
+
+        try f.write("sub/deep.txt", "one");
+        try f.expectEvent("sub/deep.txt", .created);
+    }
+}
+
+test "a non-recursive watch ignores what happens below it" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "sub");
+        _ = try f.watcher.add(f.root, .{});
+        try f.settle();
+
+        try f.write("sub/deep.txt", "one");
+
+        const gpa = std.testing.allocator;
+        const wanted = try f.path("sub/deep.txt");
+        defer gpa.free(wanted);
+        for (try f.watcher.poll(400)) |event| {
+            try std.testing.expect(!std.mem.eql(u8, event.path, wanted));
+        }
+    }
+}
+
+test "a directory past the entry limit reports overflow against the watch root" {
+    for (backends) |backend| {
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+
+        var watcher: Watcher = try .init(gpa, io, .{
+            .backend = backend,
+            .poll_interval_ms = 20,
+            .max_dir_entries = 2,
+        });
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{});
+
+        for (0..6) |i| {
+            var name: [8]u8 = undefined;
+            try tmp.dir.writeFile(io, .{
+                .sub_path = std.fmt.bufPrint(&name, "f{d}", .{i}) catch unreachable,
+                .data = "x",
+            });
+        }
+
+        var found = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !found) : (waited += 200) {
+            for (try watcher.poll(200)) |event| {
+                if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "the descriptor is present exactly when the backend has one" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var polling: Watcher = try .init(gpa, io, .{ .backend = .poll });
+    defer polling.deinit();
+    try std.testing.expectEqual(zwatch.Backend.poll, polling.backend());
+    try std.testing.expectEqual(@as(?std.posix.fd_t, null), polling.fd());
+
+    if (zwatch.native_backend) |native| {
+        var kernel: Watcher = try .init(gpa, io, .{ .backend = native });
+        defer kernel.deinit();
+        try std.testing.expectEqual(native, kernel.backend());
+        try std.testing.expect(kernel.fd() != null);
+    }
+}
+
+test "a backend this target was not built with is refused, not a compile error" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const absent: zwatch.Backend = switch (zwatch.native_backend orelse .poll) {
+        .inotify => .kqueue,
+        else => .inotify,
+    };
+    try std.testing.expectError(
+        error.BackendUnavailable,
+        Watcher.init(gpa, io, .{ .backend = absent }),
+    );
+}
+
+test "adding a path that does not exist fails" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var watcher: Watcher = try .init(gpa, io, .{});
+    defer watcher.deinit();
+    try std.testing.expectError(
+        error.FileNotFound,
+        watcher.add("zwatch-no-such-path-exists-here", .{}),
+    );
+}
+
+test "polling a watcher with nothing to report returns nothing" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var watcher: Watcher = try .init(gpa, io, .{ .poll_interval_ms = 20 });
+    defer watcher.deinit();
+    try std.testing.expectEqual(@as(usize, 0), (try watcher.poll(100)).len);
+}

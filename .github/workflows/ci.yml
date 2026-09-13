@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.16.0
+
+jobs:
+  # The full suite on every host that can run it. The suite itself runs
+  # once per backend the host has, so a macOS runner exercises kqueue and
+  # polling, a Linux runner inotify and polling, and a Windows runner
+  # polling -- which is the whole backend surface, executed.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Formatting
+        run: zig fmt --check src examples build.zig
+
+      - name: Test -- Debug
+        run: zig build test -Doptimize=Debug
+
+      - name: Test -- ReleaseSafe
+        run: zig build test -Doptimize=ReleaseSafe
+
+      - name: Test -- ReleaseFast
+        run: zig build test -Doptimize=ReleaseFast
+
+      - name: Test -- ReleaseSmall
+        run: zig build test -Doptimize=ReleaseSmall
+
+      - name: Examples
+        run: zig build examples
+
+  # Compile-only coverage of the targets the suite cannot execute on --
+  # and of the ones it can, under the other libc. The default step
+  # compiles the test binary as well as the archive, so these really do
+  # analyse the backend sources rather than an empty library.
+  cross-compile:
+    name: cross (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux-gnu
+          - aarch64-linux-gnu
+          - x86_64-linux-musl
+          - x86_64-macos
+          - aarch64-macos
+          - x86_64-windows-gnu
+          - aarch64-windows-gnu
+          - x86_64-freebsd
+          - x86_64-netbsd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: zig build -Dtarget=${{ matrix.target }}
+
+  # The Usage block in README.md is a region of examples/usage.zig, which
+  # the job above builds and runs. This is what keeps the two identical.
+  docs:
+    name: documented snippets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ci/check-docs.sh
