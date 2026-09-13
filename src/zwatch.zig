@@ -143,12 +143,17 @@ pub const Options = struct {
     /// of a file being saved. Zero disables the wait and reports whatever
     /// is already queued.
     latency_ms: u32 = 50,
-    /// The largest number of entries zwatch tracks in one watched
-    /// directory. A directory with more entries than this is tracked up to
-    /// the limit and reports `Kind.overflow` on every scan, because
-    /// changes beyond the limit cannot be seen. Used by the `kqueue` and
-    /// `poll` backends, which learn what changed by comparing directory
-    /// listings; `inotify` is told the name by the kernel and ignores it.
+    /// The largest number of entries zwatch will account for in one
+    /// watched directory. A directory holding more reports
+    /// `Kind.overflow` against its watch root, which means: this one is
+    /// past the budget you set, rescan it yourself.
+    ///
+    /// The backends reach that answer differently and it is deliberate
+    /// that they all reach it. `kqueue` and `poll` name an entry by
+    /// comparing directory listings, so past the limit they genuinely
+    /// cannot see a change. `inotify` is told every name by the kernel
+    /// and keeps reporting them, and counts entries only so that the
+    /// signal a caller handles is the same one on every platform.
     max_dir_entries: usize = 4096,
 };
 

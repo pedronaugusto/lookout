@@ -137,11 +137,14 @@ than something you discover.
   watch on the file reports `renamed` or `removed` and then goes quiet,
   because the descriptor still refers to the old file. Watch the
   containing directory to follow a path rather than a file.
-- **Large directories are capped.** The backends that compare directory
-  listings — `kqueue` and `poll` — track at most `max_dir_entries`
-  entries per directory, 4096 by default. A directory with more reports
-  `Kind.overflow` against the watch root on every scan, meaning "rescan
-  this yourself": changes past the limit cannot be seen.
+- **Large directories are capped.** A directory holding more than
+  `max_dir_entries` entries, 4096 by default, reports `Kind.overflow`
+  against the watch root, meaning "rescan this yourself". `kqueue` and
+  `poll` name entries by comparing listings and past the limit genuinely
+  cannot see a change; `inotify` is told every name by the kernel and
+  keeps reporting them, and counts entries only so that the signal is
+  the same on every platform. Raise the budget if you meant to watch a
+  directory that size.
 - **`overflow` is not an error.** It is also what the kernel event queue
   overflowing looks like on Linux. Either way the answer is the same:
   the watcher's record is incomplete and the caller should re-read the
@@ -196,6 +199,22 @@ opened with `.iterate` can be listed while entries are being created and
 removed, and that `statFile` reports a modification time with enough
 resolution to see two writes close together. Both hold on the POSIX
 targets this was developed on.
+
+## Testing
+
+```
+zig build test          # the suite, on this host, once per backend it has
+ci/linux.sh             # the suite on Linux, in Docker, all four modes
+```
+
+`ci/linux.sh` exists because the `inotify` backend cannot run on macOS or
+Windows, and a backend that only compiles is a backend nobody has run. It
+builds a Debian image with the pinned Zig from
+[`ci/linux.Dockerfile`](ci/linux.Dockerfile) — no network beyond that,
+nothing installed on the host — mounts the working tree read-only, and
+runs `zig build test` inside it in Debug, ReleaseSafe, ReleaseFast and
+ReleaseSmall. Pass mode names to run fewer, or set
+`ZWATCH_LINUX_IMAGE` to reuse an image you already have.
 
 ## Requirements
 

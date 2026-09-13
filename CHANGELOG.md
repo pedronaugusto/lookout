@@ -22,4 +22,6 @@ First release.
   appear.
 - The test suite runs once per backend the host can execute, so the
   polling backend is held to the same contract as the kernel ones instead
-  of to a weaker one of its own.
+  of to a weaker one of its own. `ci/linux.sh` runs it on Linux in
+  Docker, so the `inotify` backend is executed rather than merely
+  compiled from a machine that is not Linux.

@@ -36,6 +36,8 @@ ifd: posix.fd_t,
 watches: std.AutoArrayHashMapUnmanaged(WatchId, Watch),
 /// Kernel watch descriptor to the directory or file it stands for.
 wds: std.AutoArrayHashMapUnmanaged(i32, Registration),
+/// Mirrors `zwatch.Options.max_dir_entries`.
+max_dir_entries: usize,
 
 /// What the caller asked for.
 const Watch = struct {
@@ -49,6 +51,15 @@ const Registration = struct {
     watch: WatchId,
     /// Absolute path the descriptor stands for, owned by the backend.
     path: []u8,
+    /// How many entries the directory holds, counted once when the watch
+    /// was registered and kept current from the creations and deletions
+    /// the kernel reports. Zero for a file.
+    ///
+    /// inotify needs no listing to name what changed, so this exists for
+    /// one reason: `zwatch.Options.max_dir_entries` is a budget the
+    /// caller set, and a directory past it must say `zwatch.Kind.overflow`
+    /// here exactly as it does on the backends that compare listings.
+    entries: usize,
 };
 
 /// Everything zwatch asks the kernel to report. `IN.EXCL_UNLINK` keeps a
@@ -65,7 +76,6 @@ const read_buffer_len = 8192;
 
 /// Creates the inotify descriptor.
 pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.InitError!Inotify {
-    _ = options;
     // `linux.errno`, not `posix.errno`: these are raw syscalls, and on a
     // target that links libc `posix.errno` reads libc's thread-local
     // variable, which a raw syscall never writes.
@@ -83,6 +93,7 @@ pub fn init(gpa: Allocator, io: Io, options: zwatch.Options) zwatch.Watcher.Init
         .ifd = @intCast(rc),
         .watches = .empty,
         .wds = .empty,
+        .max_dir_entries = options.max_dir_entries,
     };
 }
 
@@ -237,20 +248,33 @@ fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) zwatch.
     const is_dir = event.mask & linux.IN.ISDIR != 0;
     const recursive = (n.watches.get(watch) orelse return).recursive;
 
-    if (event.mask & (linux.IN.CREATE | linux.IN.MOVED_TO) != 0) {
-        try batch.push(n.gpa, watch, path, .created);
-        if (is_dir and recursive) try n.adopt(watch, path, batch);
-    }
-    if (event.mask & (linux.IN.DELETE | linux.IN.MOVED_FROM) != 0) {
-        try batch.push(n.gpa, watch, path, .removed);
-        if (is_dir) n.forgetSubtree(path);
-    }
+    const appeared = event.mask & (linux.IN.CREATE | linux.IN.MOVED_TO) != 0;
+    const vanished = event.mask & (linux.IN.DELETE | linux.IN.MOVED_FROM) != 0;
+
+    if (appeared) try batch.push(n.gpa, watch, path, .created);
+    if (vanished) try batch.push(n.gpa, watch, path, .removed);
     if (event.mask & linux.IN.MODIFY != 0) {
         try batch.push(n.gpa, watch, path, .modified);
     }
     if (event.mask & linux.IN.ATTRIB != 0) {
         try batch.push(n.gpa, watch, path, .attributes);
     }
+
+    // The entry budget. Checked on every event for the directory rather
+    // than only on the ones that move the count, so that a watch added to
+    // a directory that is already too big says so at the first sign of
+    // life, which is what the listing backends do.
+    if (n.wds.getPtr(event.wd)) |current| {
+        if (appeared) current.entries += 1;
+        if (vanished) current.entries -|= 1;
+        if (current.entries > n.max_dir_entries) {
+            try batch.push(n.gpa, watch, n.watches.get(watch).?.root, .overflow);
+        }
+    }
+
+    // Last, because both can rehash `wds` and invalidate the pointer above.
+    if (appeared and is_dir and recursive) try n.adopt(watch, path, batch);
+    if (vanished and is_dir) n.forgetSubtree(path);
 }
 
 /// Registers directories that appeared inside a recursive watch, and
@@ -331,9 +355,23 @@ fn register(n: *Inotify, id: WatchId, path: []u8) zwatch.Watcher.AddError!void {
 
     // The kernel returns the existing descriptor when the same inode is
     // registered twice, so a replaced entry frees the path it replaces.
+    const entries = n.countEntries(path);
     const gop = try n.wds.getOrPut(n.gpa, wd);
     if (gop.found_existing) n.gpa.free(gop.value_ptr.path);
-    gop.value_ptr.* = .{ .watch = id, .path = path };
+    gop.value_ptr.* = .{ .watch = id, .path = path, .entries = entries };
+}
+
+/// How many entries `path` holds, or zero when it is not a directory or
+/// cannot be read. The one listing inotify does, and only to start the
+/// count `handle` keeps: an unreadable directory is a budget of nothing
+/// rather than a failed `add`.
+fn countEntries(n: *Inotify, path: []const u8) usize {
+    var dir = Io.Dir.openDirAbsolute(n.io, path, .{ .iterate = true }) catch return 0;
+    defer dir.close(n.io);
+    var it = dir.iterate();
+    var count: usize = 0;
+    while (it.next(n.io) catch null) |_| count += 1;
+    return count;
 }
 
 /// Asks the kernel to drop one watch, and forgets the path it stood for.
