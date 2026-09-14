@@ -363,6 +363,37 @@ test "a recursive watch follows directories created after it" {
     }
 }
 
+test "a directory that arrives with a tree in it reports the tree" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{ .recursive = true });
+        try f.settle();
+
+        // Built in one go, with no poll in between for the watcher to
+        // register the directory before it has anything in it -- an
+        // archive unpacked, a build writing a tree. Whatever is inside
+        // when lookout first sees the directory is new, and a watcher
+        // that took it for a baseline would report none of it and would
+        // not watch the directories among it either.
+        try f.tmp.dir.createDirPath(std.testing.io, "tree/deep");
+        try f.write("tree/a.txt", "one");
+        try f.write("tree/deep/b.txt", "two");
+
+        try f.expectEvents(&.{
+            .{ .sub_path = "tree", .kind = .created },
+            .{ .sub_path = "tree/a.txt", .kind = .created },
+            .{ .sub_path = "tree/deep", .kind = .created },
+            .{ .sub_path = "tree/deep/b.txt", .kind = .created },
+        });
+
+        // And the deepest of them is watched, not merely listed once.
+        try f.settle();
+        try f.write("tree/deep/c.txt", "three");
+        try f.expectEvent("tree/deep/c.txt", .created);
+    }
+}
+
 test "a non-recursive watch ignores what happens below it" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);

@@ -48,6 +48,13 @@ breaking one.
   happens in a directory the watch was never put on. The boolean said
   Windows reported `removed`, which it does not; a caller waiting for
   that event waited forever.
+- A directory that appears under a recursive watch with files already
+  inside it reports them. The `kqueue` and polling backends registered
+  such a directory by listing it and keeping that listing as the
+  baseline, so everything already in it was taken for something that had
+  always been there -- and the directories among them were never
+  registered, which left a whole unpacked tree unwatched below the first
+  level. `inotify` already did this; now all three do.
 - A fresh FSEvents watch no longer reports the directory it was just
   put on as `Kind.created`. The backend resolves a flag against the file
   system by asking whether it has seen the path before, and the walk that

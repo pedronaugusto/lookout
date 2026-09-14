@@ -372,14 +372,7 @@ pub fn rescanDirectory(
     batch: *Batch,
     added: *std.ArrayList(NodeId),
 ) ScanError!void {
-    var frontier = std.ArrayList(NodeId).empty;
-    defer frontier.deinit(t.gpa);
-    try frontier.append(t.gpa, id);
-
-    var i: usize = 0;
-    while (i < frontier.items.len) : (i += 1) {
-        try t.rescanOne(frontier.items[i], batch, added, &frontier);
-    }
+    return t.rescanOne(id, batch, added);
 }
 
 fn rescanOne(
@@ -387,7 +380,6 @@ fn rescanOne(
     id: NodeId,
     batch: *Batch,
     added: *std.ArrayList(NodeId),
-    frontier: *std.ArrayList(NodeId),
 ) ScanError!void {
     const node = t.nodes.getPtr(id) orelse return;
     if (node.role != .directory) return;
@@ -446,23 +438,74 @@ fn rescanOne(
         }
         if (!recursive or change.file_kind != .directory) continue;
         switch (change.kind) {
-            .created => {
-                const owned = try t.gpa.dupe(u8, child);
-                errdefer t.gpa.free(owned);
-                const new_id = t.createDirectory(watch, owned, added) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    // Created and gone again, or not ours to open: the
-                    // parent's next scan reports whatever happens next.
-                    else => {
-                        t.gpa.free(owned);
-                        continue;
-                    },
-                };
-                // Files may already have appeared inside it.
-                try frontier.append(t.gpa, new_id);
-            },
+            .created => try t.adopt(watch, child, batch, added),
             .removed => t.removeSubtree(child),
             else => {},
+        }
+    }
+}
+
+/// Registers a directory that has appeared under a recursive watch, and
+/// everything already inside it, reporting all of it as created.
+///
+/// A directory can be created and filled before lookout is told it exists
+/// -- an archive unpacked, a `mkdir -p`, a build writing a tree in one
+/// go -- and the listing taken when it is registered is its baseline, so
+/// without this everything already inside would be taken for something
+/// that had always been there, and the directories among them would
+/// never be registered at all.
+///
+/// Iterative rather than recursive: the tree being adopted was made by
+/// somebody else and its depth is not this library's to bound.
+fn adopt(
+    t: *Tree,
+    watch: WatchId,
+    root: []const u8,
+    batch: *Batch,
+    added: *std.ArrayList(NodeId),
+) ScanError!void {
+    var frontier: std.ArrayList([]u8) = .empty;
+    defer {
+        for (frontier.items) |path| t.gpa.free(path);
+        frontier.deinit(t.gpa);
+    }
+    try frontier.append(t.gpa, try t.gpa.dupe(u8, root));
+
+    var i: usize = 0;
+    while (i < frontier.items.len) : (i += 1) {
+        const current = frontier.items[i];
+        const owned = try t.gpa.dupe(u8, current);
+        const id = t.createDirectory(watch, owned, added) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // Created and gone again, or not ours to open: reported
+            // through its parent and no further.
+            else => {
+                t.gpa.free(owned);
+                continue;
+            },
+        };
+
+        var j: usize = 0;
+        while (true) : (j += 1) {
+            // Re-resolved each round: the node table is rehashed by the
+            // next directory this loop creates.
+            const node = t.nodes.getPtr(id) orelse break;
+            if (j >= node.snapshot.entries.count()) break;
+            const name = node.snapshot.entries.keys()[j];
+            const file_kind = node.snapshot.entries.values()[j].file_kind;
+
+            const entry = try std.fs.path.join(t.gpa, &.{ current, name });
+            errdefer t.gpa.free(entry);
+            if (t.excluded(watch, entry)) {
+                t.gpa.free(entry);
+                continue;
+            }
+            try batch.push(t.gpa, watch, entry, .created);
+            if (file_kind == .directory) {
+                try frontier.append(t.gpa, entry);
+            } else {
+                t.gpa.free(entry);
+            }
         }
     }
 }
