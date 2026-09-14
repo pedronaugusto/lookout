@@ -48,6 +48,16 @@ breaking one.
   happens in a directory the watch was never put on. The boolean said
   Windows reported `removed`, which it does not; a caller waiting for
   that event waited forever.
+- A fresh FSEvents watch no longer reports the directory it was just
+  put on as `Kind.created`. The backend resolves a flag against the file
+  system by asking whether it has seen the path before, and the walk that
+  seeds that answer covered every path under the root and not the root
+  itself, so the first delivery naming the watched directory called it
+  new. A directory's own `modified` and `attributes` flags are dropped
+  too: a directory's times move whenever anything inside it moves, no
+  other backend reports that, and FSEvents keeps these flags per path and
+  never clears them -- so the first delivery for a directory carried
+  whatever was last done to it, however long before the watch.
 - `AddOptions.filter` says what a watch is not about: `Filter.ignore`, a
   list of path prefixes and simple globs, and `Filter.allow`, a predicate
   of the caller's, both asked about every ancestor of a path so that

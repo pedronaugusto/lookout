@@ -525,14 +525,23 @@ fn report(f: *FsEvents, batch: *Batch, run: []const Record) lookout.Watcher.Poll
         try f.recount(batch, record, stream);
         return 0;
     }
-    if (record.flags & c.kFSEventStreamEventFlagItemModified != 0) {
-        try batch.push(f.gpa, record.id, record.path, .modified);
-    } else if (record.flags & (c.kFSEventStreamEventFlagItemInodeMetaMod |
-        c.kFSEventStreamEventFlagItemChangeOwner |
-        c.kFSEventStreamEventFlagItemXattrMod |
-        c.kFSEventStreamEventFlagItemFinderInfoMod) != 0)
-    {
-        try batch.push(f.gpa, record.id, record.path, .attributes);
+    // Contents and metadata, but not a directory's. A directory's own
+    // times move whenever anything inside it moves, so reporting them
+    // would make every ancestor of a change produce an event of its own
+    // -- which no other backend does and a caller cannot use. It matters
+    // more here than anywhere: FSEvents keeps these flags per path and
+    // never clears them, so the first delivery naming a directory
+    // carries whatever was last done to it, however long ago.
+    if (record.flags & c.kFSEventStreamEventFlagItemIsDir == 0) {
+        if (record.flags & c.kFSEventStreamEventFlagItemModified != 0) {
+            try batch.push(f.gpa, record.id, record.path, .modified);
+        } else if (record.flags & (c.kFSEventStreamEventFlagItemInodeMetaMod |
+            c.kFSEventStreamEventFlagItemChangeOwner |
+            c.kFSEventStreamEventFlagItemXattrMod |
+            c.kFSEventStreamEventFlagItemFinderInfoMod) != 0)
+        {
+            try batch.push(f.gpa, record.id, record.path, .attributes);
+        }
     }
     try f.recount(batch, record, stream);
     return 0;
@@ -557,10 +566,12 @@ fn forget(f: *FsEvents, path: []const u8) void {
 /// Listing only: no descriptor is kept, which is the difference between
 /// this and what the `kqueue` backend has to do.
 fn seedKnown(f: *FsEvents, stream: *const Stream) Allocator.Error!void {
-    if (stream.scope == .file) {
-        if (f.exists(stream.root)) try f.remember(stream.root);
-        return;
-    }
+    if (stream.scope == .file) return;
+    // The root itself, before anything below it: FSEvents names the
+    // watched directory as readily as it names an entry, and a path the
+    // backend has never heard of is a path it reports as created.
+    if (f.exists(stream.root)) try f.remember(stream.root);
+
     var frontier: std.ArrayList([]u8) = .empty;
     defer {
         for (frontier.items) |path| f.gpa.free(path);
@@ -714,6 +725,7 @@ const c = struct {
     const kFSEventStreamEventFlagItemFinderInfoMod: u32 = 0x00002000;
     const kFSEventStreamEventFlagItemChangeOwner: u32 = 0x00004000;
     const kFSEventStreamEventFlagItemXattrMod: u32 = 0x00008000;
+    const kFSEventStreamEventFlagItemIsDir: u32 = 0x00020000;
 
     const F_GETFL: c_int = 3;
     const F_SETFL: c_int = 4;

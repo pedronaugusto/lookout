@@ -153,6 +153,28 @@ const Fixture = struct {
     }
 };
 
+test "a fresh watch reports nothing that was already there as new" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("a.txt", "one");
+        try f.tmp.dir.createDirPath(std.testing.io, "sub");
+        try f.write("sub/deep.txt", "two");
+
+        _ = try f.watcher.add(f.root, .{ .recursive = true });
+
+        // A watch is about what changes from now on, so nothing that was
+        // there when it was taken may arrive as a creation, and the
+        // watched directory itself is not news at all. On a backend that
+        // is handed accumulated flags rather than a sequence of facts,
+        // that is the harder half of the contract.
+        for (try f.watcher.poll(400)) |event| {
+            try std.testing.expect(event.kind != .created);
+            try std.testing.expect(!std.mem.eql(u8, event.path, f.root));
+        }
+    }
+}
+
 test "a file appearing in a watched directory is created" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
