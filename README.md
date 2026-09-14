@@ -95,7 +95,8 @@ exe.root_module.addImport("lookout", lookout_dep.module("lookout"));
 | `default_backend` | The backend `.auto` resolves to on this target. |
 | `supported(backend)` | Whether this target was built with a backend. |
 | `pairsRenames(backend)` | Whether it reports `renamed` with a `from`, or a removal and a creation. |
-| `reportsRootMove(backend)` | Whether a move of the watched path itself arrives as `renamed` or as `removed`. |
+| `RootMove` | What a backend reports when the watched path itself is moved: `renamed`, `removed`, or `silent` for nothing at all. |
+| `reportsRootMove(backend)` | Which of those three a move of the watched path itself arrives as. |
 
 The events a `poll` returns, and every path in them, belong to the
 watcher and are invalidated by the next `poll`. Copy anything you intend

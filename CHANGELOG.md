@@ -41,6 +41,13 @@ breaking one.
   has *grown*. Under `debounce_ms` a push produces no event for a while,
   and a backend watching the event count would have slept through its
   own deadline -- with no timeout at all, forever.
+- `reportsRootMove` answers with `RootMove` rather than with a boolean,
+  because there are three shapes and not two: `renamed` on `kqueue` and
+  `inotify`, `removed` on FSEvents and polling, and `silent` on Windows,
+  where the directory handle survives the rename and the rename itself
+  happens in a directory the watch was never put on. The boolean said
+  Windows reported `removed`, which it does not; a caller waiting for
+  that event waited forever.
 - `Event.path` is spelled with the platform's own separator all the way
   down: `/` on POSIX, `\` on Windows, including the part below the watch
   root. The backends already did this; nothing said so, and a caller

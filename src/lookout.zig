@@ -72,36 +72,46 @@ pub fn pairsRenames(backend: Backend) bool {
     };
 }
 
-/// Whether `backend` can tell that the watched path itself was moved,
-/// reporting `Kind.renamed` against it, or can only see that the path is
-/// no longer there and reports `Kind.removed`.
+/// What a backend reports when the watched path itself is moved. See
+/// `reportsRootMove`.
+pub const RootMove = enum {
+    /// `Kind.renamed` against the watch root: the backend watches the
+    /// object and is told that it moved.
+    renamed,
+    /// `Kind.removed` against the watch root: the backend watches the
+    /// name, and a move and a deletion leave the same absence behind.
+    removed,
+    /// Nothing at all. The backend holds the object open through a
+    /// handle the move does not disturb, and the move itself is a change
+    /// in a directory it was not asked to watch, so there is nothing to
+    /// deliver and the watch keeps running on the object under its new
+    /// name.
+    silent,
+};
+
+/// How `backend` reports the watched path itself being moved.
 ///
-/// The watched path disappearing is reported by every backend; which of
-/// the two kinds it arrives as is the only difference, and this is how a
-/// program asks rather than discovers.
+/// The watched path being *deleted* is `Kind.removed` on every backend.
+/// A move is the one that differs, so this is how a program asks which
+/// of the three shapes to expect instead of discovering it.
 ///
-/// `kqueue` and `inotify` watch the object and are told that it moved.
-/// The other three learn it from the name: `poll` compares listings, in
-/// which a move and a deletion are the same absence; FSEvents reports
-/// both with one flag against a root that is no longer at its name; and
-/// `windows` holds a handle that a move does not disturb, so a move is
-/// not reported at all until the path is read again. All three report the
-/// deletion as `Kind.removed` and lookout does not guess which it was.
-pub fn reportsRootMove(backend: Backend) bool {
+/// `kqueue` and `inotify` watch the object and are told that it moved,
+/// so both say `renamed`. `poll` compares listings, in which a move and
+/// a deletion are the same absence, and FSEvents reports both with one
+/// flag against a root that is no longer at its name; both say
+/// `removed`. `windows` holds a directory handle that a rename leaves
+/// valid, and the rename happens in the parent directory, which the
+/// watch was not put on: nothing is delivered, and `silent` says so
+/// rather than leaving a caller waiting for an event that is not coming.
+pub fn reportsRootMove(backend: Backend) RootMove {
     return switch (backend) {
         .auto => reportsRootMove(default_backend),
-        .kqueue, .inotify => true,
-        .fsevents, .windows, .poll => false,
+        .kqueue, .inotify => .renamed,
+        .fsevents, .poll => .removed,
+        .windows => .silent,
     };
 }
 
-/// The backend `Backend.auto` resolves to on this target: the kernel one
-/// where there is a kernel one, and `poll` where there is not.
-///
-/// On Apple targets this is `fsevents` rather than `kqueue`, because
-/// FSEvents recurses without a descriptor per directory and pairs
-/// renames. `kqueue` remains selectable, and is the better answer for a
-/// handful of paths watched without recursion.
 pub const default_backend: Backend = switch (builtin.os.tag) {
     .driverkit,
     .ios,
@@ -152,8 +162,8 @@ pub const Kind = enum {
     /// The watched path itself was renamed, so the watch no longer stands
     /// for the name it was added under and stops, exactly as for a
     /// `removed` root. Produced by the `kqueue` and `inotify` backends;
-    /// the `poll` backend cannot tell a rename from a deletion and
-    /// reports `removed`.
+    /// the other three report a move differently or not at all, and
+    /// `reportsRootMove` says which.
     renamed,
     /// Metadata other than the contents changed — permissions, ownership,
     /// link count, or the status-change time.

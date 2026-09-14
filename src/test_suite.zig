@@ -518,13 +518,24 @@ test "the watched path's own move is reported in the shape the backend documents
 
         try f.tmp.dir.rename("target", f.tmp.dir, "moved", std.testing.io);
 
-        // Two shapes, one fact: the watched path is no longer at the name
-        // it was added under. Which one a backend produces is
-        // `lookout.reportsRootMove`, and it is asserted rather than
+        // Three shapes, one fact: the watched path is no longer at the
+        // name it was added under. Which one a backend produces is
+        // `lookout.reportsRootMove`, and each is asserted rather than
         // accepted either way, so the table in the README cannot go
-        // stale without the suite saying so.
-        const kind: Kind = if (lookout.reportsRootMove(backend)) .renamed else .removed;
-        try f.expectEvent("target", kind);
+        // stale without the suite saying so -- the silence included,
+        // which is the one a caller would otherwise wait out.
+        switch (lookout.reportsRootMove(backend)) {
+            .renamed => try f.expectEvent("target", .renamed),
+            .removed => try f.expectEvent("target", .removed),
+            .silent => {
+                var waited: u32 = 0;
+                while (waited < 1_000) : (waited += 200) {
+                    for (try f.watcher.poll(200)) |event| {
+                        try std.testing.expect(!std.mem.eql(u8, event.path, target));
+                    }
+                }
+            },
+        }
     }
 }
 
