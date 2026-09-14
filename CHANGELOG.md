@@ -48,6 +48,14 @@ breaking one.
   happens in a directory the watch was never put on. The boolean said
   Windows reported `removed`, which it does not; a caller waiting for
   that event waited forever.
+- `AddOptions.pending` takes a watch on a path that does not exist yet
+  instead of failing the `add` with `error.FileNotFound`. The watch is
+  parked on the nearest existing ancestor, narrowed to the single entry
+  that leads to the path asked for, steps down as the path appears, and
+  is promoted to the real watch -- recursion, filter and all -- with the
+  appearance reported as `Kind.created` against it. Nothing that happens
+  to the ancestor while it waits is reported. A tool watching a directory
+  its own first run creates had to poll for it.
 - A directory that appears under a recursive watch with files already
   inside it reports them. The `kqueue` and polling backends registered
   such a directory by listing it and keeping that listing as the

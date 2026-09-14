@@ -92,7 +92,7 @@ exe.root_module.addImport("lookout", lookout_dep.module("lookout"));
 | `Kind` | `created`, `modified`, `removed`, `renamed`, `attributes`, `overflow`. |
 | `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `debounce_ms`, `max_dir_entries`. |
 | `Filter` | What a watch is not about: `ignore`, a list of path prefixes and simple globs; `allow`, a predicate of the caller's; `context`, passed back to it. |
-| `AddOptions` | `recursive`, `filter`. |
+| `AddOptions` | `recursive`, `filter`, `pending`. |
 | `default_backend` | The backend `.auto` resolves to on this target. |
 | `supported(backend)` | Whether this target was built with a backend. |
 | `pairsRenames(backend)` | Whether it reports `renamed` with a `from`, or a removal and a creation. |

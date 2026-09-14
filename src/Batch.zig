@@ -165,6 +165,48 @@ fn pushDetail(
     return b.record(gpa, id, path, kind, from, now);
 }
 
+/// Drops every event, and everything held back, belonging to `id`.
+///
+/// A watch whose path does not exist yet is registered on an ancestor
+/// while it waits, and the ancestor's own comings and goings are not what
+/// the caller asked about. This is how they are kept out of the batch
+/// without the backends having to know why.
+pub fn discard(b: *Batch, gpa: Allocator, id: WatchId) void {
+    var removed = false;
+    var i: usize = 0;
+    while (i < b.events.items.len) {
+        if (b.events.items[i].id != id) {
+            i += 1;
+            continue;
+        }
+        const event = b.events.orderedRemove(i);
+        gpa.free(event.path);
+        if (event.from) |from| gpa.free(from);
+        removed = true;
+    }
+    if (removed) {
+        // The index is a position per path, so removing from the middle
+        // of the list means rebuilding it. The capacity is still there.
+        b.index.clearRetainingCapacity();
+        for (b.events.items, 0..) |event, at| {
+            b.index.putAssumeCapacity(event.path, @intCast(at));
+        }
+    }
+
+    var h: usize = 0;
+    while (h < b.held.count()) {
+        if (b.held.values()[h].id != id) {
+            h += 1;
+            continue;
+        }
+        const path = b.held.keys()[h];
+        const entry = b.held.values()[h];
+        b.held.swapRemoveAt(h);
+        gpa.free(path);
+        if (entry.from) |from| gpa.free(from);
+    }
+}
+
 /// Moves into the batch every path that has now been quiet for
 /// `hold_ns`. A no-op when nothing is held back.
 pub fn promote(b: *Batch, gpa: Allocator) Allocator.Error!void {
@@ -438,4 +480,38 @@ test "a push that is held still moves the revision" {
     try b.push(gpa, @enumFromInt(0), "/tmp/a", .created);
     try testing.expect(b.revision > before);
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
+}
+
+test "discarding a watch takes its events and its held paths with it" {
+    const gpa = testing.allocator;
+    var b = testBatch(.{ .debounce_ms = 50 });
+    defer b.deinit(gpa);
+
+    const kept: WatchId = @enumFromInt(1);
+    const dropped: WatchId = @enumFromInt(2);
+    try b.push(gpa, kept, "/tmp/a", .created);
+    try b.push(gpa, dropped, "/tmp/b", .created);
+    try b.push(gpa, kept, "/tmp/c", .created);
+    for (b.held.values()) |*entry| entry.last_ns -= 100 * std.time.ns_per_ms;
+    try b.promote(gpa);
+    try testing.expectEqual(@as(usize, 3), b.events.items.len);
+
+    b.discard(gpa, dropped);
+    try testing.expectEqual(@as(usize, 2), b.events.items.len);
+    try testing.expectEqualStrings("/tmp/a", b.events.items[0].path);
+    try testing.expectEqualStrings("/tmp/c", b.events.items[1].path);
+
+    // The index has to survive the removal: a later push on a path the
+    // batch still holds must merge rather than appear twice.
+    try b.push(gpa, kept, "/tmp/c", .removed);
+    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
+    try b.promote(gpa);
+    try testing.expectEqual(@as(usize, 2), b.events.items.len);
+    try testing.expectEqual(Kind.removed, b.events.items[1].kind);
+
+    // And what is still held for a discarded watch goes too.
+    try b.push(gpa, dropped, "/tmp/d", .modified);
+    try testing.expectEqual(@as(usize, 1), b.held.count());
+    b.discard(gpa, dropped);
+    try testing.expectEqual(@as(usize, 0), b.held.count());
 }

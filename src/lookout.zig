@@ -339,6 +339,28 @@ pub const AddOptions = struct {
     /// The patterns are copied by `Watcher.add`; `Filter.context` is
     /// not, and whatever it points at must outlive the watch.
     filter: Filter = .none,
+    /// Accept a path that is not there yet, instead of failing the `add`
+    /// with `error.FileNotFound`.
+    ///
+    /// The watch is put on the nearest existing ancestor, narrowed to the
+    /// single entry that leads to the path asked for, and steps down as
+    /// the path appears. When the path itself appears the watch is
+    /// promoted to the real one -- recursion, filter and all -- and the
+    /// appearance is reported as `Kind.created` against it. A tool
+    /// watching a directory its own first run creates no longer has to
+    /// poll for it.
+    ///
+    /// The id comes back from `add` immediately and is the id every event
+    /// carries, before and after the promotion. Nothing that happens to
+    /// the ancestor while the watch waits is reported: it is not what the
+    /// caller asked about.
+    ///
+    /// The ancestor is a watch like any other, so it cannot be a path
+    /// this same watcher already watches. When it is, the watch stays
+    /// parked with nothing registered and is re-examined on every `poll`,
+    /// which makes it as prompt as the polls rather than as prompt as the
+    /// kernel.
+    pending: bool = false,
 };
 
 /// A set of watches and the events they have produced.
@@ -352,6 +374,39 @@ pub const Watcher = struct {
     batch: Batch,
     next_id: u32,
     impl: Impl,
+    /// Watches whose path does not exist yet. See `AddOptions.pending`.
+    pending: std.ArrayList(*Pending),
+
+    /// A watch waiting for its path to appear.
+    ///
+    /// Heap-allocated and never moved: the ancestor watch's filter points
+    /// at it, and that filter is asked from inside a backend.
+    const Pending = struct {
+        /// The id `add` returned, which the ancestor watch is registered
+        /// under and which the real watch takes over.
+        id: WatchId,
+        /// The absolute path the caller asked for, canonical as far as it
+        /// exists. Owned here, and the two slices below point into it.
+        target: []u8,
+        /// The ancestor currently watched, or `null` when none could be
+        /// registered.
+        anchor: ?[]const u8,
+        /// The one entry of `anchor` that leads to `target`, which is the
+        /// only thing the ancestor watch is about.
+        next: []const u8,
+        /// `AddOptions.recursive`, applied at the promotion.
+        recursive: bool,
+        /// `AddOptions.filter`, copied: the patterns it borrowed are long
+        /// gone by the time the watch is promoted.
+        filter: Filter,
+
+        /// The ancestor watch's filter. Everything but the next step down
+        /// is somebody else's business.
+        fn onlyNext(context: ?*anyopaque, path: []const u8) bool {
+            const p: *const Pending = @ptrCast(@alignCast(context.?));
+            return std.mem.eql(u8, path, p.next);
+        }
+    };
 
     /// Every backend this target was built with, and the one the watcher
     /// chose. Written out per target rather than generated, because the
@@ -440,6 +495,7 @@ pub const Watcher = struct {
             .batch = .init(io, options),
             .next_id = 0,
             .impl = impl,
+            .pending = .empty,
         };
     }
 
@@ -449,6 +505,8 @@ pub const Watcher = struct {
         switch (w.impl) {
             inline else => |*impl| impl.deinit(),
         }
+        for (w.pending.items) |p| w.destroyPending(p);
+        w.pending.deinit(w.gpa);
         w.batch.deinit(w.gpa);
         w.* = undefined;
     }
@@ -472,15 +530,189 @@ pub const Watcher = struct {
     pub fn add(w: *Watcher, path: []const u8, options: AddOptions) AddError!WatchId {
         // The backend copies what it keeps, so this resolution is scratch
         // and a failed `add` leaves nothing behind.
-        const abs = try Io.Dir.cwd().realPathFileAlloc(w.io, path, w.gpa);
+        const abs = Io.Dir.cwd().realPathFileAlloc(w.io, path, w.gpa) catch |err| switch (err) {
+            error.FileNotFound => if (options.pending)
+                return w.addPending(path, options)
+            else
+                return err,
+            else => |e| return e,
+        };
         defer w.gpa.free(abs);
+        return w.register(abs, options);
+    }
 
+    /// Registers an absolute path that exists, and issues its id.
+    fn register(w: *Watcher, abs: []const u8, options: AddOptions) AddError!WatchId {
         const id: WatchId = @enumFromInt(w.next_id);
         switch (w.impl) {
             inline else => |*impl| try impl.add(id, abs, options),
         }
         w.next_id += 1;
         return id;
+    }
+
+    /// Takes a watch on a path that is not there, parks it on the nearest
+    /// existing ancestor, and issues its id. See `AddOptions.pending`.
+    fn addPending(w: *Watcher, path: []const u8, options: AddOptions) AddError!WatchId {
+        const target = try w.absentPath(path);
+        errdefer w.gpa.free(target);
+        // It may have appeared while its name was being spelled, in which
+        // case there is nothing to wait for.
+        if (w.exists(target)) {
+            defer w.gpa.free(target);
+            return w.register(target, options);
+        }
+
+        const p = try w.gpa.create(Pending);
+        errdefer w.gpa.destroy(p);
+        var filter = try options.filter.dupe(w.gpa);
+        errdefer filter.deinit(w.gpa);
+
+        const id: WatchId = @enumFromInt(w.next_id);
+        p.* = .{
+            .id = id,
+            .target = target,
+            .anchor = null,
+            .next = target,
+            .recursive = options.recursive,
+            .filter = filter,
+        };
+        try w.pending.append(w.gpa, p);
+        w.next_id += 1;
+        w.anchorPending(p);
+        return id;
+    }
+
+    /// The absolute path of something that is not there: canonical as far
+    /// as it exists, and taken as written past that, because a name that
+    /// does not exist has no symbolic links to resolve.
+    fn absentPath(w: *Watcher, path: []const u8) AddError![]u8 {
+        const lexical = lexical: {
+            if (std.fs.path.isAbsolute(path)) break :lexical try std.fs.path.resolve(w.gpa, &.{path});
+            const here = try Io.Dir.cwd().realPathFileAlloc(w.io, ".", w.gpa);
+            defer w.gpa.free(here);
+            break :lexical try std.fs.path.resolve(w.gpa, &.{ here, path });
+        };
+        errdefer w.gpa.free(lexical);
+
+        const present = w.existingPrefix(lexical) orelse return lexical;
+        const real = Io.Dir.cwd().realPathFileAlloc(w.io, present, w.gpa) catch return lexical;
+        defer w.gpa.free(real);
+
+        var rest = lexical[present.len..];
+        while (rest.len != 0 and std.fs.path.isSep(rest[0])) rest = rest[1..];
+        const joined = if (rest.len == 0)
+            try w.gpa.dupe(u8, real)
+        else
+            try std.fs.path.join(w.gpa, &.{ real, rest });
+        w.gpa.free(lexical);
+        return joined;
+    }
+
+    /// The longest prefix of `path` that is there, as a slice of it.
+    fn existingPrefix(w: *const Watcher, path: []const u8) ?[]const u8 {
+        var candidate = path;
+        while (true) {
+            if (w.exists(candidate)) return candidate;
+            candidate = std.fs.path.dirname(candidate) orelse return null;
+        }
+    }
+
+    fn exists(w: *const Watcher, path: []const u8) bool {
+        _ = Io.Dir.cwd().statFile(w.io, path, .{}) catch return false;
+        return true;
+    }
+
+    /// Puts the watch on the nearest existing ancestor of a path that is
+    /// not there yet, narrowed to the one entry that leads to it.
+    ///
+    /// Failing is not an error: the ancestor may be gone again, or may be
+    /// a path this watcher already watches. The watch stays parked and
+    /// the next `poll` tries again.
+    fn anchorPending(w: *Watcher, p: *Pending) void {
+        p.anchor = null;
+        const present = w.existingPrefix(p.target) orelse return;
+        if (present.len == p.target.len) return;
+        p.next = p.target[0..nextStep(p.target, present.len)];
+        switch (w.impl) {
+            inline else => |*impl| impl.add(p.id, present, .{
+                .filter = .{ .allow = Pending.onlyNext, .context = p },
+            }) catch return,
+        }
+        p.anchor = present;
+    }
+
+    /// Where the component after the prefix of length `at` ends.
+    fn nextStep(target: []const u8, at: usize) usize {
+        var i = at;
+        while (i < target.len and std.fs.path.isSep(target[i])) i += 1;
+        while (i < target.len and !std.fs.path.isSep(target[i])) i += 1;
+        return i;
+    }
+
+    /// Keeps the watches whose path is not there yet: drops the events of
+    /// the ancestor each one is parked on, steps the parked ones down or
+    /// up as the tree changes, and promotes any whose path has appeared.
+    fn settlePending(w: *Watcher) PollError!void {
+        if (w.pending.items.len == 0) return;
+        for (w.pending.items) |p| w.batch.discard(w.gpa, p.id);
+
+        var i: usize = 0;
+        while (i < w.pending.items.len) {
+            const p = w.pending.items[i];
+            if (w.exists(p.target)) {
+                if (try w.promotePending(p)) {
+                    _ = w.pending.orderedRemove(i);
+                    continue;
+                }
+            } else if (w.exists(p.next) or !w.anchorStands(p)) {
+                // Something appeared on the way down, or the ancestor the
+                // watch was parked on is itself gone. Either way the
+                // parking place is no longer the right one.
+                switch (w.impl) {
+                    inline else => |*impl| impl.remove(p.id),
+                }
+                w.anchorPending(p);
+            }
+            i += 1;
+        }
+    }
+
+    fn anchorStands(w: *const Watcher, p: *const Pending) bool {
+        const anchor = p.anchor orelse return false;
+        return w.exists(anchor);
+    }
+
+    /// Swaps the ancestor watch for the real one and reports the path
+    /// appearing. `false` when the path could not be watched after all,
+    /// which parks it again.
+    fn promotePending(w: *Watcher, p: *Pending) PollError!bool {
+        switch (w.impl) {
+            inline else => |*impl| impl.remove(p.id),
+        }
+        switch (w.impl) {
+            inline else => |*impl| impl.add(p.id, p.target, .{
+                .recursive = p.recursive,
+                .filter = p.filter,
+            }) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // Gone again between the look and the registration, or
+                // not ours to open. Park it and wait.
+                else => {
+                    w.anchorPending(p);
+                    return false;
+                },
+            },
+        }
+        try w.batch.push(w.gpa, p.id, p.target, .created);
+        w.destroyPending(p);
+        return true;
+    }
+
+    fn destroyPending(w: *Watcher, p: *Pending) void {
+        w.gpa.free(p.target);
+        p.filter.deinit(w.gpa);
+        w.gpa.destroy(p);
     }
 
     /// Stops watching `id`, releasing its descriptors. Events already
@@ -492,6 +724,12 @@ pub const Watcher = struct {
     pub fn remove(w: *Watcher, id: WatchId) void {
         switch (w.impl) {
             inline else => |*impl| impl.remove(id),
+        }
+        for (w.pending.items, 0..) |p, i| {
+            if (p.id != id) continue;
+            _ = w.pending.orderedRemove(i);
+            w.destroyPending(p);
+            break;
         }
     }
 
@@ -526,6 +764,7 @@ pub const Watcher = struct {
                 inline else => |*impl| try impl.wait(&w.batch, wait_ms),
             }
             try w.batch.promote(w.gpa);
+            try w.settlePending();
             if (w.batch.events.items.len > 0) break;
             if (remainingMs(w.io, started, timeout_ms)) |l| {
                 if (l == 0) return &.{};
@@ -547,6 +786,7 @@ pub const Watcher = struct {
                 inline else => |*impl| try impl.wait(&w.batch, left),
             }
             try w.batch.promote(w.gpa);
+            try w.settlePending();
         }
         return w.batch.events.items;
     }

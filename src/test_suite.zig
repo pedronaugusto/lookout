@@ -673,6 +673,126 @@ test "a zero timeout is one check, not a refusal to look" {
     }
 }
 
+test "a path that does not exist yet can be watched" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+
+        const gpa = std.testing.allocator;
+        const target = try f.path("later/inside");
+        defer gpa.free(target);
+
+        // Two levels missing, and the options are the real watch's: they
+        // are held until there is something to apply them to.
+        const id = try f.watcher.add(target, .{
+            .pending = true,
+            .recursive = true,
+            .filter = .{ .ignore = &.{"skip"} },
+        });
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(200)).len);
+
+        // The tree appears one level at a time; the watch steps down with
+        // it and reports the path it was asked about, not the steps.
+        try f.tmp.dir.createDirPath(std.testing.io, "later");
+        try f.tmp.dir.createDirPath(std.testing.io, "later/inside");
+        try f.expectEvent("later/inside", .created);
+        for (f.watcher.batch.events.items) |event| {
+            if (std.mem.eql(u8, event.path, target)) {
+                try std.testing.expectEqual(id, event.id);
+            }
+        }
+        try f.settle();
+
+        // And it is the real watch now, recursion and filter included.
+        try f.tmp.dir.createDirPath(std.testing.io, "later/inside/sub");
+        try f.tmp.dir.createDirPath(std.testing.io, "later/inside/skip");
+        try f.write("later/inside/skip/hidden.txt", "one");
+        try f.write("later/inside/sub/deep.txt", "two");
+
+        const ignored = try f.path("later/inside/skip");
+        defer gpa.free(ignored);
+        const wanted = try f.path("later/inside/sub/deep.txt");
+        defer gpa.free(wanted);
+
+        var found = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !found) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                try std.testing.expect(!std.mem.startsWith(u8, event.path, ignored));
+                if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "what happens to the ancestor of a pending watch is not reported" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+
+        const gpa = std.testing.allocator;
+        const target = try f.path("later");
+        defer gpa.free(target);
+        _ = try f.watcher.add(target, .{ .pending = true });
+
+        // The watch is parked on the directory the path will appear in,
+        // which is busy with things the caller never asked about.
+        try f.write("noise.txt", "one");
+        try f.tmp.dir.createDirPath(std.testing.io, "other");
+        try f.write("other/more.txt", "two");
+
+        var waited: u32 = 0;
+        while (waited < 800) : (waited += 200) {
+            try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(200)).len);
+        }
+
+        try f.tmp.dir.createDirPath(std.testing.io, "later");
+        try f.expectEvent("later", .created);
+    }
+}
+
+test "a pending watch holds one watch and gives it back" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+
+        const gpa = std.testing.allocator;
+        const target = try f.path("later");
+        defer gpa.free(target);
+
+        const id = try f.watcher.add(target, .{ .pending = true });
+        // Parked on an ancestor is still one watch, and one registration
+        // -- a caller counting what it holds sees the same thing before
+        // and after the path appears.
+        try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().watches);
+        try std.testing.expect(f.watcher.stats().registrations >= 1);
+
+        f.watcher.remove(id);
+        try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().watches);
+        try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().registrations);
+
+        // And nothing is left waiting for it: the path appearing now is
+        // nobody's business.
+        try f.tmp.dir.createDirPath(std.testing.io, "later");
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(400)).len);
+    }
+}
+
+test "a pending watch on a path that is already there is an ordinary watch" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{ .pending = true });
+        // No creation is reported for something that was already there.
+        for (try f.watcher.poll(200)) |event| {
+            try std.testing.expect(event.kind != .created);
+        }
+        try f.write("a.txt", "one");
+        try f.expectEvent("a.txt", .created);
+    }
+}
+
 test "adding a path that does not exist fails" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

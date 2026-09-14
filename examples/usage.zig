@@ -83,6 +83,20 @@ pub fn main() !void {
         std.debug.print("filtered: {s} {s}\n", .{ @tagName(event.kind), event.path });
     }
 
+    // A watch on a path that is not there yet. It is parked on the
+    // nearest existing ancestor, steps down as the path appears, and is
+    // promoted to the real watch with the appearance reported against it.
+    const later = try std.fs.path.join(gpa, &.{ dir_path, "later", "inside" });
+    defer gpa.free(later);
+    var pending: lookout.Watcher = try .init(gpa, io, .{});
+    defer pending.deinit();
+    _ = try pending.add(later, .{ .pending = true, .recursive = true });
+
+    try scratch.createDirPath(io, "later/inside");
+    for (try pending.poll(2_000)) |event| {
+        std.debug.print("pending: {s} {s}\n", .{ @tagName(event.kind), event.path });
+    }
+
     std.debug.print("backend: {s}\n", .{@tagName(watcher.backend())});
     std.debug.print("prunes ignored: {}\n", .{lookout.prunesIgnored(watcher.backend())});
 }
