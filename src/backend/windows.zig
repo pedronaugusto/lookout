@@ -279,10 +279,10 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
             };
             const failed: WatchId = @enumFromInt(@as(u32, @truncate(key)));
             const err = c.GetLastError();
-            const watch = w.watches.get(failed) orelse {
+            const watch = w.live(failed, overlapped) orelse {
                 // The completion of a read cancelled by `remove`. Its
                 // buffer has been waiting for exactly this.
-                w.retire(failed);
+                w.retire(overlapped);
                 continue;
             };
             if (err == c.ERROR_NOTIFY_ENUM_DIR) {
@@ -309,8 +309,8 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
         }
 
         const id: WatchId = @enumFromInt(@as(u32, @truncate(key)));
-        const watch = w.watches.get(id) orelse {
-            w.retire(id);
+        const watch = w.live(id, overlapped) orelse {
+            w.retire(overlapped);
             continue;
         };
         if (transferred == 0) {
@@ -337,10 +337,30 @@ fn discard(w: *Windows, id: WatchId) void {
     w.free(entry.value);
 }
 
+/// The watch a completion belongs to, or `null` when it belongs to a read
+/// `remove` cancelled.
+///
+/// Matched on the overlapped pointer and not on the completion key alone.
+/// The key is the `lookout.WatchId`, and an id can be registered a second
+/// time: a watch on a path that does not exist yet is put on an ancestor
+/// and then re-registered on the path itself under the same id the caller
+/// holds. The cancelled read of the first registration completes after
+/// the second one is armed, and keyed by id alone that completion reads
+/// as the new watch's own read failing -- which closed a handle that had
+/// just been opened and reported the path the caller was waiting for as
+/// removed. Each `Watch` is heap-allocated and never moved, so the
+/// address of its `overlapped` tells the two apart.
+fn live(w: *Windows, id: WatchId, overlapped: ?*c.OVERLAPPED) ?*Watch {
+    const watch = w.watches.get(id) orelse return null;
+    if (overlapped != &watch.overlapped) return null;
+    return watch;
+}
+
 /// Frees a retiring watch once its cancelled read has been accounted for.
-fn retire(w: *Windows, id: WatchId) void {
+fn retire(w: *Windows, overlapped: ?*c.OVERLAPPED) void {
+    const completed = overlapped orelse return;
     for (w.retiring.items, 0..) |watch, i| {
-        if (watch.id != id) continue;
+        if (&watch.overlapped != completed) continue;
         _ = w.retiring.swapRemove(i);
         w.free(watch);
         return;

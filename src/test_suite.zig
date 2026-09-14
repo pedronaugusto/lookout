@@ -823,6 +823,12 @@ test "a path that does not exist yet can be watched" {
                 try std.testing.expectEqual(id, event.id);
             }
         }
+
+        // The promoted watch is the one watch the watcher holds. A
+        // backend that took the parked watch's cancelled registration for
+        // the new one's would have closed it again here.
+        try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().watches);
+        try std.testing.expect(f.watcher.stats().registrations >= 1);
         try f.settle();
 
         // And it is the real watch now, recursion and filter included.

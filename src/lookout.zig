@@ -192,9 +192,16 @@ const Poll = @import("backend/poll.zig");
 
 /// Identifies one watch within one `Watcher`.
 ///
-/// Values are unique for the lifetime of the `Watcher` that issued them and
-/// are never reused, so an event carrying an id of a removed watch cannot
-/// be confused with a later watch.
+/// `add` never issues the same value twice for the lifetime of the
+/// `Watcher`, so an event carrying the id of a removed watch cannot be
+/// confused with a later one.
+///
+/// One id is registered with a backend twice, and only one: a watch taken
+/// with `AddOptions.pending` is registered on an ancestor while it waits
+/// and registered again on the path itself when that appears, under the
+/// id the caller already holds. A backend that keeps state past a
+/// `remove` -- a buffer the kernel may still be writing into, say --
+/// therefore cannot key that state on the id alone.
 pub const WatchId = enum(u32) { _ };
 
 /// What happened to a path.
