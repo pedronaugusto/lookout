@@ -41,6 +41,11 @@ breaking one.
   has *grown*. Under `debounce_ms` a push produces no event for a while,
   and a backend watching the event count would have slept through its
   own deadline -- with no timeout at all, forever.
+- `Event.path` is spelled with the platform's own separator all the way
+  down: `/` on POSIX, `\` on Windows, including the part below the watch
+  root. The backends already did this; nothing said so, and a caller
+  comparing an event against a path it pasted together with `/` matched
+  nothing on Windows.
 - "What it does not do" names three gaps that were there all along and
   were left to be found: there is no filtering, so a recursive watch
   over a tree with a large build directory in it costs a kernel watch

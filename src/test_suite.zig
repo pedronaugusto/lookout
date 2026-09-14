@@ -79,8 +79,20 @@ const Fixture = struct {
         try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = data });
     }
 
+    /// The absolute path an event for `sub_path` will carry.
+    ///
+    /// The suite writes its sub-paths with `/`, which is not what an
+    /// event carries on Windows: a path is spelled with the platform's
+    /// separator all the way down, so the expectation has to be built
+    /// component by component rather than by pasting the two together.
     fn path(f: *Fixture, sub_path: []const u8) ![]u8 {
-        return std.fs.path.join(std.testing.allocator, &.{ f.root, sub_path });
+        const gpa = std.testing.allocator;
+        var parts: std.ArrayList([]const u8) = .empty;
+        defer parts.deinit(gpa);
+        try parts.append(gpa, f.root);
+        var it = std.mem.splitScalar(u8, sub_path, '/');
+        while (it.next()) |part| try parts.append(gpa, part);
+        return std.fs.path.join(gpa, parts.items);
     }
 
     /// One event the suite is waiting for.

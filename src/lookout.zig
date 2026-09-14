@@ -174,6 +174,12 @@ pub const Event = struct {
     /// watch root joined with the entry name. Owned by the `Watcher` and
     /// valid until the next call to `Watcher.poll` or `Watcher.deinit`.
     ///
+    /// Spelled with the platform's own separator throughout: `/` on
+    /// POSIX, `\` on Windows, including the part below the watch root.
+    /// A program comparing an event against a path of its own builds it
+    /// the same way — `std.fs.path.join` — rather than by pasting `/`
+    /// between components.
+    ///
     /// For `Kind.renamed` this is where the path is now.
     path: []const u8,
     /// What happened.
