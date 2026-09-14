@@ -566,11 +566,12 @@ fn forget(f: *FsEvents, path: []const u8) void {
 /// Listing only: no descriptor is kept, which is the difference between
 /// this and what the `kqueue` backend has to do.
 fn seedKnown(f: *FsEvents, stream: *const Stream) Allocator.Error!void {
-    if (stream.scope == .file) return;
     // The root itself, before anything below it: FSEvents names the
-    // watched directory as readily as it names an entry, and a path the
-    // backend has never heard of is a path it reports as created.
+    // watched path as readily as it names an entry, and a path the
+    // backend has never heard of is a path it reports as created. This
+    // is the whole of the seeding for a watch on a single file.
     if (f.exists(stream.root)) try f.remember(stream.root);
+    if (stream.scope == .file) return;
 
     var frontier: std.ArrayList([]u8) = .empty;
     defer {

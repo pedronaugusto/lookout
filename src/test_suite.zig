@@ -302,6 +302,35 @@ test "a watch on a single file reports writes to it" {
     }
 }
 
+test "a watch on a file that is already there does not call it new" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("a.txt", "one");
+
+        const gpa = std.testing.allocator;
+        const target = try f.path("a.txt");
+        defer gpa.free(target);
+        _ = try f.watcher.add(target, .{});
+
+        // The same contract as for a directory, and the one a backend
+        // that resolves accumulated flags against the file system has to
+        // work for: the first thing that happens to a watched file is
+        // what happened to it, not its creation.
+        try f.write("a.txt", "one and two");
+        var found = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !found) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                if (!std.mem.eql(u8, event.path, target)) continue;
+                try std.testing.expect(event.kind != .created);
+                found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
 test "a burst of writes on one path is one event" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
