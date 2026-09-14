@@ -295,6 +295,13 @@ pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.Add
     else
         abs_path;
 
+    // Room for the stream before the stream exists, so that nothing
+    // between starting it and recording it can fail. What is left after
+    // the start is one error path, and it is the one where the stream was
+    // scheduled and never started -- which must be invalidated and
+    // released, and must not be stopped.
+    try f.streams.ensureUnusedCapacity(f.gpa, 1);
+
     const stream = try f.gpa.create(Stream);
     errdefer f.gpa.destroy(stream);
     const root = try f.gpa.dupe(u8, abs_path);
@@ -314,6 +321,8 @@ pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.Add
         @intFromEnum(id), @tagName(scope), abs_path, stream_path,
     });
     stream.ref = try createStream(stream, stream_path, f.io);
+    // Invalidation is what unschedules a stream, and it requires one that
+    // is scheduled, so this may only run after the line below it.
     errdefer {
         c.FSEventStreamInvalidate(stream.ref);
         c.FSEventStreamRelease(stream.ref);
@@ -326,7 +335,7 @@ pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.Add
         c.FSEventStreamGetDeviceBeingWatched(stream.ref), c.FSEventsGetCurrentEventId(),
     });
 
-    try f.streams.put(f.gpa, id, stream);
+    f.streams.putAssumeCapacity(id, stream);
     if (scope != .file) f.seedCount(abs_path) catch {};
     f.seedKnown(stream) catch {};
     trace.log("fsevents seeded watch={d} known={d}", .{ @intFromEnum(id), f.known.count() });
