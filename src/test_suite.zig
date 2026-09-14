@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const lookout = @import("lookout.zig");
+const trace = @import("trace.zig");
 
 const Kind = lookout.Kind;
 const Watcher = lookout.Watcher;
@@ -60,6 +61,7 @@ const Fixture = struct {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         errdefer gpa.free(root);
 
+        trace.log("suite fixture open backend={s} root={s}", .{ @tagName(options.backend), root });
         return .{
             .tmp = tmp,
             .root = root,
@@ -69,6 +71,7 @@ const Fixture = struct {
     }
 
     fn deinit(f: *Fixture) void {
+        trace.log("suite fixture close root={s}", .{f.root});
         f.watcher.deinit();
         if (f.seen_from) |from| std.testing.allocator.free(from);
         std.testing.allocator.free(f.root);
@@ -76,6 +79,7 @@ const Fixture = struct {
     }
 
     fn write(f: *Fixture, sub_path: []const u8, data: []const u8) !void {
+        trace.log("suite write {s}/{s} ({d} bytes)", .{ f.root, sub_path, data.len });
         try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = data });
     }
 
@@ -125,9 +129,14 @@ const Fixture = struct {
         defer gpa.free(seen);
         @memset(seen, false);
 
+        for (wants, paths) |want, p| {
+            trace.log("suite want {s} {s}", .{ @tagName(want.kind), p });
+        }
+
         var waited: u32 = 0;
         while (waited < timeout_ms) : (waited += 200) {
             for (try f.watcher.poll(200)) |event| {
+                trace.log("suite saw {s} {s}", .{ @tagName(event.kind), event.path });
                 for (wants, paths, seen) |want, p, *hit| {
                     if (event.kind != want.kind or !std.mem.eql(u8, event.path, p)) continue;
                     hit.* = true;
@@ -140,9 +149,12 @@ const Fixture = struct {
             if (std.mem.allEqual(bool, seen, true)) return;
         }
         for (wants, paths, seen) |want, p, hit| {
-            if (!hit) std.debug.print("no {s} event for {s} within {d} ms\n", .{
-                @tagName(want.kind), p, timeout_ms,
-            });
+            if (!hit) {
+                trace.log("suite MISSED {s} {s}", .{ @tagName(want.kind), p });
+                std.debug.print("no {s} event for {s} within {d} ms\n", .{
+                    @tagName(want.kind), p, timeout_ms,
+                });
+            }
         }
         return error.EventNotObserved;
     }

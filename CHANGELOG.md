@@ -48,6 +48,13 @@ breaking one.
   happens in a directory the watch was never put on. The boolean said
   Windows reported `removed`, which it does not; a caller waiting for
   that event waited forever.
+- Setting `LOOKOUT_TRACE` in the environment makes the Apple backend
+  write what it did to standard error: every delivery the system made,
+  every path in it with its event id and flags, and every decision that
+  turned one into an event or dropped it, alongside each stream being
+  created, started and stopped. It is read once per process and is
+  compiled out where libc is not linked. An event that does not arrive
+  was previously not investigable from outside the library.
 - `Kind.closed` says that a file open for writing has been closed: the
   writing is over, from the operating system rather than inferred from a
   quiet window, which is what `Options.settle_ms` can only estimate. Only

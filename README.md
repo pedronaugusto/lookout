@@ -281,6 +281,10 @@ zig build test          # the suite, once per backend this host has
 sh ci/linux.sh          # the suite on Linux, in Docker, all four modes
 ```
 
+Setting `LOOKOUT_TRACE` in the environment makes the Apple backend and
+the suite write what they did to standard error, which is how an event
+that did not arrive is chased down. It is read once per process.
+
 The suite runs whole against each backend the host can execute, so the
 polling backend is held to the same assertions as the kernel ones on the
 same machine. `pairsRenames`, `reportsRootMove`, `prunesIgnored` and
