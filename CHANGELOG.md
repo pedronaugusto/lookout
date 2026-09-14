@@ -7,6 +7,8 @@ breaking one.
 
 ## Unreleased
 
+## 0.1.1
+
 - `Event.time` says when lookout first saw the path change in this
   window, on the same clock a caller reads with
   `std.Io.Timestamp.now(io, .awake)`. An event that says only what
