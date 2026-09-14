@@ -308,10 +308,13 @@ fn rank(kind: Kind) u3 {
     return switch (kind) {
         .attributes => 0,
         .modified => 1,
-        .created => 2,
-        .renamed => 3,
-        .removed => 4,
-        .overflow => 5,
+        // A write that has finished says more about the path than a
+        // write in progress, and less than the name appearing or going.
+        .closed => 2,
+        .created => 3,
+        .renamed => 4,
+        .removed => 5,
+        .overflow => 6,
     };
 }
 
@@ -350,6 +353,24 @@ test "removal outranks creation and overflow outranks everything" {
 
     try b.push(gpa, id, "/tmp/a", .overflow);
     try testing.expectEqual(Kind.overflow, b.events.items[0].kind);
+}
+
+test "a finished write outranks the writing, and a creation outranks both" {
+    const gpa = testing.allocator;
+    var b = testBatch(.{});
+    defer b.deinit(gpa);
+
+    const id: WatchId = @enumFromInt(0);
+    try b.push(gpa, id, "/tmp/a", .modified);
+    try b.push(gpa, id, "/tmp/a", .closed);
+    // The window says the writing is over rather than that it happened,
+    // which is the more useful of the two statements.
+    try testing.expectEqual(Kind.closed, b.events.items[0].kind);
+
+    try b.push(gpa, id, "/tmp/a", .created);
+    try testing.expectEqual(Kind.created, b.events.items[0].kind);
+    try b.push(gpa, id, "/tmp/a", .closed);
+    try testing.expectEqual(Kind.created, b.events.items[0].kind);
 }
 
 test "reset drops the previous window" {

@@ -650,6 +650,77 @@ test "what an overflow lost can be read back from a baseline" {
     }
 }
 
+test "a finished write is reported where the backend is told about it" {
+    for (backends) |backend| {
+        var f = try Fixture.initOptions(.{
+            .backend = backend,
+            .poll_interval_ms = 20,
+            .report_closes = true,
+        });
+        defer f.deinit();
+        try f.write("a.txt", "one");
+        _ = try f.watcher.add(f.root, .{});
+        try f.settle();
+
+        const gpa = std.testing.allocator;
+        const wanted = try f.path("a.txt");
+        defer gpa.free(wanted);
+
+        // Writing a file opens it, writes it and closes it, which is the
+        // whole of what a backend that is told about closes can see.
+        try f.write("a.txt", "one and two");
+
+        var closed = false;
+        var otherwise = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !(closed or otherwise)) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                if (!std.mem.eql(u8, event.path, wanted)) continue;
+                if (event.kind == .closed) closed = true else otherwise = true;
+            }
+        }
+
+        // `lookout.reportsCloses` is asserted rather than accepted either
+        // way, so a kind that is one backend's truth cannot come to mean
+        // nothing in particular on the others: where it is false the
+        // write arrives as a write and no `closed` ever comes.
+        if (lookout.reportsCloses(backend)) {
+            try std.testing.expect(closed);
+        } else {
+            try std.testing.expect(otherwise);
+            try std.testing.expect(!closed);
+        }
+    }
+}
+
+test "closes are not reported unless they are asked for" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("a.txt", "one");
+        _ = try f.watcher.add(f.root, .{});
+        try f.settle();
+
+        const gpa = std.testing.allocator;
+        const wanted = try f.path("a.txt");
+        defer gpa.free(wanted);
+
+        try f.write("a.txt", "one and two");
+
+        // The default is the same contract on every backend: a write is
+        // `modified`, and the backend that could say more is not asked.
+        var found = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !found) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                try std.testing.expect(event.kind != .closed);
+                if (event.kind == .modified and std.mem.eql(u8, event.path, wanted)) found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
 test "the descriptor is present exactly when the backend has one" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

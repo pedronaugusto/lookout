@@ -89,8 +89,8 @@ exe.root_module.addImport("lookout", lookout_dep.module("lookout"));
 | `Watcher.backend()` | Which backend this watcher resolved to. |
 | `Watcher.stats()` | What the watcher is holding: watches, registrations the operating system is keeping, paths held back by a window, events the last `poll` returned. |
 | `Event` | `{ id, path, kind, from, time }`. `path` is absolute and canonical; `from` is where a paired rename came from; `time` is when lookout first saw the path change in this window. |
-| `Kind` | `created`, `modified`, `removed`, `renamed`, `attributes`, `overflow`. |
-| `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `debounce_ms`, `max_dir_entries`. |
+| `Kind` | `created`, `modified`, `removed`, `renamed`, `attributes`, `closed`, `overflow`. |
+| `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `debounce_ms`, `report_closes`, `max_dir_entries`. |
 | `Filter` | What a watch is not about: `ignore`, a list of path prefixes and simple globs; `allow`, a predicate of the caller's; `context`, passed back to it. |
 | `Baseline` | What a tree looked like: `seed` it where the watch is taken, `diff` it on `Kind.overflow` for the changes the lost events would have carried. |
 | `AddOptions` | `recursive`, `filter`, `pending`. |
@@ -100,6 +100,7 @@ exe.root_module.addImport("lookout", lookout_dep.module("lookout"));
 | `RootMove` | What a backend reports when the watched path itself is moved: `renamed`, `removed`, or `silent` for nothing at all. |
 | `reportsRootMove(backend)` | Which of those three a move of the watched path itself arrives as. |
 | `prunesIgnored(backend)` | Whether an excluded directory is left unregistered, or only has its events dropped. |
+| `reportsCloses(backend)` | Whether the backend is told that a file open for writing has been closed, and can report `Kind.closed`. |
 
 The events a `poll` returns, and every path in them, belong to the
 watcher and are invalidated by the next `poll`. Copy anything you intend
@@ -113,7 +114,7 @@ lands on one path inside that window becomes one `Event`, carrying the
 most significant kind observed:
 
 ```
-attributes  <  modified  <  created  <  renamed  <  removed  <  overflow
+attributes  <  modified  <  closed  <  created  <  renamed  <  removed  <  overflow
 ```
 
 So a file created and then written reports `created`; a file written and

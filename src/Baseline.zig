@@ -80,7 +80,9 @@ pub const Change = struct {
     /// `overflow` against the root when a directory was too large to
     /// compare. Never `renamed`: a comparison of listings cannot tell a
     /// rename from a removal and a creation, which is the same thing
-    /// `lookout.pairsRenames` says about the backends that work this way.
+    /// `lookout.pairsRenames` says about the backends that work this
+    /// way. Never `closed` either: a listing is not told about a writer
+    /// finishing.
     kind: Kind,
 };
 

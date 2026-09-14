@@ -121,6 +121,27 @@ pub fn reportsRootMove(backend: Backend) RootMove {
     };
 }
 
+/// Whether `backend` is told that a file open for writing has been
+/// closed, and can report `Kind.closed`.
+///
+/// Only `inotify` is: `IN_CLOSE_WRITE` is the one signal any of these
+/// mechanisms gets that a writer has actually finished rather than
+/// paused. FSEvents, `kqueue`, `ReadDirectoryChangesW` and a listing
+/// comparison all see writes and none of them sees a close.
+///
+/// This is why `Options.report_closes` is off by default and why this
+/// predicate exists beside it: a kind that silently means nothing on
+/// four backends out of five is worse than no kind at all. A program
+/// that wants the end of a write everywhere uses `Options.settle_ms`,
+/// which estimates it from a quiet window and works on all five.
+pub fn reportsCloses(backend: Backend) bool {
+    return switch (backend) {
+        .auto => reportsCloses(default_backend),
+        .inotify => true,
+        .fsevents, .kqueue, .windows, .poll => false,
+    };
+}
+
 /// Whether `backend` can leave an excluded directory unregistered, or
 /// only drop the events coming out of it.
 ///
@@ -206,6 +227,22 @@ pub const Kind = enum {
     /// Metadata other than the contents changed — permissions, ownership,
     /// link count, or the status-change time.
     attributes,
+    /// A file that was open for writing has been closed: the writing is
+    /// over, said by the operating system rather than inferred from a
+    /// quiet window. It is the answer `Options.settle_ms` estimates.
+    ///
+    /// Only `inotify` is told this, so it is off unless
+    /// `Options.report_closes` asks for it, and `reportsCloses` says
+    /// whether this backend can ever produce one. A program that turns
+    /// it on where it is not reported gets no `closed` events and the
+    /// writes it would have reported still arrive as `modified`; nothing
+    /// is lost, and nothing pretends.
+    ///
+    /// It outranks `modified` when both land on one path in a window,
+    /// because a write that has finished is the more useful statement of
+    /// the two. Set `Options.latency_ms` to zero to see each as it
+    /// arrives instead.
+    closed,
     /// Changes were lost and the caller should rescan the watch itself.
     /// Emitted when the kernel event queue overflowed, or when a watched
     /// directory holds more entries than `Options.max_dir_entries`. The
@@ -302,6 +339,18 @@ pub const Options = struct {
     /// takes over from `settle_ms`, and `poll` returns as soon as a
     /// window closes rather than collecting for `latency_ms` more.
     debounce_ms: u32 = 0,
+    /// Report `Kind.closed` when a file that was open for writing is
+    /// closed. Off by default.
+    ///
+    /// Only `inotify` is told this, and `reportsCloses` says so; asking
+    /// for it on a backend that cannot tell costs nothing and changes
+    /// nothing. Where it can, the kernel is asked for `IN_CLOSE_WRITE`
+    /// as well, and a path that was written and then closed inside one
+    /// coalescing window reports `closed` rather than `modified` --
+    /// which is the point, and is also why this is a choice rather than
+    /// the default: a program that only wants to know a path changed
+    /// should not have to learn a second kind meaning the same thing.
+    report_closes: bool = false,
     /// The largest number of entries lookout will account for in one
     /// watched directory. A directory holding more reports
     /// `Kind.overflow` against its watch root, which means: this one is

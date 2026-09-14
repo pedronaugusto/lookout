@@ -48,6 +48,15 @@ breaking one.
   happens in a directory the watch was never put on. The boolean said
   Windows reported `removed`, which it does not; a caller waiting for
   that event waited forever.
+- `Kind.closed` says that a file open for writing has been closed: the
+  writing is over, from the operating system rather than inferred from a
+  quiet window, which is what `Options.settle_ms` can only estimate. Only
+  `inotify` is told this, through `IN_CLOSE_WRITE`, so `Options.report_closes`
+  has to ask for it and `reportsCloses` says whether this backend will
+  ever produce one -- a kind that silently means nothing on four backends
+  out of five is worse than no kind at all. With it on, a path written and
+  then closed inside one coalescing window reports `closed` rather than
+  `modified`, which is why it is a choice and not the default.
 - `Baseline` answers what `Kind.overflow` could not. The watcher can say
   that its record of a tree is incomplete and not what was lost, because
   the names are gone by the time it knows. A baseline seeded where the

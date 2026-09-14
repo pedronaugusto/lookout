@@ -39,6 +39,11 @@ watches: std.AutoArrayHashMapUnmanaged(WatchId, Watch),
 wds: std.AutoArrayHashMapUnmanaged(i32, Registration),
 /// Mirrors `lookout.Options.max_dir_entries`.
 max_dir_entries: usize,
+/// What every kernel watch is registered with: `base_mask`, plus
+/// `IN_CLOSE_WRITE` when `lookout.Options.report_closes` asked for it.
+/// Kept rather than recomputed, because every `register` needs it and
+/// the kernel is not asked for events nobody wants.
+mask: u32,
 /// The `IN_MOVED_FROM` halves of renames whose `IN_MOVED_TO` has not
 /// arrived, keyed by the cookie the kernel pairs them with. Paths owned
 /// here.
@@ -86,7 +91,7 @@ const Registration = struct {
 /// Everything lookout asks the kernel to report. `IN.EXCL_UNLINK` keeps a
 /// still-open but unlinked file from producing events nobody can act on;
 /// `IN.DONT_FOLLOW` keeps a symbolic link from silently widening a watch.
-const mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
+const base_mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
     linux.IN.ATTRIB | linux.IN.MOVED_FROM | linux.IN.MOVED_TO |
     linux.IN.DELETE_SELF | linux.IN.MOVE_SELF |
     linux.IN.EXCL_UNLINK | linux.IN.DONT_FOLLOW;
@@ -115,6 +120,10 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .watches = .empty,
         .wds = .empty,
         .max_dir_entries = options.max_dir_entries,
+        .mask = if (options.report_closes)
+            base_mask | linux.IN.CLOSE_WRITE
+        else
+            base_mask,
         .pending_renames = .empty,
     };
 }
@@ -351,6 +360,11 @@ fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout
     if (event.mask & linux.IN.MODIFY != 0) {
         try batch.push(n.gpa, watch, path, .modified);
     }
+    // Only asked for when `lookout.Options.report_closes` is set, so a
+    // watcher that did not ask never sees one of these.
+    if (event.mask & linux.IN.CLOSE_WRITE != 0) {
+        try batch.push(n.gpa, watch, path, .closed);
+    }
     if (event.mask & linux.IN.ATTRIB != 0) {
         try batch.push(n.gpa, watch, path, .attributes);
     }
@@ -441,7 +455,7 @@ fn register(n: *Inotify, id: WatchId, path: []u8) lookout.Watcher.AddError!void 
         n.gpa.free(path);
         return error.NameTooLong;
     };
-    const rc = linux.inotify_add_watch(n.ifd, &path_z, mask);
+    const rc = linux.inotify_add_watch(n.ifd, &path_z, n.mask);
     switch (linux.errno(rc)) {
         .SUCCESS => {},
         .NOSPC => {
