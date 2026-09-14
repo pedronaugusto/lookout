@@ -24,6 +24,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -70,6 +71,7 @@ jobs:
   cross-compile:
     name: cross (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +96,7 @@ jobs:
   docs:
     name: documented snippets
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - run: ci/check-docs.sh
