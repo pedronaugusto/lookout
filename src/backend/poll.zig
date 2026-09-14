@@ -68,7 +68,7 @@ pub fn registrationCount(p: *const Poll) usize {
 pub fn add(p: *Poll, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(p.gpa);
-    try p.tree.addWatch(id, abs_path, options.recursive, &added);
+    try p.tree.addWatch(id, abs_path, options, &added);
 }
 
 /// Stops watching `id`.

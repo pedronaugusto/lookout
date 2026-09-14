@@ -24,6 +24,7 @@ const linux = std.os.linux;
 
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
+const Filter = @import("../Filter.zig");
 const WatchId = lookout.WatchId;
 
 const Inotify = @This();
@@ -53,6 +54,9 @@ const Watch = struct {
     /// Absolute, canonical path, owned by the backend.
     root: []u8,
     recursive: bool,
+    /// `lookout.AddOptions.filter`, copied. An excluded directory is
+    /// never registered, so the kernel is never asked for a watch on it.
+    filter: Filter,
 };
 
 /// One half of a rename, waiting for the other.
@@ -119,7 +123,10 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
 pub fn deinit(n: *Inotify) void {
     for (n.wds.values()) |registration| n.gpa.free(registration.path);
     n.wds.deinit(n.gpa);
-    for (n.watches.values()) |watch| n.gpa.free(watch.root);
+    for (n.watches.values()) |*watch| {
+        n.gpa.free(watch.root);
+        watch.filter.deinit(n.gpa);
+    }
     n.watches.deinit(n.gpa);
     for (n.pending_renames.values()) |half| n.gpa.free(half.path);
     n.pending_renames.deinit(n.gpa);
@@ -153,7 +160,13 @@ pub fn add(n: *Inotify, id: WatchId, abs_path: []const u8, options: lookout.AddO
 
     const root = try n.gpa.dupe(u8, abs_path);
     errdefer n.gpa.free(root);
-    try n.watches.put(n.gpa, id, .{ .root = root, .recursive = options.recursive });
+    var filter = try options.filter.dupe(n.gpa);
+    errdefer filter.deinit(n.gpa);
+    try n.watches.put(n.gpa, id, .{
+        .root = root,
+        .recursive = options.recursive,
+        .filter = filter,
+    });
     errdefer _ = n.watches.swapRemove(id);
     // A watch the kernel only half accepted is worse than none: it would
     // report a fraction of a tree and look like a quiet one.
@@ -179,6 +192,12 @@ pub fn add(n: *Inotify, id: WatchId, abs_path: []const u8, options: lookout.AddO
             if (entry.kind != .directory) continue;
             const child = try std.fs.path.join(n.gpa, &.{ frontier.items[i], entry.name });
             errdefer n.gpa.free(child);
+            // An excluded directory costs no kernel watch and is not
+            // descended into, so its whole tree costs nothing.
+            if (n.excluded(id, child)) {
+                n.gpa.free(child);
+                continue;
+            }
             n.register(id, try n.gpa.dupe(u8, child)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.WatchLimitReached => return error.WatchLimitReached,
@@ -193,9 +212,17 @@ pub fn add(n: *Inotify, id: WatchId, abs_path: []const u8, options: lookout.AddO
 
 /// Stops watching `id` and releases its kernel watches.
 pub fn remove(n: *Inotify, id: WatchId) void {
-    const watch = n.watches.fetchSwapRemove(id) orelse return;
+    var watch = n.watches.fetchSwapRemove(id) orelse return;
     n.gpa.free(watch.value.root);
+    watch.value.filter.deinit(n.gpa);
     n.removeWatchDescriptors(id);
+}
+
+/// Whether `path` is outside what the watch `id` is about. See
+/// `lookout.AddOptions.filter`.
+fn excluded(n: *const Inotify, id: WatchId, path: []const u8) bool {
+    const watch = n.watches.get(id) orelse return false;
+    return watch.filter.excludes(watch.root, path);
 }
 
 /// Waits on the inotify descriptor until it reports something `batch` did
@@ -278,6 +305,10 @@ fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout
     else
         try n.gpa.dupe(u8, base);
     defer n.gpa.free(path);
+
+    // Excluded before anything is reported, registered or counted: the
+    // path is not part of this watch at all.
+    if (n.excluded(watch, path)) return;
 
     const is_dir = event.mask & linux.IN.ISDIR != 0;
     const recursive = (n.watches.get(watch) orelse return).recursive;
@@ -390,6 +421,10 @@ fn adopt(n: *Inotify, id: WatchId, path: []const u8, batch: *Batch) Allocator.Er
         while (it.next(n.io) catch null) |entry| {
             const child = try std.fs.path.join(n.gpa, &.{ current, entry.name });
             errdefer n.gpa.free(child);
+            if (n.excluded(id, child)) {
+                n.gpa.free(child);
+                continue;
+            }
             try batch.push(n.gpa, id, child, .created);
             if (entry.kind == .directory) {
                 try frontier.append(n.gpa, child);

@@ -31,6 +31,7 @@ const posix = std.posix;
 
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
+const Filter = @import("../Filter.zig");
 const WatchId = lookout.WatchId;
 
 const FsEvents = @This();
@@ -147,6 +148,12 @@ const Stream = struct {
     /// Which paths under the stream's own root this watch is about.
     /// FSEvents is always recursive, so a narrower watch is a filter.
     scope: Scope,
+    /// `lookout.AddOptions.filter`, copied.
+    ///
+    /// FSEvents recurses in the kernel and cannot be told to leave a
+    /// directory out, so here the filter drops the events rather than
+    /// saving the work -- see `lookout.prunesIgnored`.
+    filter: Filter,
 
     const Scope = enum {
         /// Everything under `root`.
@@ -274,7 +281,16 @@ pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.Add
     errdefer f.gpa.destroy(stream);
     const root = try f.gpa.dupe(u8, abs_path);
     errdefer f.gpa.free(root);
-    stream.* = .{ .id = id, .sink = f.sink, .ref = undefined, .root = root, .scope = scope };
+    var filter = try options.filter.dupe(f.gpa);
+    errdefer filter.deinit(f.gpa);
+    stream.* = .{
+        .id = id,
+        .sink = f.sink,
+        .ref = undefined,
+        .root = root,
+        .scope = scope,
+        .filter = filter,
+    };
 
     stream.ref = try createStream(stream, stream_path, f.io);
     errdefer {
@@ -338,6 +354,7 @@ fn destroy(f: *FsEvents, stream: *Stream) void {
     c.FSEventStreamInvalidate(stream.ref);
     c.FSEventStreamRelease(stream.ref);
     f.gpa.free(stream.root);
+    stream.filter.deinit(f.gpa);
     f.gpa.destroy(stream);
 }
 
@@ -476,6 +493,10 @@ fn report(f: *FsEvents, batch: *Batch, run: []const Record) lookout.Watcher.Poll
         return 0;
     }
 
+    // The kernel walked the tree whatever the filter says; what the
+    // filter can still do is keep the event from the caller.
+    if (stream.filter.excludes(stream.root, record.path)) return 0;
+
     if (record.flags & c.kFSEventStreamEventFlagItemRenamed != 0) {
         const consumed = try f.reportRename(batch, run, stream);
         if (consumed != 0) {
@@ -558,6 +579,10 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) Allocator.Error!void {
             seen += 1;
             const child = try std.fs.path.join(f.gpa, &.{ frontier.items[i], entry.name });
             errdefer f.gpa.free(child);
+            if (stream.filter.excludes(stream.root, child)) {
+                f.gpa.free(child);
+                continue;
+            }
             try f.remember(child);
             if (entry.kind == .directory and stream.scope == .tree) {
                 try frontier.append(f.gpa, child);
@@ -590,6 +615,7 @@ fn reportRename(f: *FsEvents, batch: *Batch, run: []const Record, stream: *const
     if (next.id != run[0].id) return 0;
     if (next.flags & c.kFSEventStreamEventFlagItemRenamed == 0) return 0;
     if (!stream.wants(next.path)) return 0;
+    if (stream.filter.excludes(stream.root, next.path)) return 0;
 
     const first_exists = f.exists(run[0].path);
     const second_exists = f.exists(next.path);

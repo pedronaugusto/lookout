@@ -91,12 +91,14 @@ exe.root_module.addImport("lookout", lookout_dep.module("lookout"));
 | `Event` | `{ id, path, kind, from, time }`. `path` is absolute and canonical; `from` is where a paired rename came from; `time` is when lookout first saw the path change in this window. |
 | `Kind` | `created`, `modified`, `removed`, `renamed`, `attributes`, `overflow`. |
 | `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `debounce_ms`, `max_dir_entries`. |
-| `AddOptions` | `recursive`. |
+| `Filter` | What a watch is not about: `ignore`, a list of path prefixes and simple globs; `allow`, a predicate of the caller's; `context`, passed back to it. |
+| `AddOptions` | `recursive`, `filter`. |
 | `default_backend` | The backend `.auto` resolves to on this target. |
 | `supported(backend)` | Whether this target was built with a backend. |
 | `pairsRenames(backend)` | Whether it reports `renamed` with a `from`, or a removal and a creation. |
 | `RootMove` | What a backend reports when the watched path itself is moved: `renamed`, `removed`, or `silent` for nothing at all. |
 | `reportsRootMove(backend)` | Which of those three a move of the watched path itself arrives as. |
+| `prunesIgnored(backend)` | Whether an excluded directory is left unregistered, or only has its events dropped. |
 
 The events a `poll` returns, and every path in them, belong to the
 watcher and are invalidated by the next `poll`. Copy anything you intend
@@ -247,13 +249,13 @@ than something you discover.
 
 ## Backends
 
-| Backend | Targets | Default | Mechanism | Recursion costs | Renames |
-|---|---|---|---|---|---|
-| `fsevents` | macOS, iOS and the rest of Apple's | yes | One FSEvents stream per watch, delivered on a dispatch queue into a pipe the watcher owns. | one stream, and one remembered path per file | paired |
-| `kqueue` | Apple platforms, FreeBSD, NetBSD, OpenBSD, DragonFly | on the BSDs | `EVFILT_VNODE` on a descriptor per watched path, plus a listing comparison to name the entry that changed. | one descriptor per directory **and per file** | removal + creation |
-| `inotify` | Linux | yes | One kernel watch per directory; the kernel names the entry and gives each rename a cookie. | one kernel watch per directory | paired |
-| `windows` | Windows | yes | `ReadDirectoryChangesW` with overlapped reads drained through a completion port. | nothing: recursion is a flag | paired |
-| `poll` | everywhere | where there is no kernel backend | Re-stat and re-list on a timer. | one listing per directory per tick | removal + creation |
+| Backend | Targets | Default | Mechanism | Recursion costs | Renames | Ignored subtree |
+|---|---|---|---|---|---|---|
+| `fsevents` | macOS, iOS and the rest of Apple's | yes | One FSEvents stream per watch, delivered on a dispatch queue into a pipe the watcher owns. | one stream, and one remembered path per file | paired | events dropped; the kernel recurses regardless |
+| `kqueue` | Apple platforms, FreeBSD, NetBSD, OpenBSD, DragonFly | on the BSDs | `EVFILT_VNODE` on a descriptor per watched path, plus a listing comparison to name the entry that changed. | one descriptor per directory **and per file** | removal + creation | never opened, never registered |
+| `inotify` | Linux | yes | One kernel watch per directory; the kernel names the entry and gives each rename a cookie. | one kernel watch per directory | paired | never opened, never registered |
+| `windows` | Windows | yes | `ReadDirectoryChangesW` with overlapped reads drained through a completion port. | nothing: recursion is a flag | paired | events dropped; the kernel recurses regardless |
+| `poll` | everywhere | where there is no kernel backend | Re-stat and re-list on a timer. | one listing per directory per tick | removal + creation | never opened, never registered |
 
 `Options.backend` selects one explicitly; `supported` says whether this
 target has it. Asking for a backend this target was not built with fails

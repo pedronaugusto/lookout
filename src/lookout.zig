@@ -19,6 +19,9 @@ const Io = std.Io;
 const Batch = @import("Batch.zig");
 const Tree = @import("Tree.zig");
 
+/// Which paths under a watch the caller wants. See `AddOptions.filter`.
+pub const Filter = @import("Filter.zig");
+
 /// The mechanism a `Watcher` uses to learn that something changed.
 ///
 /// Which of these this target was built with is `supported`; which one
@@ -112,6 +115,35 @@ pub fn reportsRootMove(backend: Backend) RootMove {
     };
 }
 
+/// Whether `backend` can leave an excluded directory unregistered, or
+/// only drop the events coming out of it.
+///
+/// `AddOptions.filter` means the same thing to a caller on every backend:
+/// the excluded paths are not reported. What differs is what it saves.
+/// `inotify`, `kqueue` and `poll` recurse in lookout, so an excluded
+/// directory is never opened, never registered, and costs neither a
+/// kernel watch nor a descriptor nor a listing. FSEvents and
+/// `ReadDirectoryChangesW` recurse in the kernel, which was never told
+/// about the filter, so the tree is walked whatever the filter says and
+/// only the events are dropped.
+///
+/// A program that filters to save resources rather than noise wants this
+/// answer; one that filters to save itself the events does not care.
+pub fn prunesIgnored(backend: Backend) bool {
+    return switch (backend) {
+        .auto => prunesIgnored(default_backend),
+        .inotify, .kqueue, .poll => true,
+        .fsevents, .windows => false,
+    };
+}
+
+/// The backend `Backend.auto` resolves to on this target: the kernel one
+/// where there is a kernel one, and `poll` where there is not.
+///
+/// On Apple targets this is `fsevents` rather than `kqueue`, because
+/// FSEvents recurses without a descriptor per directory and pairs
+/// renames. `kqueue` remains selectable, and is the better answer for a
+/// handful of paths watched without recursion.
 pub const default_backend: Backend = switch (builtin.os.tag) {
     .driverkit,
     .ios,
@@ -293,6 +325,20 @@ pub const AddOptions = struct {
     /// * Symbolic links are not followed, so a link into a watched tree
     ///   does not silently widen it.
     recursive: bool = false,
+    /// What of this path the watch is about. The default excludes
+    /// nothing.
+    ///
+    /// A filter is applied where lookout recurses, so on `inotify`,
+    /// `kqueue` and `poll` an excluded directory is never registered and
+    /// its tree costs nothing at all. FSEvents and
+    /// `ReadDirectoryChangesW` recurse in the kernel, which cannot be
+    /// told about a filter, so there the excluded events are dropped and
+    /// the kernel does the work regardless -- `prunesIgnored` is how a
+    /// program asks which it is getting.
+    ///
+    /// The patterns are copied by `Watcher.add`; `Filter.context` is
+    /// not, and whatever it points at must outlive the watch.
+    filter: Filter = .none,
 };
 
 /// A set of watches and the events they have produced.
@@ -584,6 +630,7 @@ pub const Watcher = struct {
 
 test {
     _ = Batch;
+    _ = Filter;
     _ = Tree;
     _ = @import("Snapshot.zig");
     _ = @import("test_suite.zig");

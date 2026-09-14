@@ -15,6 +15,7 @@ const Io = std.Io;
 
 const lookout = @import("lookout.zig");
 const Batch = @import("Batch.zig");
+const Filter = @import("Filter.zig");
 const Snapshot = @import("Snapshot.zig");
 const WatchId = lookout.WatchId;
 
@@ -52,6 +53,9 @@ pub const Watch = struct {
     root: []u8,
     /// `lookout.AddOptions.recursive`.
     recursive: bool,
+    /// `lookout.AddOptions.filter`, copied: the patterns are borrowed
+    /// only for the duration of the `add` that supplied them.
+    filter: Filter,
 };
 
 /// One registered path.
@@ -104,7 +108,10 @@ pub fn init(gpa: Allocator, io: Io, max_dir_entries: usize, track_entries: bool)
 pub fn deinit(t: *Tree) void {
     for (t.nodes.values()) |*node| t.destroy(node);
     t.nodes.deinit(t.gpa);
-    for (t.watches.values()) |watch| t.gpa.free(watch.root);
+    for (t.watches.values()) |*watch| {
+        t.gpa.free(watch.root);
+        watch.filter.deinit(t.gpa);
+    }
     t.watches.deinit(t.gpa);
     Snapshot.freeChanges(t.gpa, &t.changes);
     t.changes.deinit(t.gpa);
@@ -120,15 +127,18 @@ pub fn addWatch(
     t: *Tree,
     id: WatchId,
     abs_path: []const u8,
-    recursive: bool,
+    options: lookout.AddOptions,
     added: *std.ArrayList(NodeId),
 ) AddError!void {
     if (t.watched(abs_path)) return error.PathAlreadyWatched;
     const stat = try Io.Dir.cwd().statFile(t.io, abs_path, .{});
+    const recursive = options.recursive;
 
     const root = try t.gpa.dupe(u8, abs_path);
     errdefer t.gpa.free(root);
-    try t.watches.put(t.gpa, id, .{ .root = root, .recursive = recursive });
+    var filter = try options.filter.dupe(t.gpa);
+    errdefer filter.deinit(t.gpa);
+    try t.watches.put(t.gpa, id, .{ .root = root, .recursive = recursive, .filter = filter });
     errdefer _ = t.watches.swapRemove(id);
 
     const start = added.items.len;
@@ -190,6 +200,13 @@ fn descend(t: *Tree, parent_id: NodeId, added: *std.ArrayList(NodeId)) AddError!
         const name = node.snapshot.entries.keys()[i];
         const child_path = try std.fs.path.join(t.gpa, &.{ parent_path, name });
         errdefer t.gpa.free(child_path);
+        // An excluded directory is not opened and not registered, which
+        // is the whole point of filtering here rather than on the way
+        // out: the tree below it costs nothing.
+        if (t.excluded(watch, child_path)) {
+            t.gpa.free(child_path);
+            continue;
+        }
         _ = t.createDirectory(watch, child_path, added) catch |err| switch (err) {
             // A subdirectory that vanished between the listing and the
             // open is not an error; the parent's next scan reports it.
@@ -248,6 +265,10 @@ fn trackEntries(t: *Tree, dir_id: NodeId, added: *std.ArrayList(NodeId)) AddErro
         const name = dir_node.snapshot.entries.keys()[i];
         const child = try std.fs.path.join(t.gpa, &.{ dir_node.path, name });
         errdefer t.gpa.free(child);
+        if (t.excluded(dir_node.watch, child)) {
+            t.gpa.free(child);
+            continue;
+        }
         _ = try t.createFile(dir_node.watch, child, meta, added);
     }
 }
@@ -271,8 +292,9 @@ fn createFile(t: *Tree, watch: WatchId, path: []u8, meta: Snapshot.Meta, added: 
 /// Drops `id` and every node it created, releasing their descriptors.
 /// Unknown ids are ignored.
 pub fn removeWatch(t: *Tree, id: WatchId) void {
-    const watch = t.watches.fetchSwapRemove(id) orelse return;
+    var watch = t.watches.fetchSwapRemove(id) orelse return;
     t.gpa.free(watch.value.root);
+    watch.value.filter.deinit(t.gpa);
 
     var i: usize = 0;
     while (i < t.nodes.count()) {
@@ -329,6 +351,13 @@ pub fn watchRoot(t: *Tree, id: WatchId) []const u8 {
 /// Whether the watch a node belongs to asked for recursion.
 pub fn isRecursive(t: *Tree, id: WatchId) bool {
     return (t.watches.get(id) orelse return false).recursive;
+}
+
+/// Whether `path` is outside what the watch `id` is about. See
+/// `lookout.AddOptions.filter`.
+pub fn excluded(t: *const Tree, id: WatchId, path: []const u8) bool {
+    const watch = t.watches.get(id) orelse return false;
+    return watch.filter.excludes(watch.root, path);
 }
 
 /// Re-lists the directory node `id`, pushes what changed into `batch`, and
@@ -396,6 +425,9 @@ fn rescanOne(
 
         const child = try std.fs.path.join(t.gpa, &.{ dir_path, change.name });
         defer t.gpa.free(child);
+        // Excluded before it is reported and before a node is made for
+        // it, so an excluded directory never becomes a registration.
+        if (t.excluded(watch, child)) continue;
         try batch.push(t.gpa, watch, child, change.kind);
 
         if (change.file_kind == .file) {

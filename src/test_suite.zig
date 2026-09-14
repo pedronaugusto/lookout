@@ -360,6 +360,127 @@ test "a non-recursive watch ignores what happens below it" {
     }
 }
 
+test "an ignored subtree is watched by nobody" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "keep");
+        try f.tmp.dir.createDirPath(std.testing.io, "skip/deeper");
+
+        _ = try f.watcher.add(f.root, .{
+            .recursive = true,
+            .filter = .{ .ignore = &.{ "skip", "*.tmp" } },
+        });
+        try f.settle();
+
+        const gpa = std.testing.allocator;
+        const ignored = try f.path("skip");
+        defer gpa.free(ignored);
+        const scratch = try f.path("keep/notes.tmp");
+        defer gpa.free(scratch);
+        const wanted = try f.path("keep/notes.txt");
+        defer gpa.free(wanted);
+
+        try f.write("skip/a.txt", "one");
+        try f.write("skip/deeper/b.txt", "two");
+        try f.write("keep/notes.tmp", "three");
+        try f.write("keep/notes.txt", "four");
+
+        // Every poll until the wanted event arrives is also an assertion:
+        // nothing from the ignored subtree, and nothing matching the
+        // ignored glob, may appear in any of them.
+        var found = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !found) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                try std.testing.expect(!std.mem.startsWith(u8, event.path, ignored));
+                try std.testing.expect(!std.mem.eql(u8, event.path, scratch));
+                if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
+/// Excludes anything whose name starts with a dot, which is the kind of
+/// rule a pattern list cannot state and a caller can.
+fn notHidden(context: ?*anyopaque, path: []const u8) bool {
+    _ = context;
+    return !std.mem.startsWith(u8, std.fs.path.basename(path), ".");
+}
+
+test "a caller predicate excludes what a pattern cannot say" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, ".hidden");
+
+        _ = try f.watcher.add(f.root, .{
+            .recursive = true,
+            .filter = .{ .allow = notHidden },
+        });
+        try f.settle();
+
+        const gpa = std.testing.allocator;
+        const hidden = try f.path(".hidden");
+        defer gpa.free(hidden);
+        const wanted = try f.path("visible.txt");
+        defer gpa.free(wanted);
+
+        try f.write(".hidden/a.txt", "one");
+        try f.write("visible.txt", "two");
+
+        var found = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !found) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                try std.testing.expect(!std.mem.startsWith(u8, event.path, hidden));
+                if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "an ignored subtree costs nothing where lookout does the recursion" {
+    for (backends) |backend| {
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+
+        try tmp.dir.createDirPath(io, "keep");
+        try tmp.dir.createDirPath(io, "skip/one");
+        try tmp.dir.createDirPath(io, "skip/two");
+
+        var plain: Watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 });
+        defer plain.deinit();
+        _ = try plain.add(root, .{ .recursive = true });
+
+        var filtered: Watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 });
+        defer filtered.deinit();
+        _ = try filtered.add(root, .{
+            .recursive = true,
+            .filter = .{ .ignore = &.{"skip"} },
+        });
+
+        // The claim in README.md, asserted rather than described: where
+        // lookout recurses, an excluded directory is never registered;
+        // where the kernel recurses, it was never told and the filter
+        // can only drop the events.
+        if (lookout.prunesIgnored(backend)) {
+            try std.testing.expect(filtered.stats().registrations < plain.stats().registrations);
+        } else {
+            try std.testing.expectEqual(
+                plain.stats().registrations,
+                filtered.stats().registrations,
+            );
+        }
+    }
+}
+
 test "a directory past the entry limit reports overflow against the watch root" {
     for (backends) |backend| {
         const gpa = std.testing.allocator;

@@ -31,6 +31,7 @@ const windows = std.os.windows;
 
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
+const Filter = @import("../Filter.zig");
 const WatchId = lookout.WatchId;
 
 const Windows = @This();
@@ -67,6 +68,12 @@ const Watch = struct {
     /// directory the handle is on, is the watch.
     only: ?[]u8,
     recursive: bool,
+    /// `lookout.AddOptions.filter`, copied.
+    ///
+    /// `ReadDirectoryChangesW` recurses in the kernel and cannot be told
+    /// to leave a directory out, so here the filter drops the events
+    /// rather than saving the work -- see `lookout.prunesIgnored`.
+    filter: Filter,
     overlapped: c.OVERLAPPED,
     buffer: [read_buffer_len]u8 align(@alignOf(u32)),
     /// The old name of a rename whose new name has not arrived yet.
@@ -148,12 +155,16 @@ pub fn add(w: *Windows, id: WatchId, abs_path: []const u8, options: lookout.AddO
     const handle = try open(w.gpa, dir_path);
     errdefer _ = c.CloseHandle(handle);
 
+    var filter = try options.filter.dupe(w.gpa);
+    errdefer filter.deinit(w.gpa);
+
     watch.* = .{
         .id = id,
         .root = root,
         .handle = handle,
         .only = only,
         .recursive = options.recursive and is_dir,
+        .filter = filter,
         .overlapped = std.mem.zeroes(c.OVERLAPPED),
         .buffer = undefined,
         .pending_rename = null,
@@ -235,6 +246,7 @@ pub fn remove(w: *Windows, id: WatchId) void {
 
 fn free(w: *Windows, watch: *Watch) void {
     w.gpa.free(watch.root);
+    watch.filter.deinit(w.gpa);
     if (watch.only) |name| w.gpa.free(name);
     if (watch.pending_rename) |name| w.gpa.free(name);
     w.gpa.destroy(watch);
@@ -352,7 +364,13 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
         const path = try std.fs.path.join(w.gpa, &.{ dir, relative });
         defer w.gpa.free(path);
 
-        if (watch.only == null or std.mem.eql(u8, path, watch.root)) {
+        // The kernel walked the tree whatever the filter says; what the
+        // filter can still do is keep the event from the caller.
+        const wanted = if (watch.only == null)
+            !watch.filter.excludes(watch.root, path)
+        else
+            std.mem.eql(u8, path, watch.root);
+        if (wanted) {
             try w.reportOne(watch, info.Action, path, batch);
         }
 

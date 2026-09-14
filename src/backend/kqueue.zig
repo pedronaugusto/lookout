@@ -112,7 +112,7 @@ pub fn add(k: *Kqueue, id: WatchId, abs_path: []const u8, options: lookout.AddOp
     // report a fraction of a tree and look like a quiet one.
     errdefer k.remove(id);
 
-    try k.tree.addWatch(id, abs_path, options.recursive, &added);
+    try k.tree.addWatch(id, abs_path, options, &added);
     try k.register(added.items);
 }
 

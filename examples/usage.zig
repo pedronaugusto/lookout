@@ -63,7 +63,28 @@ pub fn main() !void {
     try scratch.deleteFile(io, "renamed.txt");
     try report(&watcher);
 
+    // A second watcher, with a filter: the ignore list keeps part of the
+    // tree out of the watch entirely. Where lookout does the recursion
+    // an ignored directory is never opened and never registered, so it
+    // costs nothing; where the kernel recurses it is the events that are
+    // dropped, and `prunesIgnored` is how a program asks which it got.
+    try scratch.createDirPath(io, "build");
+    var filtered: lookout.Watcher = try .init(gpa, io, .{});
+    defer filtered.deinit();
+    _ = try filtered.add(dir_path, .{
+        .recursive = true,
+        .filter = .{ .ignore = &.{ "build", "*.tmp" } },
+    });
+
+    try scratch.writeFile(io, .{ .sub_path = "build/artifact.o", .data = "ignored" });
+    try scratch.writeFile(io, .{ .sub_path = "draft.tmp", .data = "ignored" });
+    try scratch.writeFile(io, .{ .sub_path = "kept.txt", .data = "reported" });
+    for (try filtered.poll(2_000)) |event| {
+        std.debug.print("filtered: {s} {s}\n", .{ @tagName(event.kind), event.path });
+    }
+
     std.debug.print("backend: {s}\n", .{@tagName(watcher.backend())});
+    std.debug.print("prunes ignored: {}\n", .{lookout.prunesIgnored(watcher.backend())});
 }
 
 /// Polls once and prints whatever came back, including where a renamed

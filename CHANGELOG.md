@@ -48,6 +48,19 @@ breaking one.
   happens in a directory the watch was never put on. The boolean said
   Windows reported `removed`, which it does not; a caller waiting for
   that event waited forever.
+- `AddOptions.filter` says what a watch is not about: `Filter.ignore`, a
+  list of path prefixes and simple globs, and `Filter.allow`, a predicate
+  of the caller's, both asked about every ancestor of a path so that
+  excluding a directory excludes its whole tree. It is applied where
+  lookout does the recursion, so on `inotify`, `kqueue` and `poll` an
+  excluded directory is never opened and never registered and costs
+  neither a kernel watch nor a descriptor; FSEvents and
+  `ReadDirectoryChangesW` recurse in the kernel, which cannot be told
+  about a filter, so there the events are dropped and the work happens
+  anyway. `prunesIgnored` is how a program asks which of the two it has.
+  Before this, a recursive watch over a tree with a large build
+  directory in it paid for every file in that directory and the caller
+  could only throw the events away afterwards.
 - `Event.path` is spelled with the platform's own separator all the way
   down: `/` on POSIX, `\` on Windows, including the part below the watch
   root. The backends already did this; nothing said so, and a caller
