@@ -315,14 +315,15 @@ pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.Add
     });
     stream.ref = try createStream(stream, stream_path, f.io);
     errdefer {
-        c.FSEventStreamSetDispatchQueue(stream.ref, null);
         c.FSEventStreamInvalidate(stream.ref);
         c.FSEventStreamRelease(stream.ref);
     }
     c.FSEventStreamSetDispatchQueue(stream.ref, f.queue);
     if (c.FSEventStreamStart(stream.ref) == 0) return error.WatchLimitReached;
-    trace.log("fsevents started watch={d} since=sincenow latency={d} streams={d}", .{
-        @intFromEnum(id), stream_latency, f.streams.count() + 1,
+    trace.log("fsevents started watch={d} since=sincenow latency={d} streams={d} latest={d} dev={d} now={d}", .{
+        @intFromEnum(id),                                 stream_latency,
+        f.streams.count() + 1,                            c.FSEventStreamGetLatestEventId(stream.ref),
+        c.FSEventStreamGetDeviceBeingWatched(stream.ref), c.FSEventsGetCurrentEventId(),
     });
 
     try f.streams.put(f.gpa, id, stream);
@@ -375,16 +376,30 @@ fn destroy(f: *FsEvents, stream: *Stream) void {
     trace.log("fsevents stop watch={d} root={s} streams={d}", .{
         @intFromEnum(stream.id), stream.root, f.streams.count(),
     });
+    // Stop, invalidate, release, in that order and with nothing between.
+    // `FSEventStreamInvalidate` is what unschedules the stream from the
+    // queue, and it requires the stream to still be scheduled: calling
+    // `FSEventStreamSetDispatchQueue(ref, null)` first -- which is the
+    // other way to unschedule -- makes the invalidation fail its own
+    // assertion and do nothing, which leaves the stream registered with
+    // the system after it has been released, still holding the pointer
+    // to the memory freed below.
     c.FSEventStreamStop(stream.ref);
-    // Detaching the queue is what waits for a delivery already in flight;
-    // without it `stream` could be freed under the thread reading it.
-    c.FSEventStreamSetDispatchQueue(stream.ref, null);
     c.FSEventStreamInvalidate(stream.ref);
     c.FSEventStreamRelease(stream.ref);
+    // Invalidation says no further delivery will be made; it does not say
+    // that one already running has returned, and `stream` is what it
+    // holds a pointer to. The queue is serial, so an empty block run
+    // synchronously on it returns only once everything accepted before it
+    // has finished.
+    c.dispatch_sync_f(f.queue, null, settled);
     f.gpa.free(stream.root);
     stream.filter.deinit(f.gpa);
     f.gpa.destroy(stream);
 }
+
+/// The block `destroy` waits on. It does nothing; arriving is the point.
+fn settled(_: ?*anyopaque) callconv(.c) void {}
 
 /// What FSEvents calls on the dispatch queue. Copies and gets out: no
 /// allocation, no parsing, no lookout logic on a thread lookout does not
@@ -846,10 +861,18 @@ const c = struct {
     ) ?FSEventStreamRef;
     extern "c" fn FSEventStreamSetDispatchQueue(stream: FSEventStreamRef, q: ?dispatch_queue_t) void;
     extern "c" fn FSEventStreamStart(stream: FSEventStreamRef) u8;
+    extern "c" fn FSEventStreamGetLatestEventId(stream: FSEventStreamRef) u64;
+    extern "c" fn FSEventStreamGetDeviceBeingWatched(stream: FSEventStreamRef) i32;
+    extern "c" fn FSEventsGetCurrentEventId() u64;
     extern "c" fn FSEventStreamStop(stream: FSEventStreamRef) void;
     extern "c" fn FSEventStreamInvalidate(stream: FSEventStreamRef) void;
     extern "c" fn FSEventStreamRelease(stream: FSEventStreamRef) void;
 
     extern "c" fn dispatch_queue_create(label: ?[*:0]const u8, attr: ?*anyopaque) ?dispatch_queue_t;
     extern "c" fn dispatch_release(object: *anyopaque) void;
+    extern "c" fn dispatch_sync_f(
+        queue: dispatch_queue_t,
+        context: ?*anyopaque,
+        work: *const fn (?*anyopaque) callconv(.c) void,
+    ) void;
 };

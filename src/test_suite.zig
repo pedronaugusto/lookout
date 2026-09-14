@@ -1120,6 +1120,79 @@ test "debouncing reports one event per path carrying the kind seen last" {
     try std.testing.expectEqual(Kind.modified, kind);
 }
 
+test "a watcher torn down with deliveries in flight does not outlive them" {
+    for (backends) |backend| {
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        for (0..60) |_| {
+            var tmp = std.testing.tmpDir(.{ .iterate = true });
+            defer tmp.cleanup();
+            const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+            defer gpa.free(root);
+
+            var watcher: Watcher = try .init(gpa, io, .{
+                .backend = backend,
+                .poll_interval_ms = 20,
+            });
+            _ = try watcher.add(root, .{ .recursive = true });
+
+            // A burst that is never polled for, so that whatever the
+            // operating system delivers is still in flight when the
+            // watcher goes away. Anything the watcher hands to a thread
+            // it does not own has to be finished with before the memory
+            // behind it is released.
+            for (0..24) |j| {
+                var name: [16]u8 = undefined;
+                try tmp.dir.writeFile(io, .{
+                    .sub_path = std.fmt.bufPrint(&name, "f{d}", .{j}) catch unreachable,
+                    .data = "x",
+                });
+            }
+            watcher.deinit();
+        }
+    }
+}
+
+test "watches taken and dropped in quick succession keep working" {
+    for (backends) |backend| {
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        for (0..60) |i| {
+            var tmp = std.testing.tmpDir(.{ .iterate = true });
+            defer tmp.cleanup();
+            const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+            defer gpa.free(root);
+
+            var watcher: Watcher = try .init(gpa, io, .{
+                .backend = backend,
+                .poll_interval_ms = 20,
+            });
+            defer watcher.deinit();
+            _ = try watcher.add(root, .{});
+
+            try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
+            const wanted = try std.fs.path.join(gpa, &.{ root, "a.txt" });
+            defer gpa.free(wanted);
+
+            // Every watch has to work, not most of them. A registration
+            // the operating system accepted and then did nothing with is
+            // a watch that is silent for the life of the program, which
+            // is the worst thing a watcher can be.
+            var found = false;
+            var waited: u32 = 0;
+            while (waited < 2_000 and !found) : (waited += 100) {
+                for (try watcher.poll(100)) |event| {
+                    if (std.mem.eql(u8, event.path, wanted)) found = true;
+                }
+            }
+            if (!found) {
+                std.debug.print("watch {d} on {s} reported nothing\n", .{ i, root });
+                return error.WatchWentSilent;
+            }
+        }
+    }
+}
+
 test "the watch limit is one error, named the same on every backend" {
     // Exhausting the limit takes a machine configured to have a small
     // one, which a test may not assume. What a test can hold is the

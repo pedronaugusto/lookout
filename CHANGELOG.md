@@ -48,6 +48,17 @@ breaking one.
   happens in a directory the watch was never put on. The boolean said
   Windows reported `removed`, which it does not; a caller waiting for
   that event waited forever.
+- An FSEvents watch no longer goes silent for the life of the program.
+  The backend unscheduled a stream from its dispatch queue before
+  invalidating it, and `FSEventStreamInvalidate` requires the stream to
+  still be scheduled: it failed its own assertion and did nothing, so
+  every stream was released while the system still had it registered.
+  The registrations accumulated, and roughly one stream in twenty-five
+  after that was accepted and then never delivered anything -- a watch
+  that reported nothing, ever, with no error to say so. The same
+  registration kept a pointer to memory the watcher had freed, which is
+  the crash that came with it under a program that takes and drops
+  watches quickly.
 - Setting `LOOKOUT_TRACE` in the environment makes the Apple backend
   write what it did to standard error: every delivery the system made,
   every path in it with its event id and flags, and every decision that
