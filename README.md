@@ -67,7 +67,7 @@ linked anywhere.
 | `Watcher.stats()` | What the watcher holds: watches, registrations the operating system is keeping, paths held back by a window, events the last `poll` returned. |
 | `Event` | `{ id, path, kind, from, time }`. `path` is absolute, canonical, and spelled with the platform's separator; `from` is where a paired rename came from; `time` is when lookout first saw the path change in this window. |
 | `Kind` | `created`, `modified`, `removed`, `renamed`, `attributes`, `closed`, `overflow`. |
-| `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `debounce_ms`, `report_closes`, `max_dir_entries`. |
+| `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `debounce_ms`, `report_closes`, `windows_buffer_bytes`, `max_dir_entries`. |
 | `AddOptions` | `recursive`, `filter`, `pending`. |
 | `Filter` | What a watch is not about: `ignore`, a list of path prefixes and simple globs; `allow`, a predicate of the caller's; `context`, passed back to it. |
 | `Baseline` | What a tree looked like. `seed` it where the watch is taken, `diff` it on `Kind.overflow` for the changes the lost events would have carried. |
@@ -93,13 +93,11 @@ to report; it is `null` for the polling backend, which has nothing to
 wait on, and on Windows, where the watcher waits on an I/O completion
 port no other loop can take.
 
-FSEvents delivers on a dispatch queue the system owns. That thread copies
-into a fixed buffer and writes one byte to a pipe, and nothing else; a
-burst that outruns the buffer becomes `Kind.overflow`.
-
-The allocator holds the watch tables and the batch of events, so a
-watcher with no watches holds no memory. The slice `poll` returns is the
-watcher's, and so is every path in it; the next `poll` frees them.
+FSEvents delivers on a dispatch queue the system owns; that thread copies
+into a fixed buffer and writes one byte to a pipe, and a burst that
+outruns the buffer becomes `Kind.overflow`. The allocator holds the watch
+tables and the batch of events, so a watcher with no watches holds no
+memory.
 
 ### Three windows
 
@@ -110,8 +108,8 @@ watcher's, and so is every path in it; the next `poll` frees them.
 | `debounce_ms` | a path to go quiet, whatever happened to it | one event, carrying the kind seen **last** |
 
 `poll` blocks until the first event of a batch arrives and then collects
-for `latency_ms` more, 50 ms by default. Everything on one path inside
-that window becomes one `Event`, carrying the most significant kind:
+for `latency_ms` more, 50 ms by default. Everything on one path in that
+window becomes one `Event`, carrying the most significant kind:
 
 ```
 attributes  <  modified  <  closed  <  created  <  renamed  <  removed  <  overflow
@@ -146,10 +144,10 @@ the kernel, so a tree costs one stream or one handle.
 
 `AddOptions.filter` says what a watch is not about. `Filter.ignore` is a
 list of path prefixes and simple globs: `*` and `?` match within one path
-component, a pattern holding no separator matches the final component at
-any depth, and an absolute pattern matches the absolute path.
-`Filter.allow` is the caller's own predicate. Both are asked about every
-ancestor of a path, so excluding a directory excludes its subtree.
+component, a pattern with no separator matches the final component at any
+depth, an absolute pattern matches the absolute path. `Filter.allow` is
+the caller's own predicate. Both are asked about every ancestor, so
+excluding a directory excludes its subtree.
 
 Where lookout does the recursion — `inotify`, `kqueue`, `poll` — an
 excluded directory is never opened and never registered, and its tree
@@ -167,13 +165,13 @@ are the same thing. `pairsRenames(backend)` says which shape to expect,
 `Event.from` carries the answer where there is one, and neither backend
 guesses.
 
-`Kind.renamed` with `from == null` means the watched path itself was
-moved, which has no second half. Deleting the watched path is
-`Kind.removed` everywhere. Moving it is `renamed` on `kqueue` and
-`inotify`, which watch the object and are told; `removed` on FSEvents and
-polling, which see only that the name is empty; and nothing at all on
-Windows, where the handle survives the rename and the rename happens in a
-directory the watch was not put on. `reportsRootMove` gives all three.
+`Kind.renamed` with `from == null` means the watched path itself moved,
+which has no second half. Deleting the watched path is `Kind.removed`
+everywhere. Moving it is `renamed` on `kqueue` and `inotify`, which watch
+the object and are told; `removed` on FSEvents and polling, which see
+only that the name is empty; and nothing on Windows, where the handle
+survives the rename and the rename happens in a directory the watch was
+not put on. `reportsRootMove` gives all three.
 
 ### Losing events
 
@@ -188,6 +186,12 @@ It does not say what was lost, because by then the names are gone. Seed
 a `Baseline` where the watch is taken and `diff` it when the overflow
 arrives: it re-reads the tree and returns the changes the events would
 have carried, on the same ownership terms as the slice `poll` returns.
+
+On Windows how much the kernel can hold between two reads is
+`Options.windows_buffer_bytes`, 64 KiB by default, the largest a network
+share takes. A busy tree polled infrequently wants more; the buffer is
+non-paged pool while a read is outstanding, so a large one on many
+watches costs something real.
 
 ### Finished writes
 
@@ -243,8 +247,6 @@ this target has it. Asking for one this target was not built with fails
 
 ## Scope
 
-What lookout does not do:
-
 - Symbolic links are not followed. A link inside a watched tree is an
   entry, not a doorway into a directory you did not ask for.
 - A watched file that is replaced rather than written — the
@@ -264,10 +266,10 @@ What lookout does not do:
 | macOS, and the other Apple platforms | `fsevents` (default), `kqueue`, `poll` | macOS CI runner |
 | Linux | `inotify` (default), `poll` | Ubuntu CI runner, and `ci/linux.sh` in Docker |
 | FreeBSD, NetBSD, OpenBSD, DragonFly | `kqueue` (default), `poll` | cross-compiled only |
-| Windows | `windows` (default), `poll` | compiles for Windows; the CI run is pending |
+| Windows | `windows` (default), `poll` | `windows-latest` CI runner |
 
-Pending: the Windows read buffer is fixed at 64 KB and is not
-configurable. That waits on a green Windows CI run.
+Every job in that matrix passed on run
+[`34809335102`](https://github.com/pedronaugusto/lookout/actions/runs/34809335102).
 
 CI compiles every commit for `x86_64-linux-gnu`, `aarch64-linux-gnu`,
 `x86_64-linux-musl`, `x86_64-windows-gnu`, `x86_64-windows-msvc`,
@@ -282,8 +284,8 @@ sh ci/linux.sh          # the suite on Linux, in Docker, all four modes
 ```
 
 Setting `LOOKOUT_TRACE` in the environment makes the Apple backend and
-the suite write what they did to standard error, which is how an event
-that did not arrive is chased down. It is read once per process.
+the suite write what they did to standard error. It is read once per
+process.
 
 The suite runs whole against each backend the host can execute, so the
 polling backend is held to the same assertions as the kernel ones on the

@@ -733,6 +733,87 @@ test "closes are not reported unless they are asked for" {
     }
 }
 
+/// Writes `count` files with names long enough that the change records
+/// the Windows kernel keeps for them are worth measuring: each is twelve
+/// bytes and the name in UTF-16.
+fn writeBurst(dir: std.Io.Dir, count: usize) !void {
+    for (0..count) |i| {
+        var name: [96]u8 = undefined;
+        const sub_path = std.fmt.bufPrint(
+            &name,
+            "a-rather-long-name-so-that-one-record-is-not-small-{d}.txt",
+            .{i},
+        ) catch unreachable;
+        try dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = "x" });
+    }
+}
+
+test "the Windows read buffer is the size the caller asked for" {
+    // `ReadDirectoryChangesW` is the only backend with a buffer of this
+    // kind, and the claim is about what the kernel does with it.
+    if (!lookout.supported(.windows)) return error.SkipZigTest;
+
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const burst = 300;
+
+    // At the floor. Nothing polls while the burst is written, so the
+    // kernel has to hold all of it in the buffer it was given, and four
+    // kilobytes is a tenth of what it needs.
+    {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+
+        var watcher: Watcher = try .init(gpa, io, .{
+            .backend = .windows,
+            .windows_buffer_bytes = 4 * 1024,
+        });
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{});
+        try writeBurst(tmp.dir, burst);
+
+        var overflowed = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !overflowed) : (waited += 200) {
+            for (try watcher.poll(200)) |event| {
+                if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
+            }
+        }
+        try std.testing.expect(overflowed);
+    }
+
+    // A megabyte, the same burst. Room for all of it, so the caller is
+    // told what changed instead of being told to look again.
+    {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+
+        var watcher: Watcher = try .init(gpa, io, .{
+            .backend = .windows,
+            .windows_buffer_bytes = 1024 * 1024,
+        });
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{});
+        try writeBurst(tmp.dir, burst);
+
+        var created: usize = 0;
+        var overflowed = false;
+        var waited: u32 = 0;
+        while (waited < 2_000) : (waited += 200) {
+            for (try watcher.poll(200)) |event| {
+                if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
+                if (event.kind == .created) created += 1;
+            }
+        }
+        try std.testing.expect(!overflowed);
+        try std.testing.expect(created > 0);
+    }
+}
+
 test "the descriptor is present exactly when the backend has one" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

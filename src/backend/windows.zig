@@ -47,11 +47,24 @@ watches: std.AutoArrayHashMapUnmanaged(WatchId, *Watch),
 retiring: std.ArrayList(*Watch),
 /// Mirrors `lookout.Options.max_dir_entries`.
 max_dir_entries: usize,
+/// `lookout.Options.windows_buffer_bytes`, clamped and rounded to what
+/// `ReadDirectoryChangesW` will take. See `clampBuffer`.
+buffer_len: usize,
 
-/// How much change the kernel may buffer between two reads. Past this a
-/// read completes with zero bytes and lookout reports
-/// `lookout.Kind.overflow`.
-const read_buffer_len = 64 * 1024;
+/// The smallest and largest buffer `ReadDirectoryChangesW` is given. See
+/// `lookout.Options.windows_buffer_bytes` for what a caller should pick;
+/// these are only the ends of the range lookout will pass on.
+///
+/// The floor is a few times the largest single record -- twelve bytes and
+/// a name of up to 32767 UTF-16 units -- so that one change can always be
+/// reported. The ceiling is a size past which the call is a bad idea
+/// rather than a refusal: the buffer is non-paged pool while a read is
+/// outstanding, one per watch.
+const min_buffer_len = 4 * 1024;
+const max_buffer_len = 16 * 1024 * 1024;
+
+/// What a caller gets if they ask for nothing.
+const default_buffer_len = 64 * 1024;
 
 /// One watch: one directory handle with one read outstanding.
 ///
@@ -75,7 +88,10 @@ const Watch = struct {
     /// rather than saving the work -- see `lookout.prunesIgnored`.
     filter: Filter,
     overlapped: c.OVERLAPPED,
-    buffer: [read_buffer_len]u8 align(@alignOf(u32)),
+    /// Where the kernel writes the change records. Owned by the watch,
+    /// and not released until its outstanding read has completed, which
+    /// is why `remove` retires a watch rather than freeing it.
+    buffer: []align(@alignOf(u32)) u8,
     /// The old name of a rename whose new name has not arrived yet.
     pending_rename: ?[]u8,
     /// How many entries the watched directory holds, for the
@@ -94,7 +110,21 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .watches = .empty,
         .retiring = .empty,
         .max_dir_entries = options.max_dir_entries,
+        .buffer_len = clampBuffer(options.windows_buffer_bytes),
     };
+}
+
+/// What lookout will actually ask the kernel for: the caller's size held
+/// inside the range above, and a multiple of four, because the records
+/// the kernel writes are aligned to a `DWORD` and it measures the buffer
+/// in whole ones.
+fn clampBuffer(asked: usize) usize {
+    const bounded = std.math.clamp(
+        if (asked == 0) default_buffer_len else asked,
+        min_buffer_len,
+        max_buffer_len,
+    );
+    return bounded - bounded % @alignOf(u32);
 }
 
 /// Closes every directory handle and the port.
@@ -158,6 +188,9 @@ pub fn add(w: *Windows, id: WatchId, abs_path: []const u8, options: lookout.AddO
     var filter = try options.filter.dupe(w.gpa);
     errdefer filter.deinit(w.gpa);
 
+    const buffer = try w.gpa.alignedAlloc(u8, .of(u32), w.buffer_len);
+    errdefer w.gpa.free(buffer);
+
     watch.* = .{
         .id = id,
         .root = root,
@@ -166,7 +199,7 @@ pub fn add(w: *Windows, id: WatchId, abs_path: []const u8, options: lookout.AddO
         .recursive = options.recursive and is_dir,
         .filter = filter,
         .overlapped = std.mem.zeroes(c.OVERLAPPED),
-        .buffer = undefined,
+        .buffer = buffer,
         .pending_rename = null,
         .entries = countEntries(w.io, dir_path),
     };
@@ -219,8 +252,8 @@ fn arm(w: *Windows, watch: *Watch) lookout.Watcher.AddError!void {
         c.FILE_NOTIFY_CHANGE_SECURITY;
     if (c.ReadDirectoryChangesW(
         watch.handle,
-        &watch.buffer,
-        watch.buffer.len,
+        watch.buffer.ptr,
+        @intCast(watch.buffer.len),
         @intFromBool(watch.recursive),
         filter,
         null,
@@ -245,6 +278,7 @@ pub fn remove(w: *Windows, id: WatchId) void {
 }
 
 fn free(w: *Windows, watch: *Watch) void {
+    w.gpa.free(watch.buffer);
     w.gpa.free(watch.root);
     watch.filter.deinit(w.gpa);
     if (watch.only) |name| w.gpa.free(name);

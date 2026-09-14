@@ -358,6 +358,24 @@ pub const Options = struct {
     /// the default: a program that only wants to know a path changed
     /// should not have to learn a second kind meaning the same thing.
     report_closes: bool = false,
+    /// How much change the Windows kernel may hold for one watch between
+    /// two reads, in bytes. Ignored by every other backend.
+    ///
+    /// `ReadDirectoryChangesW` writes its records into a buffer lookout
+    /// gives it, one per watch, and that buffer is how much the kernel
+    /// can accumulate while no read is outstanding. When it fills, the
+    /// change records are discarded and the next read says so, which
+    /// lookout reports as `Kind.overflow` against the watch root: the
+    /// record is incomplete and the tree should be read again.
+    ///
+    /// The default, 64 KiB, is what a network share will take; Windows
+    /// refuses a larger one there. On a local disk a watch on a busy tree
+    /// polled infrequently wants more. Sizes are held between 4 KiB --
+    /// enough that one change with the longest possible name always fits
+    /// -- and 16 MiB, and rounded down to a multiple of four; zero means
+    /// the default. The buffer is non-paged pool for as long as a read is
+    /// outstanding, so a large one on many watches is a real cost.
+    windows_buffer_bytes: usize = 64 * 1024,
     /// The largest number of entries lookout will account for in one
     /// watched directory. A directory holding more reports
     /// `Kind.overflow` against its watch root, which means: this one is

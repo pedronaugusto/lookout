@@ -48,6 +48,13 @@ breaking one.
   happens in a directory the watch was never put on. The boolean said
   Windows reported `removed`, which it does not; a caller waiting for
   that event waited forever.
+- `Options.windows_buffer_bytes` sets how much change the Windows kernel
+  may hold for one watch between two reads. It was fixed at 64 KiB, which
+  is the largest a network share takes and not always the right answer on
+  a local disk: a busy tree polled infrequently overflowed and the caller
+  had no way to buy headroom. Sizes are held between 4 KiB and 16 MiB and
+  rounded down to a multiple of four; when the buffer does fill, the
+  overflow is reported as before.
 - An FSEvents watch no longer goes silent for the life of the program.
   The backend unscheduled a stream from its dispatch queue before
   invalidating it, and `FSEventStreamInvalidate` requires the stream to
