@@ -97,6 +97,17 @@ pub fn main() !void {
         std.debug.print("pending: {s} {s}\n", .{ @tagName(event.kind), event.path });
     }
 
+    // `Kind.overflow` says the watcher's record is incomplete without
+    // saying what is missing. A baseline seeded where the watch was taken
+    // answers that: its diff is the events that would have arrived.
+    var baseline: lookout.Baseline = try .seed(gpa, io, dir_path, .{ .recursive = true });
+    defer baseline.deinit(gpa);
+
+    try scratch.writeFile(io, .{ .sub_path = "written-while-away.txt", .data = "missed" });
+    for (try baseline.diff(gpa)) |change| {
+        std.debug.print("baseline: {s} {s}\n", .{ @tagName(change.kind), change.path });
+    }
+
     std.debug.print("backend: {s}\n", .{@tagName(watcher.backend())});
     std.debug.print("prunes ignored: {}\n", .{lookout.prunesIgnored(watcher.backend())});
 }

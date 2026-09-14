@@ -599,6 +599,57 @@ test "a directory past the entry limit reports overflow against the watch root" 
     }
 }
 
+test "what an overflow lost can be read back from a baseline" {
+    for (backends) |backend| {
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+
+        // A budget of two entries, so the sixth file is certain to put
+        // the watch past it and the watcher is certain to say so.
+        var watcher: Watcher = try .init(gpa, io, .{
+            .backend = backend,
+            .poll_interval_ms = 20,
+            .max_dir_entries = 2,
+        });
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{});
+
+        // Seeded where the watch is taken, which is the only moment the
+        // two can be made to agree.
+        var base: lookout.Baseline = try .seed(gpa, io, root, .{});
+        defer base.deinit(gpa);
+
+        for (0..6) |i| {
+            var name: [8]u8 = undefined;
+            try tmp.dir.writeFile(io, .{
+                .sub_path = std.fmt.bufPrint(&name, "f{d}", .{i}) catch unreachable,
+                .data = "x",
+            });
+        }
+
+        var overflowed = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !overflowed) : (waited += 200) {
+            for (try watcher.poll(200)) |event| {
+                if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
+            }
+        }
+        try std.testing.expect(overflowed);
+
+        // The watcher said its record was incomplete and could not say
+        // what was missing. The baseline can: all six, by name.
+        var created: usize = 0;
+        for (try base.diff(gpa)) |change| {
+            if (change.kind == .created) created += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 6), created);
+    }
+}
+
 test "the descriptor is present exactly when the backend has one" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

@@ -22,6 +22,12 @@ const Tree = @import("Tree.zig");
 /// Which paths under a watch the caller wants. See `AddOptions.filter`.
 pub const Filter = @import("Filter.zig");
 
+/// What a tree looked like, and what has changed in it since. This is
+/// what `Kind.overflow` asks a caller to work out, made answerable:
+/// seed one where the watch is taken, and diff it when the watcher says
+/// its record is incomplete.
+pub const Baseline = @import("Baseline.zig");
+
 /// The mechanism a `Watcher` uses to learn that something changed.
 ///
 /// Which of these this target was built with is `supported`; which one
@@ -204,6 +210,11 @@ pub const Kind = enum {
     /// Emitted when the kernel event queue overflowed, or when a watched
     /// directory holds more entries than `Options.max_dir_entries`. The
     /// `path` is the watch root, not an entry inside it.
+    ///
+    /// What was lost is not knowable from here -- the names are gone --
+    /// but it is knowable from the tree. `Baseline`, seeded where the
+    /// watch was taken, answers it: its `diff` returns the creations,
+    /// changes and removals that the events would have carried.
     overflow,
 };
 
@@ -869,6 +880,7 @@ pub const Watcher = struct {
 };
 
 test {
+    _ = Baseline;
     _ = Batch;
     _ = Filter;
     _ = Tree;

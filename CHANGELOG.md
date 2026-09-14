@@ -48,6 +48,17 @@ breaking one.
   happens in a directory the watch was never put on. The boolean said
   Windows reported `removed`, which it does not; a caller waiting for
   that event waited forever.
+- `Baseline` answers what `Kind.overflow` could not. The watcher can say
+  that its record of a tree is incomplete and not what was lost, because
+  the names are gone by the time it knows. A baseline seeded where the
+  watch is taken remembers the tree; `diff` re-reads it and returns the
+  creations, modifications, attribute changes and removals that the lost
+  events would have carried, spelled the way events are and on the same
+  ownership terms as `Watcher.poll`. It takes the same `recursive`,
+  `max_dir_entries` and `filter` a watch does, so the two can be made to
+  cover the same tree. It is the listing comparison the `kqueue` and
+  polling backends already made, kept for the caller instead of for the
+  watcher; nothing exposed it before.
 - `AddOptions.pending` takes a watch on a path that does not exist yet
   instead of failing the `add` with `error.FileNotFound`. The watch is
   parked on the nearest existing ancestor, narrowed to the single entry
