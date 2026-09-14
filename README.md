@@ -2,46 +2,14 @@
 
 [![CI](https://github.com/pedronaugusto/lookout/actions/workflows/ci.yml/badge.svg)](https://github.com/pedronaugusto/lookout/actions/workflows/ci.yml)
 
-A file-system watcher for Zig: one API over FSEvents and `kqueue` on
-Apple platforms, `inotify` on Linux, `ReadDirectoryChangesW` on Windows,
-and a polling backend that needs nothing from the kernel and runs
-everywhere.
-
-- **Pure Zig, no dependencies.** Nothing to vendor, no C to compile, no
-  build script of your own. The system interfaces are reached through
-  hand-written `extern` declarations; the only thing linked is
-  CoreServices, on Apple targets, where FSEvents lives.
-- **One contract, not three.** The backends do not merely share a type
-  name: the test suite runs once per backend the host can execute, so the
-  polling backend is held to the same assertions as the kernel one on the
-  same machine. A behaviour only one backend has is a behaviour you
-  cannot rely on, and this is how it is kept out.
-- **No threads, no callbacks.** Everything happens on the thread that
-  calls `poll`. A program with a wait loop of its own takes
-  `Watcher.fd` and waits on the watcher alongside its sockets and pipes.
-- **Coalesced by default, and debounced on request.** An editor saving a
-  file writes it in several pieces; a build system unpacking an archive
-  touches a directory a thousand times. Events on one path inside
-  `latency_ms` arrive as one event, so a rebuild is triggered once. Set
-  `settle_ms` and a `modified` waits until the file has stopped changing,
-  which is the difference between reading a copied file and reading half
-  of one.
-- **Renames arrive whole where the kernel knows they are renames.**
-  `Event.kind == .renamed` carries `Event.from`, so a program that
-  follows a file does not have to guess which removal goes with which
-  creation. Where the kernel cannot say, the removal and the creation are
-  reported as themselves rather than guessed at -- see the table below.
-
-What lookout does not do is under its own heading below, gaps included,
-rather than left to be found.
+A file-system watcher for Zig. One `Watcher` type over FSEvents and
+`kqueue` on Apple platforms, `inotify` on Linux, `ReadDirectoryChangesW`
+on Windows, and a polling backend that needs nothing from the kernel.
 
 ## Usage
 
-The block below is not written here: it is a region of
-[`examples/usage.zig`](examples/usage.zig), which `zig build examples`
-builds and RUNS, extracted by `ci/readme_usage.sh` and compared by CI. A
-snippet in a README is a claim about how a library is used, and this one
-is a claim something executes.
+The block below is a region of [`examples/usage.zig`](examples/usage.zig),
+which `zig build examples` builds and runs; CI compares the two.
 
 <!-- BEGIN GENERATED ci/readme_usage.sh -->
 ```zig
@@ -69,12 +37,21 @@ for (try watcher.poll(1_000)) |event| {
 ```
 <!-- END GENERATED -->
 
-Add it as a dependency and link the module:
+## Install
+
+```
+zig fetch --save git+https://github.com/pedronaugusto/lookout
+```
 
 ```zig
 const lookout_dep = b.dependency("lookout", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("lookout", lookout_dep.module("lookout"));
 ```
+
+There are no dependencies and no C to compile. The system interfaces are
+reached through hand-written `extern` declarations; on Apple targets the
+build links CoreServices, where FSEvents lives, and nothing else is
+linked anywhere.
 
 ## The API
 
@@ -85,48 +62,46 @@ exe.root_module.addImport("lookout", lookout_dep.module("lookout"));
 | `Watcher.add(path, options)` | Watches a file or a directory, optionally recursively. Returns a `WatchId`. A path already watched by this watcher is `error.PathAlreadyWatched`. |
 | `Watcher.remove(id)` | Stops a watch and releases its descriptors. |
 | `Watcher.poll(timeout_ms)` | Blocks until something happens, and returns the coalesced events. `null` blocks indefinitely; `0` reports what is already queued. |
-| `Watcher.fd()` | The descriptor to wait on, or `null` for the polling backend. |
+| `Watcher.fd()` | The descriptor to wait on, or `null` where the backend has none. |
 | `Watcher.backend()` | Which backend this watcher resolved to. |
-| `Watcher.stats()` | What the watcher is holding: watches, registrations the operating system is keeping, paths held back by a window, events the last `poll` returned. |
-| `Event` | `{ id, path, kind, from, time }`. `path` is absolute and canonical; `from` is where a paired rename came from; `time` is when lookout first saw the path change in this window. |
+| `Watcher.stats()` | What the watcher holds: watches, registrations the operating system is keeping, paths held back by a window, events the last `poll` returned. |
+| `Event` | `{ id, path, kind, from, time }`. `path` is absolute, canonical, and spelled with the platform's separator; `from` is where a paired rename came from; `time` is when lookout first saw the path change in this window. |
 | `Kind` | `created`, `modified`, `removed`, `renamed`, `attributes`, `closed`, `overflow`. |
 | `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `debounce_ms`, `report_closes`, `max_dir_entries`. |
-| `Filter` | What a watch is not about: `ignore`, a list of path prefixes and simple globs; `allow`, a predicate of the caller's; `context`, passed back to it. |
-| `Baseline` | What a tree looked like: `seed` it where the watch is taken, `diff` it on `Kind.overflow` for the changes the lost events would have carried. |
 | `AddOptions` | `recursive`, `filter`, `pending`. |
+| `Filter` | What a watch is not about: `ignore`, a list of path prefixes and simple globs; `allow`, a predicate of the caller's; `context`, passed back to it. |
+| `Baseline` | What a tree looked like. `seed` it where the watch is taken, `diff` it on `Kind.overflow` for the changes the lost events would have carried. |
+| `RootMove` | `renamed`, `removed`, or `silent` for nothing at all. |
 | `default_backend` | The backend `.auto` resolves to on this target. |
 | `supported(backend)` | Whether this target was built with a backend. |
 | `pairsRenames(backend)` | Whether it reports `renamed` with a `from`, or a removal and a creation. |
-| `RootMove` | What a backend reports when the watched path itself is moved: `renamed`, `removed`, or `silent` for nothing at all. |
-| `reportsRootMove(backend)` | Which of those three a move of the watched path itself arrives as. |
+| `reportsRootMove(backend)` | Which of the three shapes a move of the watched path itself arrives as. |
 | `prunesIgnored(backend)` | Whether an excluded directory is left unregistered, or only has its events dropped. |
-| `reportsCloses(backend)` | Whether the backend is told that a file open for writing has been closed, and can report `Kind.closed`. |
+| `reportsCloses(backend)` | Whether the backend is told that a file open for writing has been closed. |
 
 The events a `poll` returns, and every path in them, belong to the
-watcher and are invalidated by the next `poll`. Copy anything you intend
-to keep.
+watcher and are invalidated by the next `poll`. Copy anything you keep.
 
-## Coalescing
+## Design
 
-`poll` blocks until the first event of a batch arrives and then keeps
-collecting for `latency_ms` more — 50 ms by default. Everything that
-lands on one path inside that window becomes one `Event`, carrying the
-most significant kind observed:
+### Where the work happens
 
-```
-attributes  <  modified  <  closed  <  created  <  renamed  <  removed  <  overflow
-```
+Everything happens on the thread that calls `poll`. Nothing runs in the
+background and nothing is called back. A program with a wait loop of its
+own takes `Watcher.fd()`, which becomes readable when there is something
+to report; it is `null` for the polling backend, which has nothing to
+wait on, and on Windows, where the watcher waits on an I/O completion
+port no other loop can take.
 
-So a file created and then written reports `created`; a file written and
-then deleted reports `removed`. A path removed and recreated inside one
-window reports `removed`, which is the one case where the coalesced kind
-is not the end state — a caller that tracks state should treat any event
-as "look at this path again" rather than as a replay of what happened.
+FSEvents delivers on a dispatch queue the system owns. That thread copies
+into a fixed buffer and writes one byte to a pipe, and nothing else; a
+burst that outruns the buffer becomes `Kind.overflow`.
 
-Set `latency_ms` to zero to switch coalescing off and get whatever the
-kernel had queued.
+The allocator holds the watch tables and the batch of events, so a
+watcher with no watches holds no memory. The slice `poll` returns is the
+watcher's, and so is every path in it; the next `poll` frees them.
 
-### Three windows, and which question each answers
+### Three windows
 
 | Option | Waits for | Reports |
 |---|---|---|
@@ -134,193 +109,190 @@ kernel had queued.
 | `settle_ms` | a file's contents to stop changing | `modified`, once the writing is over |
 | `debounce_ms` | a path to go quiet, whatever happened to it | one event, carrying the kind seen **last** |
 
-`debounce_ms` is the one to reach for when you rebuild from the end
-state rather than react to each change. A file created and then deleted
-inside one window is one `removed`; a file deleted and then recreated is
-one `created`, which coalescing cannot say, because `removed` outranks
-`created` and the burst is reported by its strongest kind. Being the
-strongest of the three, it supersedes the other two: a non-zero
-`debounce_ms` takes over from `settle_ms`, and `poll` returns as soon as
-a window closes rather than collecting for `latency_ms` more.
+`poll` blocks until the first event of a batch arrives and then collects
+for `latency_ms` more, 50 ms by default. Everything on one path inside
+that window becomes one `Event`, carrying the most significant kind:
 
-## What it does not do
+```
+attributes  <  modified  <  closed  <  created  <  renamed  <  removed  <  overflow
+```
 
-The point of this section is that the list is short and explicit, rather
-than something you discover.
+A file created and then written reports `created`; a file written and
+then deleted reports `removed`. A path removed and recreated inside one
+window also reports `removed` — the one case where the coalesced kind is
+not the end state — so treat an event as "look at this path again". Zero
+switches coalescing off.
 
-- **The Windows backend has never been run by its author.** It compiles
-  for `x86_64-windows-gnu`, `x86_64-windows-msvc` and
-  `aarch64-windows-gnu`, and the shared suite runs it on the Windows CI
-  runner. That is the whole of the evidence behind it. `Watcher.fd` is
-  `null` there, because a completion port is not something another wait
-  loop can take.
-- **`kqueue` costs a descriptor per file.** It watches descriptors, not
-  names, so a watched tree costs one per directory and one per file
-  inside a watched directory, against the per-process limit. If the
-  process runs out, the files inside a watched directory are still
-  reported as appearing, disappearing and being renamed, but not as being
-  modified. This is why FSEvents and not `kqueue` is the default on Apple
-  platforms; `kqueue` remains the better answer for a handful of paths
-  watched without recursion.
-- **FSEvents coalesces before lookout sees anything.** It has a latency
-  window of its own, and within it several changes to one path arrive as
-  one delivery with several flags set. lookout keeps that window as short
-  as the API allows and does its own coalescing in one place, so that
-  every backend coalesces by the same rule; what it cannot do is
-  reconstruct an order FSEvents did not keep.
-- **FSEvents delivers on a thread lookout does not own.** The library
-  starts none and calls nothing back: the dispatch queue appends to a
-  fixed buffer and writes one byte to a pipe, and every event a caller
-  sees is produced on the thread that called `poll`. If a burst outruns
-  that buffer, the excess becomes `Kind.overflow` rather than a blocked
-  system callback.
-- **Recursion is not a kernel feature.** Neither `kqueue` nor `inotify`
-  recurses. lookout walks the tree at `add` time, registers each
-  directory, and registers new directories as they appear. A directory
-  created and populated faster than lookout can register it can lose the
-  events for files inside; lookout scans each new directory immediately
-  and reports what it finds as `created`, which closes the race for
-  files that still exist and not for files already gone again.
-- **Symbolic links are not followed.** A link inside a watched tree is an
-  entry, not a doorway, so a watch cannot silently widen into a
-  directory you did not ask for.
-- **A watched file that is replaced is not followed.** The
-  write-to-temporary-and-rename that editors do replaces the inode; a
-  watch on the file reports `renamed` or `removed` and then goes quiet,
-  because the descriptor still refers to the old file. Watch the
-  containing directory to follow a path rather than a file.
-- **Large directories are capped.** A directory holding more than
-  `max_dir_entries` entries, 4096 by default, reports `Kind.overflow`
-  against the watch root, meaning "rescan this yourself". `kqueue` and
-  `poll` name entries by comparing listings and past the limit genuinely
-  cannot see a change; `inotify` is told every name by the kernel and
-  keeps reporting them, and counts entries only so that the signal is
-  the same on every platform. Raise the budget if you meant to watch a
-  directory that size.
-- **`overflow` is not an error.** It is also what the kernel event queue
-  overflowing looks like on Linux. Either way the answer is the same:
-  the watcher's record is incomplete and the caller should re-read the
-  tree.
-- **There is no filtering.** No globs, no ignore list, no predicate:
-  everything under a recursive watch is watched, so a tree with a large
-  build directory in it costs a kernel watch or a descriptor for every
-  file in that directory. Watch the subdirectories you mean, or drop the
-  events you do not want after the fact.
-- **A path must exist before it can be watched.** `add` on a path that
-  is not there fails with `error.FileNotFound` rather than waiting for
-  it to appear. Watch the containing directory and add the real watch
-  when it is created.
-- **`overflow` comes with no rescan helper.** lookout says the record is
-  incomplete; re-reading the tree and working out what was missed is the
-  caller's, with no API here to do it for them.
-- **The watch limit is one error.** `error.WatchLimitReached` is what
-  `add` returns when the operating system refuses another watch --
-  `ENOSPC` from `inotify_add_watch`, which is the per-user
-  `max_user_watches` cap; `ENOMEM` from `kevent`; a stream FSEvents will
-  not start; a handle Windows will not take. The same error on every
-  backend, so a caller writes one arm rather than five. A file that
-  merely happens to sit inside a watched directory is dropped rather
-  than failing the `add`, because the directory still reports it
-  appearing and disappearing -- only the path the caller named is an
-  error. `Watcher.stats().registrations` is the number that runs into
-  the limit.
-- **One watcher, one thread.** A `Watcher` is not thread-safe. Several
-  may exist in one process.
-- **One watcher watches a path once.** A second `add` of a path already
-  watched fails with `error.PathAlreadyWatched`. Two watchers may watch
-  the same path; one watcher may not watch it twice, because `inotify`
-  hands back the same kernel watch descriptor for the same inode and the
-  second registration would quietly take the first one's events over.
-- **Overlapping watches are not fully independent on Linux.** Watching a
-  tree recursively and also watching a directory inside it means two
-  watches meeting at one inode, which `inotify` represents once; the
-  events for the shared directory arrive under whichever watch
-  registered it last. The other backends keep them separate. Watch
-  either the tree or the subdirectory, not both.
-- **`settle_ms` delays only `modified`.** A creation, a removal and a
-  rename are facts about a name rather than about contents, and are
-  reported at once whatever it is set to.
-- **`renamed` means the watched path itself.** A rename of an entry
-  inside a watched directory is `removed` on the old name and `created`
-  on the new one, on every backend, because the listing comparison the
-  BSD and polling backends make cannot tell a rename from a deletion and
-  a creation. `renamed` is reserved for the watched path itself being
-  moved, which `kqueue` and `inotify` do report and the other three
-  backends report as `removed` -- see `reportsRootMove`. The watched
-  path being *deleted* is `removed` on every backend.
+`settle_ms` delays only `modified`. A creation, a removal and a rename
+are facts about a name, and are reported at once whatever it is set to.
 
-## Backends
+`debounce_ms` reports the end state: a file deleted and then recreated is
+one `created`, which coalescing cannot say because `removed` outranks
+`created`. It supersedes the other two — a non-zero `debounce_ms` takes
+over from `settle_ms`, and `poll` returns as soon as a window closes.
 
-| Backend | Targets | Default | Mechanism | Recursion costs | Renames | Ignored subtree |
-|---|---|---|---|---|---|---|
-| `fsevents` | macOS, iOS and the rest of Apple's | yes | One FSEvents stream per watch, delivered on a dispatch queue into a pipe the watcher owns. | one stream, and one remembered path per file | paired | events dropped; the kernel recurses regardless |
-| `kqueue` | Apple platforms, FreeBSD, NetBSD, OpenBSD, DragonFly | on the BSDs | `EVFILT_VNODE` on a descriptor per watched path, plus a listing comparison to name the entry that changed. | one descriptor per directory **and per file** | removal + creation | never opened, never registered |
-| `inotify` | Linux | yes | One kernel watch per directory; the kernel names the entry and gives each rename a cookie. | one kernel watch per directory | paired | never opened, never registered |
-| `windows` | Windows | yes | `ReadDirectoryChangesW` with overlapped reads drained through a completion port. | nothing: recursion is a flag | paired | events dropped; the kernel recurses regardless |
-| `poll` | everywhere | where there is no kernel backend | Re-stat and re-list on a timer. | one listing per directory per tick | removal + creation | never opened, never registered |
+### Recursion
 
-`Options.backend` selects one explicitly; `supported` says whether this
-target has it. Asking for a backend this target was not built with fails
-`init` with `error.BackendUnavailable` rather than failing to compile, so
-a program can ask and fall back.
+Neither `kqueue` nor `inotify` recurses. lookout walks the tree at `add`,
+registers each directory, and registers new ones as they appear,
+reporting whatever is already inside as created — which closes the race
+for files that still exist and not for files already gone again. A deep
+tree costs one descriptor or one kernel watch per directory, against a
+per-process or per-user limit; `Watcher.stats().registrations` is the
+number that runs into it. FSEvents and `ReadDirectoryChangesW` recurse in
+the kernel, so a tree costs one stream or one handle.
 
-### Where the backends disagree, and what the contract does about it
+### Filtering
 
-Two differences are real and cannot be papered over, so they are in the
-API rather than in the small print.
+`AddOptions.filter` says what a watch is not about. `Filter.ignore` is a
+list of path prefixes and simple globs: `*` and `?` match within one path
+component, a pattern holding no separator matches the final component at
+any depth, and an absolute pattern matches the absolute path.
+`Filter.allow` is the caller's own predicate. Both are asked about every
+ancestor of a path, so excluding a directory excludes its subtree.
 
-**Renames.** FSEvents, `inotify` and `ReadDirectoryChangesW` each say
-which removal goes with which creation -- by reporting both halves in one
-delivery, by a cookie, by an old-name/new-name pair. `kqueue` and polling
-learn what changed by comparing directory listings, where a rename and a
-delete-plus-create are the same listing. So `pairsRenames(backend)` tells
-you which shape to expect, `Event.from` carries the answer where there is
-one, and neither backend guesses. `Kind.renamed` with `from == null` is a
-third thing: the watched path itself was moved, which has no second half.
+Where lookout does the recursion — `inotify`, `kqueue`, `poll` — an
+excluded directory is never opened and never registered, and its tree
+costs nothing. Where the kernel recurses it cannot be told about a
+filter, so the work happens anyway and only the events are dropped.
+`prunesIgnored(backend)` says which of the two you have.
 
-**Flags versus facts.** `inotify` reports a sequence of things that
-happened. FSEvents reports flags accumulated per path which it never
-clears, so a file created an hour ago and written now still arrives with
-the created bit set. The FSEvents backend therefore remembers which
-paths it believes exist -- seeded by one listing walk per watch, kept
-current from what it reports -- and asks that, not the flags, whether
-something is a creation. It costs one string per watched file, which is
-still nothing beside `kqueue`'s descriptor per watched file.
+### Renames
 
-## What has run where
+FSEvents, `inotify` and `ReadDirectoryChangesW` each say which removal
+goes with which creation — both halves in one delivery, a cookie, an
+old-name/new-name pair. `kqueue` and polling learn what changed by
+comparing directory listings, in which a rename and a delete-plus-create
+are the same thing. `pairsRenames(backend)` says which shape to expect,
+`Event.from` carries the answer where there is one, and neither backend
+guesses.
 
-Test results are a claim like any other, so here is the shape of the
-evidence. The suite is executed on Linux, macOS and Windows by CI --
-`zig build test` in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall on
-each, plus `zig build examples` -- and every target in the cross-compile
-matrix is compiled including the test binary, so a backend source cannot
-break unnoticed behind an empty archive.
+`Kind.renamed` with `from == null` means the watched path itself was
+moved, which has no second half. Deleting the watched path is
+`Kind.removed` everywhere. Moving it is `renamed` on `kqueue` and
+`inotify`, which watch the object and are told; `removed` on FSEvents and
+polling, which see only that the name is empty; and nothing at all on
+Windows, where the handle survives the rename and the rename happens in a
+directory the watch was not put on. `reportsRootMove` gives all three.
 
-`ci/linux.sh` closes the gap for `inotify`, which now runs rather than
-merely compiling. What is left compile-only is Windows: nothing in
-`src/backend/windows.zig` has been executed on the machine it was written
-on, and the Windows runner in CI is the only place it runs. The polling
-backend's Windows path has the same status, and rests on `std.Io.Dir`
-behaving there as it does on POSIX -- that a directory opened with
-`.iterate` can be listed while entries are being created and removed, and
-that `statFile` reports a modification time with enough resolution to see
-two writes close together.
+### Losing events
+
+`Kind.overflow` against a watch root means the record is incomplete and
+the tree should be read again. It comes from the `inotify` queue
+overflowing, from FSEvents dropping events, from `ReadDirectoryChangesW`
+returning an empty read or `ERROR_NOTIFY_ENUM_DIR`, and from a directory
+holding more than `Options.max_dir_entries` entries, 4096 by default. It
+is not an error.
+
+It does not say what was lost, because by then the names are gone. Seed
+a `Baseline` where the watch is taken and `diff` it when the overflow
+arrives: it re-reads the tree and returns the changes the events would
+have carried, on the same ownership terms as the slice `poll` returns.
+
+### Finished writes
+
+`settle_ms` decides a write is over when the file has been still for a
+window, which is an estimate. `inotify` is told exactly, through
+`IN_CLOSE_WRITE`: `Options.report_closes` asks for it and `Kind.closed`
+carries it. `reportsCloses(backend)` says whether the backend can produce
+one, and four of the five cannot. It is off by default because turning it
+on changes what a write looks like — `closed` outranks `modified` inside
+a coalescing window. Asking for it where it is not reported costs
+nothing; the writes still arrive as `modified`.
+
+### Watching a path that is not there
+
+`add` on a missing path is `error.FileNotFound` unless
+`AddOptions.pending` is set. With it the watch is parked on the nearest
+existing ancestor, narrowed to the single entry that leads to the path
+asked for, and steps down as the path appears; when the path appears the
+watch is promoted to the real one — recursion, filter and all — and
+reported as `Kind.created`. The id comes back from `add` at once and does
+not change. Nothing that happens to the ancestor meanwhile is reported.
+
+### One error for the watch limit
+
+`error.WatchLimitReached` is what `add` returns when the operating system
+refuses another watch: `ENOSPC` from `inotify_add_watch`, the per-user
+`max_user_watches` cap; `ENOMEM` from `kevent`; a stream FSEvents will
+not start; a handle Windows will not take. A file that merely sits inside
+a watched directory is dropped instead, since the directory still reports
+it appearing and disappearing; only the path the caller named is an
+error.
+
+### What each backend costs
+
+| Backend | Mechanism | Recursion costs | Renames | Ignored subtree |
+|---|---|---|---|---|
+| `fsevents` | One stream per watch, delivered on a dispatch queue into a pipe the watcher owns. | one stream, and one remembered path per file | paired | events dropped; the kernel recurses regardless |
+| `kqueue` | `EVFILT_VNODE` on a descriptor per watched path, plus a listing comparison to name the entry that changed. | one descriptor per directory **and per file** | removal + creation | never opened, never registered |
+| `inotify` | One kernel watch per directory; the kernel names the entry and gives each rename a cookie. | one kernel watch per directory | paired | never opened, never registered |
+| `windows` | `ReadDirectoryChangesW` with overlapped reads drained through a completion port. | nothing: recursion is a flag | paired | events dropped; the kernel recurses regardless |
+| `poll` | Re-stat and re-list on a timer. | one listing per directory per tick | removal + creation | never opened, never registered |
+
+I made FSEvents the default on Apple platforms rather than `kqueue`,
+because it recurses without a descriptor per directory and pairs renames.
+`kqueue` is still the better answer for a handful of paths watched
+without recursion; a process that runs out of descriptors under it still
+sees files inside a watched directory appear, disappear and be renamed,
+but not be modified.
+
+`Options.backend` selects one explicitly and `supported` says whether
+this target has it. Asking for one this target was not built with fails
+`init` with `error.BackendUnavailable` rather than failing to compile.
+
+## Scope
+
+What lookout does not do:
+
+- Symbolic links are not followed. A link inside a watched tree is an
+  entry, not a doorway into a directory you did not ask for.
+- A watched file that is replaced rather than written — the
+  write-to-temporary-and-rename an editor does — is reported once and
+  then goes quiet. Watch the containing directory to follow a path.
+- A `Watcher` is not thread-safe. Several may exist in one process.
+- One watcher watches a path once; a second `add` of it is
+  `error.PathAlreadyWatched`. On Linux two watches that overlap share one
+  kernel watch where they meet, and its events go to whichever came last.
+- Nothing is persisted. There is no answer to what changed while the
+  process was not running.
+
+## Platforms
+
+| Platform | Backends | Tested |
+|---|---|---|
+| macOS, and the other Apple platforms | `fsevents` (default), `kqueue`, `poll` | macOS CI runner |
+| Linux | `inotify` (default), `poll` | Ubuntu CI runner, and `ci/linux.sh` in Docker |
+| FreeBSD, NetBSD, OpenBSD, DragonFly | `kqueue` (default), `poll` | cross-compiled only |
+| Windows | `windows` (default), `poll` | compiles for Windows; the CI run is pending |
+
+Pending: the Windows read buffer is fixed at 64 KB and is not
+configurable. That waits on a green Windows CI run.
+
+CI compiles every commit for `x86_64-linux-gnu`, `aarch64-linux-gnu`,
+`x86_64-linux-musl`, `x86_64-windows-gnu`, `x86_64-windows-msvc`,
+`aarch64-windows-gnu`, `x86_64-freebsd` and `x86_64-netbsd`, test binary
+included, so no backend source can break behind an empty archive.
 
 ## Testing
 
 ```
-zig build test          # the suite, on this host, once per backend it has
-ci/linux.sh             # the suite on Linux, in Docker, all four modes
+zig build test          # the suite, once per backend this host has
+sh ci/linux.sh          # the suite on Linux, in Docker, all four modes
 ```
 
-`ci/linux.sh` exists because the `inotify` backend cannot run on macOS or
-Windows, and a backend that only compiles is a backend nobody has run. It
+The suite runs whole against each backend the host can execute, so the
+polling backend is held to the same assertions as the kernel ones on the
+same machine. `pairsRenames`, `reportsRootMove`, `prunesIgnored` and
+`reportsCloses` are asserted per backend, so the tables above cannot go
+stale quietly.
+
+`ci/linux.sh` exists because `inotify` cannot run on macOS or Windows. It
 builds a Debian image with the pinned Zig from
-[`ci/linux.Dockerfile`](ci/linux.Dockerfile) — no network beyond that,
-nothing installed on the host — mounts the working tree read-only, and
-runs `zig build test` inside it in Debug, ReleaseSafe, ReleaseFast and
-ReleaseSmall. Pass mode names to run fewer, or set
-`LOOKOUT_LINUX_IMAGE` to reuse an image you already have.
+[`ci/linux.Dockerfile`](ci/linux.Dockerfile), mounts the working tree
+read-only, and runs `zig build test` inside it in all four optimize modes.
+Pass mode names to run fewer, or set `LOOKOUT_LINUX_IMAGE` to reuse an
+image you have.
 
 ## Requirements
 
