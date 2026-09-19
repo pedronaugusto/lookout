@@ -1307,4 +1307,5 @@ test {
     _ = @import("test_suite.zig");
     _ = @import("test_bench.zig");
     _ = @import("test_gaps.zig");
+    _ = @import("test_fuzz.zig");
 }

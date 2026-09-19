@@ -61,6 +61,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = darwin,
+            // The fuzz targets in src/test_fuzz.zig are the reason: the
+            // fuzzing runner in Zig 0.16.0 will not build a module that
+            // carries error return traces.
+            .error_tracing = false,
         }),
     });
     if (darwin) {

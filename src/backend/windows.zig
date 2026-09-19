@@ -36,6 +36,7 @@ const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
+const records = @import("windows_records.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
@@ -466,13 +467,18 @@ fn retire(w: *Windows, overlapped: ?*c.OVERLAPPED) void {
 fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.Watcher.PollError!void {
     const dir = if (watch.only == null) watch.root else std.fs.path.dirname(watch.root) orelse watch.root;
 
-    var offset: usize = 0;
-    while (offset + @sizeOf(c.FILE_NOTIFY_INFORMATION) <= transferred) {
-        const info: *align(4) const c.FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(&watch.buffer[offset]));
-        const name_bytes = watch.buffer[offset + @sizeOf(c.FILE_NOTIFY_INFORMATION) ..][0..info.FileNameLength];
-        const name_wide = std.mem.bytesAsSlice(u16, @as([]align(2) const u8, @alignCast(name_bytes)));
+    var it = records.iterate(watch.buffer[0..transferred]);
+    while (true) {
+        // A chain this cannot follow is a read that cannot be accounted
+        // for: what is left of it is lost, and `lookout.Kind.overflow`
+        // is what lookout says when it has lost something and cannot
+        // say what. The caller already handles it.
+        const record = it.next() catch {
+            try batch.push(w.gpa, watch.id, watch.root, .overflow, .directory);
+            return;
+        } orelse return;
 
-        const relative = try std.unicode.wtf16LeToWtf8Alloc(w.gpa, name_wide);
+        const relative = try record.wtf8Alloc(w.gpa);
         defer w.gpa.free(relative);
         // The kernel spells a nested path with backslashes already, so
         // joining is only about the root.
@@ -486,11 +492,8 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
         else
             path_cmp.eql(path, watch.root);
         if (wanted) {
-            try w.reportOne(watch, info.Action, path, batch);
+            try w.reportOne(watch, record.action, path, batch);
         }
-
-        if (info.NextEntryOffset == 0) break;
-        offset += info.NextEntryOffset;
     }
 }
 
@@ -610,14 +613,6 @@ const c = struct {
         Offset: DWORD,
         OffsetHigh: DWORD,
         hEvent: ?HANDLE,
-    };
-
-    /// A variable-length record: `FileName` of `FileNameLength` bytes
-    /// follows, and `NextEntryOffset` steps to the next one.
-    const FILE_NOTIFY_INFORMATION = extern struct {
-        NextEntryOffset: DWORD,
-        Action: DWORD,
-        FileNameLength: DWORD,
     };
 
     const SECURITY_ATTRIBUTES = extern struct {

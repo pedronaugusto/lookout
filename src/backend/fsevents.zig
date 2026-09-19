@@ -40,10 +40,13 @@ const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
+const records = @import("fsevents_records.zig");
 const trace = @import("../trace.zig");
 const walk = @import("../walk.zig");
+const Record = records.Record;
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
+const flag = records.flag;
 
 const FsEvents = @This();
 
@@ -77,24 +80,9 @@ since: u64,
 /// per watched file -- still nothing against `kqueue`'s descriptor per
 /// watched file, which is the comparison that matters on this platform.
 known: path_cmp.Set(void),
-/// The half of a rename whose partner has not been delivered yet.
-///
-/// FSEvents reports a rename as two `ItemRenamed` records and usually
-/// puts both in one delivery, but "usually" is not "always": a burst
-/// long enough splits a pair across two. A half is therefore held until
-/// the whole wait is over rather than until the end of its own delivery,
-/// because deciding early turns one `renamed` into a removal and a
-/// creation on a backend that says it pairs them.
-held: ?Half,
-
-/// One `ItemRenamed` record waiting for its partner.
-const Half = struct {
-    id: WatchId,
-    /// Absolute path, owned by the backend.
-    path: []u8,
-    flags: u32,
-    event: u64,
-};
+/// The half of a rename whose partner has not been delivered yet. The
+/// path it holds is owned here -- see `records.Half`.
+pairing: records.Pairing,
 
 /// FSEvents' own coalescing window, in seconds. Kept short because
 /// lookout does its own coalescing in `Batch`, so that every backend
@@ -174,23 +162,16 @@ const Sink = struct {
     /// costs nothing: one byte pending is as good as a thousand.
     wake_w: posix.fd_t,
 
-    /// Record layout: watch id, flags, path length, the system's event
-    /// id, path. Read back with unaligned loads, because the path lengths
-    /// do not align.
-    const header_len = 20;
-
+    /// Written here and read back in `drain`, both through
+    /// src/backend/fsevents_records.zig, which is where the layout is
+    /// written down and where it is fuzzed.
     fn append(s: *Sink, id: WatchId, flags: u32, event: u64, subject: []const u8) void {
-        if (s.len + header_len + subject.len > s.buffer.len) {
+        if (s.len + records.encodedLen(subject) > s.buffer.len) {
             s.overflowed = true;
             s.dropped += 1;
             return;
         }
-        std.mem.writeInt(u32, s.buffer[s.len..][0..4], @intFromEnum(id), .little);
-        std.mem.writeInt(u32, s.buffer[s.len + 4 ..][0..4], flags, .little);
-        std.mem.writeInt(u32, s.buffer[s.len + 8 ..][0..4], @intCast(subject.len), .little);
-        std.mem.writeInt(u64, s.buffer[s.len + 12 ..][0..8], event, .little);
-        @memcpy(s.buffer[s.len + header_len ..][0..subject.len], subject);
-        s.len += header_len + subject.len;
+        s.len += records.encode(s.buffer[s.len..], id, flags, event, subject);
     }
 
     fn signal(s: *Sink) void {
@@ -304,7 +285,7 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .budget = .init(gpa, io, options.max_dir_entries),
         .since = sinceOf(options.since),
         .known = .empty,
-        .held = null,
+        .pairing = .{},
     };
 }
 
@@ -325,7 +306,7 @@ pub fn deinit(f: *FsEvents) void {
     f.budget.deinit();
     for (f.known.keys()) |p| f.gpa.free(p);
     f.known.deinit(f.gpa);
-    if (f.held) |half| f.gpa.free(half.path);
+    if (f.pairing.held) |half| f.gpa.free(half.path);
     c.dispatch_release(f.queue);
     _ = std.c.close(f.sink.wake_r);
     _ = std.c.close(f.sink.wake_w);
@@ -556,7 +537,7 @@ fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
             // longer than one delivery, and deciding now would turn one
             // `renamed` into a removal and a creation.
             var round: usize = 0;
-            while (f.held != null and round < grace_rounds) : (round += 1) {
+            while (f.pairing.held != null and round < grace_rounds) : (round += 1) {
                 if (!f.readable(grace_ms)) break;
                 try f.drain(batch);
             }
@@ -614,23 +595,21 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
         }
     }
 
-    var records: std.ArrayList(Record) = .empty;
-    defer records.deinit(f.gpa);
-    var offset: usize = 0;
-    while (offset + Sink.header_len <= f.staging.items.len) {
-        const bytes = f.staging.items;
-        const id: WatchId = @enumFromInt(std.mem.readInt(u32, bytes[offset..][0..4], .little));
-        const flags = std.mem.readInt(u32, bytes[offset + 4 ..][0..4], .little);
-        const len = std.mem.readInt(u32, bytes[offset + 8 ..][0..4], .little);
-        const event = std.mem.readInt(u64, bytes[offset + 12 ..][0..8], .little);
-        offset += Sink.header_len;
-        if (offset + len > bytes.len) break;
-        const subject = bytes[offset..][0..len];
+    var delivered: std.ArrayList(Record) = .empty;
+    defer delivered.deinit(f.gpa);
+    var it = records.iterate(f.staging.items);
+    while (true) {
+        // The delivery thread writes a whole record under the lock and
+        // the drain copies under the same lock, so a tail this cannot
+        // decode is not one either of them wrote. What has been decoded
+        // is reported; the rest says nothing that can be acted on.
+        const record = it.next() catch |err| switch (err) {
+            error.TruncatedRecord => break,
+        } orelse break;
         trace.log("fsevents record watch={d} event={d} flags=0x{x} path={s}", .{
-            @intFromEnum(id), event, flags, subject,
+            @intFromEnum(record.id), record.event, record.flags, record.path,
         });
-        try records.append(f.gpa, .{ .id = id, .flags = flags, .event = event, .path = subject });
-        offset += len;
+        try delivered.append(f.gpa, record);
     }
 
     // Which records a pairing has already spoken for. FSEvents puts
@@ -638,80 +617,50 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
     // each other -- the directory they are in can be named between
     // them -- so a partner is looked for anywhere in the delivery and
     // struck off here.
-    const used = try f.gpa.alloc(bool, records.items.len);
+    const used = try f.gpa.alloc(bool, delivered.items.len);
     defer f.gpa.free(used);
     @memset(used, false);
 
     // The half held from the last drain looks for its partner here.
-    if (f.held != null) try f.rejoin(batch, records.items, used);
+    try f.rejoin(batch, delivered.items, used);
 
-    for (records.items, 0..) |_, i| {
+    for (delivered.items, 0..) |_, i| {
         if (used[i]) continue;
-        try f.report(batch, records.items, used, i);
+        try f.report(batch, delivered.items, used, i);
     }
 }
 
 /// Joins the half held from the last drain to its partner in this one,
 /// or gives up on it.
-fn rejoin(f: *FsEvents, batch: *Batch, records: []const Record, used: []bool) lookout.Watcher.PollError!void {
-    const half = f.held orelse return;
-    const at = f.partnerOf(half.id, half.path, records, used, 0) orelse
-        return f.resolveHeld(batch);
-    const stream = f.streams.get(half.id) orelse return f.resolveHeld(batch);
+fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) lookout.Watcher.PollError!void {
+    const taken = f.pairing.take(delivered, used, Asking{ .f = f }) orelse return;
+    defer f.gpa.free(taken.half.path);
+    const at = taken.partner orelse return f.reportHalf(batch, taken.half);
+    const stream = f.streams.get(taken.half.id) orelse return f.reportHalf(batch, taken.half);
 
-    f.held = null;
-    used[at] = true;
-    defer f.gpa.free(half.path);
-    const partner = records[at];
+    const partner = delivered[at];
     if (f.exists(partner.path)) {
-        try f.joined(batch, half.id, partner.path, half.path, partner.target());
+        try f.joined(batch, taken.half.id, partner.path, taken.half.path, partner.target());
     } else {
-        try f.joined(batch, half.id, half.path, partner.path, partner.target());
+        try f.joined(batch, taken.half.id, taken.half.path, partner.path, partner.target());
     }
     try f.recount(batch, partner, stream);
 }
 
-/// Where in `records` the other half of a rename of `subject` is, if it
-/// is there at all.
-///
-/// The one that no longer exists is the name it came from: the inode
-/// moved, so exactly one of the two paths resolves. When neither test
-/// settles it -- the file was renamed and then deleted, or renamed out
-/// of the watch -- there is no partner and there is nothing to pair.
-fn partnerOf(
+/// What the matching in src/backend/fsevents_records.zig asks the
+/// watcher about a path: whether an event for it would be reported
+/// against that watch at all, and whether the file system has it now.
+const Asking = struct {
     f: *FsEvents,
-    id: WatchId,
-    subject: []const u8,
-    records: []const Record,
-    used: []const bool,
-    from: usize,
-) ?usize {
-    const stream = f.streams.get(id) orelse return null;
-    const subject_exists = f.exists(subject);
-    for (records[from..], from..) |record, at| {
-        if (used[at]) continue;
-        if (record.id != id) continue;
-        if (record.flags & c.kFSEventStreamEventFlagItemRenamed == 0) continue;
-        if (path_cmp.eql(record.path, subject)) continue;
-        if (!stream.wants(record.path)) continue;
-        if (stream.filter.excludes(stream.root, record.path)) continue;
-        if (f.exists(record.path) == subject_exists) continue;
-        return at;
+
+    pub fn wanted(a: Asking, id: WatchId, subject: []const u8) bool {
+        const stream = a.f.streams.get(id) orelse return false;
+        if (!stream.wants(subject)) return false;
+        return !stream.filter.excludes(stream.root, subject);
     }
-    return null;
-}
 
-/// One delivered change, still pointing into `staging`.
-const Record = struct {
-    id: WatchId,
-    flags: u32,
-    /// The system's own number for this change, which orders it against
-    /// `Stream.boundary`.
-    event: u64,
-    path: []const u8,
-
-    fn target(r: Record) Target {
-        return if (r.flags & c.kFSEventStreamEventFlagItemIsDir != 0) .directory else .file;
+    pub fn exists(a: Asking, subject: []const u8) bool {
+        return a.f.exists(subject);
     }
 };
 
@@ -720,11 +669,11 @@ const Record = struct {
 fn report(
     f: *FsEvents,
     batch: *Batch,
-    records: []const Record,
+    delivered: []const Record,
     used: []bool,
     at: usize,
 ) lookout.Watcher.PollError!void {
-    const record = records[at];
+    const record = delivered[at];
     const stream = f.streams.get(record.id) orelse {
         trace.log("fsevents drop no-stream watch={d} path={s}", .{ @intFromEnum(record.id), record.path });
         return;
@@ -734,9 +683,9 @@ fn report(
         return;
     }
 
-    if (record.flags & (c.kFSEventStreamEventFlagMustScanSubDirs |
-        c.kFSEventStreamEventFlagUserDropped |
-        c.kFSEventStreamEventFlagKernelDropped) != 0)
+    if (record.flags & (flag.must_scan_sub_dirs |
+        flag.user_dropped |
+        flag.kernel_dropped) != 0)
     {
         trace.log("fsevents push overflow root={s}", .{stream.root});
         try batch.push(f.gpa, record.id, stream.root, .overflow, .directory);
@@ -745,7 +694,7 @@ fn report(
     // caught up with the present. Nothing happened to a path, so there
     // is nothing to report; it is declared and swallowed rather than
     // left to look like a change to the watch root.
-    if (record.flags & c.kFSEventStreamEventFlagHistoryDone != 0) {
+    if (record.flags & flag.history_done != 0) {
         trace.log("fsevents history done root={s}", .{stream.root});
         return;
     }
@@ -754,7 +703,7 @@ fn report(
     // asks the file system: a root that is still there was moved, and one
     // that is not was deleted. FSEvents keeps watching the inode either
     // way; lookout reports it and lets the caller decide.
-    if (record.flags & c.kFSEventStreamEventFlagRootChanged != 0) {
+    if (record.flags & flag.root_changed != 0) {
         const kind: lookout.Kind = if (f.exists(stream.root)) .renamed else .removed;
         trace.log("fsevents push {s} root={s}", .{ @tagName(kind), stream.root });
         try batch.push(f.gpa, record.id, stream.root, kind, .directory);
@@ -768,10 +717,10 @@ fn report(
         return;
     }
 
-    if (record.flags & c.kFSEventStreamEventFlagItemRenamed != 0) {
-        if (f.partnerOf(record.id, record.path, records, used, at + 1)) |partner_at| {
+    if (record.renamed()) {
+        if (records.partnerOf(record, delivered, used, at + 1, Asking{ .f = f })) |partner_at| {
             used[partner_at] = true;
-            const partner = records[partner_at];
+            const partner = delivered[partner_at];
             trace.log("fsevents push renamed path={s}", .{record.path});
             if (f.exists(partner.path)) {
                 try f.joined(batch, record.id, partner.path, record.path, partner.target());
@@ -849,13 +798,13 @@ fn reportPlain(
     // never clears them, so the first delivery naming a directory
     // carries whatever was last done to it, however long ago.
     if (record.target() != .directory) {
-        if (record.flags & c.kFSEventStreamEventFlagItemModified != 0) {
+        if (record.flags & flag.item_modified != 0) {
             trace.log("fsevents push modified path={s}", .{record.path});
             try batch.push(f.gpa, record.id, record.path, .modified, .file);
-        } else if (record.flags & (c.kFSEventStreamEventFlagItemInodeMetaMod |
-            c.kFSEventStreamEventFlagItemChangeOwner |
-            c.kFSEventStreamEventFlagItemXattrMod |
-            c.kFSEventStreamEventFlagItemFinderInfoMod) != 0)
+        } else if (record.flags & (flag.item_inode_meta_mod |
+            flag.item_change_owner |
+            flag.item_xattr_mod |
+            flag.item_finder_info_mod) != 0)
         {
             trace.log("fsevents push attributes path={s}", .{record.path});
             try batch.push(f.gpa, record.id, record.path, .attributes, .file);
@@ -923,27 +872,37 @@ fn joined(
 /// Holds an unpaired rename until the next delivery arrives. Anything
 /// already held has waited as long as it is going to.
 fn hold(f: *FsEvents, batch: *Batch, record: Record) lookout.Watcher.PollError!void {
-    if (f.held != null) try f.resolveHeld(batch);
+    // Copied first: the buffer the record points into is emptied before
+    // the next delivery is read, and a dupe that fails must leave what
+    // is already held where it was.
     const owned = try f.gpa.dupe(u8, record.path);
-    f.held = .{ .id = record.id, .path = owned, .flags = record.flags, .event = record.event };
     trace.log("fsevents hold renamed path={s}", .{record.path});
+    const stale = f.pairing.carry(.{
+        .id = record.id,
+        .path = owned,
+        .flags = record.flags,
+        .event = record.event,
+    }) orelse return;
+    defer f.gpa.free(stale.path);
+    try f.reportHalf(batch, stale);
 }
 
-/// Reports a held half that never found its partner: the path was
-/// renamed out of the watch, or renamed and then deleted, and what is
-/// left is the removal or the creation the other backends would give.
+/// Gives up on a half that never found its partner, at the end of the
+/// whole wait rather than at the end of one delivery.
 fn resolveHeld(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
-    const half = f.held orelse return;
-    f.held = null;
+    const half = f.pairing.held orelse return;
+    f.pairing.held = null;
     defer f.gpa.free(half.path);
+    try f.reportHalf(batch, half);
+}
+
+/// Reports a half that never found its partner: the path was renamed
+/// out of the watch, or renamed and then deleted, and what is left is
+/// the removal or the creation the other backends would give.
+fn reportHalf(f: *FsEvents, batch: *Batch, half: records.Half) lookout.Watcher.PollError!void {
     const stream = f.streams.get(half.id) orelse return;
     trace.log("fsevents unpaired renamed path={s}", .{half.path});
-    try f.reportPlain(batch, .{
-        .id = half.id,
-        .flags = half.flags,
-        .event = half.event,
-        .path = half.path,
-    }, stream);
+    try f.reportPlain(batch, half.record(), stream);
 }
 
 /// Records that a path exists.
@@ -1052,9 +1011,9 @@ fn exists(f: *const FsEvents, subject: []const u8) bool {
 /// Keeps the entry budget of the directory a change happened in, and
 /// reports `lookout.Kind.overflow` when it is past.
 fn recount(f: *FsEvents, batch: *Batch, record: Record, stream: *const Stream) lookout.Watcher.PollError!void {
-    const appeared = record.flags & c.kFSEventStreamEventFlagItemCreated != 0;
-    const vanished = record.flags & c.kFSEventStreamEventFlagItemRemoved != 0;
-    const renamed = record.flags & c.kFSEventStreamEventFlagItemRenamed != 0;
+    const appeared = record.flags & flag.item_created != 0;
+    const vanished = record.flags & flag.item_removed != 0;
+    const renamed = record.renamed();
     if (!appeared and !vanished and !renamed) return;
 
     const parent = std.fs.path.dirname(record.path) orelse return;
@@ -1088,22 +1047,7 @@ const c = struct {
     const kFSEventStreamCreateFlagWatchRoot: u32 = 0x00000004;
     const kFSEventStreamCreateFlagFileEvents: u32 = 0x00000010;
 
-    const kFSEventStreamEventFlagMustScanSubDirs: u32 = 0x00000001;
-    const kFSEventStreamEventFlagUserDropped: u32 = 0x00000002;
-    const kFSEventStreamEventFlagKernelDropped: u32 = 0x00000004;
     /// The replay a past `since_when` asked for has reached the present.
-    const kFSEventStreamEventFlagHistoryDone: u32 = 0x00000010;
-    const kFSEventStreamEventFlagRootChanged: u32 = 0x00000020;
-    const kFSEventStreamEventFlagItemCreated: u32 = 0x00000100;
-    const kFSEventStreamEventFlagItemRemoved: u32 = 0x00000200;
-    const kFSEventStreamEventFlagItemInodeMetaMod: u32 = 0x00000400;
-    const kFSEventStreamEventFlagItemRenamed: u32 = 0x00000800;
-    const kFSEventStreamEventFlagItemModified: u32 = 0x00001000;
-    const kFSEventStreamEventFlagItemFinderInfoMod: u32 = 0x00002000;
-    const kFSEventStreamEventFlagItemChangeOwner: u32 = 0x00004000;
-    const kFSEventStreamEventFlagItemXattrMod: u32 = 0x00008000;
-    const kFSEventStreamEventFlagItemIsDir: u32 = 0x00020000;
-
     const F_GETFL: c_int = 3;
     const F_SETFL: c_int = 4;
     const O_NONBLOCK: c_int = 0x0004;

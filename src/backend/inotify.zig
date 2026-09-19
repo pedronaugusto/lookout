@@ -30,6 +30,7 @@ const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
 const path_cmp = @import("../path.zig");
+const records = @import("inotify_records.zig");
 const walk = @import("../walk.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
@@ -333,13 +334,18 @@ fn read(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!bool {
     };
     if (len == 0) return false;
 
-    var offset: usize = 0;
-    while (offset + @sizeOf(linux.inotify_event) <= len) {
-        const event: *const linux.inotify_event = @ptrCast(@alignCast(&buffer[offset]));
-        offset += @sizeOf(linux.inotify_event) + event.len;
+    var it = records.iterate(buffer[0..len]);
+    while (true) {
+        // The kernel refuses a read smaller than the next record rather
+        // than returning half of one, so a tail this cannot decode is
+        // not something it produced. What has been decoded is already
+        // reported; the rest of the buffer says nothing that can be
+        // acted on.
+        const event = it.next() catch |err| switch (err) {
+            error.TruncatedRecord => return true,
+        } orelse return true;
         try n.handle(event, batch);
     }
-    return true;
 }
 
 fn drainWake(n: *Inotify) void {
@@ -373,7 +379,7 @@ const Change = struct {
 
 /// Turns one kernel event into lookout events: read the flags, pair what
 /// can be paired, report, then keep the books.
-fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout.Watcher.PollError!void {
+fn handle(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.PollError!void {
     var change = (try n.decode(event, batch)) orelse return;
     defer {
         n.gpa.free(change.path);
@@ -387,7 +393,7 @@ fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout
 /// Reads the flags, and answers everything that is over before an entry
 /// is named: the queue overflowing, a watch going away, and the watched
 /// path itself being deleted or moved.
-fn decode(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout.Watcher.PollError!?Change {
+fn decode(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.PollError!?Change {
     if (event.mask & linux.IN.Q_OVERFLOW != 0) {
         // The kernel does not say what was lost, so every watch is suspect.
         for (n.watches.keys(), n.watches.values()) |id, watch| {
@@ -422,7 +428,7 @@ fn decode(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout
         return null;
     }
 
-    const full = if (event.getName()) |name|
+    const full = if (event.name) |name|
         try std.fs.path.join(n.gpa, &.{ base, name })
     else
         try n.gpa.dupe(u8, base);
