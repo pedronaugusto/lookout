@@ -45,17 +45,6 @@ pub fn pollMs(d: Deadline) i32 {
     return @intCast(d.remainingMs() orelse return -1);
 }
 
-/// What `kevent(2)` wants: a duration, or `null` to block indefinitely.
-/// Written into `storage`, which the caller owns.
-pub fn timespec(d: Deadline, storage: *std.c.timespec) ?*const std.c.timespec {
-    const remaining = d.remainingMs() orelse return null;
-    storage.* = .{
-        .sec = @intCast(remaining / std.time.ms_per_s),
-        .nsec = @intCast((remaining % std.time.ms_per_s) * std.time.ns_per_ms),
-    };
-    return storage;
-}
-
 /// What `GetQueuedCompletionStatus` wants: milliseconds, or `INFINITE`.
 pub fn windowsMs(d: Deadline) u32 {
     return d.remainingMs() orelse std.math.maxInt(u32);
@@ -82,13 +71,9 @@ test "a timeout that has run out clamps to zero rather than going negative" {
     try testing.expectEqual(@as(u32, 0), d.windowsMs());
 }
 
-test "a timespec carries the seconds and the nanoseconds apart" {
+test "a deadline in the future has time left on it" {
     const d: Deadline = .start(testing.io, 2_500);
-    var storage: std.c.timespec = undefined;
-    const ts = d.timespec(&storage).?;
-    try testing.expect(ts.sec == 2 or ts.sec == 1);
-    try testing.expect(ts.nsec >= 0 and ts.nsec < std.time.ns_per_s);
-
-    const forever: Deadline = .start(testing.io, null);
-    try testing.expectEqual(@as(?*const std.c.timespec, null), forever.timespec(&storage));
+    const left = d.remainingMs().?;
+    try testing.expect(left > 0 and left <= 2_500);
+    try testing.expect(!d.expired());
 }

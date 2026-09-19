@@ -172,8 +172,18 @@ pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
     const deadline: Deadline = .start(k.io, timeout_ms);
 
     while (true) {
+        // The one thing the shared deadline does not hand out: this is
+        // the only backend that wants a `timespec`, and Windows gives
+        // the name no shape to build one from.
         var storage: std.c.timespec = undefined;
-        const timeout_ptr = deadline.timespec(&storage);
+        const timeout_ptr: ?*const std.c.timespec = ptr: {
+            const remaining = deadline.remainingMs() orelse break :ptr null;
+            storage = .{
+                .sec = @intCast(remaining / std.time.ms_per_s),
+                .nsec = @intCast((remaining % std.time.ms_per_s) * std.time.ns_per_ms),
+            };
+            break :ptr &storage;
+        };
 
         var events: [events_per_call]posix.Kevent = undefined;
         const empty: [0]posix.Kevent = .{};

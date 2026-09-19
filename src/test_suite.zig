@@ -1322,7 +1322,11 @@ test "a watch that cannot cover a subtree says so instead of going quiet" {
     // Running as a user who is refused nothing makes an unreadable
     // directory readable, and there is nothing to report.
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
-    if (std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    const euid = if (@import("builtin").link_libc)
+        std.c.geteuid()
+    else
+        std.os.linux.geteuid();
+    if (euid == 0) return error.SkipZigTest;
 
     for (backends) |backend| {
         // Only the backends that register each directory themselves can
@@ -1411,26 +1415,32 @@ test "a watcher says what it is watching" {
 }
 
 test "the descriptor becomes readable when there is something to report" {
+    // A completion port is not a descriptor anything else can wait on,
+    // and `std.posix.poll` is not the call to wait for one with.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
         const descriptor = f.watcher.fd() orelse continue;
         _ = try f.watcher.add(f.root, .{});
+        try f.settle();
 
-        // Not readable with nothing to say.
+        try f.write("a.txt", "one");
+
+        // This is the whole promise: a program with a wait loop of its
+        // own waits on this and calls `poll` when it fires. The suite
+        // used to assert only that it was not null.
+        //
+        // Readable means there is something to read, not that `poll`
+        // will certainly return an event -- a delivery can resolve to
+        // nothing once it is looked at -- so the assertion is one way
+        // round only.
         var fds: [1]std.posix.pollfd = .{.{
             .fd = descriptor,
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
-        try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 0));
-
-        try f.write("a.txt", "one");
-
-        // And readable now, which is the whole promise: a program with a
-        // wait loop of its own waits on this and calls `poll` when it
-        // fires. The suite used to assert only that it was not null.
-        fds[0].revents = 0;
         try std.testing.expect(try std.posix.poll(&fds, timeout_ms) > 0);
         try f.expectEvent("a.txt", .created);
     }

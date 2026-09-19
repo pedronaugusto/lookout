@@ -93,6 +93,7 @@ const Half = struct {
     /// Absolute path, owned by the backend.
     path: []u8,
     flags: u32,
+    event: u64,
 };
 
 /// FSEvents' own coalescing window, in seconds. Kept short because
@@ -214,24 +215,24 @@ const Stream = struct {
     /// directory out, so here the filter drops the events rather than
     /// saving the work -- see `lookout.prunesIgnored`.
     filter: Filter,
-    /// Whether this stream is still replaying what happened before it
-    /// was started, which `lookout.Options.since` asked for. Cleared by
-    /// the `HistoryDone` flag.
+    /// Whether this stream is still catching up on what happened
+    /// before it existed, which `lookout.Options.since` asked for.
     ///
     /// It changes what a path that is not there means. In the ordinary
     /// way, a path FSEvents names that is gone and that lookout has
     /// never seen came and went between two polls, and the tree is as
-    /// it was, so there is nothing to report. During a replay the same
-    /// two facts mean the opposite: the path was there at the position
-    /// the caller resumed from and is not there now, which is exactly
-    /// the deletion they asked to be told about.
-    replaying: bool,
-    /// Whether `HistoryDone` has arrived for this stream during the
-    /// wait now running. The replay ends at the end of that wait rather
-    /// than at the flag: the system delivers the flag as soon as it has
-    /// read the log, and the changes made while nothing was watching
-    /// arrive just after it, in the same wave.
-    caught_up: bool,
+    /// it was, so there is nothing to report. While catching up the
+    /// same two facts mean the opposite: the path was there at the
+    /// position the caller resumed from and is not there now, which is
+    /// exactly the deletion they asked to be told about.
+    ///
+    /// It ends at the first wait that brings nothing, and not at the
+    /// `HistoryDone` flag or at an event id. The flag says when the
+    /// system finished reading its log rather than when the catching up
+    /// is over, and the last of the changes made while nothing was
+    /// watching arrive after it, live and numbered after it. A quiet
+    /// wait is the one signal that means there is no more of it.
+    catching_up: bool,
 
     const Scope = enum {
         /// Everything under `root`.
@@ -406,8 +407,7 @@ pub fn add(
         .root = root,
         .scope = scope,
         .filter = filter,
-        .replaying = f.since != c.kFSEventStreamEventIdSinceNow,
-        .caught_up = false,
+        .catching_up = f.since != c.kFSEventStreamEventIdSinceNow,
     };
 
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
@@ -529,16 +529,16 @@ fn deliver(
 /// Waits on the wake pipe until the drain produces something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+    const before = batch.revision;
     const result = f.collect(batch, timeout_ms);
     // Whatever is still held when the wait is over never found its
     // partner, however many deliveries it waited through.
     try f.resolveHeld(batch);
-    // And a replay that caught up during this wait is over, along with
-    // the wave of changes that came with it.
-    for (f.streams.values()) |stream| {
-        if (!stream.caught_up) continue;
-        stream.caught_up = false;
-        stream.replaying = false;
+    // A wait that brought nothing is the end of the catching up: there
+    // is no more of the log to read and nothing else was queued behind
+    // it.
+    if (batch.revision == before) {
+        for (f.streams.values()) |stream| stream.catching_up = false;
     }
     return result;
 }
@@ -629,7 +629,7 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
         trace.log("fsevents record watch={d} event={d} flags=0x{x} path={s}", .{
             @intFromEnum(id), event, flags, subject,
         });
-        try records.append(f.gpa, .{ .id = id, .flags = flags, .path = subject });
+        try records.append(f.gpa, .{ .id = id, .flags = flags, .event = event, .path = subject });
         offset += len;
     }
 
@@ -705,6 +705,9 @@ fn partnerOf(
 const Record = struct {
     id: WatchId,
     flags: u32,
+    /// The system's own number for this change, which orders it against
+    /// `Stream.boundary`.
+    event: u64,
     path: []const u8,
 
     fn target(r: Record) Target {
@@ -744,7 +747,6 @@ fn report(
     // left to look like a change to the watch root.
     if (record.flags & c.kFSEventStreamEventFlagHistoryDone != 0) {
         trace.log("fsevents history done root={s}", .{stream.root});
-        if (f.streams.get(record.id)) |live| live.caught_up = true;
         return;
     }
     // The watched path itself moved or vanished. FSEvents reports both
@@ -811,7 +813,7 @@ fn reportPlain(
         // Gone. Whatever the flags remember about it, the fact now is
         // that the path is not there. A path lookout never knew about came
         // and went between two polls, and the tree is as it was.
-        if (seen or stream.replaying) {
+        if (seen or stream.catching_up) {
             trace.log("fsevents push removed path={s}", .{record.path});
             try batch.push(f.gpa, record.id, record.path, .removed, record.target());
             f.forget(record.path);
@@ -923,7 +925,7 @@ fn joined(
 fn hold(f: *FsEvents, batch: *Batch, record: Record) lookout.Watcher.PollError!void {
     if (f.held != null) try f.resolveHeld(batch);
     const owned = try f.gpa.dupe(u8, record.path);
-    f.held = .{ .id = record.id, .path = owned, .flags = record.flags };
+    f.held = .{ .id = record.id, .path = owned, .flags = record.flags, .event = record.event };
     trace.log("fsevents hold renamed path={s}", .{record.path});
 }
 
@@ -936,7 +938,12 @@ fn resolveHeld(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
     defer f.gpa.free(half.path);
     const stream = f.streams.get(half.id) orelse return;
     trace.log("fsevents unpaired renamed path={s}", .{half.path});
-    try f.reportPlain(batch, .{ .id = half.id, .flags = half.flags, .path = half.path }, stream);
+    try f.reportPlain(batch, .{
+        .id = half.id,
+        .flags = half.flags,
+        .event = half.event,
+        .path = half.path,
+    }, stream);
 }
 
 /// Records that a path exists.

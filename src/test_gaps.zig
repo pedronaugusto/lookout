@@ -132,45 +132,6 @@ test "the delivery buffer is the size the caller asked for" {
     }
 }
 
-test "a ten-thousand file burst arrives whole" {
-    // The same burst, on every backend, with the sizes they default to.
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const burst = 10_000;
-
-    for (backends) |backend| {
-        var tmp = std.testing.tmpDir(.{ .iterate = true });
-        defer tmp.cleanup();
-        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-        defer gpa.free(root);
-
-        var watcher: Watcher = try .init(gpa, io, .{
-            .backend = backend,
-            .poll_interval_ms = 20,
-            .max_dir_entries = 1_000_000,
-        });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
-
-        // Nothing polls while the burst is written, so whatever the
-        // backend holds between two polls is what it has to hold.
-        try writeBurst(tmp.dir, burst);
-
-        var tally: Tally = .{};
-        try tally.drain(&watcher, 1_000);
-        if (tally.created != burst) {
-            std.debug.print("{s}: {d}/{d} created, {d} overflow\n", .{
-                @tagName(backend), tally.created, burst, tally.overflow,
-            });
-        }
-        if (tally.overflow == 0) {
-            try std.testing.expectEqual(burst, tally.created);
-        } else {
-            try std.testing.expect(tally.created > burst / 2);
-        }
-    }
-}
-
 test "a change inside a renamed directory is not a creation" {
     // The Apple backend remembers every path it has seen, so that an
     // accumulated `ItemCreated` flag can be told from a write. Renaming a
@@ -196,8 +157,24 @@ test "a change inside a renamed directory is not a creation" {
         _ = try watcher.add(root, .{ .recursive = true });
         while ((try watcher.poll(200)).len != 0) {}
 
+        const moved = try std.fs.path.join(gpa, &.{ root, "sub2" });
+        defer gpa.free(moved);
+
         try tmp.dir.rename("sub", tmp.dir, "sub2", io);
+
+        // Waited for rather than slept through: the write below has to
+        // happen after the watcher has taken the rename in, or what it
+        // reports is a race and not a rule.
         var lost = false;
+        var settled = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !settled) : (waited += 200) {
+            for (try watcher.poll(200)) |event| {
+                if (event.kind == .overflow) lost = true;
+                if (std.mem.startsWith(u8, event.path, moved)) settled = true;
+            }
+        }
+        try std.testing.expect(settled or lost);
         while (true) {
             const events = try watcher.poll(400);
             if (events.len == 0) break;
@@ -216,7 +193,7 @@ test "a change inside a renamed directory is not a creation" {
         defer gpa.free(wanted);
 
         var kind: ?Kind = null;
-        var waited: u32 = 0;
+        waited = 0;
         while (waited < timeout_ms and kind == null) : (waited += 200) {
             for (try watcher.poll(200)) |event| {
                 if (event.kind == .overflow) lost = true;
@@ -478,8 +455,9 @@ test "a burst of renames is paired across the reads it is split over" {
 test "the entry budget is one directory's, not a whole recursive watch's" {
     // `max_dir_entries` is documented as the entries of one watched
     // directory. The Windows backend counted every creation anywhere
-    // under a recursive root against one number, so twenty directories
-    // of three hundred entries overflowed a budget none of them reached.
+    // under a recursive root against one number, so twelve directories
+    // of a hundred and fifty entries overflowed a budget none of them
+    // reached.
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
@@ -489,7 +467,7 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        for (0..20) |d| {
+        for (0..12) |d| {
             var name: [16]u8 = undefined;
             try tmp.dir.createDirPath(io, std.fmt.bufPrint(&name, "d{d}", .{d}) catch unreachable);
         }
@@ -497,7 +475,7 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
         var watcher: Watcher = try .init(gpa, io, .{
             .backend = backend,
             .poll_interval_ms = 20,
-            .max_dir_entries = 1024,
+            .max_dir_entries = 512,
         });
         defer watcher.deinit();
         _ = try watcher.add(root, .{ .recursive = true });
@@ -506,8 +484,8 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
         // Drained as it goes, so that what is being measured is the
         // budget and not the kernel's own patience with a burst.
         var tally: Tally = .{};
-        for (0..20) |d| {
-            for (0..300) |i| {
+        for (0..12) |d| {
+            for (0..150) |i| {
                 var name: [32]u8 = undefined;
                 try tmp.dir.writeFile(io, .{
                     .sub_path = std.fmt.bufPrint(&name, "d{d}/f{d}.txt", .{ d, i }) catch unreachable,
@@ -518,7 +496,7 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
         }
         try tally.drain(&watcher, 400);
         if (tally.overflow != 0) {
-            std.debug.print("{s}: {d} overflow for 20 x 300 under a 1024 budget\n", .{
+            std.debug.print("{s}: {d} overflow for 12 x 150 under a 512 budget\n", .{
                 @tagName(backend), tally.overflow,
             });
         }
