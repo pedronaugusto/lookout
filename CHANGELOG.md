@@ -66,14 +66,16 @@ about itself.
   `ReadDirectoryChangesW` leaves, and the flags-and-paths buffer the
   FSEvents delivery thread fills are parsers over bytes lookout did not
   write; the matching that decides which two records of a delivery are
-  the two halves of one rename is a parser over the records. Each is now
-  a file of its own, compiled on every target rather than only on the one
-  whose kernel writes those bytes, with a `std.testing.fuzz` target
-  holding it to one contract: any input yields records or a named error,
-  never a crash and never a read past the end of the input; every name
-  lies inside the input it was decoded from; the work and the memory are
-  bounded by the input's length; and a rename pairs symmetrically.
-  `zig build test --fuzz` runs them.
+  the two halves of one rename is a parser over the records. They are out
+  of the backends now, in files that compile on every target rather than
+  only on the one whose kernel writes those bytes, each with a
+  `std.testing.fuzz` target holding it to one contract: any input yields
+  records or a named error, never a crash and never a read past the end
+  of the input; every name lies inside the input it was decoded from; and
+  the work and the memory are bounded by the input's length. The two over
+  the FSEvents records hold one more, being the two that pair: the
+  matching is symmetric, so if this record is that one's other half, that
+  one is this one's. `zig build test --fuzz` runs them.
 
 - **`Options.max_events`** is a ceiling on one batch. A process writing faster
   than the caller polls made the library grow without bound; past the ceiling

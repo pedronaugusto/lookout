@@ -394,12 +394,14 @@ Four things are fuzzed, and all four are parsers: the run of
 `FILE_NOTIFY_INFORMATION` chain a completed `ReadDirectoryChangesW`
 leaves, the flags-and-paths buffer the FSEvents delivery thread fills,
 and the matching that decides which two records of a delivery are the
-two halves of one rename. Each target holds one contract: any input
+two halves of one rename. Each target holds the same contract: any input
 yields records or a named error, never a crash and never a read past the
 end of the input; every name lies inside the input it was decoded from;
-the work and the memory are bounded by the input's length; and a rename
-pairs symmetrically. The four decoders sit in files of their own,
-compiled on every target, so they are fuzzed on whatever host is in
+and the work and the memory are bounded by the input's length. The two
+over the FSEvents records hold one more, being the two that pair: the
+matching is symmetric, so if this record is that one's other half, that
+one is this one's. The decoders are out of the backends now, in files
+that compile on every target, so they are fuzzed on whatever host is in
 front of the change rather than only on the one whose kernel writes
 those bytes.
 

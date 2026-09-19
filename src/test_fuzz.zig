@@ -10,13 +10,14 @@
 //! Each target holds the same contract: any input yields records or a
 //! named error, never a crash and never a read past the end of the
 //! input; every name a record carries is a slice of the input it was
-//! decoded from; the work and the memory are bounded by the input's
-//! length; and a rename pairs symmetrically -- if this record is that
+//! decoded from; and the work and the memory are bounded by the input's
+//! length. The two over the FSEvents records hold one more, being the
+//! two that pair: the matching is symmetric -- if this record is that
 //! one's other half, that one is this one's.
 //!
-//! The decoders are in files of their own, compiled on every target, so
-//! all four run on whatever host is in front of the change. Run them
-//! with `zig build test --fuzz`.
+//! The decoders are out of the backends, in files that compile on every
+//! target, so all four run on whatever host is in front of the change.
+//! Run them with `zig build test --fuzz`.
 
 const std = @import("std");
 const testing = std.testing;
