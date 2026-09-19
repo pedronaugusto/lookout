@@ -113,9 +113,14 @@ const bounds: buffer.Bounds = .{
     .default = 4 * 1024 * 1024,
 };
 
-/// How long a delivery whose rename is missing its partner is waited for
-/// before the half is reported on its own, and how many times.
-const grace_ms = 5;
+/// How long a delivery whose rename is missing its partner is waited
+/// for before the half is reported on its own, and how many times.
+///
+/// Paid only while a half is actually held, which is rare: FSEvents
+/// puts both halves in one delivery unless a burst was long enough to
+/// split them, and its own coalescing window is about ten milliseconds,
+/// so the partner is either in the next delivery or nowhere.
+const grace_ms = 25;
 const grace_rounds = 4;
 
 /// The lock between the delivery thread and the polling one.
@@ -793,6 +798,16 @@ fn reportPlain(
         trace.log("fsevents push created path={s}", .{record.path});
         try batch.push(f.gpa, record.id, record.path, .created, record.target());
         try f.remember(record.path);
+        // A directory can arrive with a tree already inside it -- an
+        // archive unpacked, or a rename this backend could not pair --
+        // and what is inside it is as new to lookout as the directory
+        // is. The backends that recurse themselves walk it here; this
+        // one has to as well, or the first write to a file inside would
+        // be the first lookout had heard of the path and would be
+        // reported as its creation.
+        if (record.target() == .directory and stream.scope == .tree) {
+            try f.adopt(batch, record.id, record.path, stream);
+        }
         try f.recount(batch, record, stream);
         return;
     }
@@ -821,6 +836,38 @@ fn reportPlain(
         trace.log("fsevents drop dir-metadata path={s}", .{record.path});
     }
     try f.recount(batch, record, stream);
+}
+
+/// Reports everything inside a directory that has just appeared, and
+/// remembers it.
+fn adopt(
+    f: *FsEvents,
+    batch: *Batch,
+    id: WatchId,
+    root: []const u8,
+    stream: *const Stream,
+) lookout.Watcher.PollError!void {
+    const Adopting = struct {
+        f: *FsEvents,
+        batch: *Batch,
+        id: WatchId,
+        stream: *const Stream,
+
+        fn visit(a: *@This(), entry: walk.Entry) anyerror!walk.Step {
+            if (a.stream.filter.prunes(a.stream.root, entry.path)) return .over;
+            if (a.f.known.contains(entry.path)) return .into;
+            if (!a.stream.filter.excludes(a.stream.root, entry.path)) {
+                try a.batch.push(a.f.gpa, a.id, entry.path, .created, .of(entry.kind));
+            }
+            try a.f.remember(entry.path);
+            return .into;
+        }
+    };
+    var adopting: Adopting = .{ .f = f, .batch = batch, .id = id, .stream = stream };
+    walk.tree(f.gpa, f.io, root, &adopting, Adopting.visit) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Unexpected,
+    };
 }
 
 /// Reports one rename and moves everything lookout remembers from the
