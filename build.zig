@@ -17,13 +17,34 @@ pub fn build(b: *std.Build) void {
     // other target stays free-standing Zig.
     const darwin = target.result.os.tag.isDarwin();
 
+    // Cross-compiling to an Apple target from an Apple host: Zig finds
+    // the SDK by itself for a native build and not for a named one, so
+    // `-Dtarget=aarch64-macos` would fail to find CoreServices on the
+    // very machine that has it. Asking the host where its SDK is costs
+    // nothing when there is no SDK to find.
+    const frameworks: ?std.Build.LazyPath = frameworks: {
+        if (!darwin) break :frameworks null;
+        if (b.sysroot) |root| break :frameworks .{
+            .cwd_relative = b.pathJoin(&.{ root, "System", "Library", "Frameworks" }),
+        };
+        const sdk = std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target.result) orelse
+            break :frameworks null;
+        b.sysroot = sdk;
+        break :frameworks .{
+            .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }),
+        };
+    };
+
     const module = b.addModule("lookout", .{
         .root_source_file = b.path("src/lookout.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = darwin,
     });
-    if (darwin) module.linkFramework("CoreServices", .{});
+    if (darwin) {
+        if (frameworks) |path| module.addSystemFrameworkPath(path);
+        module.linkFramework("CoreServices", .{});
+    }
 
     //=====================================================================
     // Tests.
@@ -42,7 +63,10 @@ pub fn build(b: *std.Build) void {
             .link_libc = darwin,
         }),
     });
-    if (darwin) tests.root_module.linkFramework("CoreServices", .{});
+    if (darwin) {
+        if (frameworks) |path| tests.root_module.addSystemFrameworkPath(path);
+        tests.root_module.linkFramework("CoreServices", .{});
+    }
 
     const test_step = b.step("test", "Run the lookout tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
