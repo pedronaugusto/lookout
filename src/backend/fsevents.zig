@@ -214,6 +214,24 @@ const Stream = struct {
     /// directory out, so here the filter drops the events rather than
     /// saving the work -- see `lookout.prunesIgnored`.
     filter: Filter,
+    /// Whether this stream is still replaying what happened before it
+    /// was started, which `lookout.Options.since` asked for. Cleared by
+    /// the `HistoryDone` flag.
+    ///
+    /// It changes what a path that is not there means. In the ordinary
+    /// way, a path FSEvents names that is gone and that lookout has
+    /// never seen came and went between two polls, and the tree is as
+    /// it was, so there is nothing to report. During a replay the same
+    /// two facts mean the opposite: the path was there at the position
+    /// the caller resumed from and is not there now, which is exactly
+    /// the deletion they asked to be told about.
+    replaying: bool,
+    /// Whether `HistoryDone` has arrived for this stream during the
+    /// wait now running. The replay ends at the end of that wait rather
+    /// than at the flag: the system delivers the flag as soon as it has
+    /// read the log, and the changes made while nothing was watching
+    /// arrive just after it, in the same wave.
+    caught_up: bool,
 
     const Scope = enum {
         /// Everything under `root`.
@@ -388,6 +406,8 @@ pub fn add(
         .root = root,
         .scope = scope,
         .filter = filter,
+        .replaying = f.since != c.kFSEventStreamEventIdSinceNow,
+        .caught_up = false,
     };
 
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
@@ -513,6 +533,13 @@ pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollE
     // Whatever is still held when the wait is over never found its
     // partner, however many deliveries it waited through.
     try f.resolveHeld(batch);
+    // And a replay that caught up during this wait is over, along with
+    // the wave of changes that came with it.
+    for (f.streams.values()) |stream| {
+        if (!stream.caught_up) continue;
+        stream.caught_up = false;
+        stream.replaying = false;
+    }
     return result;
 }
 
@@ -717,6 +744,7 @@ fn report(
     // left to look like a change to the watch root.
     if (record.flags & c.kFSEventStreamEventFlagHistoryDone != 0) {
         trace.log("fsevents history done root={s}", .{stream.root});
+        if (f.streams.get(record.id)) |live| live.caught_up = true;
         return;
     }
     // The watched path itself moved or vanished. FSEvents reports both
@@ -783,7 +811,7 @@ fn reportPlain(
         // Gone. Whatever the flags remember about it, the fact now is
         // that the path is not there. A path lookout never knew about came
         // and went between two polls, and the tree is as it was.
-        if (seen) {
+        if (seen or stream.replaying) {
             trace.log("fsevents push removed path={s}", .{record.path});
             try batch.push(f.gpa, record.id, record.path, .removed, record.target());
             f.forget(record.path);

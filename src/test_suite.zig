@@ -1567,6 +1567,7 @@ test "what changed while nothing was watching is reported on resuming" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
     try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "one" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "gone.txt", .data = "one" });
 
     var token: [lookout.Position.max_token_len]u8 = undefined;
     var written: usize = 0;
@@ -1584,6 +1585,7 @@ test "what changed while nothing was watching is reported on resuming" {
     // changes happen to a tool that was not running.
     try tmp.dir.writeFile(io, .{ .sub_path = "while-away.txt", .data = "two" });
     try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "one and two" });
+    try tmp.dir.deleteFile(io, "gone.txt");
 
     var watcher: Watcher = try .init(gpa, io, .{
         .since = try lookout.Position.parse(token[0..written]),
@@ -1595,18 +1597,25 @@ test "what changed while nothing was watching is reported on resuming" {
     defer gpa.free(appeared);
     const changed = try std.fs.path.join(gpa, &.{ root, "kept.txt" });
     defer gpa.free(changed);
+    const deleted = try std.fs.path.join(gpa, &.{ root, "gone.txt" });
+    defer gpa.free(deleted);
 
     var saw_appeared = false;
     var saw_changed = false;
+    var saw_deleted = false;
     var waited: u32 = 0;
-    while (waited < timeout_ms and !(saw_appeared and saw_changed)) : (waited += 200) {
+    while (waited < timeout_ms and !(saw_appeared and saw_changed and saw_deleted)) : (waited += 200) {
         for (try watcher.poll(200)) |event| {
             if (std.mem.eql(u8, event.path, appeared)) saw_appeared = true;
             if (std.mem.eql(u8, event.path, changed)) saw_changed = true;
+            if (std.mem.eql(u8, event.path, deleted) and event.kind == .removed) saw_deleted = true;
         }
     }
     try std.testing.expect(saw_appeared);
     try std.testing.expect(saw_changed);
+    // A path that was there at the position and is not there now is the
+    // half a watcher that only looks forward cannot report.
+    try std.testing.expect(saw_deleted);
 }
 
 test "an include list reports what it names and nothing else" {

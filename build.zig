@@ -98,4 +98,5 @@ pub fn build(b: *std.Build) void {
 /// directory is not reproducible from the manifest alone.
 const example_sources = [_][]const u8{
     "examples/usage.zig",
+    "examples/since.zig",
 };
