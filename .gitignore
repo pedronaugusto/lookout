@@ -5,7 +5,6 @@ zig-out/
 zig-pkg/
 
 # Worktrees of this repository.
-.claude/
 
 # macOS.
 .DS_Store
