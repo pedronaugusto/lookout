@@ -340,7 +340,18 @@ test "a burst of renames is paired across the reads it is split over" {
     });
     defer watcher.deinit();
     _ = try watcher.add(root, .{});
-    while ((try watcher.poll(200)).len != 0) {}
+    // The four hundred creations above are still on their way, and a
+    // backend that delivers on its own latency does not finish them by
+    // the first empty poll. A creation that lands after this point is
+    // counted below as an unpaired event, which is a straggler from the
+    // setup and not a rename this test is about, so wait for a quiet
+    // window rather than for one empty read.
+    {
+        var settling: u32 = 0;
+        while (settling < 1_000) {
+            if ((try watcher.poll(200)).len == 0) settling += 200 else settling = 0;
+        }
+    }
 
     for (0..pairs) |i| {
         var from: [64]u8 = undefined;
