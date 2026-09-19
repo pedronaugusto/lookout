@@ -112,6 +112,18 @@ const bounds: buffer.Bounds = .{
 const grace_ms = 25;
 const grace_rounds = 4;
 
+/// How long after the end of the system's log a resumed stream is still
+/// hearing about the gap. See `Stream.catchingUp`.
+///
+/// Nothing marks the end of a replay, so this is a window and not a
+/// signal. Measured on a loaded machine, the last of the tail arrived
+/// some two hundred milliseconds after the sentinel; a second is four
+/// times that, and being generous costs only this -- a path created and
+/// deleted inside the window that lookout never knew about is reported
+/// as removed rather than dropped. It is paid once, by a watcher that
+/// asked to be told what it missed.
+const replay_tail_ms = 1_000;
+
 /// The lock between the delivery thread and the polling one.
 ///
 /// A spin lock rather than `std.Io.Mutex`, which needs an `Io` to block
@@ -196,6 +208,23 @@ const Stream = struct {
     /// directory out, so here the filter drops the events rather than
     /// saving the work -- see `lookout.prunesIgnored`.
     filter: Filter,
+    /// Whether this stream was started from a position rather than from
+    /// now, which `lookout.Options.since` asked for. See `catchingUp`.
+    resumed: bool,
+    /// When `HistoryDone` arrived, or `null` while the system is still
+    /// reading its log. See `catchingUp`.
+    replayed: ?Io.Timestamp,
+
+    const Scope = enum {
+        /// Everything under `root`.
+        tree,
+        /// `root` and its immediate entries.
+        directory,
+        /// Only `root` itself. The stream is created on the parent
+        /// directory, because FSEvents watches directories.
+        file,
+    };
+
     /// Whether this stream is still catching up on what happened
     /// before it existed, which `lookout.Options.since` asked for.
     ///
@@ -207,23 +236,27 @@ const Stream = struct {
     /// position the caller resumed from and is not there now, which is
     /// exactly the deletion they asked to be told about.
     ///
-    /// It ends at the first wait that brings nothing, and not at the
-    /// `HistoryDone` flag or at an event id. The flag says when the
-    /// system finished reading its log rather than when the catching up
-    /// is over, and the last of the changes made while nothing was
-    /// watching arrive after it, live and numbered after it. A quiet
-    /// wait is the one signal that means there is no more of it.
-    catching_up: bool,
-
-    const Scope = enum {
-        /// Everything under `root`.
-        tree,
-        /// `root` and its immediate entries.
-        directory,
-        /// Only `root` itself. The stream is created on the parent
-        /// directory, because FSEvents watches directories.
-        file,
-    };
+    /// Two things end it, and neither on its own is the answer.
+    /// `HistoryDone` says the system has finished reading its log, not
+    /// that the replay is over: a change made while nothing was
+    /// watching that had not reached the log when the stream started is
+    /// delivered after the sentinel, live and numbered after it. And a
+    /// wait that reported nothing is not a wait the system was silent
+    /// through -- the sentinel is itself a delivery that reports no
+    /// event, and so is a poll that expires before the stream has said
+    /// anything at all. Ending on either of those ended the catching up
+    /// one delivery before the changes it was there to explain, and a
+    /// file deleted in the gap was dropped as one that came and went
+    /// between two polls.
+    ///
+    /// So it ends `replay_tail_ms` after the sentinel, and it is asked
+    /// of each record as the record is read rather than being flipped
+    /// on a wait boundary.
+    fn catchingUp(st: *const Stream, io: Io) bool {
+        if (!st.resumed) return false;
+        const sentinel = st.replayed orelse return true;
+        return sentinel.durationTo(.now(io, .awake)).toMilliseconds() < replay_tail_ms;
+    }
 
     fn wants(st: *const Stream, subject: []const u8) bool {
         const rest = path_cmp.relative(st.root, subject) orelse return false;
@@ -388,7 +421,8 @@ pub fn add(
         .root = root,
         .scope = scope,
         .filter = filter,
-        .catching_up = f.since != c.kFSEventStreamEventIdSinceNow,
+        .resumed = f.since != c.kFSEventStreamEventIdSinceNow,
+        .replayed = null,
     };
 
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
@@ -510,17 +544,10 @@ fn deliver(
 /// Waits on the wake pipe until the drain produces something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
-    const before = batch.revision;
     const result = f.collect(batch, timeout_ms);
     // Whatever is still held when the wait is over never found its
     // partner, however many deliveries it waited through.
     try f.resolveHeld(batch);
-    // A wait that brought nothing is the end of the catching up: there
-    // is no more of the log to read and nothing else was queued behind
-    // it.
-    if (batch.revision == before) {
-        for (f.streams.values()) |stream| stream.catching_up = false;
-    }
     return result;
 }
 
@@ -591,6 +618,10 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
     }
     if (overflowed) {
         for (f.streams.values()) |stream| {
+            // A delivery that did not fit may have carried the sentinel,
+            // and a stream waiting for one that was dropped would catch
+            // up for ever.
+            if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
             try batch.push(f.gpa, stream.id, stream.root, .overflow, .directory);
         }
     }
@@ -690,11 +721,14 @@ fn report(
         trace.log("fsevents push overflow root={s}", .{stream.root});
         try batch.push(f.gpa, record.id, stream.root, .overflow, .directory);
     }
-    // The marker that a replay asked for by `lookout.Options.since` has
-    // caught up with the present. Nothing happened to a path, so there
-    // is nothing to report; it is declared and swallowed rather than
-    // left to look like a change to the watch root.
+    // The marker that the system has finished reading its log back to
+    // the position `lookout.Options.since` named. Nothing happened to a
+    // path, so there is nothing to report; it is declared and swallowed
+    // rather than left to look like a change to the watch root. What it
+    // is kept for is `Stream.catchingUp`, which measures the tail that
+    // still follows it from here.
     if (record.flags & flag.history_done != 0) {
+        if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
         trace.log("fsevents history done root={s}", .{stream.root});
         return;
     }
@@ -767,7 +801,7 @@ fn reportPlain(
         // Gone. Whatever the flags remember about it, the fact now is
         // that the path is not there. A path lookout never knew about came
         // and went between two polls, and the tree is as it was.
-        if (seen or stream.catching_up) {
+        if (seen or stream.catchingUp(f.io)) {
             trace.log("fsevents push removed path={s}", .{record.path});
             try batch.push(f.gpa, record.id, record.path, .removed, record.target());
             f.forget(record.path);

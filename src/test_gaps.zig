@@ -488,6 +488,69 @@ test "a root deleted and recreated inside one window is not a move" {
     }
 }
 
+test "a poll that expires before the replay begins is not the end of it" {
+    // The Apple backend ended a resumed watcher's catching up at the
+    // first wait that reported nothing, and two waits report nothing
+    // while the replay is still coming. One is the wait a poll spends
+    // before the stream has said anything at all -- the one written
+    // down here, as `poll(0)`. The other is the wait the `HistoryDone`
+    // sentinel lands in, which is a delivery that reports no event
+    // because nothing happened to a path.
+    //
+    // Either one ended the catching up one delivery early, and the
+    // changes made while nothing was watching arrive after it: a change
+    // the system had not written to its log when the stream started is
+    // delivered live and numbered after the sentinel. With the catching
+    // up already over, a path that is gone and that lookout has never
+    // heard of is a path that came and went between two polls, and the
+    // deletion was dropped -- the half of `Options.since` a watcher
+    // that only looks forward cannot report, and the reason the option
+    // exists.
+    if (!lookout.tracksPosition(lookout.default_backend)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "gone.txt", .data = "one" });
+
+    var token: [lookout.Position.max_token_len]u8 = undefined;
+    var written: usize = 0;
+    {
+        var watcher: Watcher = try .init(gpa, io, .{});
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{ .recursive = true });
+        while ((try watcher.poll(200)).len != 0) {}
+        written = watcher.position().?.token(&token).len;
+    }
+
+    try tmp.dir.deleteFile(io, "gone.txt");
+
+    var watcher: Watcher = try .init(gpa, io, .{
+        .since = try lookout.Position.parse(token[0..written]),
+    });
+    defer watcher.deinit();
+    _ = try watcher.add(root, .{ .recursive = true });
+
+    // The boundary, stated: a wait that cannot have brought anything,
+    // taken before the replay can have begun.
+    try std.testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+
+    const deleted = try std.fs.path.join(gpa, &.{ root, "gone.txt" });
+    defer gpa.free(deleted);
+
+    var saw_deleted = false;
+    var waited: u32 = 0;
+    while (waited < timeout_ms and !saw_deleted) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (std.mem.eql(u8, event.path, deleted) and event.kind == .removed) saw_deleted = true;
+        }
+    }
+    try std.testing.expect(saw_deleted);
+}
+
 // Last in the file on purpose. Ten thousand files created and then
 // deleted is enough churn that the operating system loses track of what
 // a watcher started just afterwards is looking at, and a test that
