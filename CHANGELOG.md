@@ -7,6 +7,129 @@ breaking one.
 
 ## Unreleased
 
+## 0.2.0
+
+Breaking, and each of them is a shape that was wrong rather than a
+preference:
+
+- `Options.windows_buffer_bytes` is `Options.buffer_bytes`, and it sizes
+  both backends that are handed a buffer and find the changes in it.
+- `Kind` has two more members, `unwatched` and the `renamed` a caller
+  already had; `Event` has another field, `target`. An exhaustive switch
+  over either has to grow an arm.
+- `Filter` has another field, `only`, and a second question, `prunes`.
+- `Options.max_events` puts a ceiling on a batch where there was none.
+
+The changes themselves:
+
+- A path is compared the way the file system compares it. lookout
+  compared paths byte for byte, which on a volume that folds case is not
+  a degradation but a silent total failure: a caller whose spelling
+  differed from the one on disk had every event dropped, and nothing
+  said why. An ignore pattern had it from the other side -- `*.TMP`
+  excluded nothing on a disk holding `notes.tmp`. Case and Latin-1
+  composition are now folded on the targets whose file systems fold
+  them, and every comparison between two paths goes through one place:
+  the watch root against the path an event names, a pattern against an
+  entry, one node against the subtree it is removed with, and the key an
+  event is coalesced under. Linux and the BSDs still compare bytes.
+- `Options.buffer_bytes` sizes the buffer the Apple backend's delivery
+  thread copies into, which was fixed at 64 KiB. At about a hundred and
+  ten bytes a record that is room for some six hundred paths: ten
+  thousand files created in one directory arrived as four hundred and
+  sixty-five creations and one `overflow`, which is the truth honestly
+  reported and useless to a caller who wanted the names. The default is
+  four megabytes, which holds that burst. The same option sizes the
+  Windows read buffer, which had its own name before and the same job.
+- On Windows a buffer the caller sized for a local disk is no longer a
+  watch that dies on a network share. `ReadDirectoryChangesW` refuses a
+  buffer over 64 KiB on a remote directory rather than clamping it, and
+  the failure was an unmapped error at the point where the watch was
+  re-armed: the watch stopped reporting, with no error and no event.
+  lookout comes down to the size a share takes by itself.
+- `Kind.unwatched` says that lookout is no longer watching a path, and
+  that nothing under it will be reported. A subdirectory the operating
+  system refused -- unreadable, or past the per-user watch limit -- was
+  swallowed at five places, and the only sign of it was a part of the
+  tree that never reported anything. It outranks `overflow`: one says
+  look again, the other says looking again is the only way you will ever
+  hear about this path.
+- A rename is no longer split into a removal and a creation by the
+  boundary of a read. Both halves arrive together, but "together" is
+  about the kernel's queue and not about the buffer lookout reads it
+  into, and all three backends that pair renames decided at the end of
+  each read. A half is now held until the whole wait is over. On the
+  Apple backend the partner is also looked for anywhere in the delivery
+  rather than only next door, because the directory the two names are in
+  can be reported between them.
+- A write inside a renamed directory is a write. The Apple backend tells
+  a creation from a write by remembering every path it has seen, and
+  renaming a directory left every path under the old name: the first
+  write inside the new one looked new. Renaming re-keys the subtree, and
+  a directory that arrives already holding a tree -- an archive
+  unpacked, or a rename that could not be paired -- is walked and
+  reported, which is what the backends that recurse themselves already
+  did.
+- `max_dir_entries` is one directory's budget on every backend. It is
+  documented as the entries of one watched directory, and the Windows
+  backend counted every creation anywhere under a recursive root against
+  one number, so twenty directories of three hundred entries overflowed
+  a budget none of them reached.
+- `Watcher.position` and `Options.since` are how a tool that runs, exits
+  and runs again is told what it missed. The position is a short piece
+  of text -- `Position.token` writes it, `Position.parse` reads it back
+  -- and lookout persists nothing: the token is the caller's to keep.
+  Only FSEvents can answer, because only it is backed by a log the
+  system keeps per volume rather than by a queue that starts empty, and
+  `tracksPosition` says so rather than pretending. A resumed watch
+  reports what was created, changed and deleted while nothing was
+  watching, resolved against the tree as it is now.
+- `Event.target` says whether the path was a file or a directory. After
+  a removal the path cannot be stat-ed to find out, so a caller keeping
+  a model of a tree had no way to know what had just left it.
+- `Filter.only` says what a watch *is* about, which no combination of
+  exclusions could express, and `**` crosses a separator, so
+  `src/**/*.zig` is a thing that can be written. An include list has to
+  answer two questions rather than one -- may this path be reported, and
+  may lookout look inside this directory -- because a list naming files
+  at any depth still has to let the walk reach them.
+- `Watcher.wake` makes a blocked `poll` come back from another thread. A
+  program that wanted its thread back had to have left itself a timeout
+  to discover that through, and `poll(null)` could not be interrupted at
+  all.
+- `Watcher.watches` enumerates what the watcher holds -- the path, the
+  recursion, and whether it is still parked on an ancestor waiting for
+  its path to appear. `Watcher.stats` counted them and could not name
+  them, so intent could not be diffed against reality.
+- `Options.max_events` is a ceiling on one batch. A process writing
+  faster than the caller polls made the library grow without bound;
+  past the ceiling the names stop being kept and `Kind.overflow` says so
+  against the roots that lost them, which is the answer the caller
+  already handles.
+- `settle_ms` measures the file as well as timing it. The quiet window
+  on its own is a guess about a writer nobody can see, and a kernel that
+  coalesces several writes into one notification could leave the window
+  closing over a file that was still growing -- the exact failure the
+  option exists to prevent. One `stat` at the moment the window closes;
+  a file larger than it was starts the window again. A writer that stops
+  for longer than the window and then starts again is still
+  indistinguishable from one that has finished, and `Kind.closed` is the
+  only real answer to that.
+- The documentation says what the code does. `Kind.removed` claimed that
+  every backend reports a rename as a removal and a creation, which
+  `pairsRenames` contradicts; `Kind.renamed` was described as two
+  backends' when three produce it for entries; `Stats.registrations` said
+  one per path scanned on `poll` when it is one per directory; the module
+  header named three backends of five; and the polling backend called
+  itself the one for Windows, which has had a backend of its own since
+  0.1.0. Where a claim can be asserted rather than written down, it now
+  is: the suite holds `tracksPosition` and the entry budget the same way
+  it already held `pairsRenames` and `reportsRootMove`.
+- What a watcher costs is held to a budget. How long after a change
+  `poll` comes back, how much of a burst arrives, and how much memory a
+  watched directory costs were each measured once; a measurement nothing
+  checks is one that goes quietly wrong.
+
 ## 0.1.1
 
 - `Event.time` says when lookout first saw the path change in this

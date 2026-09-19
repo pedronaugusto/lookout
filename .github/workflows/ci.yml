@@ -18,9 +18,10 @@ env:
 
 jobs:
   # The full suite on every host that can run it. The suite itself runs
-  # once per backend the host has, so a macOS runner exercises kqueue and
-  # polling, a Linux runner inotify and polling, and a Windows runner
-  # polling -- which is the whole backend surface, executed.
+  # once per backend the host has, so a macOS runner exercises FSEvents,
+  # kqueue and polling, a Linux runner inotify and polling, and a Windows
+  # runner ReadDirectoryChangesW and polling -- which is the whole
+  # backend surface, executed.
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -37,7 +38,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Formatting
-        run: zig fmt --check src examples build.zig
+        run: zig fmt --check build.zig build.zig.zon src examples
 
       - name: Test -- Debug
         run: zig build test -Doptimize=Debug
