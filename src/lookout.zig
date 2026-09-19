@@ -114,11 +114,15 @@ pub const RootMove = enum {
 /// `kqueue` and `inotify` watch the object and are told that it moved,
 /// so both say `renamed`. `poll` compares listings, in which a move and
 /// a deletion are the same absence, and FSEvents reports both with one
-/// flag against a root that is no longer at its name; both say
-/// `removed`. `windows` holds a directory handle that a rename leaves
-/// valid, and the rename happens in the parent directory, which the
-/// watch was not put on: nothing is delivered, and `silent` says so
-/// rather than leaving a caller waiting for an event that is not coming.
+/// flag that does not say which; both say `removed`. `windows` holds a
+/// directory handle that a rename leaves valid, and the rename happens
+/// in the parent directory, which the watch was not put on: nothing is
+/// delivered, and `silent` says so rather than leaving a caller waiting
+/// for an event that is not coming.
+///
+/// The answer is absolute: a backend gives the shape named here and
+/// never one of the other two, so a caller may switch on it without a
+/// fallback arm.
 pub fn reportsRootMove(backend: Backend) RootMove {
     return switch (backend) {
         .auto => reportsRootMove(default_backend),

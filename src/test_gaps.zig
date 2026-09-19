@@ -436,6 +436,58 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
     }
 }
 
+test "a root deleted and recreated inside one window is not a move" {
+    // `lookout.reportsRootMove` says which of three shapes a backend
+    // gives when the watched path leaves the name it was added under.
+    // A caller switches on it, so it is absolute. The Apple backend
+    // decided between `renamed` and `removed` by asking whether the
+    // root was there when the delivery was read, and a root deleted and
+    // recreated before the read is there: it came back as `renamed`,
+    // which is the one shape `reportsRootMove(.fsevents)` says it never
+    // gives.
+    //
+    // What a backend may do here is say nothing at all -- a window
+    // short enough closes over both halves, and a backend that learns
+    // by listing may never see the gap. What none of them may do is
+    // report a shape the predicate does not declare.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    for (backends) |backend| {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+
+        try tmp.dir.createDirPath(io, "target");
+        const target = try std.fs.path.join(gpa, &.{ root, "target" });
+        defer gpa.free(target);
+
+        var watcher: Watcher = try .init(gpa, io, .{
+            .backend = backend,
+            .poll_interval_ms = 20,
+        });
+        defer watcher.deinit();
+        _ = try watcher.add(target, .{});
+        while ((try watcher.poll(200)).len != 0) {}
+
+        try tmp.dir.deleteDir(io, "target");
+        try tmp.dir.createDirPath(io, "target");
+
+        var waited: u32 = 0;
+        while (waited < 2_000) : (waited += 200) {
+            for (try watcher.poll(200)) |event| {
+                if (!std.mem.eql(u8, event.path, target)) continue;
+                if (event.kind != .renamed) continue;
+                try std.testing.expectEqual(
+                    lookout.reportsRootMove(backend),
+                    lookout.RootMove.renamed,
+                );
+            }
+        }
+    }
+}
+
 // Last in the file on purpose. Ten thousand files created and then
 // deleted is enough churn that the operating system loses track of what
 // a watcher started just afterwards is looking at, and a test that

@@ -699,14 +699,19 @@ fn report(
         return;
     }
     // The watched path itself moved or vanished. FSEvents reports both
-    // against the root with one flag and does not say which, so lookout
-    // asks the file system: a root that is still there was moved, and one
-    // that is not was deleted. FSEvents keeps watching the inode either
-    // way; lookout reports it and lets the caller decide.
+    // against the root with one flag and does not say which, and
+    // `lookout.reportsRootMove` is what a caller switches on: it answers
+    // `removed` for this backend, and it answers absolutely, so the
+    // shape cannot depend on what the file system happens to hold when
+    // the delivery is read. Asking whether the root was there made a
+    // root deleted and recreated inside one window a `renamed` -- the
+    // one shape this backend says it never gives. It is the rule
+    // coalescing already has for every other path: removed and
+    // recreated inside one window is `removed`, which means look at this
+    // path again.
     if (record.flags & flag.root_changed != 0) {
-        const kind: lookout.Kind = if (f.exists(stream.root)) .renamed else .removed;
-        trace.log("fsevents push {s} root={s}", .{ @tagName(kind), stream.root });
-        try batch.push(f.gpa, record.id, stream.root, kind, .directory);
+        trace.log("fsevents push removed root={s}", .{stream.root});
+        try batch.push(f.gpa, record.id, stream.root, .removed, .directory);
         return;
     }
 
