@@ -61,6 +61,20 @@ about itself.
   path to appear. `Watcher.stats` counted them and could not name them, so
   intent could not be diffed against reality.
 
+- **The decoders are fuzzed.** The run of `struct inotify_event` one read
+  brings back, the `FILE_NOTIFY_INFORMATION` chain a completed
+  `ReadDirectoryChangesW` leaves, and the flags-and-paths buffer the
+  FSEvents delivery thread fills are parsers over bytes lookout did not
+  write; the matching that decides which two records of a delivery are
+  the two halves of one rename is a parser over the records. Each is now
+  a file of its own, compiled on every target rather than only on the one
+  whose kernel writes those bytes, with a `std.testing.fuzz` target
+  holding it to one contract: any input yields records or a named error,
+  never a crash and never a read past the end of the input; every name
+  lies inside the input it was decoded from; the work and the memory are
+  bounded by the input's length; and a rename pairs symmetrically.
+  `zig build test --fuzz` runs them.
+
 - **`Options.max_events`** is a ceiling on one batch. A process writing faster
   than the caller polls made the library grow without bound; past the ceiling
   the names stop being kept and `Kind.overflow` says so against the roots that
@@ -83,6 +97,30 @@ about itself.
   that goes quietly wrong.
 
 ### Fixed
+
+- **A record the operating system did not write no longer reads past the
+  end of the buffer it came in.** All three backends that are handed
+  bytes trusted the lengths in the records' own headers: an `inotify`
+  event whose name ran past the read, a `FILE_NOTIFY_INFORMATION` whose
+  `FileNameLength` ran past what the read transferred, and a chain whose
+  `NextEntryOffset` pointed back into the record it followed were each an
+  out-of-bounds read away. The Windows name was also loaded as `u16`
+  where it lay, which a `NextEntryOffset` that is not even makes a
+  misaligned load; it is copied and realigned now. A chain that cannot be
+  followed is `Kind.overflow`, which is lookout saying it could not
+  account for a read and is what the caller already handles.
+
+- **`reportsRootMove` is absolute on the Apple backend.** It answers
+  `removed` there, and a caller switches on it; the backend chose between
+  `removed` and `renamed` by asking whether the watched path was there
+  when the delivery was read. A root deleted and recreated inside one
+  window is there, so it arrived as `renamed` — the one shape the
+  predicate says this backend never gives, and the shape a caller
+  therefore does not handle. FSEvents says the path to the root changed
+  and does not say how, so there was nothing behind the question but a
+  race. It is the rule coalescing already has for every other path: a
+  path removed and recreated inside one window is `removed`, which means
+  look at this path again.
 
 - **A path is compared the way the file system compares it.** lookout compared
   paths byte for byte, which on a volume that folds case is not a degradation

@@ -195,10 +195,12 @@ end of its own read, so a rename stays a rename under load.
 `Kind.renamed` with `from == null` means the watched path itself moved,
 which has no second half. Deleting the watched path is `Kind.removed`
 everywhere. Moving it is `renamed` on `kqueue` and `inotify`, which watch
-the object and are told; `removed` on FSEvents and polling, which see
-only that the name is empty; and nothing on Windows, where the handle
-survives the rename and the rename happens in a directory the watch was
-not put on. `reportsRootMove` gives all three.
+the object and are told; `removed` on FSEvents and polling, which are
+not told whether the name moved or went; and nothing on Windows, where
+the handle survives the rename and the rename happens in a directory the
+watch was not put on. `reportsRootMove` gives all three, and gives them
+absolutely: a backend produces the shape it names and not another, so a
+caller switches on it without a fallback.
 
 **`Kind.overflow` against a watch root means the record is incomplete
 and the tree should be read again.** It comes from the `inotify` queue
@@ -377,6 +379,7 @@ and are neither built nor run here.
 
 ```
 zig build test          # the suite, once per backend this host has
+zig build test --fuzz   # the fuzz targets, until you stop them
 sh ci/linux.sh          # the suite on Linux, in Docker, all four modes
 ```
 
@@ -385,6 +388,20 @@ back, how much of a burst arrives, and how much memory a watched
 directory costs. They are several times the measured numbers, because a
 hosted runner is a shared machine; what they catch is a regression of an
 order of magnitude rather than of a percentage.
+
+Four things are fuzzed, and all four are parsers: the run of
+`struct inotify_event` one read brings back, the
+`FILE_NOTIFY_INFORMATION` chain a completed `ReadDirectoryChangesW`
+leaves, the flags-and-paths buffer the FSEvents delivery thread fills,
+and the matching that decides which two records of a delivery are the
+two halves of one rename. Each target holds one contract: any input
+yields records or a named error, never a crash and never a read past the
+end of the input; every name lies inside the input it was decoded from;
+the work and the memory are bounded by the input's length; and a rename
+pairs symmetrically. The four decoders sit in files of their own,
+compiled on every target, so they are fuzzed on whatever host is in
+front of the change rather than only on the one whose kernel writes
+those bytes.
 
 Setting `LOOKOUT_TRACE` in the environment makes the Apple backend and
 the suite write what they did to standard error. It is read once per
