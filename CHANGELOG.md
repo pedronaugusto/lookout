@@ -14,9 +14,8 @@ preference:
 
 - `Options.windows_buffer_bytes` is `Options.buffer_bytes`, and it sizes
   both backends that are handed a buffer and find the changes in it.
-- `Kind` has two more members, `unwatched` and the `renamed` a caller
-  already had; `Event` has another field, `target`. An exhaustive switch
-  over either has to grow an arm.
+- `Kind` has another member, `unwatched`, and `Event` another field,
+  `target`. An exhaustive switch over either has to grow an arm.
 - `Filter` has another field, `only`, and a second question, `prunes`.
 - `Options.max_events` puts a ceiling on a batch where there was none.
 
