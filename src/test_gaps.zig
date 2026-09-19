@@ -64,74 +64,6 @@ const Tally = struct {
     }
 };
 
-test "the delivery buffer is the size the caller asked for" {
-    // The Apple backend held deliveries in a fixed 64 KiB buffer, which
-    // at about a hundred and ten bytes a record is room for some six
-    // hundred paths: a ten-thousand file burst lost 95% of itself and
-    // said so as one `overflow`. The size is now the caller's, and the
-    // default holds the burst.
-    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const burst = 10_000;
-
-    // At the floor. Nothing polls while the burst is written, so the
-    // delivery thread has to hold all of it in the buffer it was given.
-    {
-        var tmp = std.testing.tmpDir(.{ .iterate = true });
-        defer tmp.cleanup();
-        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-        defer gpa.free(root);
-
-        var watcher: Watcher = try .init(gpa, io, .{
-            .backend = .fsevents,
-            .buffer_bytes = 64 * 1024,
-            .max_dir_entries = 1_000_000,
-        });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
-        try writeBurst(tmp.dir, burst);
-
-        var tally: Tally = .{};
-        try tally.drain(&watcher, 1_000);
-        try std.testing.expect(tally.overflow > 0);
-        try std.testing.expect(tally.created < burst);
-    }
-
-    // At the default. Room for all of it.
-    {
-        var tmp = std.testing.tmpDir(.{ .iterate = true });
-        defer tmp.cleanup();
-        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-        defer gpa.free(root);
-
-        var watcher: Watcher = try .init(gpa, io, .{
-            .backend = .fsevents,
-            .max_dir_entries = 1_000_000,
-        });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
-        try writeBurst(tmp.dir, burst);
-
-        var tally: Tally = .{};
-        try tally.drain(&watcher, 1_000);
-        if (tally.created != burst) {
-            std.debug.print("fsevents: {d}/{d} created, {d} overflow\n", .{
-                tally.created, burst, tally.overflow,
-            });
-        }
-        // The operating system can still lose track of a burst this
-        // size and say so, which is its answer and not lookout's. What
-        // must not happen again is lookout losing nineteen paths in
-        // twenty to a buffer the caller could not size.
-        if (tally.overflow == 0) {
-            try std.testing.expectEqual(burst, tally.created);
-        } else {
-            try std.testing.expect(tally.created > burst / 2);
-        }
-    }
-}
-
 test "a change inside a renamed directory is not a creation" {
     // The Apple backend remembers every path it has seen, so that an
     // accumulated `ItemCreated` flag can be told from a write. Renaming a
@@ -501,5 +433,78 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
             });
         }
         try std.testing.expectEqual(@as(usize, 0), tally.overflow);
+    }
+}
+
+// Last in the file on purpose. Ten thousand files created and then
+// deleted is enough churn that the operating system loses track of what
+// a watcher started just afterwards is looking at, and a test that
+// asserts what a watcher remembers has no business running in that
+// wake.
+test "the delivery buffer is the size the caller asked for" {
+    // The Apple backend held deliveries in a fixed 64 KiB buffer, which
+    // at about a hundred and ten bytes a record is room for some six
+    // hundred paths: a ten-thousand file burst lost 95% of itself and
+    // said so as one `overflow`. The size is now the caller's, and the
+    // default holds the burst.
+    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const burst = 10_000;
+
+    // At the floor. Nothing polls while the burst is written, so the
+    // delivery thread has to hold all of it in the buffer it was given.
+    {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+
+        var watcher: Watcher = try .init(gpa, io, .{
+            .backend = .fsevents,
+            .buffer_bytes = 64 * 1024,
+            .max_dir_entries = 1_000_000,
+        });
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{});
+        try writeBurst(tmp.dir, burst);
+
+        var tally: Tally = .{};
+        try tally.drain(&watcher, 1_000);
+        try std.testing.expect(tally.overflow > 0);
+        try std.testing.expect(tally.created < burst);
+    }
+
+    // At the default. Room for all of it.
+    {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+
+        var watcher: Watcher = try .init(gpa, io, .{
+            .backend = .fsevents,
+            .max_dir_entries = 1_000_000,
+        });
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{});
+        try writeBurst(tmp.dir, burst);
+
+        var tally: Tally = .{};
+        try tally.drain(&watcher, 1_000);
+        if (tally.created != burst) {
+            std.debug.print("fsevents: {d}/{d} created, {d} overflow\n", .{
+                tally.created, burst, tally.overflow,
+            });
+        }
+        // The operating system can still lose track of a burst this
+        // size and say so, which is its answer and not lookout's. What
+        // must not happen again is lookout losing nineteen paths in
+        // twenty to a buffer the caller could not size.
+        if (tally.overflow == 0) {
+            try std.testing.expectEqual(burst, tally.created);
+        } else {
+            try std.testing.expect(tally.created > burst / 2);
+        }
     }
 }
