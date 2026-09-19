@@ -768,7 +768,7 @@ test "the Windows read buffer is the size the caller asked for" {
 
         var watcher: Watcher = try .init(gpa, io, .{
             .backend = .windows,
-            .windows_buffer_bytes = 4 * 1024,
+            .buffer_bytes = 4 * 1024,
         });
         defer watcher.deinit();
         _ = try watcher.add(root, .{});
@@ -794,7 +794,7 @@ test "the Windows read buffer is the size the caller asked for" {
 
         var watcher: Watcher = try .init(gpa, io, .{
             .backend = .windows,
-            .windows_buffer_bytes = 1024 * 1024,
+            .buffer_bytes = 1024 * 1024,
         });
         defer watcher.deinit();
         _ = try watcher.add(root, .{});
@@ -1285,4 +1285,363 @@ test "the watch limit is one error, named the same on every backend" {
         if (std.mem.eql(u8, err.name, "WatchLimitReached")) named = true;
     }
     try std.testing.expect(named);
+}
+
+test "an event says whether the path is a file or a directory" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{ .recursive = true });
+
+        const gpa = std.testing.allocator;
+        const dir_path = try f.path("made");
+        defer gpa.free(dir_path);
+        const file_path = try f.path("made/a.txt");
+        defer gpa.free(file_path);
+
+        try f.tmp.dir.createDirPath(std.testing.io, "made");
+        try f.write("made/a.txt", "one");
+
+        var dir_target: ?lookout.Target = null;
+        var file_target: ?lookout.Target = null;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and (dir_target == null or file_target == null)) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                if (std.mem.eql(u8, event.path, dir_path)) dir_target = event.target;
+                if (std.mem.eql(u8, event.path, file_path)) file_target = event.target;
+            }
+        }
+        // "From the path" is not an answer once the path is gone, which
+        // is why this is on the event and not left to the caller.
+        try std.testing.expectEqual(lookout.Target.directory, dir_target.?);
+        try std.testing.expectEqual(lookout.Target.file, file_target.?);
+    }
+}
+
+test "a watch that cannot cover a subtree says so instead of going quiet" {
+    // Running as a user who is refused nothing makes an unreadable
+    // directory readable, and there is nothing to report.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (std.os.linux.geteuid() == 0) return error.SkipZigTest;
+
+    for (backends) |backend| {
+        // Only the backends that register each directory themselves can
+        // be refused one; the two that recurse in the kernel are told
+        // about the tree whether they could open it or not.
+        if (!lookout.prunesIgnored(backend)) continue;
+
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const io = std.testing.io;
+        try f.tmp.dir.createDir(io, "closed", @enumFromInt(0o000));
+        // Put it back before the fixture tries to delete the tree.
+        defer f.tmp.dir.setFilePermissions(io, "closed", .default_dir, .{}) catch {};
+
+        _ = try f.watcher.add(f.root, .{ .recursive = true });
+
+        // A subtree lookout cannot see into is a hole in the watch. It
+        // used to be swallowed, and the only sign of it was a part of
+        // the tree that never reported anything.
+        try f.expectEvent("closed", .unwatched);
+    }
+}
+
+test "a watcher can be woken from another thread" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{});
+
+        const Waker = struct {
+            watcher: *Watcher,
+            fn run(self: *@This()) void {
+                std.testing.io.sleep(.fromMilliseconds(100), .awake) catch {};
+                self.watcher.wake();
+            }
+        };
+        var waker: Waker = .{ .watcher = &f.watcher };
+        const thread = try std.Thread.spawn(.{}, Waker.run, .{&waker});
+        defer thread.join();
+
+        // Nothing is going to happen to the tree, so without the wake
+        // this blocks for as long as the caller is prepared to wait --
+        // and with `null`, forever.
+        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        const events = try f.watcher.poll(null);
+        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
+        try std.testing.expectEqual(@as(usize, 0), events.len);
+        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+
+        // And the watcher still works afterwards.
+        try f.write("a.txt", "one");
+        try f.expectEvent("a.txt", .created);
+    }
+}
+
+test "a watcher says what it is watching" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+
+        const later = try f.path("later");
+        defer gpa.free(later);
+        const here = try f.watcher.add(f.root, .{ .recursive = true });
+        const waiting = try f.watcher.add(later, .{ .pending = true });
+
+        const held = try f.watcher.watches(gpa);
+        defer gpa.free(held);
+        try std.testing.expectEqual(@as(usize, 2), held.len);
+        try std.testing.expectEqual(here, held[0].id);
+        try std.testing.expectEqualStrings(f.root, held[0].path);
+        try std.testing.expect(held[0].recursive);
+        try std.testing.expect(!held[0].waiting);
+        try std.testing.expectEqual(waiting, held[1].id);
+        try std.testing.expectEqualStrings(later, held[1].path);
+        // Parked on an ancestor is still not watching what was asked
+        // for, and a program diffing what it meant to watch against
+        // what it has needs to be told which.
+        try std.testing.expect(held[1].waiting);
+
+        f.watcher.remove(waiting);
+        const after = try f.watcher.watches(gpa);
+        defer gpa.free(after);
+        try std.testing.expectEqual(@as(usize, 1), after.len);
+    }
+}
+
+test "the descriptor becomes readable when there is something to report" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const descriptor = f.watcher.fd() orelse continue;
+        _ = try f.watcher.add(f.root, .{});
+
+        // Not readable with nothing to say.
+        var fds: [1]std.posix.pollfd = .{.{
+            .fd = descriptor,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 0));
+
+        try f.write("a.txt", "one");
+
+        // And readable now, which is the whole promise: a program with a
+        // wait loop of its own waits on this and calls `poll` when it
+        // fires. The suite used to assert only that it was not null.
+        fds[0].revents = 0;
+        try std.testing.expect(try std.posix.poll(&fds, timeout_ms) > 0);
+        try f.expectEvent("a.txt", .created);
+    }
+}
+
+test "two watchers in one process do not disturb each other" {
+    for (backends) |backend| {
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+        try tmp.dir.createDirPath(io, "one");
+        try tmp.dir.createDirPath(io, "two");
+
+        const first_root = try std.fs.path.join(gpa, &.{ root, "one" });
+        defer gpa.free(first_root);
+        const second_root = try std.fs.path.join(gpa, &.{ root, "two" });
+        defer gpa.free(second_root);
+
+        var first: Watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 });
+        defer first.deinit();
+        var second: Watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 });
+        defer second.deinit();
+        _ = try first.add(first_root, .{});
+        _ = try second.add(second_root, .{});
+
+        try tmp.dir.writeFile(io, .{ .sub_path = "one/a.txt", .data = "one" });
+        try tmp.dir.writeFile(io, .{ .sub_path = "two/b.txt", .data = "two" });
+
+        const wanted_first = try std.fs.path.join(gpa, &.{ first_root, "a.txt" });
+        defer gpa.free(wanted_first);
+        const wanted_second = try std.fs.path.join(gpa, &.{ second_root, "b.txt" });
+        defer gpa.free(wanted_second);
+
+        var saw_first = false;
+        var saw_second = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !(saw_first and saw_second)) : (waited += 200) {
+            for (try first.poll(100)) |event| {
+                try std.testing.expect(!std.mem.eql(u8, event.path, wanted_second));
+                if (std.mem.eql(u8, event.path, wanted_first)) saw_first = true;
+            }
+            for (try second.poll(100)) |event| {
+                try std.testing.expect(!std.mem.eql(u8, event.path, wanted_first));
+                if (std.mem.eql(u8, event.path, wanted_second)) saw_second = true;
+            }
+        }
+        try std.testing.expect(saw_first);
+        try std.testing.expect(saw_second);
+    }
+}
+
+test "a watch can be removed from inside a poll loop" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "one");
+        try f.tmp.dir.createDirPath(std.testing.io, "two");
+
+        const gpa = std.testing.allocator;
+        const first_root = try f.path("one");
+        defer gpa.free(first_root);
+        const second_root = try f.path("two");
+        defer gpa.free(second_root);
+
+        const first = try f.watcher.add(first_root, .{});
+        _ = try f.watcher.add(second_root, .{});
+        try f.settle();
+
+        try f.write("one/a.txt", "one");
+        try f.write("two/b.txt", "two");
+
+        // Removing a watch while its events are in the caller's hands is
+        // documented as supported, and is what a program that reacts to
+        // an event by dropping the watch does.
+        var removed = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !removed) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                if (event.id == first) {
+                    f.watcher.remove(first);
+                    removed = true;
+                }
+            }
+        }
+        try std.testing.expect(removed);
+        try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().watches);
+
+        // The other watch still works.
+        try f.write("two/c.txt", "three");
+        try f.expectEvent("two/c.txt", .created);
+    }
+}
+
+test "a position is a token a caller can write down and hand back" {
+    const start: lookout.Position = .{ .backend = .fsevents, .value = 1234567890 };
+    var storage: [lookout.Position.max_token_len]u8 = undefined;
+    const token = start.token(&storage);
+    const parsed = try lookout.Position.parse(token);
+    try std.testing.expectEqual(start.backend, parsed.backend);
+    try std.testing.expectEqual(start.value, parsed.value);
+
+    // A token is text, and text a program did not write is refused
+    // rather than guessed at.
+    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse(""));
+    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.fsevents"));
+    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("2.fsevents.1"));
+    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.nosuch.1"));
+    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.auto.1"));
+    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.fsevents.x"));
+}
+
+test "a watcher says where it has got to, exactly where it can" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const where = f.watcher.position();
+        // Asserted rather than accepted either way, so the predicate
+        // beside the option cannot go stale.
+        try std.testing.expectEqual(lookout.tracksPosition(backend), where != null);
+        if (where) |p| try std.testing.expectEqual(backend, p.backend);
+    }
+}
+
+test "what changed while nothing was watching is reported on resuming" {
+    if (!lookout.tracksPosition(lookout.default_backend)) return error.SkipZigTest;
+
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "one" });
+
+    var token: [lookout.Position.max_token_len]u8 = undefined;
+    var written: usize = 0;
+    {
+        var watcher: Watcher = try .init(gpa, io, .{});
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{ .recursive = true });
+        while ((try watcher.poll(200)).len != 0) {}
+        const where = watcher.position().?;
+        const text = where.token(&token);
+        written = text.len;
+    }
+
+    // Nothing is watching now, which is exactly when the interesting
+    // changes happen to a tool that was not running.
+    try tmp.dir.writeFile(io, .{ .sub_path = "while-away.txt", .data = "two" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "one and two" });
+
+    var watcher: Watcher = try .init(gpa, io, .{
+        .since = try lookout.Position.parse(token[0..written]),
+    });
+    defer watcher.deinit();
+    _ = try watcher.add(root, .{ .recursive = true });
+
+    const appeared = try std.fs.path.join(gpa, &.{ root, "while-away.txt" });
+    defer gpa.free(appeared);
+    const changed = try std.fs.path.join(gpa, &.{ root, "kept.txt" });
+    defer gpa.free(changed);
+
+    var saw_appeared = false;
+    var saw_changed = false;
+    var waited: u32 = 0;
+    while (waited < timeout_ms and !(saw_appeared and saw_changed)) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (std.mem.eql(u8, event.path, appeared)) saw_appeared = true;
+            if (std.mem.eql(u8, event.path, changed)) saw_changed = true;
+        }
+    }
+    try std.testing.expect(saw_appeared);
+    try std.testing.expect(saw_changed);
+}
+
+test "an include list reports what it names and nothing else" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "src/deep");
+
+        _ = try f.watcher.add(f.root, .{
+            .recursive = true,
+            .filter = .{ .only = &.{"src/**/*.zig"} },
+        });
+        try f.settle();
+
+        const gpa = std.testing.allocator;
+        const unwanted = try f.path("src/notes.txt");
+        defer gpa.free(unwanted);
+        const wanted = try f.path("src/deep/main.zig");
+        defer gpa.free(wanted);
+
+        try f.write("src/notes.txt", "one");
+        try f.write("notes.zig", "two");
+        try f.write("src/deep/main.zig", "three");
+
+        // The walk still reached the directory the file is in, which is
+        // the half an include list gets wrong if it prunes what it does
+        // not name.
+        var found = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !found) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                try std.testing.expect(!std.mem.eql(u8, event.path, unwanted));
+                if (std.mem.eql(u8, event.path, wanted)) found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
 }

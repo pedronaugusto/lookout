@@ -10,7 +10,9 @@
 //!
 //! * The number of watches is capped per user by
 //!   `/proc/sys/fs/inotify/max_user_watches`. Exhausting it fails
-//!   `lookout.Watcher.add` with `error.WatchLimitReached`.
+//!   `lookout.Watcher.add` with `error.WatchLimitReached` for the path the
+//!   caller named, and reports `lookout.Kind.unwatched` for a directory
+//!   below it that there was no room for.
 //! * The kernel event queue is bounded. When it overflows, the kernel says
 //!   so and says nothing about what was lost; lookout reports
 //!   `lookout.Kind.overflow` against every watch root and the caller should
@@ -24,7 +26,12 @@ const linux = std.os.linux;
 
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
+const Budget = @import("../Budget.zig");
+const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
+const path_cmp = @import("../path.zig");
+const walk = @import("../walk.zig");
+const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
 const Inotify = @This();
@@ -33,12 +40,17 @@ gpa: Allocator,
 io: Io,
 /// The inotify descriptor, which is what `lookout.Watcher.fd` hands out.
 ifd: posix.fd_t,
+/// Read and write ends of the pipe `wake` pokes. Both non-blocking, so
+/// neither a waker nor a waiter can be held up by the other.
+wake_r: posix.fd_t,
+wake_w: posix.fd_t,
 /// The caller's watches.
 watches: std.AutoArrayHashMapUnmanaged(WatchId, Watch),
 /// Kernel watch descriptor to the directory or file it stands for.
 wds: std.AutoArrayHashMapUnmanaged(i32, Registration),
-/// Mirrors `lookout.Options.max_dir_entries`.
-max_dir_entries: usize,
+/// How many entries each watched directory holds, against
+/// `lookout.Options.max_dir_entries`.
+budget: Budget,
 /// What every kernel watch is registered with: `base_mask`, plus
 /// `IN_CLOSE_WRITE` when `lookout.Options.report_closes` asked for it.
 /// Kept rather than recomputed, because every `register` needs it and
@@ -48,10 +60,13 @@ mask: u32,
 /// arrived, keyed by the cookie the kernel pairs them with. Paths owned
 /// here.
 ///
-/// The kernel emits the two halves back to back, so this is normally
-/// empty by the end of the read that filled it. What stays behind is a
-/// path that moved out of the watch, and `flushRenames` reports it as a
-/// removal -- which, from inside the watch, is what it is.
+/// The kernel emits the two halves back to back, but "back to back" is
+/// about the queue and not about the read: a burst of renames large
+/// enough to fill the read buffer puts one pair either side of a
+/// boundary. So a half is held across reads and released only when the
+/// whole wait is over -- see `flushRenames` -- and what stays behind
+/// then is a path that moved out of the watch, which from inside the
+/// watch is a removal.
 pending_renames: std.AutoArrayHashMapUnmanaged(u32, Pending),
 
 /// What the caller asked for.
@@ -77,15 +92,6 @@ const Registration = struct {
     watch: WatchId,
     /// Absolute path the descriptor stands for, owned by the backend.
     path: []u8,
-    /// How many entries the directory holds, counted once when the watch
-    /// was registered and kept current from the creations and deletions
-    /// the kernel reports. Zero for a file.
-    ///
-    /// inotify needs no listing to name what changed, so this exists for
-    /// one reason: `lookout.Options.max_dir_entries` is a budget the
-    /// caller set, and a directory past it must say `lookout.Kind.overflow`
-    /// here exactly as it does on the backends that compare listings.
-    entries: usize,
 };
 
 /// Everything lookout asks the kernel to report. `IN.EXCL_UNLINK` keeps a
@@ -100,12 +106,12 @@ const base_mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
 /// kernel refuses a read smaller than the next event, never a short one.
 const read_buffer_len = 8192;
 
-/// Creates the inotify descriptor.
+/// Creates the inotify descriptor and the pipe `wake` pokes.
 pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!Inotify {
     // `linux.errno`, not `posix.errno`: these are raw syscalls, and on a
     // target that links libc `posix.errno` reads libc's thread-local
     // variable, which a raw syscall never writes.
-    const rc = linux.inotify_init1(linux.IN.CLOEXEC);
+    const rc = linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK);
     switch (linux.errno(rc)) {
         .SUCCESS => {},
         .MFILE => return error.ProcessFdQuotaExceeded,
@@ -113,13 +119,26 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .NOMEM => return error.SystemResources,
         else => return error.Unexpected,
     }
+    const ifd: posix.fd_t = @intCast(rc);
+    errdefer _ = linux.close(ifd);
+
+    var fds: [2]i32 = undefined;
+    switch (linux.errno(linux.pipe2(&fds, .{ .CLOEXEC = true, .NONBLOCK = true }))) {
+        .SUCCESS => {},
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        else => return error.Unexpected,
+    }
+
     return .{
         .gpa = gpa,
         .io = io,
-        .ifd = @intCast(rc),
+        .ifd = ifd,
+        .wake_r = fds[0],
+        .wake_w = fds[1],
         .watches = .empty,
         .wds = .empty,
-        .max_dir_entries = options.max_dir_entries,
+        .budget = .init(gpa, io, options.max_dir_entries),
         .mask = if (options.report_closes)
             base_mask | linux.IN.CLOSE_WRITE
         else
@@ -128,7 +147,7 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
     };
 }
 
-/// Closes the inotify descriptor and releases every watch.
+/// Closes the descriptors and releases every watch.
 pub fn deinit(n: *Inotify) void {
     for (n.wds.values()) |registration| n.gpa.free(registration.path);
     n.wds.deinit(n.gpa);
@@ -139,6 +158,9 @@ pub fn deinit(n: *Inotify) void {
     n.watches.deinit(n.gpa);
     for (n.pending_renames.values()) |half| n.gpa.free(half.path);
     n.pending_renames.deinit(n.gpa);
+    n.budget.deinit();
+    _ = linux.close(n.wake_r);
+    _ = linux.close(n.wake_w);
     _ = linux.close(n.ifd);
     n.* = undefined;
 }
@@ -149,9 +171,18 @@ pub fn fd(n: *const Inotify) ?posix.fd_t {
     return n.ifd;
 }
 
-/// How many watches the caller has added. See `lookout.Watcher.Stats`.
-pub fn watchCount(n: *const Inotify) usize {
-    return n.watches.count();
+/// Nothing to resume from: the kernel queue starts empty and remembers
+/// nothing from before the watch. See `lookout.tracksPosition`.
+pub fn position(n: *const Inotify) ?u64 {
+    _ = n;
+    return null;
+}
+
+/// Writes one byte to the pipe a blocked `wait` is also polling. See
+/// `lookout.Watcher.wake`.
+pub fn wake(n: *Inotify) void {
+    const byte: [1]u8 = .{0};
+    _ = linux.write(n.wake_w, &byte, 1);
 }
 
 /// How many kernel watches this backend holds, which is what the
@@ -161,10 +192,13 @@ pub fn registrationCount(n: *const Inotify) usize {
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
-pub fn add(n: *Inotify, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
-    for (n.watches.values()) |watch| {
-        if (std.mem.eql(u8, watch.root, abs_path)) return error.PathAlreadyWatched;
-    }
+pub fn add(
+    n: *Inotify,
+    id: WatchId,
+    abs_path: []const u8,
+    options: lookout.AddOptions,
+    batch: *Batch,
+) lookout.Watcher.AddError!void {
     const stat = try Io.Dir.cwd().statFile(n.io, abs_path, .{});
 
     const root = try n.gpa.dupe(u8, abs_path);
@@ -182,208 +216,333 @@ pub fn add(n: *Inotify, id: WatchId, abs_path: []const u8, options: lookout.AddO
     errdefer n.removeWatchDescriptors(id);
 
     try n.register(id, try n.gpa.dupe(u8, abs_path));
+    if (stat.kind == .directory) try n.budget.seed(abs_path);
     if (stat.kind != .directory or !options.recursive) return;
 
     // One kernel watch per directory: inotify does not recurse.
-    var frontier: std.ArrayList([]u8) = .empty;
-    defer {
-        for (frontier.items) |path| n.gpa.free(path);
-        frontier.deinit(n.gpa);
-    }
-    try frontier.append(n.gpa, try n.gpa.dupe(u8, abs_path));
+    const Registering = struct {
+        n: *Inotify,
+        id: WatchId,
+        batch: *Batch,
 
-    var i: usize = 0;
-    while (i < frontier.items.len) : (i += 1) {
-        var dir = Io.Dir.openDirAbsolute(n.io, frontier.items[i], .{ .iterate = true }) catch continue;
-        defer dir.close(n.io);
-        var it = dir.iterate();
-        while (try it.next(n.io)) |entry| {
-            if (entry.kind != .directory) continue;
-            const child = try std.fs.path.join(n.gpa, &.{ frontier.items[i], entry.name });
-            errdefer n.gpa.free(child);
+        fn visit(r: *@This(), entry: walk.Entry) anyerror!walk.Step {
+            if (entry.kind != .directory) return .over;
             // An excluded directory costs no kernel watch and is not
             // descended into, so its whole tree costs nothing.
-            if (n.excluded(id, child)) {
-                n.gpa.free(child);
-                continue;
-            }
-            n.register(id, try n.gpa.dupe(u8, child)) catch |err| switch (err) {
+            if (r.n.pruned(r.id, entry.path)) return .over;
+            r.n.register(r.id, try r.n.gpa.dupe(u8, entry.path)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.WatchLimitReached => return error.WatchLimitReached,
                 // A subdirectory that vanished, or that is not ours to
-                // read, is reported through its parent and no further.
-                else => {},
+                // read: a hole in the watch, and saying so is the
+                // difference between a quiet subtree and a silent one.
+                else => {
+                    try r.batch.trouble(r.n.gpa, r.id, entry.path, .directory);
+                    return .over;
+                },
             };
-            try frontier.append(n.gpa, child);
+            return .into;
         }
-    }
+    };
+    var registering: Registering = .{ .n = n, .id = id, .batch = batch };
+    walk.tree(n.gpa, n.io, abs_path, &registering, Registering.visit) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.WatchLimitReached => return error.WatchLimitReached,
+        else => return error.Unexpected,
+    };
 }
 
 /// Stops watching `id` and releases its kernel watches.
 pub fn remove(n: *Inotify, id: WatchId) void {
     var watch = n.watches.fetchSwapRemove(id) orelse return;
+    n.budget.forget(watch.value.root);
     n.gpa.free(watch.value.root);
     watch.value.filter.deinit(n.gpa);
     n.removeWatchDescriptors(id);
 }
 
-/// Whether `path` is outside what the watch `id` is about. See
-/// `lookout.AddOptions.filter`.
-fn excluded(n: *const Inotify, id: WatchId, path: []const u8) bool {
+/// Whether `subject` is outside what the watch `id` is about, so no
+/// event for it is reported. See `lookout.AddOptions.filter`.
+fn excluded(n: *const Inotify, id: WatchId, subject: []const u8) bool {
     const watch = n.watches.get(id) orelse return false;
-    return watch.filter.excludes(watch.root, path);
+    return watch.filter.excludes(watch.root, subject);
+}
+
+/// Whether a directory is so far outside the watch that it need not be
+/// registered at all. See `Filter.prunes`.
+fn pruned(n: *const Inotify, id: WatchId, subject: []const u8) bool {
+    const watch = n.watches.get(id) orelse return false;
+    return watch.filter.prunes(watch.root, subject);
 }
 
 /// Waits on the inotify descriptor until it reports something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+    const result = n.collect(batch, timeout_ms);
+    // Whatever is still held when the wait is over never found its other
+    // half, however many reads it waited through.
+    try n.flushRenames(batch);
+    return result;
+}
+
+fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
     const before = batch.revision;
-    const started: Io.Timestamp = .now(n.io, .awake);
+    const deadline: Deadline = .start(n.io, timeout_ms);
 
     while (true) {
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still performs one non-blocking check. Returning early here
         // would make `poll(0)` report nothing, ever.
-        const timeout: i32 = timeout: {
-            const total = timeout_ms orelse break :timeout -1;
-            const elapsed = started.durationTo(Io.Timestamp.now(n.io, .awake)).toMilliseconds();
-            break :timeout @intCast(@max(0, @as(i64, total) - elapsed));
+        var fds: [2]posix.pollfd = .{
+            .{ .fd = n.ifd, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = n.wake_r, .events = posix.POLL.IN, .revents = 0 },
         };
-
-        var fds: [1]posix.pollfd = .{.{ .fd = n.ifd, .events = posix.POLL.IN, .revents = 0 }};
-        const ready = posix.poll(&fds, timeout) catch |err| switch (err) {
+        const ready = posix.poll(&fds, deadline.pollMs()) catch |err| switch (err) {
             error.SystemResources => return error.SystemResources,
             else => return error.Unexpected,
         };
         if (ready == 0) return;
 
-        var buffer: [read_buffer_len]u8 align(@alignOf(linux.inotify_event)) = undefined;
-        const len = posix.read(n.ifd, &buffer) catch |err| switch (err) {
-            error.WouldBlock => continue,
-            else => return error.Unexpected,
-        };
-
-        var offset: usize = 0;
-        while (offset + @sizeOf(linux.inotify_event) <= len) {
-            const event: *const linux.inotify_event = @ptrCast(@alignCast(&buffer[offset]));
-            offset += @sizeOf(linux.inotify_event) + event.len;
-            try n.handle(event, batch);
+        var woken = false;
+        if (fds[1].revents & posix.POLL.IN != 0) {
+            n.drainWake();
+            woken = true;
         }
-        // The kernel puts both halves of a rename in one read, so a half
-        // still held at the end of one is a path that left the watch.
-        try n.flushRenames(batch);
-        if (batch.revision != before) return;
-    }
-}
-
-/// Turns one kernel event into lookout events.
-fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout.Watcher.PollError!void {
-    if (event.mask & linux.IN.Q_OVERFLOW != 0) {
-        // The kernel does not say what was lost, so every watch is suspect.
-        for (n.watches.keys(), n.watches.values()) |id, watch| {
-            try batch.push(n.gpa, id, watch.root, .overflow);
+        if (fds[0].revents & posix.POLL.IN != 0) {
+            if (!try n.read(batch)) continue;
+        }
+        if (!woken and batch.revision == before) continue;
+        // A half with no partner yet is worth one more look: the other
+        // half is in the queue if the burst was simply longer than one
+        // read, and flushing here would turn a rename into a removal and
+        // a creation on a backend that says it pairs them.
+        while (n.pending_renames.count() != 0) {
+            if (!try n.read(batch)) break;
         }
         return;
     }
-    const registration = n.wds.get(event.wd) orelse return;
+}
+
+/// Reads one buffer of kernel events and turns them into lookout events.
+/// `false` when there was nothing to read.
+fn read(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!bool {
+    var buffer: [read_buffer_len]u8 align(@alignOf(linux.inotify_event)) = undefined;
+    const len = posix.read(n.ifd, &buffer) catch |err| switch (err) {
+        error.WouldBlock => return false,
+        else => return error.Unexpected,
+    };
+    if (len == 0) return false;
+
+    var offset: usize = 0;
+    while (offset + @sizeOf(linux.inotify_event) <= len) {
+        const event: *const linux.inotify_event = @ptrCast(@alignCast(&buffer[offset]));
+        offset += @sizeOf(linux.inotify_event) + event.len;
+        try n.handle(event, batch);
+    }
+    return true;
+}
+
+fn drainWake(n: *Inotify) void {
+    var scratch: [256]u8 = undefined;
+    while (posix.read(n.wake_r, &scratch) catch @as(usize, 0) > 0) {}
+}
+
+/// What one kernel event says, once the flags have been read.
+const Change = struct {
+    watch: WatchId,
+    /// The kernel watch descriptor the event arrived on.
+    wd: i32,
+    /// The directory the watch descriptor stands for, owned by `handle`.
+    dir: []u8,
+    /// The absolute path of the entry, owned by `handle`.
+    path: []u8,
+    cookie: u32,
+    is_dir: bool,
+    appeared: bool,
+    vanished: bool,
+    moved_from: bool,
+    moved_to: bool,
+    modified: bool,
+    closed: bool,
+    attributes: bool,
+
+    fn target(c: Change) Target {
+        return if (c.is_dir) .directory else .file;
+    }
+};
+
+/// Turns one kernel event into lookout events: read the flags, pair what
+/// can be paired, report, then keep the books.
+fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout.Watcher.PollError!void {
+    var change = (try n.decode(event, batch)) orelse return;
+    defer {
+        n.gpa.free(change.path);
+        n.gpa.free(change.dir);
+    }
+    const paired = try n.pair(&change, batch);
+    try n.emit(change, paired, batch);
+    try n.bookkeep(change, paired, batch);
+}
+
+/// Reads the flags, and answers everything that is over before an entry
+/// is named: the queue overflowing, a watch going away, and the watched
+/// path itself being deleted or moved.
+fn decode(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout.Watcher.PollError!?Change {
+    if (event.mask & linux.IN.Q_OVERFLOW != 0) {
+        // The kernel does not say what was lost, so every watch is suspect.
+        for (n.watches.keys(), n.watches.values()) |id, watch| {
+            try batch.push(n.gpa, id, watch.root, .overflow, .directory);
+        }
+        return null;
+    }
+    const registration = n.wds.get(event.wd) orelse return null;
     const watch = registration.watch;
 
     // Copied because reporting a disappearance is also what frees it.
     const base = try n.gpa.dupe(u8, registration.path);
-    defer n.gpa.free(base);
+    errdefer n.gpa.free(base);
 
     // IN_IGNORED is the kernel saying the watch is already gone, and it
     // follows IN_DELETE_SELF, so neither asks for `inotify_rm_watch`.
     if (event.mask & linux.IN.IGNORED != 0) {
+        n.gpa.free(base);
         n.drop(event.wd);
-        return;
+        return null;
     }
     if (event.mask & linux.IN.DELETE_SELF != 0) {
-        try batch.push(n.gpa, watch, base, .removed);
+        defer n.gpa.free(base);
+        try batch.push(n.gpa, watch, base, .removed, .directory);
         n.drop(event.wd);
-        return;
+        return null;
     }
     if (event.mask & linux.IN.MOVE_SELF != 0) {
-        try batch.push(n.gpa, watch, base, .renamed);
+        defer n.gpa.free(base);
+        try batch.push(n.gpa, watch, base, .renamed, .directory);
         n.forget(event.wd);
-        return;
+        return null;
     }
 
-    const path = if (event.getName()) |name|
+    const full = if (event.getName()) |name|
         try std.fs.path.join(n.gpa, &.{ base, name })
     else
         try n.gpa.dupe(u8, base);
-    defer n.gpa.free(path);
+    errdefer n.gpa.free(full);
 
     // Excluded before anything is reported, registered or counted: the
     // path is not part of this watch at all.
-    if (n.excluded(watch, path)) return;
+    if (n.excluded(watch, full) and n.pruned(watch, full)) {
+        n.gpa.free(full);
+        n.gpa.free(base);
+        return null;
+    }
 
-    const is_dir = event.mask & linux.IN.ISDIR != 0;
-    const recursive = (n.watches.get(watch) orelse return).recursive;
+    return .{
+        .watch = watch,
+        .wd = event.wd,
+        .dir = base,
+        .path = full,
+        .cookie = event.cookie,
+        .is_dir = event.mask & linux.IN.ISDIR != 0,
+        .appeared = event.mask & (linux.IN.CREATE | linux.IN.MOVED_TO) != 0,
+        .vanished = event.mask & (linux.IN.DELETE | linux.IN.MOVED_FROM) != 0,
+        .moved_from = event.mask & linux.IN.MOVED_FROM != 0,
+        .moved_to = event.mask & linux.IN.MOVED_TO != 0,
+        .modified = event.mask & linux.IN.MODIFY != 0,
+        .closed = event.mask & linux.IN.CLOSE_WRITE != 0,
+        .attributes = event.mask & linux.IN.ATTRIB != 0,
+    };
+}
 
-    const appeared = event.mask & (linux.IN.CREATE | linux.IN.MOVED_TO) != 0;
-    const vanished = event.mask & (linux.IN.DELETE | linux.IN.MOVED_FROM) != 0;
-
-    // A move is held rather than reported: the kernel gives both halves a
-    // cookie, and two halves make one `renamed` instead of a removal and
-    // a creation nobody can connect.
-    var paired = false;
-    if (event.mask & linux.IN.MOVED_FROM != 0) {
-        const owned = try n.gpa.dupe(u8, path);
+/// Holds one half of a move, or joins it to the half already held.
+///
+/// The kernel gives both halves one cookie, and two halves make one
+/// `renamed` instead of a removal and a creation nobody can connect.
+fn pair(n: *Inotify, change: *const Change, batch: *Batch) lookout.Watcher.PollError!bool {
+    if (change.moved_from) {
+        const owned = try n.gpa.dupe(u8, change.path);
         errdefer n.gpa.free(owned);
-        if (n.pending_renames.fetchSwapRemove(event.cookie)) |stale| n.gpa.free(stale.value.path);
-        try n.pending_renames.put(n.gpa, event.cookie, .{
-            .watch = watch,
+        if (n.pending_renames.fetchSwapRemove(change.cookie)) |stale| n.gpa.free(stale.value.path);
+        try n.pending_renames.put(n.gpa, change.cookie, .{
+            .watch = change.watch,
             .path = owned,
-            .is_dir = is_dir,
+            .is_dir = change.is_dir,
         });
-        paired = true;
+        return true;
     }
-    if (event.mask & linux.IN.MOVED_TO != 0) {
-        if (n.pending_renames.fetchSwapRemove(event.cookie)) |half| {
-            defer n.gpa.free(half.value.path);
-            try batch.pushRename(n.gpa, watch, path, half.value.path);
-            // The watches below a moved directory are still on the right
-            // inodes but under the wrong names, so they are dropped and
-            // taken again at the name the tree now has.
-            if (is_dir) {
-                n.forgetSubtree(half.value.path);
-                if (recursive) try n.adopt(watch, path, batch);
-            }
-            paired = true;
+    if (change.moved_to) {
+        const half = n.pending_renames.fetchSwapRemove(change.cookie) orelse return false;
+        defer n.gpa.free(half.value.path);
+        if (!n.excluded(change.watch, change.path)) {
+            try batch.pushRename(n.gpa, change.watch, change.path, half.value.path, change.target());
         }
+        // The watches below a moved directory are still on the right
+        // inodes but under the wrong names, so they are dropped and
+        // taken again at the name the tree now has.
+        if (change.is_dir) {
+            n.forgetSubtree(half.value.path);
+            n.budget.forget(half.value.path);
+        }
+        return true;
     }
+    return false;
+}
 
-    if (appeared and !paired) try batch.push(n.gpa, watch, path, .created);
-    if (vanished and !paired) try batch.push(n.gpa, watch, path, .removed);
-    if (event.mask & linux.IN.MODIFY != 0) {
-        try batch.push(n.gpa, watch, path, .modified);
+/// Reports what happened to the entry, for everything a pairing did not
+/// already answer.
+fn emit(n: *Inotify, change: Change, paired: bool, batch: *Batch) lookout.Watcher.PollError!void {
+    if (n.excluded(change.watch, change.path)) return;
+    const target = change.target();
+    if (change.appeared and !paired) {
+        try batch.push(n.gpa, change.watch, change.path, .created, target);
+    }
+    if (change.vanished and !paired) {
+        try batch.push(n.gpa, change.watch, change.path, .removed, target);
+    }
+    if (change.modified) {
+        try batch.push(n.gpa, change.watch, change.path, .modified, target);
     }
     // Only asked for when `lookout.Options.report_closes` is set, so a
     // watcher that did not ask never sees one of these.
-    if (event.mask & linux.IN.CLOSE_WRITE != 0) {
-        try batch.push(n.gpa, watch, path, .closed);
+    if (change.closed) {
+        try batch.push(n.gpa, change.watch, change.path, .closed, target);
     }
-    if (event.mask & linux.IN.ATTRIB != 0) {
-        try batch.push(n.gpa, watch, path, .attributes);
+    if (change.attributes) {
+        try batch.push(n.gpa, change.watch, change.path, .attributes, target);
+    }
+}
+
+/// Keeps the entry budget and the registrations current.
+fn bookkeep(n: *Inotify, change: Change, paired: bool, batch: *Batch) lookout.Watcher.PollError!void {
+    // Checked on every event for the directory rather than only on the
+    // ones that move the count, so that a watch added to a directory
+    // that is already too big says so at the first sign of life, which
+    // is what the listing backends do.
+    const move: Budget.Move = if (change.appeared)
+        .appeared
+    else if (change.vanished)
+        .vanished
+    else
+        .unchanged;
+    if (try n.budget.note(change.dir, move)) {
+        const root = (n.watches.get(change.watch) orelse return).root;
+        try batch.push(n.gpa, change.watch, root, .overflow, .directory);
     }
 
-    // The entry budget. Checked on every event for the directory rather
-    // than only on the ones that move the count, so that a watch added to
-    // a directory that is already too big says so at the first sign of
-    // life, which is what the listing backends do.
-    if (n.wds.getPtr(event.wd)) |current| {
-        if (appeared) current.entries += 1;
-        if (vanished) current.entries -|= 1;
-        if (current.entries > n.max_dir_entries) {
-            try batch.push(n.gpa, watch, n.watches.get(watch).?.root, .overflow);
-        }
+    if (!change.is_dir) return;
+    if (change.appeared and !paired and n.recursive(change.watch)) {
+        try n.adopt(change.watch, change.path, batch);
     }
+    if (change.moved_to and paired and n.recursive(change.watch)) {
+        try n.adopt(change.watch, change.path, batch);
+    }
+    if (change.vanished and !paired) {
+        n.forgetSubtree(change.path);
+        n.budget.forget(change.path);
+    }
+}
 
-    // Last, because both can rehash `wds` and invalidate the pointer above.
-    if (appeared and !paired and is_dir and recursive) try n.adopt(watch, path, batch);
-    if (vanished and !paired and is_dir) n.forgetSubtree(path);
+fn recursive(n: *const Inotify, id: WatchId) bool {
+    return (n.watches.get(id) orelse return false).recursive;
 }
 
 /// Reports every held `IN_MOVED_FROM` whose other half never came as a
@@ -392,12 +551,19 @@ fn handle(n: *Inotify, event: *const linux.inotify_event, batch: *Batch) lookout
 fn flushRenames(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!void {
     while (n.pending_renames.count() != 0) {
         const half = n.pending_renames.values()[0];
-        const cookie = n.pending_renames.keys()[0];
         n.pending_renames.swapRemoveAt(0);
         defer n.gpa.free(half.path);
-        _ = cookie;
-        try batch.push(n.gpa, half.watch, half.path, .removed);
-        if (half.is_dir) n.forgetSubtree(half.path);
+        try batch.push(
+            n.gpa,
+            half.watch,
+            half.path,
+            .removed,
+            if (half.is_dir) .directory else .file,
+        );
+        if (half.is_dir) {
+            n.forgetSubtree(half.path);
+            n.budget.forget(half.path);
+        }
     }
 }
 
@@ -405,77 +571,72 @@ fn flushRenames(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!void {
 /// reports whatever is already inside them as created -- a directory can
 /// be populated before the watch on it exists, and those events would
 /// otherwise be lost.
-///
-/// Iterative rather than recursive: the tree being adopted is one an
-/// unrelated process just created, so its depth is not this library's to
-/// bound.
-fn adopt(n: *Inotify, id: WatchId, path: []const u8, batch: *Batch) Allocator.Error!void {
-    var frontier: std.ArrayList([]u8) = .empty;
-    defer {
-        for (frontier.items) |item| n.gpa.free(item);
-        frontier.deinit(n.gpa);
-    }
-    try frontier.append(n.gpa, try n.gpa.dupe(u8, path));
+fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+    n.register(id, try n.gpa.dupe(u8, root)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            try batch.trouble(n.gpa, id, root, .directory);
+            return;
+        },
+    };
+    n.budget.seed(root) catch {};
 
-    var i: usize = 0;
-    while (i < frontier.items.len) : (i += 1) {
-        const current = frontier.items[i];
-        const owned = try n.gpa.dupe(u8, current);
-        n.register(id, owned) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            // `register` freed it. A directory that is gone again, or is
-            // not ours to read, is reported through its parent and no
-            // further.
-            else => continue,
-        };
+    const Adopting = struct {
+        n: *Inotify,
+        id: WatchId,
+        batch: *Batch,
 
-        var dir = Io.Dir.openDirAbsolute(n.io, current, .{ .iterate = true }) catch continue;
-        defer dir.close(n.io);
-        var it = dir.iterate();
-        while (it.next(n.io) catch null) |entry| {
-            const child = try std.fs.path.join(n.gpa, &.{ current, entry.name });
-            errdefer n.gpa.free(child);
-            if (n.excluded(id, child)) {
-                n.gpa.free(child);
-                continue;
+        fn visit(a: *@This(), entry: walk.Entry) anyerror!walk.Step {
+            if (a.n.pruned(a.id, entry.path)) return .over;
+            if (!a.n.excluded(a.id, entry.path)) {
+                try a.batch.push(a.n.gpa, a.id, entry.path, .created, .of(entry.kind));
             }
-            try batch.push(n.gpa, id, child, .created);
-            if (entry.kind == .directory) {
-                try frontier.append(n.gpa, child);
-            } else {
-                n.gpa.free(child);
-            }
+            if (entry.kind != .directory) return .over;
+            a.n.register(a.id, try a.n.gpa.dupe(u8, entry.path)) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    try a.batch.trouble(a.n.gpa, a.id, entry.path, .directory);
+                    return .over;
+                },
+            };
+            a.n.budget.seed(entry.path) catch {};
+            return .into;
         }
-    }
+    };
+    var adopting: Adopting = .{ .n = n, .id = id, .batch = batch };
+    walk.tree(n.gpa, n.io, root, &adopting, Adopting.visit) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Unexpected,
+    };
 }
 
 /// Asks the kernel for a watch on `path`, taking ownership of it.
-fn register(n: *Inotify, id: WatchId, path: []u8) lookout.Watcher.AddError!void {
-    const path_z = posix.toPosixPath(path) catch {
-        n.gpa.free(path);
+fn register(n: *Inotify, id: WatchId, watched: []u8) lookout.Watcher.AddError!void {
+    const path_z = posix.toPosixPath(watched) catch {
+        n.gpa.free(watched);
         return error.NameTooLong;
     };
     const rc = linux.inotify_add_watch(n.ifd, &path_z, n.mask);
     switch (linux.errno(rc)) {
         .SUCCESS => {},
         .NOSPC => {
-            n.gpa.free(path);
+            n.gpa.free(watched);
             return error.WatchLimitReached;
         },
         .ACCES => {
-            n.gpa.free(path);
+            n.gpa.free(watched);
             return error.AccessDenied;
         },
         .NOENT => {
-            n.gpa.free(path);
+            n.gpa.free(watched);
             return error.FileNotFound;
         },
         .NOMEM => {
-            n.gpa.free(path);
+            n.gpa.free(watched);
             return error.SystemResources;
         },
         else => {
-            n.gpa.free(path);
+            n.gpa.free(watched);
             return error.Unexpected;
         },
     }
@@ -483,23 +644,9 @@ fn register(n: *Inotify, id: WatchId, path: []u8) lookout.Watcher.AddError!void 
 
     // The kernel returns the existing descriptor when the same inode is
     // registered twice, so a replaced entry frees the path it replaces.
-    const entries = n.countEntries(path);
     const gop = try n.wds.getOrPut(n.gpa, wd);
     if (gop.found_existing) n.gpa.free(gop.value_ptr.path);
-    gop.value_ptr.* = .{ .watch = id, .path = path, .entries = entries };
-}
-
-/// How many entries `path` holds, or zero when it is not a directory or
-/// cannot be read. The one listing inotify does, and only to start the
-/// count `handle` keeps: an unreadable directory is a budget of nothing
-/// rather than a failed `add`.
-fn countEntries(n: *Inotify, path: []const u8) usize {
-    var dir = Io.Dir.openDirAbsolute(n.io, path, .{ .iterate = true }) catch return 0;
-    defer dir.close(n.io);
-    var it = dir.iterate();
-    var count: usize = 0;
-    while (it.next(n.io) catch null) |_| count += 1;
-    return count;
+    gop.value_ptr.* = .{ .watch = id, .path = watched };
 }
 
 /// Asks the kernel to drop one watch, and forgets the path it stood for.
@@ -515,18 +662,13 @@ fn drop(n: *Inotify, wd: i32) void {
     n.gpa.free(entry.value.path);
 }
 
-/// Drops the watch on `path` and on everything below it.
-fn forgetSubtree(n: *Inotify, path: []const u8) void {
+/// Drops the watch on `root` and on everything below it.
+fn forgetSubtree(n: *Inotify, root: []const u8) void {
     var i: usize = 0;
     while (i < n.wds.count()) {
-        const registered = n.wds.values()[i].path;
-        const inside = std.mem.eql(u8, registered, path) or
-            (registered.len > path.len and
-                std.mem.startsWith(u8, registered, path) and
-                registered[path.len] == std.fs.path.sep);
-        if (inside) {
+        if (path_cmp.within(root, n.wds.values()[i].path)) {
             _ = linux.inotify_rm_watch(n.ifd, n.wds.keys()[i]);
-            n.gpa.free(registered);
+            n.gpa.free(n.wds.values()[i].path);
             n.wds.swapRemoveAt(i);
         } else {
             i += 1;

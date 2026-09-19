@@ -17,6 +17,8 @@ const lookout = @import("lookout.zig");
 const Batch = @import("Batch.zig");
 const Filter = @import("Filter.zig");
 const Snapshot = @import("Snapshot.zig");
+const path_cmp = @import("path.zig");
+const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
 const Tree = @This();
@@ -81,10 +83,7 @@ pub const Node = struct {
 };
 
 /// Errors adding a watch can return.
-pub const AddError = error{
-    /// This watcher already watches that path. See `lookout.Watcher.add`.
-    PathAlreadyWatched,
-} || Allocator.Error || Io.Dir.OpenError || Io.Dir.StatFileError ||
+pub const AddError = Allocator.Error || Io.Dir.OpenError || Io.Dir.StatFileError ||
     Io.Dir.RealPathFileAllocError || Snapshot.RefreshError;
 
 /// Errors rescanning a watch can return.
@@ -129,8 +128,8 @@ pub fn addWatch(
     abs_path: []const u8,
     options: lookout.AddOptions,
     added: *std.ArrayList(NodeId),
+    batch: *Batch,
 ) AddError!void {
-    if (t.watched(abs_path)) return error.PathAlreadyWatched;
     const stat = try Io.Dir.cwd().statFile(t.io, abs_path, .{});
     const recursive = options.recursive;
 
@@ -168,7 +167,7 @@ pub fn addWatch(
     // node can rehash `nodes`.
     var frontier = start;
     while (frontier < added.items.len) : (frontier += 1) {
-        try t.descend(added.items[frontier], added);
+        try t.descend(added.items[frontier], added, batch);
     }
 }
 
@@ -185,7 +184,7 @@ fn rollback(t: *Tree, added: *std.ArrayList(NodeId), start: usize) void {
 
 /// Creates a node for every subdirectory already listed in `parent`'s
 /// snapshot.
-fn descend(t: *Tree, parent_id: NodeId, added: *std.ArrayList(NodeId)) AddError!void {
+fn descend(t: *Tree, parent_id: NodeId, added: *std.ArrayList(NodeId), batch: *Batch) AddError!void {
     const parent = t.nodes.getPtr(parent_id) orelse return;
     if (parent.role != .directory) return;
     const watch = parent.watch;
@@ -203,14 +202,20 @@ fn descend(t: *Tree, parent_id: NodeId, added: *std.ArrayList(NodeId)) AddError!
         // An excluded directory is not opened and not registered, which
         // is the whole point of filtering here rather than on the way
         // out: the tree below it costs nothing.
-        if (t.excluded(watch, child_path)) {
+        if (t.pruned(watch, child_path)) {
             t.gpa.free(child_path);
             continue;
         }
         _ = t.createDirectory(watch, child_path, added) catch |err| switch (err) {
             // A subdirectory that vanished between the listing and the
             // open is not an error; the parent's next scan reports it.
+            // One that is not ours to read is neither, and it is not
+            // nothing either: it is a hole in the watch, and saying so
+            // is the difference between a quiet subtree and a silent one.
             error.FileNotFound, error.AccessDenied, error.NotDir => {
+                if (err != error.FileNotFound) {
+                    try batch.trouble(t.gpa, watch, child_path, .directory);
+                }
                 t.gpa.free(child_path);
                 continue;
             },
@@ -309,15 +314,10 @@ pub fn removeWatch(t: *Tree, id: WatchId) void {
 
 /// Drops the node at `path` and every node below it. Used when a watched
 /// directory itself disappears.
-pub fn removeSubtree(t: *Tree, path: []const u8) void {
+pub fn removeSubtree(t: *Tree, root: []const u8) void {
     var i: usize = 0;
     while (i < t.nodes.count()) {
-        const node_path = t.nodes.values()[i].path;
-        const inside = std.mem.eql(u8, node_path, path) or
-            (node_path.len > path.len and
-                std.mem.startsWith(u8, node_path, path) and
-                node_path[path.len] == std.fs.path.sep);
-        if (inside) {
+        if (path_cmp.within(root, t.nodes.values()[i].path)) {
             t.destroy(&t.nodes.values()[i]);
             t.nodes.swapRemoveAt(i);
         } else {
@@ -334,14 +334,6 @@ fn destroy(t: *Tree, node: *Node) void {
     t.gpa.free(node.path);
 }
 
-/// Whether some watch already has `abs_path` as its root.
-pub fn watched(t: *const Tree, abs_path: []const u8) bool {
-    for (t.watches.values()) |watch| {
-        if (std.mem.eql(u8, watch.root, abs_path)) return true;
-    }
-    return false;
-}
-
 /// The absolute path of the watch a node belongs to, for reporting
 /// `lookout.Kind.overflow`.
 pub fn watchRoot(t: *Tree, id: WatchId) []const u8 {
@@ -349,15 +341,22 @@ pub fn watchRoot(t: *Tree, id: WatchId) []const u8 {
 }
 
 /// Whether the watch a node belongs to asked for recursion.
-pub fn isRecursive(t: *Tree, id: WatchId) bool {
+fn isRecursive(t: *Tree, id: WatchId) bool {
     return (t.watches.get(id) orelse return false).recursive;
 }
 
-/// Whether `path` is outside what the watch `id` is about. See
-/// `lookout.AddOptions.filter`.
-pub fn excluded(t: *const Tree, id: WatchId, path: []const u8) bool {
+/// Whether `subject` is outside what the watch `id` is about, so no
+/// event for it is reported. See `lookout.AddOptions.filter`.
+fn excluded(t: *const Tree, id: WatchId, subject: []const u8) bool {
     const watch = t.watches.get(id) orelse return false;
-    return watch.filter.excludes(watch.root, path);
+    return watch.filter.excludes(watch.root, subject);
+}
+
+/// Whether a directory is so far outside the watch that it need not be
+/// registered at all. See `Filter.prunes`.
+fn pruned(t: *const Tree, id: WatchId, subject: []const u8) bool {
+    const watch = t.watches.get(id) orelse return false;
+    return watch.filter.prunes(watch.root, subject);
 }
 
 /// Re-lists the directory node `id`, pushes what changed into `batch`, and
@@ -367,15 +366,6 @@ pub fn excluded(t: *const Tree, id: WatchId, path: []const u8) bool {
 /// A node whose directory has disappeared is dropped along with everything
 /// below it, and reported as `lookout.Kind.removed`.
 pub fn rescanDirectory(
-    t: *Tree,
-    id: NodeId,
-    batch: *Batch,
-    added: *std.ArrayList(NodeId),
-) ScanError!void {
-    return t.rescanOne(id, batch, added);
-}
-
-fn rescanOne(
     t: *Tree,
     id: NodeId,
     batch: *Batch,
@@ -393,16 +383,16 @@ fn rescanOne(
         // The directory is gone, or is no longer a directory. Report it and
         // stop watching what is below it.
         else => {
-            const path = try t.gpa.dupe(u8, node.path);
-            defer t.gpa.free(path);
-            try batch.push(t.gpa, watch, path, .removed);
-            t.removeSubtree(path);
+            const gone = try t.gpa.dupe(u8, node.path);
+            defer t.gpa.free(gone);
+            try batch.push(t.gpa, watch, gone, .removed, .directory);
+            t.removeSubtree(gone);
             return;
         },
     };
 
     if (t.nodes.getPtr(id).?.snapshot.truncated) {
-        try batch.push(t.gpa, watch, t.watchRoot(watch), .overflow);
+        try batch.push(t.gpa, watch, t.watchRoot(watch), .overflow, .directory);
     }
 
     const dir_path = t.nodes.getPtr(id).?.path;
@@ -419,8 +409,11 @@ fn rescanOne(
         defer t.gpa.free(child);
         // Excluded before it is reported and before a node is made for
         // it, so an excluded directory never becomes a registration.
-        if (t.excluded(watch, child)) continue;
-        try batch.push(t.gpa, watch, child, change.kind);
+        const pruned_here = t.pruned(watch, child);
+        if (!t.excluded(watch, child)) {
+            try batch.push(t.gpa, watch, child, change.kind, .of(change.file_kind));
+        }
+        if (pruned_here) continue;
 
         if (change.file_kind == .file) {
             if (!t.track_entries) continue;
@@ -478,8 +471,13 @@ fn adopt(
         const id = t.createDirectory(watch, owned, added) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // Created and gone again, or not ours to open: reported
-            // through its parent and no further.
+            // through its parent, and as a hole in the watch when the
+            // reason is that it cannot be read rather than that it has
+            // gone.
             else => {
+                if (err != error.FileNotFound) {
+                    try batch.trouble(t.gpa, watch, owned, .directory);
+                }
                 t.gpa.free(owned);
                 continue;
             },
@@ -496,11 +494,13 @@ fn adopt(
 
             const entry = try std.fs.path.join(t.gpa, &.{ current, name });
             errdefer t.gpa.free(entry);
-            if (t.excluded(watch, entry)) {
+            if (t.pruned(watch, entry)) {
                 t.gpa.free(entry);
                 continue;
             }
-            try batch.push(t.gpa, watch, entry, .created);
+            if (!t.excluded(watch, entry)) {
+                try batch.push(t.gpa, watch, entry, .created, .of(file_kind));
+            }
             if (file_kind == .directory) {
                 try frontier.append(t.gpa, entry);
             } else {
@@ -517,10 +517,10 @@ pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {
     if (node.role != .file) return;
 
     const stat = Io.Dir.cwd().statFile(t.io, node.path, .{ .follow_symlinks = false }) catch {
-        const path = try t.gpa.dupe(u8, node.path);
-        defer t.gpa.free(path);
-        try batch.push(t.gpa, node.watch, path, .removed);
-        t.removeSubtree(path);
+        const gone = try t.gpa.dupe(u8, node.path);
+        defer t.gpa.free(gone);
+        try batch.push(t.gpa, node.watch, gone, .removed, .file);
+        t.removeSubtree(gone);
         return;
     };
     const before = node.meta;
@@ -531,8 +531,8 @@ pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {
         .file_kind = stat.kind,
     };
     if (before.size != stat.size or before.mtime_ns != stat.mtime.nanoseconds) {
-        try batch.push(t.gpa, node.watch, node.path, .modified);
+        try batch.push(t.gpa, node.watch, node.path, .modified, .of(stat.kind));
     } else if (before.ctime_ns != stat.ctime.nanoseconds) {
-        try batch.push(t.gpa, node.watch, node.path, .attributes);
+        try batch.push(t.gpa, node.watch, node.path, .attributes, .of(stat.kind));
     }
 }

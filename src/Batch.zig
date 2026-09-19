@@ -17,8 +17,10 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const lookout = @import("lookout.zig");
+const path_cmp = @import("path.zig");
 const Event = lookout.Event;
 const Kind = lookout.Kind;
+const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
 const Batch = @This();
@@ -36,13 +38,28 @@ hold_all: bool,
 /// touched. Every `path` and every `from` is owned by this batch.
 events: std.ArrayList(Event),
 /// Maps an event's path to its index in `events`. Keys are the same
-/// allocations as `Event.path`, owned by `events`.
-index: std.StringHashMapUnmanaged(u32),
+/// allocations as `Event.path`, owned by `events`, and are compared the
+/// way the file system compares them: two spellings of one path are one
+/// event, not two.
+index: std.HashMapUnmanaged([]const u8, u32, path_cmp.MapContext, std.hash_map.default_max_load_percentage),
 /// Paths that have changed but have not been quiet long enough to be
 /// reported. Survives `reset`, because a file still being written is not
 /// news that expires with the poll that noticed it. Keys are owned here,
 /// and so is each `Held.from`.
-held: std.StringArrayHashMapUnmanaged(Held),
+held: path_cmp.Set(Held),
+/// The most events one window may hold, or zero for no ceiling. See
+/// `lookout.Options.max_events`.
+limit: usize,
+/// Paths lookout could not watch, noticed while `lookout.Watcher.add`
+/// was walking a tree rather than while a `poll` was waiting. They
+/// survive `reset` and are moved into the batch by `flush`, because
+/// `add` returns before there is any poll to carry them.
+troubles: std.ArrayList(Trouble),
+/// The watches whose events the ceiling has turned away, which
+/// `lookout.Watcher.poll` answers with `lookout.Kind.overflow` against
+/// their roots -- the batch knows it had to stop, and only the watcher
+/// knows what to say so against.
+dropped: std.AutoArrayHashMapUnmanaged(WatchId, void),
 /// Counts every push, whether it produced an event or was held back.
 ///
 /// A backend waits until the batch has changed, not until it has grown:
@@ -52,17 +69,30 @@ held: std.StringArrayHashMapUnmanaged(Held),
 revision: u64,
 
 /// A change that has not been reported yet.
+/// A path that could not be registered, waiting to be reported.
+const Trouble = struct {
+    id: WatchId,
+    /// Absolute path, owned here.
+    path: []u8,
+    target: Target,
+};
+
 const Held = struct {
     id: WatchId,
     /// What happened. Under `debounce_ms` this is the kind seen last.
     kind: Kind,
     /// Where a paired rename came from, owned here.
     from: ?[]u8,
+    /// What the path is. Becomes `Event.target`.
+    target: Target,
     /// When this path first changed in this window. Becomes `Event.time`.
     first_ns: i96,
     /// When it last changed, which is what the quiet window is measured
     /// from.
     last_ns: i96,
+    /// How large the file was when it was last looked at, or `null` for
+    /// a path `settle_ms` does not measure this way. See `promote`.
+    size: ?u64,
 };
 
 /// A batch that owns nothing.
@@ -79,6 +109,9 @@ pub fn init(io: Io, options: lookout.Options) Batch {
         .events = .empty,
         .index = .empty,
         .held = .empty,
+        .limit = options.max_events,
+        .troubles = .empty,
+        .dropped = .empty,
         .revision = 0,
     };
 }
@@ -93,6 +126,9 @@ pub fn deinit(b: *Batch, gpa: Allocator) void {
         if (entry.from) |from| gpa.free(from);
     }
     b.held.deinit(gpa);
+    for (b.troubles.items) |t| gpa.free(t.path);
+    b.troubles.deinit(gpa);
+    b.dropped.deinit(gpa);
     b.* = undefined;
 }
 
@@ -109,31 +145,48 @@ pub fn reset(b: *Batch, gpa: Allocator) void {
 
 /// Records that `kind` happened to `path`, merging with anything already
 /// recorded for that path in this window. `path` is copied.
-pub fn push(b: *Batch, gpa: Allocator, id: WatchId, path: []const u8, kind: Kind) Allocator.Error!void {
-    return b.pushDetail(gpa, id, path, kind, null);
+pub fn push(
+    b: *Batch,
+    gpa: Allocator,
+    id: WatchId,
+    subject: []const u8,
+    kind: Kind,
+    target: Target,
+) Allocator.Error!void {
+    return b.pushDetail(gpa, id, subject, kind, null, target);
 }
 
 /// Records that `from` is now `path`: one event rather than a removal and
 /// a creation, for the backends whose kernel pairs the two halves. Both
 /// paths are copied.
-pub fn pushRename(b: *Batch, gpa: Allocator, id: WatchId, path: []const u8, from: []const u8) Allocator.Error!void {
-    return b.pushDetail(gpa, id, path, .renamed, from);
-}
-
-fn pushDetail(
+pub fn pushRename(
     b: *Batch,
     gpa: Allocator,
     id: WatchId,
-    path: []const u8,
+    subject: []const u8,
+    from: []const u8,
+    target: Target,
+) Allocator.Error!void {
+    return b.pushDetail(gpa, id, subject, .renamed, from, target);
+}
+
+pub fn pushDetail(
+    b: *Batch,
+    gpa: Allocator,
+    id: WatchId,
+    subject: []const u8,
     kind: Kind,
     from: ?[]const u8,
+    target: Target,
 ) Allocator.Error!void {
     b.revision += 1;
     const now = Io.Timestamp.now(b.io, .awake);
 
     if (b.hold_ns > 0 and (b.hold_all or kind == .modified)) {
-        if (b.held.getPtr(path)) |entry| {
+        if (b.held.getPtr(subject)) |entry| {
             entry.last_ns = now.nanoseconds;
+            if (kind == .modified) entry.size = b.sizeOf(subject);
+            entry.target = target;
             // Under `debounce_ms` the window reports what happened last,
             // which is the end state; under `settle_ms` only `modified`
             // is ever held, so there is nothing to replace.
@@ -145,7 +198,7 @@ fn pushDetail(
             }
             return;
         }
-        const owned_path = try gpa.dupe(u8, path);
+        const owned_path = try gpa.dupe(u8, subject);
         errdefer gpa.free(owned_path);
         const owned_from = if (from) |source| try gpa.dupe(u8, source) else null;
         errdefer if (owned_from) |f| gpa.free(f);
@@ -153,16 +206,27 @@ fn pushDetail(
             .id = id,
             .kind = kind,
             .from = owned_from,
+            .target = target,
             .first_ns = now.nanoseconds,
             .last_ns = now.nanoseconds,
+            .size = if (kind == .modified) b.sizeOf(subject) else null,
         });
         return;
     }
     // Anything else that happens to a path ends the question of whether
     // its contents have stopped changing: the name has been created,
     // removed or moved since.
-    b.release(gpa, path);
-    return b.record(gpa, id, path, kind, from, now);
+    b.release(gpa, subject);
+    return b.record(gpa, id, subject, kind, from, target, now);
+}
+
+/// How large a file is now, or `null` when it cannot be asked. Read only
+/// for a path `settle_ms` is holding, so a watcher without that option
+/// set never makes this call.
+fn sizeOf(b: *const Batch, subject: []const u8) ?u64 {
+    const stat = Io.Dir.cwd().statFile(b.io, subject, .{ .follow_symlinks = false }) catch
+        return null;
+    return stat.size;
 }
 
 /// Drops every event, and everything held back, belonging to `id`.
@@ -172,6 +236,15 @@ fn pushDetail(
 /// the caller asked about. This is how they are kept out of the batch
 /// without the backends having to know why.
 pub fn discard(b: *Batch, gpa: Allocator, id: WatchId) void {
+    _ = b.dropped.swapRemove(id);
+    var t: usize = 0;
+    while (t < b.troubles.items.len) {
+        if (b.troubles.items[t].id != id) {
+            t += 1;
+            continue;
+        }
+        gpa.free(b.troubles.orderedRemove(t).path);
+    }
     var removed = false;
     var i: usize = 0;
     while (i < b.events.items.len) {
@@ -207,8 +280,47 @@ pub fn discard(b: *Batch, gpa: Allocator, id: WatchId) void {
     }
 }
 
+/// Records that `subject` could not be watched, for the next `poll` to
+/// report as `lookout.Kind.unwatched`. The path is copied.
+pub fn trouble(
+    b: *Batch,
+    gpa: Allocator,
+    id: WatchId,
+    subject: []const u8,
+    target: Target,
+) Allocator.Error!void {
+    const owned = try gpa.dupe(u8, subject);
+    errdefer gpa.free(owned);
+    try b.troubles.append(gpa, .{ .id = id, .path = owned, .target = target });
+    b.revision += 1;
+}
+
+/// Moves everything `trouble` recorded into the batch. Called once at
+/// the start of every `lookout.Watcher.poll`, before anything blocks, so
+/// that a watch which came back half registered says so at once rather
+/// than when the tree next happens to change.
+pub fn flush(b: *Batch, gpa: Allocator) Allocator.Error!void {
+    while (b.troubles.items.len != 0) {
+        const t = b.troubles.orderedRemove(0);
+        defer gpa.free(t.path);
+        try b.push(gpa, t.id, t.path, .unwatched, t.target);
+    }
+}
+
 /// Moves into the batch every path that has now been quiet for
-/// `hold_ns`. A no-op when nothing is held back.
+/// `hold_ns` and is not still growing. A no-op when nothing is held back.
+///
+/// The quiet window on its own is a guess about a writer nobody can see,
+/// and a kernel that coalesces several writes into one notification can
+/// leave the window closing over a file that is still being written --
+/// which is the one thing `lookout.Options.settle_ms` exists to prevent.
+/// So the file is measured as well as timed: one `stat` at the moment
+/// the window closes, and a file larger than it was when the window
+/// started is still being written, so the window starts again.
+///
+/// What no measurement can see is a writer that has stopped for longer
+/// than the window and will start again. `lookout.Kind.closed` is the
+/// only answer to that one, and only one backend is told it.
 pub fn promote(b: *Batch, gpa: Allocator) Allocator.Error!void {
     if (b.held.count() == 0) return;
     const now = Io.Timestamp.now(b.io, .awake).nanoseconds;
@@ -220,14 +332,33 @@ pub fn promote(b: *Batch, gpa: Allocator) Allocator.Error!void {
             i += 1;
             continue;
         }
-        const path = b.held.keys()[i];
+        if (entry.size) |before| {
+            const subject = b.held.keys()[i];
+            if (b.sizeOf(subject)) |after| {
+                if (after != before) {
+                    b.held.values()[i].size = after;
+                    b.held.values()[i].last_ns = now;
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        const subject = b.held.keys()[i];
         b.held.swapRemoveAt(i);
-        defer gpa.free(path);
+        defer gpa.free(subject);
         defer if (entry.from) |from| gpa.free(from);
         // The event is stamped with when the path first changed, not with
         // when the window closed: the caller wants to know when it
         // happened, not when lookout stopped waiting.
-        try b.record(gpa, entry.id, path, entry.kind, entry.from, .{ .nanoseconds = entry.first_ns });
+        try b.record(
+            gpa,
+            entry.id,
+            subject,
+            entry.kind,
+            entry.from,
+            entry.target,
+            .{ .nanoseconds = entry.first_ns },
+        );
     }
 }
 
@@ -248,8 +379,8 @@ pub fn nextDueMs(b: *const Batch) ?u32 {
 
 /// Drops whatever is held for `path`, because something has happened to
 /// it that answers the question the hold was waiting on.
-fn release(b: *Batch, gpa: Allocator, path: []const u8) void {
-    const entry = b.held.fetchSwapRemove(path) orelse return;
+fn release(b: *Batch, gpa: Allocator, subject: []const u8) void {
+    const entry = b.held.fetchSwapRemove(subject) orelse return;
     gpa.free(entry.key);
     if (entry.value.from) |from| gpa.free(from);
 }
@@ -260,13 +391,15 @@ fn record(
     b: *Batch,
     gpa: Allocator,
     id: WatchId,
-    path: []const u8,
+    subject: []const u8,
     kind: Kind,
     from: ?[]const u8,
+    target: Target,
     time: Io.Timestamp,
 ) Allocator.Error!void {
-    if (b.index.get(path)) |i| {
+    if (b.index.get(subject)) |i| {
         const existing = &b.events.items[i];
+        if (existing.target == .unknown) existing.target = target;
         if (b.hold_all) {
             // Debouncing already decided what the window says: the kind
             // seen last, and the rename it came with or none at all.
@@ -285,7 +418,17 @@ fn record(
         return;
     }
 
-    const owned_path = try gpa.dupe(u8, path);
+    // Past the ceiling the batch stops holding names. The two kinds that
+    // say the record is incomplete are exactly what a caller needs then,
+    // so they are never the ones turned away.
+    if (b.limit != 0 and b.events.items.len >= b.limit and
+        kind != .overflow and kind != .unwatched)
+    {
+        try b.dropped.put(gpa, id, {});
+        return;
+    }
+
+    const owned_path = try gpa.dupe(u8, subject);
     errdefer gpa.free(owned_path);
     const owned_from = if (from) |source| try gpa.dupe(u8, source) else null;
     errdefer if (owned_from) |f| gpa.free(f);
@@ -295,6 +438,7 @@ fn record(
         .kind = kind,
         .from = owned_from,
         .time = time,
+        .target = target,
     });
     errdefer _ = b.events.pop();
     try b.index.put(gpa, owned_path, @intCast(b.events.items.len - 1));
@@ -315,6 +459,9 @@ fn rank(kind: Kind) u3 {
         .renamed => 4,
         .removed => 5,
         .overflow => 6,
+        // "Look again" is beaten by "looking again is the only way you
+        // will ever hear about this path".
+        .unwatched => 7,
     };
 }
 
@@ -330,10 +477,10 @@ test "one event per path, strongest kind wins" {
     defer b.deinit(gpa);
 
     const id: WatchId = @enumFromInt(0);
-    try b.push(gpa, id, "/tmp/a", .modified);
-    try b.push(gpa, id, "/tmp/a", .created);
-    try b.push(gpa, id, "/tmp/a", .attributes);
-    try b.push(gpa, id, "/tmp/b", .modified);
+    try b.push(gpa, id, "/tmp/a", .modified, .file);
+    try b.push(gpa, id, "/tmp/a", .created, .file);
+    try b.push(gpa, id, "/tmp/a", .attributes, .file);
+    try b.push(gpa, id, "/tmp/b", .modified, .file);
 
     try testing.expectEqual(@as(usize, 2), b.events.items.len);
     try testing.expectEqualStrings("/tmp/a", b.events.items[0].path);
@@ -347,11 +494,11 @@ test "removal outranks creation and overflow outranks everything" {
     defer b.deinit(gpa);
 
     const id: WatchId = @enumFromInt(7);
-    try b.push(gpa, id, "/tmp/a", .created);
-    try b.push(gpa, id, "/tmp/a", .removed);
+    try b.push(gpa, id, "/tmp/a", .created, .file);
+    try b.push(gpa, id, "/tmp/a", .removed, .file);
     try testing.expectEqual(Kind.removed, b.events.items[0].kind);
 
-    try b.push(gpa, id, "/tmp/a", .overflow);
+    try b.push(gpa, id, "/tmp/a", .overflow, .file);
     try testing.expectEqual(Kind.overflow, b.events.items[0].kind);
 }
 
@@ -361,15 +508,15 @@ test "a finished write outranks the writing, and a creation outranks both" {
     defer b.deinit(gpa);
 
     const id: WatchId = @enumFromInt(0);
-    try b.push(gpa, id, "/tmp/a", .modified);
-    try b.push(gpa, id, "/tmp/a", .closed);
+    try b.push(gpa, id, "/tmp/a", .modified, .file);
+    try b.push(gpa, id, "/tmp/a", .closed, .file);
     // The window says the writing is over rather than that it happened,
     // which is the more useful of the two statements.
     try testing.expectEqual(Kind.closed, b.events.items[0].kind);
 
-    try b.push(gpa, id, "/tmp/a", .created);
+    try b.push(gpa, id, "/tmp/a", .created, .file);
     try testing.expectEqual(Kind.created, b.events.items[0].kind);
-    try b.push(gpa, id, "/tmp/a", .closed);
+    try b.push(gpa, id, "/tmp/a", .closed, .file);
     try testing.expectEqual(Kind.created, b.events.items[0].kind);
 }
 
@@ -378,10 +525,10 @@ test "reset drops the previous window" {
     var b = testBatch(.{});
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created);
+    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
     b.reset(gpa);
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified);
+    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified, .file);
     try testing.expectEqual(Kind.modified, b.events.items[0].kind);
 }
 
@@ -390,7 +537,7 @@ test "a paired rename is one event carrying where it came from" {
     var b = testBatch(.{});
     defer b.deinit(gpa);
 
-    try b.pushRename(gpa, @enumFromInt(0), "/tmp/new", "/tmp/old");
+    try b.pushRename(gpa, @enumFromInt(0), "/tmp/new", "/tmp/old", .file);
     try testing.expectEqual(@as(usize, 1), b.events.items.len);
     try testing.expectEqual(Kind.renamed, b.events.items[0].kind);
     try testing.expectEqualStrings("/tmp/new", b.events.items[0].path);
@@ -403,7 +550,7 @@ test "every event carries when it was seen" {
     defer b.deinit(gpa);
 
     const before: Io.Timestamp = .now(testing.io, .awake);
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created);
+    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
     const after: Io.Timestamp = .now(testing.io, .awake);
 
     const stamped = b.events.items[0].time;
@@ -416,7 +563,7 @@ test "a settling modification is held back until it is due" {
     var b = testBatch(.{ .settle_ms = 50 });
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified);
+    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified, .file);
     try b.promote(gpa);
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
     try testing.expect(b.nextDueMs().? > 0);
@@ -435,8 +582,8 @@ test "a name event settles the question of the contents" {
     var b = testBatch(.{ .settle_ms = 50 });
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified);
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .removed);
+    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified, .file);
+    try b.push(gpa, @enumFromInt(0), "/tmp/a", .removed, .file);
     try testing.expectEqual(@as(usize, 0), b.held.count());
     try testing.expectEqual(Kind.removed, b.events.items[0].kind);
 }
@@ -447,10 +594,10 @@ test "debouncing holds every kind and reports the one seen last" {
     defer b.deinit(gpa);
 
     const id: WatchId = @enumFromInt(0);
-    try b.push(gpa, id, "/tmp/a", .created);
-    try b.push(gpa, id, "/tmp/a", .modified);
-    try b.push(gpa, id, "/tmp/a", .removed);
-    try b.push(gpa, id, "/tmp/a", .modified);
+    try b.push(gpa, id, "/tmp/a", .created, .file);
+    try b.push(gpa, id, "/tmp/a", .modified, .file);
+    try b.push(gpa, id, "/tmp/a", .removed, .file);
+    try b.push(gpa, id, "/tmp/a", .modified, .file);
     try b.promote(gpa);
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
 
@@ -469,8 +616,8 @@ test "a debounced rename keeps where it came from" {
     var b = testBatch(.{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/new", .modified);
-    try b.pushRename(gpa, @enumFromInt(0), "/tmp/new", "/tmp/old");
+    try b.push(gpa, @enumFromInt(0), "/tmp/new", .modified, .file);
+    try b.pushRename(gpa, @enumFromInt(0), "/tmp/new", "/tmp/old", .file);
     b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
     try b.promote(gpa);
 
@@ -483,9 +630,9 @@ test "debouncing stamps an event with when the path first changed" {
     var b = testBatch(.{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created);
+    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
     const first = b.held.values()[0].first_ns;
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified);
+    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified, .file);
     b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
     try b.promote(gpa);
 
@@ -498,7 +645,7 @@ test "a push that is held still moves the revision" {
     defer b.deinit(gpa);
 
     const before = b.revision;
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created);
+    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
     try testing.expect(b.revision > before);
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
 }
@@ -510,9 +657,9 @@ test "discarding a watch takes its events and its held paths with it" {
 
     const kept: WatchId = @enumFromInt(1);
     const dropped: WatchId = @enumFromInt(2);
-    try b.push(gpa, kept, "/tmp/a", .created);
-    try b.push(gpa, dropped, "/tmp/b", .created);
-    try b.push(gpa, kept, "/tmp/c", .created);
+    try b.push(gpa, kept, "/tmp/a", .created, .file);
+    try b.push(gpa, dropped, "/tmp/b", .created, .file);
+    try b.push(gpa, kept, "/tmp/c", .created, .file);
     for (b.held.values()) |*entry| entry.last_ns -= 100 * std.time.ns_per_ms;
     try b.promote(gpa);
     try testing.expectEqual(@as(usize, 3), b.events.items.len);
@@ -524,15 +671,131 @@ test "discarding a watch takes its events and its held paths with it" {
 
     // The index has to survive the removal: a later push on a path the
     // batch still holds must merge rather than appear twice.
-    try b.push(gpa, kept, "/tmp/c", .removed);
+    try b.push(gpa, kept, "/tmp/c", .removed, .file);
     b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
     try b.promote(gpa);
     try testing.expectEqual(@as(usize, 2), b.events.items.len);
     try testing.expectEqual(Kind.removed, b.events.items[1].kind);
 
     // And what is still held for a discarded watch goes too.
-    try b.push(gpa, dropped, "/tmp/d", .modified);
+    try b.push(gpa, dropped, "/tmp/d", .modified, .file);
     try testing.expectEqual(@as(usize, 1), b.held.count());
     b.discard(gpa, dropped);
     try testing.expectEqual(@as(usize, 0), b.held.count());
+}
+
+test "a held modification that is still growing is not reported yet" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "big.bin", .data = "one" });
+    const target = try tmp.dir.realPathFileAlloc(io, "big.bin", gpa);
+    defer gpa.free(target);
+
+    var b: Batch = .init(io, .{ .settle_ms = 50 });
+    defer b.deinit(gpa);
+
+    try b.push(gpa, @enumFromInt(0), target, .modified, .file);
+    try testing.expectEqual(@as(usize, 1), b.held.count());
+
+    // The window closes, and the file is bigger than it was when it
+    // opened: the writing is not over, whatever the clock says.
+    tmp.dir.writeFile(io, .{ .sub_path = "big.bin", .data = "one and two" }) catch unreachable;
+    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
+    try b.promote(gpa);
+    try testing.expectEqual(@as(usize, 0), b.events.items.len);
+    try testing.expectEqual(@as(usize, 1), b.held.count());
+
+    // The window closes again with the file the size it was: now it is.
+    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
+    try b.promote(gpa);
+    try testing.expectEqual(@as(usize, 1), b.events.items.len);
+    try testing.expectEqual(Kind.modified, b.events.items[0].kind);
+}
+
+test "a path that cannot be measured is still reported when it goes quiet" {
+    const gpa = testing.allocator;
+    var b: Batch = .init(testing.io, .{ .settle_ms = 50 });
+    defer b.deinit(gpa);
+
+    // Nothing is at this path, so there is no size to compare and the
+    // quiet window is the whole of the answer.
+    try b.push(gpa, @enumFromInt(0), "/tmp/lookout-no-such-file", .modified, .file);
+    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
+    try b.promote(gpa);
+    try testing.expectEqual(@as(usize, 1), b.events.items.len);
+}
+
+test "the ceiling turns events away and says which watch lost them" {
+    const gpa = testing.allocator;
+    var b: Batch = .init(testing.io, .{ .max_events = 2 });
+    defer b.deinit(gpa);
+
+    const id: WatchId = @enumFromInt(3);
+    try b.push(gpa, id, "/tmp/a", .created, .file);
+    try b.push(gpa, id, "/tmp/b", .created, .file);
+    try b.push(gpa, id, "/tmp/c", .created, .file);
+    try testing.expectEqual(@as(usize, 2), b.events.items.len);
+    try testing.expectEqual(@as(usize, 1), b.dropped.count());
+    try testing.expectEqual(id, b.dropped.keys()[0]);
+
+    // A path the batch already holds still merges: the ceiling is on
+    // how many paths are remembered, not on how much happens to them.
+    try b.push(gpa, id, "/tmp/a", .removed, .file);
+    try testing.expectEqual(Kind.removed, b.events.items[0].kind);
+
+    // And the two kinds that say the record is incomplete are never the
+    // ones turned away, because they are the answer to the ceiling.
+    try b.push(gpa, id, "/tmp/root", .overflow, .directory);
+    try testing.expectEqual(@as(usize, 3), b.events.items.len);
+}
+
+test "no ceiling means no ceiling" {
+    const gpa = testing.allocator;
+    var b: Batch = .init(testing.io, .{ .max_events = 0 });
+    defer b.deinit(gpa);
+    for (0..64) |i| {
+        var name: [32]u8 = undefined;
+        try b.push(
+            gpa,
+            @enumFromInt(0),
+            std.fmt.bufPrint(&name, "/tmp/f{d}", .{i}) catch unreachable,
+            .created,
+            .file,
+        );
+    }
+    try testing.expectEqual(@as(usize, 64), b.events.items.len);
+    try testing.expectEqual(@as(usize, 0), b.dropped.count());
+}
+
+test "an event says whether the path was a file or a directory" {
+    const gpa = testing.allocator;
+    var b: Batch = .init(testing.io, .{});
+    defer b.deinit(gpa);
+
+    try b.push(gpa, @enumFromInt(0), "/tmp/d", .created, .directory);
+    try testing.expectEqual(lookout.Target.directory, b.events.items[0].target);
+
+    // A backend that could not say does not overwrite one that could.
+    try b.push(gpa, @enumFromInt(0), "/tmp/d", .modified, .unknown);
+    try testing.expectEqual(lookout.Target.directory, b.events.items[0].target);
+
+    // And one that could fills in for one that could not.
+    try b.push(gpa, @enumFromInt(0), "/tmp/e", .removed, .unknown);
+    try testing.expectEqual(lookout.Target.unknown, b.events.items[1].target);
+    try b.push(gpa, @enumFromInt(0), "/tmp/e", .removed, .file);
+    try testing.expectEqual(lookout.Target.file, b.events.items[1].target);
+}
+
+test "two spellings of one path are one event" {
+    const gpa = testing.allocator;
+    var b: Batch = .init(testing.io, .{});
+    defer b.deinit(gpa);
+
+    try b.push(gpa, @enumFromInt(0), "/tmp/Notes.txt", .modified, .file);
+    try b.push(gpa, @enumFromInt(0), "/tmp/notes.txt", .removed, .file);
+
+    const merged: usize = if (path_cmp.folds_case) 1 else 2;
+    try testing.expectEqual(merged, b.events.items.len);
 }

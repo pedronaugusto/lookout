@@ -1,5 +1,5 @@
-//! lookout — one file-system watching API over `kqueue`, `inotify` and
-//! polling.
+//! lookout — one file-system watching API over FSEvents, `kqueue`,
+//! `inotify`, `ReadDirectoryChangesW` and polling.
 //!
 //! A `Watcher` owns a set of watches. Each watch is a path — a file or a
 //! directory — added with `Watcher.add` and dropped with `Watcher.remove`.
@@ -17,10 +17,17 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const Batch = @import("Batch.zig");
+const Deadline = @import("Deadline.zig");
 const Tree = @import("Tree.zig");
+const path_cmp = @import("path.zig");
 
 /// Which paths under a watch the caller wants. See `AddOptions.filter`.
 pub const Filter = @import("Filter.zig");
+
+/// Whether lookout compares two paths as the target's usual file systems
+/// do, ignoring case and composition, or byte for byte. See the module
+/// this comes from for exactly what is folded.
+pub const folds_case = @import("path.zig").folds_case;
 
 /// What a tree looked like, and what has changed in it since. This is
 /// what `Kind.overflow` asks a caller to work out, made answerable:
@@ -190,6 +197,78 @@ pub const default_backend: Backend = switch (builtin.os.tag) {
 /// because every one of that union's shapes has it.
 const Poll = @import("backend/poll.zig");
 
+/// Where a watcher had got to, so that a later one can carry on from
+/// there.
+///
+/// `Watcher.position` returns one and `Options.since` takes one. In
+/// between it is the caller's to keep: `token` writes it as text a
+/// program can print, store and hand back, and `parse` reads that back.
+/// lookout persists nothing.
+///
+/// A position belongs to the backend and the volume that issued it.
+/// Handing one to a different backend, or to a watcher on a different
+/// volume, is not an error and not a resumption: it is ignored and the
+/// watch starts from now, which is the same thing a caller with no
+/// position at all gets.
+pub const Position = struct {
+    /// Which mechanism issued it.
+    backend: Backend,
+    /// What that mechanism calls this point in its own sequence.
+    value: u64,
+
+    /// The longest a token can be, so a caller can size a buffer.
+    pub const max_token_len = 32;
+
+    /// Errors `parse` can return.
+    pub const ParseError = error{
+        /// The text is not a token this version of lookout wrote.
+        InvalidPosition,
+    };
+
+    /// Writes the position into `buffer` as text: a version, the
+    /// backend, and the value, separated by dots and holding no
+    /// character that a line, a NUL-separated list or a shell argument
+    /// would have to quote.
+    pub fn token(p: Position, buffer: *[max_token_len]u8) []const u8 {
+        return std.fmt.bufPrint(buffer, "1.{s}.{d}", .{ @tagName(p.backend), p.value }) catch
+            unreachable;
+    }
+
+    /// Reads back what `token` wrote.
+    pub fn parse(text: []const u8) ParseError!Position {
+        var parts = std.mem.splitScalar(u8, text, '.');
+        const version = parts.next() orelse return error.InvalidPosition;
+        if (!std.mem.eql(u8, version, "1")) return error.InvalidPosition;
+        const name = parts.next() orelse return error.InvalidPosition;
+        const digits = parts.next() orelse return error.InvalidPosition;
+        if (parts.next() != null) return error.InvalidPosition;
+        const backend = std.meta.stringToEnum(Backend, name) orelse
+            return error.InvalidPosition;
+        if (backend == .auto) return error.InvalidPosition;
+        return .{
+            .backend = backend,
+            .value = std.fmt.parseInt(u64, digits, 10) catch return error.InvalidPosition,
+        };
+    }
+};
+
+/// Whether `backend` can say where it has got to, so that
+/// `Watcher.position` returns something and `Options.since` is worth
+/// setting.
+///
+/// Only FSEvents can. It is the only one of the five backed by a log the
+/// operating system keeps per volume rather than by a queue that starts
+/// empty, so it is the only one that can be asked what happened before
+/// the watch existed. The others return `null` from `position` and
+/// ignore `since` rather than pretending.
+pub fn tracksPosition(backend: Backend) bool {
+    return switch (backend) {
+        .auto => tracksPosition(default_backend),
+        .fsevents => true,
+        .kqueue, .inotify, .windows, .poll => false,
+    };
+}
+
 /// Identifies one watch within one `Watcher`.
 ///
 /// `add` never issues the same value twice for the lifetime of the
@@ -218,18 +297,24 @@ pub const Kind = enum {
     /// modification time, or a write reported by the kernel.
     modified,
     /// The path no longer exists. A rename of an entry inside a watched
-    /// directory is reported as `removed` on the old name and `created` on
-    /// the new one, on every backend.
+    /// directory is reported this way only where the operating system
+    /// cannot pair the two halves; where it can, one `renamed` carrying
+    /// `Event.from` is reported instead, and `pairsRenames` says which
+    /// of the two this backend does.
     ///
     /// When the path is a watch's own root, that watch stops there: a
     /// path is watched, not a name, and the name is now empty. The id
     /// stays valid and `Watcher.remove` still releases it.
     removed,
-    /// The watched path itself was renamed, so the watch no longer stands
-    /// for the name it was added under and stops, exactly as for a
-    /// `removed` root. Produced by the `kqueue` and `inotify` backends;
-    /// the other three report a move differently or not at all, and
-    /// `reportsRootMove` says which.
+    /// A path was renamed. `Event.path` is where it is now and
+    /// `Event.from` is where it was, on the backends `pairsRenames` is
+    /// true for.
+    ///
+    /// Against a watch's own root it means something else and carries no
+    /// `from`: the watched path itself was moved, so the watch no longer
+    /// stands for the name it was added under and stops, exactly as for
+    /// a `removed` root. Which backends say that, and what the others
+    /// say instead, is `reportsRootMove`.
     renamed,
     /// Metadata other than the contents changed — permissions, ownership,
     /// link count, or the status-change time.
@@ -260,6 +345,40 @@ pub const Kind = enum {
     /// watch was taken, answers it: its `diff` returns the creations,
     /// changes and removals that the events would have carried.
     overflow,
+    /// lookout is no longer watching this path, and nothing that happens
+    /// to it or below it will be reported. The watch itself is still
+    /// alive and its other paths still report; this one is a hole in it.
+    ///
+    /// It is what a registration the operating system refused looks like
+    /// from the outside: a subdirectory of a recursive watch that could
+    /// not be opened or that the per-user watch limit had no room for,
+    /// or on Windows a read that could not be posted again. Each of
+    /// those used to be swallowed, which left a subtree silently quiet
+    /// with no error and no event -- the worst thing a watcher can be.
+    ///
+    /// Like `overflow` it is not an error, and it outranks it: an
+    /// `overflow` says look again, and this says looking again is the
+    /// only way you will ever hear about this path. A caller that wants
+    /// the path back adds a watch on it.
+    unwatched,
+};
+
+/// What an event's path is, where the backend knows.
+pub const Target = enum {
+    /// A regular file, a symbolic link, or anything else that is not a
+    /// directory.
+    file,
+    /// A directory.
+    directory,
+    /// The backend was not told and the path can no longer be asked:
+    /// it is gone by the time the event is read. `Kind.removed` on
+    /// `windows` is the one that lands here.
+    unknown,
+
+    /// What a listing or a `stat` found, as a target.
+    pub fn of(kind: Io.File.Kind) Target {
+        return if (kind == .directory) .directory else .file;
+    }
 };
 
 /// One thing that happened to one path during one `Watcher.poll` window.
@@ -298,6 +417,14 @@ pub const Event = struct {
     /// first of them rather than the last: the caller wants to know when
     /// the path started changing, not when lookout stopped collecting.
     time: Io.Timestamp = .zero,
+    /// Whether the path is a file or a directory.
+    ///
+    /// After a `Kind.removed` the path cannot be stat-ed to find out, so
+    /// a caller keeping a model of the tree needs to be told. Every
+    /// backend is told by the operating system, except that
+    /// `ReadDirectoryChangesW` says nothing about a path that is already
+    /// gone; that one is `unknown`.
+    target: Target = .unknown,
 };
 
 /// How a `Watcher` behaves, fixed for its lifetime.
@@ -358,24 +485,60 @@ pub const Options = struct {
     /// the default: a program that only wants to know a path changed
     /// should not have to learn a second kind meaning the same thing.
     report_closes: bool = false,
-    /// How much change the Windows kernel may hold for one watch between
-    /// two reads, in bytes. Ignored by every other backend.
+    /// How much change may accumulate between two polls, in bytes, on
+    /// the backends that are handed a buffer and find the changes in it.
+    /// Zero, the default, is each backend's own.
     ///
-    /// `ReadDirectoryChangesW` writes its records into a buffer lookout
-    /// gives it, one per watch, and that buffer is how much the kernel
-    /// can accumulate while no read is outstanding. When it fills, the
-    /// change records are discarded and the next read says so, which
-    /// lookout reports as `Kind.overflow` against the watch root: the
-    /// record is incomplete and the tree should be read again.
+    /// On `windows` this is the buffer `ReadDirectoryChangesW` writes
+    /// its records into, one per watch. Its default is 64 KiB, which is
+    /// what a network share will take -- Windows refuses a larger one
+    /// there, and lookout falls back to it by itself if a larger one is
+    /// refused. Sizes are held between 4 KiB and 16 MiB.
     ///
-    /// The default, 64 KiB, is what a network share will take; Windows
-    /// refuses a larger one there. On a local disk a watch on a busy tree
-    /// polled infrequently wants more. Sizes are held between 4 KiB --
-    /// enough that one change with the longest possible name always fits
-    /// -- and 16 MiB, and rounded down to a multiple of four; zero means
-    /// the default. The buffer is non-paged pool for as long as a read is
-    /// outstanding, so a large one on many watches is a real cost.
-    windows_buffer_bytes: usize = 64 * 1024,
+    /// On `fsevents` this is the buffer the system's delivery thread
+    /// copies into, one per watcher, which is what lets that thread do a
+    /// bounded `memcpy` and nothing else. Its default is 4 MiB, enough
+    /// to hold a burst of ten thousand paths without losing one. Sizes
+    /// are held between 4 KiB and 64 MiB.
+    ///
+    /// When the buffer does fill, the changes that did not fit are lost
+    /// and `Kind.overflow` says so against the watch root. A watch on a
+    /// busy tree that is polled infrequently wants more; the memory is
+    /// held for the life of the watcher, and on Windows it is non-paged
+    /// pool for as long as a read is outstanding, so a large one on many
+    /// watches is a real cost.
+    ///
+    /// The other three backends are told what changed by the kernel or
+    /// find it by listing, and ignore this.
+    buffer_bytes: usize = 0,
+    /// Where to resume from: a `Position` an earlier watcher returned,
+    /// so that changes made while nothing was watching are reported
+    /// rather than missed.
+    ///
+    /// Only `fsevents` can answer this, because only it keeps a log per
+    /// volume that can be replayed; `tracksPosition` says so, and a
+    /// backend that cannot ignores this. A position from another
+    /// backend, or from another volume, is ignored too.
+    ///
+    /// A replayed change is reported against the tree as it is now: a
+    /// file created while nothing was watching and still there arrives
+    /// as `Kind.modified` rather than `Kind.created`, because what the
+    /// caller is being told is that the path is not what it was. What
+    /// lookout will not do is invent a history it cannot check.
+    ///
+    /// lookout persists nothing itself. The token is the caller's to
+    /// write down and hand back.
+    since: ?Position = null,
+    /// The most events one `poll` will hold, past which it stops
+    /// collecting names and says `Kind.overflow` against the watch roots
+    /// that lost them. Zero means no ceiling at all.
+    ///
+    /// A watcher holds one event and one path per changed path until the
+    /// next `poll`, so a process writing a million files faster than the
+    /// caller polls made the library grow without bound. The default is
+    /// high enough that no ordinary burst reaches it and low enough to
+    /// be a ceiling.
+    max_events: usize = 100_000,
     /// The largest number of entries lookout will account for in one
     /// watched directory. A directory holding more reports
     /// `Kind.overflow` against its watch root, which means: this one is
@@ -459,8 +622,49 @@ pub const Watcher = struct {
     batch: Batch,
     next_id: u32,
     impl: Impl,
+    /// Every watch `add` has issued an id for, in the order it issued
+    /// them. Kept here rather than in the backends because all five had
+    /// the same table and the same linear scan over it, and because a
+    /// watch's root is what `Kind.overflow` is reported against.
+    table: std.AutoArrayHashMapUnmanaged(WatchId, Held),
     /// Watches whose path does not exist yet. See `AddOptions.pending`.
     pending: std.ArrayList(*Pending),
+    /// Set by `wake` and cleared by the `poll` that answers it. The one
+    /// field of a `Watcher` another thread may touch.
+    woken: std.atomic.Value(bool),
+
+    /// What the watcher remembers about one watch.
+    const Held = struct {
+        /// The path the caller asked for, absolute and canonical as far
+        /// as it exists. Owned here.
+        path: []u8,
+        /// The path the backend currently holds a registration on: the
+        /// same path, or an ancestor while a pending watch waits, or
+        /// `null` when nothing could be registered at all. Owned here.
+        ///
+        /// This is what makes one path one watch. `inotify` returns the
+        /// same kernel watch descriptor for the same inode, so a second
+        /// registration would quietly take the first one's events over;
+        /// refusing it here is the same answer on every backend rather
+        /// than a difference to discover.
+        registered: ?[]u8,
+        /// `AddOptions.recursive`.
+        recursive: bool,
+    };
+
+    /// One watch, as `watches` reports it.
+    pub const WatchInfo = struct {
+        /// The id `add` returned.
+        id: WatchId,
+        /// The path the caller asked for. Owned by the watcher and valid
+        /// until the next `add`, `remove` or `deinit`.
+        path: []const u8,
+        /// `AddOptions.recursive`.
+        recursive: bool,
+        /// Whether the path is still not there, so the watch is parked
+        /// on an ancestor. See `AddOptions.pending`.
+        waiting: bool,
+    };
 
     /// A watch waiting for its path to appear.
     ///
@@ -487,9 +691,9 @@ pub const Watcher = struct {
 
         /// The ancestor watch's filter. Everything but the next step down
         /// is somebody else's business.
-        fn onlyNext(context: ?*anyopaque, path: []const u8) bool {
+        fn onlyNext(context: ?*anyopaque, subject: []const u8) bool {
             const p: *const Pending = @ptrCast(@alignCast(context.?));
-            return std.mem.eql(u8, path, p.next);
+            return path_cmp.eql(subject, p.next);
         }
     };
 
@@ -542,6 +746,8 @@ pub const Watcher = struct {
         /// The kernel refused another watch: the per-process or
         /// system-wide limit on watches or descriptors is reached.
         WatchLimitReached,
+        /// This watcher already watches that path. See `add`.
+        PathAlreadyWatched,
     } || Tree.AddError || UnexpectedError;
 
     /// Errors `poll` can return, on top of the file-system errors of
@@ -580,7 +786,9 @@ pub const Watcher = struct {
             .batch = .init(io, options),
             .next_id = 0,
             .impl = impl,
+            .table = .empty,
             .pending = .empty,
+            .woken = .init(false),
         };
     }
 
@@ -592,6 +800,8 @@ pub const Watcher = struct {
         }
         for (w.pending.items) |p| w.destroyPending(p);
         w.pending.deinit(w.gpa);
+        for (w.table.values()) |*held| w.release(held);
+        w.table.deinit(w.gpa);
         w.batch.deinit(w.gpa);
         w.* = undefined;
     }
@@ -628,12 +838,43 @@ pub const Watcher = struct {
 
     /// Registers an absolute path that exists, and issues its id.
     fn register(w: *Watcher, abs: []const u8, options: AddOptions) AddError!WatchId {
+        if (w.claimed(abs)) return error.PathAlreadyWatched;
         const id: WatchId = @enumFromInt(w.next_id);
+        const owned = try w.gpa.dupe(u8, abs);
+        errdefer w.gpa.free(owned);
+        const mirror = try w.gpa.dupe(u8, abs);
+        errdefer w.gpa.free(mirror);
+        try w.table.ensureUnusedCapacity(w.gpa, 1);
         switch (w.impl) {
-            inline else => |*impl| try impl.add(id, abs, options),
+            inline else => |*impl| try impl.add(id, abs, options, &w.batch),
         }
+        w.table.putAssumeCapacity(id, .{
+            .path = owned,
+            .registered = mirror,
+            .recursive = options.recursive,
+        });
         w.next_id += 1;
         return id;
+    }
+
+    /// Whether some watch already holds a registration on `abs`.
+    fn claimed(w: *const Watcher, abs: []const u8) bool {
+        for (w.table.values()) |held| {
+            const registered = held.registered orelse continue;
+            if (path_cmp.eql(registered, abs)) return true;
+        }
+        return false;
+    }
+
+    fn release(w: *Watcher, held: *Held) void {
+        w.gpa.free(held.path);
+        if (held.registered) |registered| w.gpa.free(registered);
+        held.* = undefined;
+    }
+
+    /// The root `Kind.overflow` is reported against for a watch.
+    fn rootOf(w: *const Watcher, id: WatchId) ?[]const u8 {
+        return (w.table.get(id) orelse return null).path;
     }
 
     /// Takes a watch on a path that is not there, parks it on the nearest
@@ -648,12 +889,21 @@ pub const Watcher = struct {
             return w.register(target, options);
         }
 
+        if (w.claimed(target)) return error.PathAlreadyWatched;
         const p = try w.gpa.create(Pending);
         errdefer w.gpa.destroy(p);
         var filter = try options.filter.dupe(w.gpa);
         errdefer filter.deinit(w.gpa);
 
         const id: WatchId = @enumFromInt(w.next_id);
+        const owned = try w.gpa.dupe(u8, target);
+        errdefer w.gpa.free(owned);
+        try w.table.put(w.gpa, id, .{
+            .path = owned,
+            .registered = null,
+            .recursive = options.recursive,
+        });
+        errdefer _ = w.table.swapRemove(id);
         p.* = .{
             .id = id,
             .target = target,
@@ -716,15 +966,32 @@ pub const Watcher = struct {
     /// the next `poll` tries again.
     fn anchorPending(w: *Watcher, p: *Pending) void {
         p.anchor = null;
+        w.unregister(p.id);
         const present = w.existingPrefix(p.target) orelse return;
         if (present.len == p.target.len) return;
+        // The ancestor is a watch like any other and cannot be one this
+        // watcher already holds.
+        if (w.claimed(present)) return;
         p.next = p.target[0..nextStep(p.target, present.len)];
+        const mirror = w.gpa.dupe(u8, present) catch return;
         switch (w.impl) {
             inline else => |*impl| impl.add(p.id, present, .{
                 .filter = .{ .allow = Pending.onlyNext, .context = p },
-            }) catch return,
+            }, &w.batch) catch {
+                w.gpa.free(mirror);
+                return;
+            },
         }
+        if (w.table.getPtr(p.id)) |held| held.registered = mirror else w.gpa.free(mirror);
         p.anchor = present;
+    }
+
+    /// Forgets what the backend was registered on for `id`, without
+    /// touching the backend itself.
+    fn unregister(w: *Watcher, id: WatchId) void {
+        const held = w.table.getPtr(id) orelse return;
+        if (held.registered) |registered| w.gpa.free(registered);
+        held.registered = null;
     }
 
     /// Where the component after the prefix of length `at` ends.
@@ -775,21 +1042,26 @@ pub const Watcher = struct {
         switch (w.impl) {
             inline else => |*impl| impl.remove(p.id),
         }
+        w.unregister(p.id);
+        const mirror = try w.gpa.dupe(u8, p.target);
+        errdefer w.gpa.free(mirror);
         switch (w.impl) {
             inline else => |*impl| impl.add(p.id, p.target, .{
                 .recursive = p.recursive,
                 .filter = p.filter,
-            }) catch |err| switch (err) {
+            }, &w.batch) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 // Gone again between the look and the registration, or
                 // not ours to open. Park it and wait.
                 else => {
+                    w.gpa.free(mirror);
                     w.anchorPending(p);
                     return false;
                 },
             },
         }
-        try w.batch.push(w.gpa, p.id, p.target, .created);
+        if (w.table.getPtr(p.id)) |held| held.registered = mirror else w.gpa.free(mirror);
+        try w.batch.pushDetail(w.gpa, p.id, p.target, .created, null, .directory);
         w.destroyPending(p);
         return true;
     }
@@ -809,6 +1081,10 @@ pub const Watcher = struct {
     pub fn remove(w: *Watcher, id: WatchId) void {
         switch (w.impl) {
             inline else => |*impl| impl.remove(id),
+        }
+        if (w.table.fetchSwapRemove(id)) |entry| {
+            var held = entry.value;
+            w.release(&held);
         }
         for (w.pending.items, 0..) |p, i| {
             if (p.id != id) continue;
@@ -832,14 +1108,19 @@ pub const Watcher = struct {
     /// empty slice means the timeout expired with nothing to report.
     pub fn poll(w: *Watcher, timeout_ms: ?u32) PollError![]const Event {
         w.batch.reset(w.gpa);
-        const started: Io.Timestamp = .now(w.io, .awake);
+        // Before anything blocks: a watch that came back half
+        // registered says so at once rather than when the tree next
+        // happens to change.
+        try w.batch.flush(w.gpa);
+        const deadline: Deadline = .start(w.io, timeout_ms);
+        if (w.woken.swap(false, .acquire)) return w.batch.events.items;
 
-        while (true) {
+        while (w.batch.events.items.len == 0) {
             // A path that is settling has a deadline of its own, so the
             // wait is the shorter of the caller's timeout and the next
             // one due; otherwise a `poll(null)` would sleep through a
             // deadline the watcher set itself.
-            const left = remainingMs(w.io, started, timeout_ms);
+            const left = deadline.remainingMs();
             const wait_ms: ?u32 = if (w.batch.nextDueMs()) |due|
                 if (left) |l| @min(l, due) else due
             else
@@ -848,12 +1129,9 @@ pub const Watcher = struct {
             switch (w.impl) {
                 inline else => |*impl| try impl.wait(&w.batch, wait_ms),
             }
-            try w.batch.promote(w.gpa);
-            try w.settlePending();
-            if (w.batch.events.items.len > 0) break;
-            if (remainingMs(w.io, started, timeout_ms)) |l| {
-                if (l == 0) return &.{};
-            }
+            try w.collect();
+            if (w.woken.swap(false, .acquire)) return w.batch.events.items;
+            if (w.batch.events.items.len == 0 and deadline.expired()) return &.{};
         }
         // Debouncing has already waited for the path to be quiet, so
         // there is nothing left for a coalescing tail to merge.
@@ -863,25 +1141,89 @@ pub const Watcher = struct {
         // The coalescing tail: keep reading for `latency_ms` past the first
         // event so that an editor writing a file in four chunks is one
         // `modified` and not four.
-        const tail: Io.Timestamp = .now(w.io, .awake);
+        const tail: Deadline = .start(w.io, w.options.latency_ms);
         while (true) {
-            const left = remainingMs(w.io, tail, w.options.latency_ms) orelse 0;
+            const left = tail.remainingMs() orelse 0;
             if (left == 0) break;
             switch (w.impl) {
                 inline else => |*impl| try impl.wait(&w.batch, left),
             }
-            try w.batch.promote(w.gpa);
-            try w.settlePending();
+            try w.collect();
         }
         return w.batch.events.items;
     }
 
-    /// Milliseconds left of `timeout_ms` since `started`, or `null` when
-    /// there is no timeout at all. Zero means it has expired.
-    fn remainingMs(io: Io, started: Io.Timestamp, timeout_ms: ?u32) ?u32 {
-        const total = timeout_ms orelse return null;
-        const elapsed = started.durationTo(Io.Timestamp.now(io, .awake)).toMilliseconds();
-        return @intCast(@max(0, @as(i64, total) - elapsed));
+    /// What every round of `poll` does with what a backend has just
+    /// pushed: promote what has gone quiet, keep the parked watches
+    /// current, and turn a batch that hit its ceiling into the overflow
+    /// that says so.
+    fn collect(w: *Watcher) PollError!void {
+        try w.batch.flush(w.gpa);
+        try w.batch.promote(w.gpa);
+        try w.settlePending();
+        while (w.batch.dropped.count() != 0) {
+            const id = w.batch.dropped.keys()[0];
+            w.batch.dropped.swapRemoveAt(0);
+            // The batch knows it had to stop holding names; only the
+            // watcher knows which root to say so against.
+            const root = w.rootOf(id) orelse continue;
+            try w.batch.push(w.gpa, id, root, .overflow, .directory);
+        }
+    }
+
+    /// Makes a `poll` blocked on this watcher come back, from another
+    /// thread.
+    ///
+    /// This is the one thing a `Watcher` will take from a thread that is
+    /// not its own. Everything else about a watcher belongs to one
+    /// thread; this is how that thread is let go of, so that a program
+    /// shutting down, or one that has decided it wants to watch
+    /// something else, does not have to have left itself a timeout to
+    /// discover it through.
+    ///
+    /// The `poll` returns whatever it had, which is usually nothing. It
+    /// is not a cancellation: the watcher is still good and the next
+    /// `poll` carries on. Calling it while nothing is polling makes the
+    /// next `poll` return at once, and calling it many times is the same
+    /// as calling it once.
+    ///
+    /// On the `poll` backend the return takes up to
+    /// `Options.poll_interval_ms`, or a tenth of a second, whichever is
+    /// less: there is nothing to interrupt, only a sleep to cut short.
+    pub fn wake(w: *Watcher) void {
+        w.woken.store(true, .release);
+        switch (w.impl) {
+            inline else => |*impl| impl.wake(),
+        }
+    }
+
+    /// Where this watcher has got to, for `Options.since` to resume
+    /// from later, or `null` on a backend that cannot say. See
+    /// `tracksPosition` and `Position`.
+    pub fn position(w: *const Watcher) ?Position {
+        const value = switch (w.impl) {
+            inline else => |*impl| impl.position(),
+        } orelse return null;
+        return .{ .backend = w.backend(), .value = value };
+    }
+
+    /// Every watch this watcher holds, in the order they were added.
+    ///
+    /// The slice is allocated with `gpa` and is the caller's to free;
+    /// the paths inside it belong to the watcher and are valid until the
+    /// next `add`, `remove` or `deinit`. A program that keeps its own
+    /// idea of what it asked to watch can check it against this.
+    pub fn watches(w: *const Watcher, gpa: Allocator) Allocator.Error![]WatchInfo {
+        const list = try gpa.alloc(WatchInfo, w.table.count());
+        for (w.table.keys(), w.table.values(), list) |id, held, *slot| {
+            slot.* = .{
+                .id = id,
+                .path = held.path,
+                .recursive = held.recursive,
+                .waiting = held.registered == null or !path_cmp.eql(held.registered.?, held.path),
+            };
+        }
+        return list;
     }
 
     /// What a watcher is currently holding. See `stats`.
@@ -892,8 +1234,8 @@ pub const Watcher = struct {
         /// Paths the operating system has been told about on this
         /// watcher's behalf: one per kernel watch on `inotify`, one per
         /// open descriptor on `kqueue`, one per stream on `fsevents`, one
-        /// per directory handle on `windows`, and one per path scanned on
-        /// `poll`.
+        /// per directory handle on `windows`, and one per directory
+        /// listed on `poll`.
         ///
         /// This is the number that runs into the limits — the per-user
         /// cap on `inotify` watches, the per-process cap on descriptors —
@@ -914,9 +1256,7 @@ pub const Watcher = struct {
     /// the operating system anything.
     pub fn stats(w: *const Watcher) Stats {
         return .{
-            .watches = switch (w.impl) {
-                inline else => |*impl| impl.watchCount(),
-            },
+            .watches = w.table.count(),
             .registrations = switch (w.impl) {
                 inline else => |*impl| impl.registrationCount(),
             },
@@ -959,5 +1299,11 @@ test {
     _ = Filter;
     _ = Tree;
     _ = @import("Snapshot.zig");
+    _ = @import("Budget.zig");
+    _ = @import("Deadline.zig");
+    _ = @import("buffer.zig");
+    _ = @import("path.zig");
+    _ = @import("walk.zig");
     _ = @import("test_suite.zig");
+    _ = @import("test_gaps.zig");
 }

@@ -31,7 +31,12 @@ const windows = std.os.windows;
 
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
+const Budget = @import("../Budget.zig");
+const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
+const buffer = @import("../buffer.zig");
+const path_cmp = @import("../path.zig");
+const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
 const Windows = @This();
@@ -45,26 +50,38 @@ watches: std.AutoArrayHashMapUnmanaged(WatchId, *Watch),
 /// have finished with. Freed when their completion arrives, or at
 /// `deinit` once the port is closed.
 retiring: std.ArrayList(*Watch),
-/// Mirrors `lookout.Options.max_dir_entries`.
-max_dir_entries: usize,
-/// `lookout.Options.windows_buffer_bytes`, clamped and rounded to what
-/// `ReadDirectoryChangesW` will take. See `clampBuffer`.
+/// How many entries each watched directory holds, against
+/// `lookout.Options.max_dir_entries`.
+budget: Budget,
+/// `lookout.Options.buffer_bytes`, clamped and rounded to what
+/// `ReadDirectoryChangesW` will take. See `bounds`.
 buffer_len: usize,
 
-/// The smallest and largest buffer `ReadDirectoryChangesW` is given. See
-/// `lookout.Options.windows_buffer_bytes` for what a caller should pick;
-/// these are only the ends of the range lookout will pass on.
+/// What `lookout.Options.buffer_bytes` may ask for here.
 ///
 /// The floor is a few times the largest single record -- twelve bytes and
 /// a name of up to 32767 UTF-16 units -- so that one change can always be
 /// reported. The ceiling is a size past which the call is a bad idea
 /// rather than a refusal: the buffer is non-paged pool while a read is
-/// outstanding, one per watch.
-const min_buffer_len = 4 * 1024;
-const max_buffer_len = 16 * 1024 * 1024;
+/// outstanding, one per watch. The default is what a network share will
+/// take, which is the one size that works everywhere.
+const bounds: buffer.Bounds = .{
+    .min = 4 * 1024,
+    .max = 16 * 1024 * 1024,
+    .default = 64 * 1024,
+};
 
-/// What a caller gets if they ask for nothing.
-const default_buffer_len = 64 * 1024;
+/// What a share will take when it refuses the size the caller asked for.
+/// `ReadDirectoryChangesW` on a remote directory fails with
+/// `ERROR_INVALID_PARAMETER` for a buffer over 64 KiB rather than
+/// clamping it, so a caller who raised the size for a local disk and
+/// then pointed the watcher at a share would otherwise get a watch that
+/// died without an event and without an error.
+const share_buffer_len = 64 * 1024;
+
+/// The completion key `wake` posts under. No watch can have it: ids are
+/// handed out from zero upwards.
+const wake_key: usize = std.math.maxInt(usize);
 
 /// One watch: one directory handle with one read outstanding.
 ///
@@ -93,10 +110,16 @@ const Watch = struct {
     /// is why `remove` retires a watch rather than freeing it.
     buffer: []align(@alignOf(u32)) u8,
     /// The old name of a rename whose new name has not arrived yet.
+    ///
+    /// Held across completions rather than dropped at the end of each
+    /// one: a burst of renames long enough to fill the buffer puts one
+    /// pair either side of a read, and deciding at the end of the read
+    /// turns one `renamed` into a removal and a creation on a backend
+    /// that says it pairs them. `flushRenames` is what lets it go.
     pending_rename: ?[]u8,
-    /// How many entries the watched directory holds, for the
-    /// `lookout.Options.max_dir_entries` budget.
-    entries: usize,
+    /// How much of the buffer the kernel is willing to take. Lowered
+    /// once, to `share_buffer_len`, if the size asked for is refused.
+    accepted_len: usize,
 };
 
 /// Creates the completion port.
@@ -109,22 +132,9 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .port = port,
         .watches = .empty,
         .retiring = .empty,
-        .max_dir_entries = options.max_dir_entries,
-        .buffer_len = clampBuffer(options.windows_buffer_bytes),
+        .budget = .init(gpa, io, options.max_dir_entries),
+        .buffer_len = buffer.clamp(options.buffer_bytes, bounds),
     };
-}
-
-/// What lookout will actually ask the kernel for: the caller's size held
-/// inside the range above, and a multiple of four, because the records
-/// the kernel writes are aligned to a `DWORD` and it measures the buffer
-/// in whole ones.
-fn clampBuffer(asked: usize) usize {
-    const bounded = std.math.clamp(
-        if (asked == 0) default_buffer_len else asked,
-        min_buffer_len,
-        max_buffer_len,
-    );
-    return bounded - bounded % @alignOf(u32);
 }
 
 /// Closes every directory handle and the port.
@@ -135,6 +145,7 @@ pub fn deinit(w: *Windows) void {
         w.free(watch);
     }
     w.watches.deinit(w.gpa);
+    w.budget.deinit();
     // The port is closed before the retiring buffers are freed: after
     // that no completion can reference them.
     _ = c.CloseHandle(w.port);
@@ -151,9 +162,17 @@ pub fn fd(w: *const Windows) ?std.posix.fd_t {
     return null;
 }
 
-/// How many watches the caller has added. See `lookout.Watcher.Stats`.
-pub fn watchCount(w: *const Windows) usize {
-    return w.watches.count();
+/// Nothing to resume from: the change records start when the read does.
+/// See `lookout.tracksPosition`.
+pub fn position(w: *const Windows) ?u64 {
+    _ = w;
+    return null;
+}
+
+/// Posts a completion under a key no watch has, which a blocked `wait`
+/// takes as its cue to come back. See `lookout.Watcher.wake`.
+pub fn wake(w: *Windows) void {
+    _ = c.PostQueuedCompletionStatus(w.port, 0, wake_key, null);
 }
 
 /// How many directory handles this backend holds: one per watch, because
@@ -164,10 +183,14 @@ pub fn registrationCount(w: *const Windows) usize {
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
-pub fn add(w: *Windows, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
-    for (w.watches.values()) |existing| {
-        if (std.mem.eql(u8, existing.root, abs_path)) return error.PathAlreadyWatched;
-    }
+pub fn add(
+    w: *Windows,
+    id: WatchId,
+    abs_path: []const u8,
+    options: lookout.AddOptions,
+    batch: *Batch,
+) lookout.Watcher.AddError!void {
+    _ = batch;
     const stat = try Io.Dir.cwd().statFile(w.io, abs_path, .{});
     const is_dir = stat.kind == .directory;
 
@@ -188,8 +211,8 @@ pub fn add(w: *Windows, id: WatchId, abs_path: []const u8, options: lookout.AddO
     var filter = try options.filter.dupe(w.gpa);
     errdefer filter.deinit(w.gpa);
 
-    const buffer = try w.gpa.alignedAlloc(u8, .of(u32), w.buffer_len);
-    errdefer w.gpa.free(buffer);
+    const bytes = try w.gpa.alignedAlloc(u8, .of(u32), w.buffer_len);
+    errdefer w.gpa.free(bytes);
 
     watch.* = .{
         .id = id,
@@ -199,10 +222,11 @@ pub fn add(w: *Windows, id: WatchId, abs_path: []const u8, options: lookout.AddO
         .recursive = options.recursive and is_dir,
         .filter = filter,
         .overlapped = std.mem.zeroes(c.OVERLAPPED),
-        .buffer = buffer,
+        .buffer = bytes,
         .pending_rename = null,
-        .entries = countEntries(w.io, dir_path),
+        .accepted_len = w.buffer_len,
     };
+    w.budget.seed(dir_path) catch {};
 
     if (c.CreateIoCompletionPort(handle, w.port, @intFromEnum(id), 0) == null)
         return error.WatchLimitReached;
@@ -244,7 +268,6 @@ fn open(gpa: Allocator, path: []const u8) lookout.Watcher.AddError!windows.HANDL
 /// because a change that arrives while no read is outstanding is a change
 /// the kernel has to buffer.
 fn arm(w: *Windows, watch: *Watch) lookout.Watcher.AddError!void {
-    _ = w;
     watch.overlapped = std.mem.zeroes(c.OVERLAPPED);
     const filter: u32 = c.FILE_NOTIFY_CHANGE_FILE_NAME | c.FILE_NOTIFY_CHANGE_DIR_NAME |
         c.FILE_NOTIFY_CHANGE_ATTRIBUTES | c.FILE_NOTIFY_CHANGE_SIZE |
@@ -253,7 +276,7 @@ fn arm(w: *Windows, watch: *Watch) lookout.Watcher.AddError!void {
     if (c.ReadDirectoryChangesW(
         watch.handle,
         watch.buffer.ptr,
-        @intCast(watch.buffer.len),
+        @intCast(watch.accepted_len),
         @intFromBool(watch.recursive),
         filter,
         null,
@@ -262,6 +285,14 @@ fn arm(w: *Windows, watch: *Watch) lookout.Watcher.AddError!void {
     ) == 0) return switch (c.GetLastError()) {
         c.ERROR_IO_PENDING => {},
         c.ERROR_NOT_ENOUGH_MEMORY, c.ERROR_OUTOFMEMORY => error.SystemResources,
+        // A remote directory refuses a buffer over 64 KiB outright
+        // rather than clamping it. Coming down to what a share takes is
+        // the difference between a smaller buffer and a dead watch.
+        c.ERROR_INVALID_PARAMETER => {
+            if (watch.accepted_len <= share_buffer_len) return error.Unexpected;
+            watch.accepted_len = share_buffer_len;
+            return w.arm(watch);
+        },
         else => error.Unexpected,
     };
 }
@@ -270,6 +301,7 @@ fn arm(w: *Windows, watch: *Watch) lookout.Watcher.AddError!void {
 pub fn remove(w: *Windows, id: WatchId) void {
     const entry = w.watches.fetchSwapRemove(id) orelse return;
     const watch = entry.value;
+    w.budget.forget(watch.root);
     _ = c.CancelIoEx(watch.handle, &watch.overlapped);
     _ = c.CloseHandle(watch.handle);
     // The buffer outlives the handle until the cancelled read's
@@ -289,17 +321,31 @@ fn free(w: *Windows, watch: *Watch) void {
 /// Waits on the completion port until a read produces something `batch`
 /// did not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+    const result = w.collect(batch, timeout_ms);
+    // Whatever is still held when the wait is over never found its other
+    // half: the path moved somewhere this watch cannot see it.
+    try w.flushRenames(batch);
+    return result;
+}
+
+/// Reports every held old name whose new name never came as a removal.
+fn flushRenames(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
+    for (w.watches.values()) |watch| {
+        const old = watch.pending_rename orelse continue;
+        watch.pending_rename = null;
+        defer w.gpa.free(old);
+        try batch.push(w.gpa, watch.id, old, .removed, .unknown);
+    }
+}
+
+fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
     const before = batch.revision;
-    const started: Io.Timestamp = .now(w.io, .awake);
+    const deadline: Deadline = .start(w.io, timeout_ms);
 
     while (true) {
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still takes one look at the port.
-        const timeout: u32 = timeout: {
-            const total = timeout_ms orelse break :timeout c.INFINITE;
-            const elapsed = started.durationTo(Io.Timestamp.now(w.io, .awake)).toMilliseconds();
-            break :timeout @intCast(@max(0, @as(i64, total) - elapsed));
-        };
+        const timeout: u32 = if (timeout_ms == null) c.INFINITE else deadline.windowsMs();
 
         var transferred: u32 = 0;
         var key: usize = 0;
@@ -311,6 +357,7 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
                 c.WAIT_TIMEOUT => {},
                 else => error.Unexpected,
             };
+            if (key == wake_key) return;
             const failed: WatchId = @enumFromInt(@as(u32, @truncate(key)));
             const err = c.GetLastError();
             const watch = w.live(failed, overlapped) orelse {
@@ -323,11 +370,8 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
                 // The kernel's other way of saying the buffer overflowed:
                 // more change than it could hold, so re-read the tree.
                 // The handle is still good, so the watch is re-armed.
-                try batch.push(w.gpa, failed, watch.root, .overflow);
-                w.arm(watch) catch |e| switch (e) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => {},
-                };
+                try batch.push(w.gpa, failed, watch.root, .overflow, .directory);
+                try w.rearm(watch, batch);
                 if (batch.revision != before) return;
                 continue;
             }
@@ -336,12 +380,13 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
             // opened with FILE_SHARE_DELETE precisely so that this can
             // happen, and a watched path that no longer exists is a
             // removal like any other.
-            try batch.push(w.gpa, failed, watch.root, .removed);
+            try batch.push(w.gpa, failed, watch.root, .removed, .directory);
             w.discard(failed);
             if (batch.revision != before) return;
             continue;
         }
 
+        if (key == wake_key) return;
         const id: WatchId = @enumFromInt(@as(u32, @truncate(key)));
         const watch = w.live(id, overlapped) orelse {
             w.retire(overlapped);
@@ -350,16 +395,32 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
         if (transferred == 0) {
             // The kernel had more change than it could hold between two
             // reads and says so by transferring nothing.
-            try batch.push(w.gpa, id, watch.root, .overflow);
+            try batch.push(w.gpa, id, watch.root, .overflow, .directory);
         } else {
             try w.report(watch, transferred, batch);
         }
-        w.arm(watch) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {},
-        };
+        try w.rearm(watch, batch);
         if (batch.revision != before) return;
     }
+}
+
+/// Posts the next read, and says so when it cannot be posted.
+///
+/// A watch whose read cannot be armed again reports nothing ever after.
+/// That used to be swallowed, which left the caller with a live watch id
+/// over a tree that had gone quiet; now the watch is dropped and the
+/// root is reported as `lookout.Kind.unwatched`, which is what it is.
+fn rearm(w: *Windows, watch: *Watch, batch: *Batch) lookout.Watcher.PollError!void {
+    w.arm(watch) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            const root = try w.gpa.dupe(u8, watch.root);
+            defer w.gpa.free(root);
+            const id = watch.id;
+            w.discard(id);
+            try batch.push(w.gpa, id, root, .unwatched, .directory);
+        },
+    };
 }
 
 /// Drops a watch whose directory is gone. The read that failed is the
@@ -423,7 +484,7 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
         const wanted = if (watch.only == null)
             !watch.filter.excludes(watch.root, path)
         else
-            std.mem.eql(u8, path, watch.root);
+            path_cmp.eql(path, watch.root);
         if (wanted) {
             try w.reportOne(watch, info.Action, path, batch);
         }
@@ -431,56 +492,66 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
         if (info.NextEntryOffset == 0) break;
         offset += info.NextEntryOffset;
     }
-
-    // A rename whose second half never came: the file left the watch.
-    if (watch.pending_rename) |old| {
-        try batch.push(w.gpa, watch.id, old, .removed);
-        w.gpa.free(old);
-        watch.pending_rename = null;
-    }
 }
 
-fn reportOne(w: *Windows, watch: *Watch, action: u32, path: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+/// What the path is now, for the actions that leave it there to be
+/// asked. `ReadDirectoryChangesW` carries no bit saying whether a record
+/// is about a directory, which is why this is a `stat` and why a path
+/// that is already gone is `unknown`.
+fn targetOf(w: *const Windows, subject: []const u8) Target {
+    const stat = Io.Dir.cwd().statFile(w.io, subject, .{ .follow_symlinks = false }) catch
+        return .unknown;
+    return .of(stat.kind);
+}
+
+fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+    var move: Budget.Move = .unchanged;
     switch (action) {
         c.FILE_ACTION_ADDED => {
-            try batch.push(w.gpa, watch.id, path, .created);
-            watch.entries += 1;
+            try batch.push(w.gpa, watch.id, subject, .created, w.targetOf(subject));
+            move = .appeared;
         },
         c.FILE_ACTION_REMOVED => {
-            try batch.push(w.gpa, watch.id, path, .removed);
-            watch.entries -|= 1;
+            try batch.push(w.gpa, watch.id, subject, .removed, .unknown);
+            move = .vanished;
         },
-        c.FILE_ACTION_MODIFIED => try batch.push(w.gpa, watch.id, path, .modified),
+        c.FILE_ACTION_MODIFIED => {
+            // A directory's own times move whenever anything inside it
+            // moves, and no other backend reports that. The record does
+            // not say which this is, so the file system is asked.
+            const target = w.targetOf(subject);
+            if (target != .directory) {
+                try batch.push(w.gpa, watch.id, subject, .modified, target);
+            }
+        },
         c.FILE_ACTION_RENAMED_OLD_NAME => {
             if (watch.pending_rename) |old| w.gpa.free(old);
-            watch.pending_rename = try w.gpa.dupe(u8, path);
+            watch.pending_rename = try w.gpa.dupe(u8, subject);
+            move = .vanished;
         },
         c.FILE_ACTION_RENAMED_NEW_NAME => {
+            move = .appeared;
             if (watch.pending_rename) |old| {
                 defer w.gpa.free(old);
                 watch.pending_rename = null;
-                try batch.pushRename(w.gpa, watch.id, path, old);
+                try batch.pushRename(w.gpa, watch.id, subject, old, w.targetOf(subject));
             } else {
                 // Renamed in from outside the watch: a creation as far as
                 // anyone watching this tree can tell.
-                try batch.push(w.gpa, watch.id, path, .created);
-                watch.entries += 1;
+                try batch.push(w.gpa, watch.id, subject, .created, w.targetOf(subject));
             }
         },
         else => {},
     }
-    if (watch.entries > w.max_dir_entries) {
-        try batch.push(w.gpa, watch.id, watch.root, .overflow);
+    if (move == .unchanged) return;
+    // The budget is one directory's, not one watch's: a recursive watch
+    // over twenty directories of three hundred entries is inside a
+    // budget of a thousand, and counting every creation anywhere under
+    // the root against one number said it was not.
+    const parent = std.fs.path.dirname(subject) orelse return;
+    if (try w.budget.note(parent, move)) {
+        try batch.push(w.gpa, watch.id, watch.root, .overflow, .directory);
     }
-}
-
-fn countEntries(io: Io, path: []const u8) usize {
-    var dir = Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return 0;
-    defer dir.close(io);
-    var it = dir.iterate();
-    var count: usize = 0;
-    while (it.next(io) catch null) |_| count += 1;
-    return count;
 }
 
 /// The Win32 surface lookout uses, declared against `std.os.windows`'
@@ -505,6 +576,7 @@ const c = struct {
     const ERROR_NOT_ENOUGH_MEMORY: DWORD = 8;
     const ERROR_OUTOFMEMORY: DWORD = 14;
     const ERROR_TOO_MANY_OPEN_FILES: DWORD = 4;
+    const ERROR_INVALID_PARAMETER: DWORD = 87;
     const ERROR_IO_PENDING: DWORD = 997;
     /// The kernel could not hold everything that changed between two
     /// reads: the buffer overflowed and the tree must be re-read.
@@ -574,6 +646,12 @@ const c = struct {
         CompletionKey: usize,
         NumberOfConcurrentThreads: DWORD,
     ) callconv(.winapi) ?HANDLE;
+    extern "kernel32" fn PostQueuedCompletionStatus(
+        CompletionPort: HANDLE,
+        dwNumberOfBytesTransferred: DWORD,
+        dwCompletionKey: usize,
+        lpOverlapped: ?*OVERLAPPED,
+    ) callconv(.winapi) BOOL;
     extern "kernel32" fn GetQueuedCompletionStatus(
         CompletionPort: HANDLE,
         lpNumberOfBytesTransferred: *DWORD,

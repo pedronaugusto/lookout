@@ -1,9 +1,9 @@
 //! The portable backend: re-stat and re-list the watched paths on a timer.
 //!
 //! It needs nothing from the kernel, so it is the backend on every target
-//! lookout has no notification mechanism for — Windows today — and it is
-//! selectable everywhere else, which is what lets one test suite hold
-//! every backend to the same contract.
+//! lookout has no notification mechanism for, and it is selectable
+//! everywhere else, which is what lets one test suite hold every backend
+//! to the same contract.
 //!
 //! The costs are the obvious ones: a change is seen up to
 //! `lookout.Options.poll_interval_ms` after it happens, every watched
@@ -16,8 +16,10 @@ const Io = std.Io;
 
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
+const Deadline = @import("../Deadline.zig");
 const Snapshot = @import("../Snapshot.zig");
 const Tree = @import("../Tree.zig");
+const path_cmp = @import("../path.zig");
 const WatchId = lookout.WatchId;
 
 const Poll = @This();
@@ -26,6 +28,14 @@ gpa: Allocator,
 io: Io,
 interval_ms: u32,
 tree: Tree,
+/// Set by `wake` from another thread. There is nothing to interrupt
+/// here, only a sleep to cut short, so the sleep is taken in slices and
+/// this is read between them.
+woken: std.atomic.Value(bool),
+
+/// The longest this backend sleeps without looking at `woken`. A wake
+/// is answered within this even when `poll_interval_ms` is minutes.
+const slice_ms = 100;
 
 /// Creates a backend that watches nothing. Never actually fails -- this
 /// backend holds no kernel resource -- and returns the error union every
@@ -36,6 +46,7 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .io = io,
         .interval_ms = options.poll_interval_ms,
         .tree = .init(gpa, io, options.max_dir_entries, false),
+        .woken = .init(false),
     };
 }
 
@@ -53,9 +64,16 @@ pub fn fd(p: *const Poll) ?std.posix.fd_t {
     return null;
 }
 
-/// How many watches the caller has added. See `lookout.Watcher.Stats`.
-pub fn watchCount(p: *const Poll) usize {
-    return p.tree.watches.count();
+/// Nothing to resume from: a listing comparison has no sequence of its
+/// own to name a point in. See `lookout.tracksPosition`.
+pub fn position(p: *const Poll) ?u64 {
+    _ = p;
+    return null;
+}
+
+/// Cuts the sleep short. See `lookout.Watcher.wake`.
+pub fn wake(p: *Poll) void {
+    p.woken.store(true, .release);
 }
 
 /// How many paths this backend re-lists or re-stats on every tick. See
@@ -65,10 +83,16 @@ pub fn registrationCount(p: *const Poll) usize {
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
-pub fn add(p: *Poll, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
+pub fn add(
+    p: *Poll,
+    id: WatchId,
+    abs_path: []const u8,
+    options: lookout.AddOptions,
+    batch: *Batch,
+) lookout.Watcher.AddError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(p.gpa);
-    try p.tree.addWatch(id, abs_path, options, &added);
+    try p.tree.addWatch(id, abs_path, options, &added, batch);
 }
 
 /// Stops watching `id`.
@@ -81,21 +105,27 @@ pub fn remove(p: *Poll, id: WatchId) void {
 /// gives up.
 pub fn wait(p: *Poll, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
     const before = batch.revision;
-    const started: Io.Timestamp = .now(p.io, .awake);
+    const deadline: Deadline = .start(p.io, timeout_ms);
 
     while (true) {
         try p.scan(batch);
         if (batch.revision != before) return;
+        if (p.woken.swap(false, .acquire)) return;
 
+        var napped: u32 = 0;
         const nap_ms = nap: {
-            const timeout = timeout_ms orelse break :nap p.interval_ms;
-            const elapsed = started.durationTo(Io.Timestamp.now(p.io, .awake)).toMilliseconds();
-            if (elapsed >= timeout) return;
-            const remaining: u32 = @intCast(@as(i64, timeout) - elapsed);
+            const remaining = deadline.remainingMs() orelse break :nap p.interval_ms;
+            if (remaining == 0) return;
             break :nap @min(p.interval_ms, remaining);
         };
-        if (nap_ms == 0) return;
-        try p.io.sleep(.fromMilliseconds(nap_ms), .awake);
+        // Slept in slices so that `wake` is answered without waiting out
+        // a whole tick, which on a long interval is a long time.
+        while (napped < nap_ms) {
+            const slice = @min(slice_ms, nap_ms - napped);
+            try p.io.sleep(.fromMilliseconds(slice), .awake);
+            napped += slice;
+            if (p.woken.load(.acquire)) break;
+        }
     }
 }
 
@@ -154,7 +184,7 @@ fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
     }
 
     for (gone.items) |root| {
-        try batch.push(p.gpa, p.watchOf(root), root, .removed);
+        try batch.push(p.gpa, p.watchOf(root), root, .removed, .directory);
         p.tree.removeSubtree(root);
     }
 }
@@ -170,7 +200,7 @@ fn hasNodes(p: *const Poll, id: WatchId) bool {
 /// The watch whose root is `root`.
 fn watchOf(p: *const Poll, root: []const u8) WatchId {
     for (p.tree.watches.keys(), p.tree.watches.values()) |id, watch| {
-        if (std.mem.eql(u8, watch.root, root)) return id;
+        if (path_cmp.eql(watch.root, root)) return id;
     }
     unreachable;
 }

@@ -25,6 +25,7 @@ const posix = std.posix;
 
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
+const Deadline = @import("../Deadline.zig");
 const Tree = @import("../Tree.zig");
 const WatchId = lookout.WatchId;
 
@@ -48,6 +49,11 @@ const interest: u32 = std.c.NOTE.DELETE | std.c.NOTE.WRITE | std.c.NOTE.EXTEND |
 /// larger stack frame; the kernel keeps whatever does not fit.
 const events_per_call = 64;
 
+/// The identifier of the user event `wake` triggers. An `EVFILT_USER`
+/// identifier shares no namespace with the descriptors `EVFILT_VNODE`
+/// uses, so any value will do and this one is the first.
+const wake_ident: usize = 1;
+
 /// `O_EVTONLY` on Darwin opens a descriptor that does not count as a
 /// reference for unmounting, which is what a watcher wants. The other BSDs
 /// have no equivalent.
@@ -69,13 +75,28 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .NOMEM => error.SystemResources,
         else => error.Unexpected,
     };
-    return .{
+    const k: Kqueue = .{
         .gpa = gpa,
         .io = io,
         .kq = rc,
         .tree = .init(gpa, io, options.max_dir_entries, true),
         .file_fds = .empty,
     };
+    // The one thing on this queue that is not a file: how another
+    // thread makes a blocked `wait` come back.
+    const change: posix.Kevent = .{
+        .ident = wake_ident,
+        .filter = std.c.EVFILT.USER,
+        .flags = std.c.EV.ADD | std.c.EV.CLEAR,
+        .fflags = 0,
+        .data = 0,
+        .udata = 0,
+    };
+    if (std.c.kevent(k.kq, (&change)[0..1], 1, undefined, 0, null) < 0) {
+        _ = std.c.close(k.kq);
+        return error.Unexpected;
+    }
+    return k;
 }
 
 /// Closes the kernel queue and every watched descriptor.
@@ -93,9 +114,25 @@ pub fn fd(k: *const Kqueue) ?posix.fd_t {
     return k.kq;
 }
 
-/// How many watches the caller has added. See `lookout.Watcher.Stats`.
-pub fn watchCount(k: *const Kqueue) usize {
-    return k.tree.watches.count();
+/// Nothing to resume from: `EVFILT_VNODE` is a queue that starts empty
+/// rather than a log. See `lookout.tracksPosition`.
+pub fn position(k: *const Kqueue) ?u64 {
+    _ = k;
+    return null;
+}
+
+/// Triggers the user event a blocked `wait` is also listening for. See
+/// `lookout.Watcher.wake`.
+pub fn wake(k: *Kqueue) void {
+    const change: posix.Kevent = .{
+        .ident = wake_ident,
+        .filter = std.c.EVFILT.USER,
+        .flags = 0,
+        .fflags = std.c.NOTE.TRIGGER,
+        .data = 0,
+        .udata = 0,
+    };
+    _ = std.c.kevent(k.kq, (&change)[0..1], 1, undefined, 0, null);
 }
 
 /// How many descriptors this backend holds open for watched paths. See
@@ -105,15 +142,21 @@ pub fn registrationCount(k: *const Kqueue) usize {
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
-pub fn add(k: *Kqueue, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
+pub fn add(
+    k: *Kqueue,
+    id: WatchId,
+    abs_path: []const u8,
+    options: lookout.AddOptions,
+    batch: *Batch,
+) lookout.Watcher.AddError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(k.gpa);
     // A watch the kernel only half accepted is worse than none: it would
     // report a fraction of a tree and look like a quiet one.
     errdefer k.remove(id);
 
-    try k.tree.addWatch(id, abs_path, options, &added);
-    try k.register(added.items);
+    try k.tree.addWatch(id, abs_path, options, &added, batch);
+    try k.register(added.items, batch);
 }
 
 /// Stops watching `id` and closes its descriptors.
@@ -126,23 +169,11 @@ pub fn remove(k: *Kqueue, id: WatchId) void {
 /// already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
     const before = batch.revision;
-    const started: Io.Timestamp = .now(k.io, .awake);
+    const deadline: Deadline = .start(k.io, timeout_ms);
 
     while (true) {
-        // Clamped rather than returned on, so that a `timeout_ms` of zero
-        // still performs one non-blocking call. Returning early here would
-        // make `poll(0)` report nothing, ever.
-        var timeout: std.c.timespec = undefined;
-        const timeout_ptr: ?*const std.c.timespec = ptr: {
-            const total = timeout_ms orelse break :ptr null;
-            const elapsed = started.durationTo(Io.Timestamp.now(k.io, .awake)).toMilliseconds();
-            const remaining: u64 = @intCast(@max(0, @as(i64, total) - elapsed));
-            timeout = .{
-                .sec = @intCast(remaining / std.time.ms_per_s),
-                .nsec = @intCast((remaining % std.time.ms_per_s) * std.time.ns_per_ms),
-            };
-            break :ptr &timeout;
-        };
+        var storage: std.c.timespec = undefined;
+        const timeout_ptr = deadline.timespec(&storage);
 
         var events: [events_per_call]posix.Kevent = undefined;
         const empty: [0]posix.Kevent = .{};
@@ -153,8 +184,15 @@ pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
         };
         if (count == 0 and timeout_ptr != null) return;
 
-        for (events[0..@intCast(count)]) |event| try k.handle(event, batch);
-        if (batch.revision != before) return;
+        var woken = false;
+        for (events[0..@intCast(count)]) |event| {
+            if (event.filter == std.c.EVFILT.USER) {
+                woken = true;
+                continue;
+            }
+            try k.handle(event, batch);
+        }
+        if (woken or batch.revision != before) return;
     }
 }
 
@@ -169,6 +207,10 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollEr
     const path = try k.gpa.dupe(u8, node.path);
     defer k.gpa.free(path);
     const watch = node.watch;
+    const target: lookout.Target = switch (node.role) {
+        .directory => .directory,
+        .file => .file,
+    };
 
     const gone: ?lookout.Kind = gone: {
         if (flags & (std.c.NOTE.DELETE | std.c.NOTE.REVOKE) != 0) break :gone .removed;
@@ -176,7 +218,7 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollEr
         break :gone null;
     };
     if (gone) |kind| {
-        try batch.push(k.gpa, watch, path, kind);
+        try batch.push(k.gpa, watch, path, kind, target);
         k.tree.removeSubtree(path);
         k.closeOrphanedFiles();
         return;
@@ -189,11 +231,11 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollEr
                 defer added.deinit(k.gpa);
                 try k.tree.rescanDirectory(node_id, batch, &added);
                 k.closeOrphanedFiles();
-                k.register(added.items) catch |err| switch (err) {
+                k.register(added.items, batch) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    // A subdirectory that cannot be registered — the
-                    // descriptor limit, or it is already gone — is
-                    // reported through its parent and nothing below it.
+                    // The descriptor limit, reached while registering
+                    // the path the caller named. `register` has already
+                    // said which paths it could not take.
                     else => {},
                 };
             }
@@ -201,22 +243,22 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollEr
             // moved, which the listing already reports as a creation or a
             // removal, so only a real metadata change is an event here.
             if (flags & std.c.NOTE.ATTRIB != 0) {
-                try batch.push(k.gpa, watch, path, .attributes);
+                try batch.push(k.gpa, watch, path, .attributes, target);
             }
         },
         .file => {
             if (flags & (std.c.NOTE.WRITE | std.c.NOTE.EXTEND) != 0) {
-                try batch.push(k.gpa, watch, path, .modified);
+                try batch.push(k.gpa, watch, path, .modified, target);
             }
             if (flags & (std.c.NOTE.ATTRIB | std.c.NOTE.LINK) != 0) {
-                try batch.push(k.gpa, watch, path, .attributes);
+                try batch.push(k.gpa, watch, path, .attributes, target);
             }
         },
     }
 }
 
 /// Tells the kernel about newly created nodes.
-fn register(k: *Kqueue, ids: []const Tree.NodeId) lookout.Watcher.AddError!void {
+fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) lookout.Watcher.AddError!void {
     for (ids) |id| {
         const node = k.tree.nodes.get(id) orelse continue;
         const target: posix.fd_t = switch (node.role) {
@@ -232,6 +274,7 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId) lookout.Watcher.AddError!void 
                     // near its descriptor limit takes.
                     if (std.mem.eql(u8, node.path, k.tree.watchRoot(node.watch)))
                         return translateOpen(err);
+                    try batch.trouble(k.gpa, node.watch, node.path, .file);
                     k.tree.removeSubtree(node.path);
                     continue;
                 };
@@ -251,11 +294,18 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId) lookout.Watcher.AddError!void 
             .udata = @intFromEnum(id),
         };
         const rc = std.c.kevent(k.kq, (&change)[0..1], 1, undefined, 0, null);
-        if (rc < 0) return switch (posix.errno(rc)) {
-            .NOMEM => error.WatchLimitReached,
-            .NOENT, .BADF => continue,
-            else => error.Unexpected,
-        };
+        if (rc < 0) {
+            const root = std.mem.eql(u8, node.path, k.tree.watchRoot(node.watch));
+            switch (posix.errno(rc)) {
+                .NOMEM => {
+                    if (root) return error.WatchLimitReached;
+                    try batch.trouble(k.gpa, node.watch, node.path, .directory);
+                    k.tree.removeSubtree(node.path);
+                },
+                .NOENT, .BADF => continue,
+                else => return error.Unexpected,
+            }
+        }
     }
 }
 

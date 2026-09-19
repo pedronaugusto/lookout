@@ -3,8 +3,10 @@
 //! FSEvents is the only mechanism here that recurses in the kernel. A
 //! whole tree costs one stream and no descriptors, where `kqueue` costs
 //! one descriptor per directory and per file; it names the entry that
-//! changed, where `kqueue` says only that a directory moved; and it pairs
-//! the two halves of a rename. That is why it, and not `kqueue`, is
+//! changed, where `kqueue` says only that a directory moved; it pairs
+//! the two halves of a rename; and it is the only one of the five that
+//! can say what happened before the watch existed, which is
+//! `lookout.Options.since`. That is why it, and not `kqueue`, is
 //! `lookout.default_backend` on Apple targets.
 //!
 //! What it costs in exchange:
@@ -15,11 +17,13 @@
 //!   byte to a pipe, and everything else happens on the thread that calls
 //!   `lookout.Watcher.poll`. `lookout.Watcher.fd` hands out the read end of
 //!   that pipe, so a program with a wait loop of its own still works.
+//!   How much that buffer holds is `lookout.Options.buffer_bytes`.
 //! * FSEvents coalesces on its own, before lookout sees anything, over a
-//!   window of `lookout.Options.latency_ms`. Several changes to one path
+//!   window of about ten milliseconds. Several changes to one path
 //!   inside that window can arrive as one event with several flags set,
 //!   which is why a single delivery can produce a `created` and a
-//!   `modified` for one path.
+//!   `modified` for one path. It is also a floor under
+//!   `lookout.Options.latency_ms` that cannot be lowered.
 //! * It is not a queue of facts but a report of what changed, so it can
 //!   say "I lost track, look again": `kFSEventStreamEventFlagMustScanSubDirs`
 //!   and the two dropped-event flags all become `lookout.Kind.overflow`.
@@ -31,8 +35,14 @@ const posix = std.posix;
 
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
+const Budget = @import("../Budget.zig");
+const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
+const buffer = @import("../buffer.zig");
+const path_cmp = @import("../path.zig");
 const trace = @import("../trace.zig");
+const walk = @import("../walk.zig");
+const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
 const FsEvents = @This();
@@ -48,11 +58,15 @@ sink: *Sink,
 streams: std.AutoArrayHashMapUnmanaged(WatchId, *Stream),
 /// Scratch the drain copies the sink into, reused between polls.
 staging: std.ArrayList(u8),
-/// Mirrors `lookout.Options.max_dir_entries`.
-max_dir_entries: usize,
+/// How many entries each watched directory holds, against
+/// `lookout.Options.max_dir_entries`.
+budget: Budget,
+/// Where every stream is started from: `since_now`, or the event id a
+/// caller kept from an earlier watcher. See `lookout.Options.since`.
+since: u64,
 /// Every path the backend believes exists, seeded by walking each watch
 /// when it is added and kept current from what it reports. Keys owned
-/// here.
+/// here, and compared the way the file system compares them.
 ///
 /// This is the price of FSEvents' flags. They are not a sequence of
 /// things that happened: FSEvents keeps them per path and does not clear
@@ -62,27 +76,47 @@ max_dir_entries: usize,
 /// apart is whether lookout has seen the path before. It costs one string
 /// per watched file -- still nothing against `kqueue`'s descriptor per
 /// watched file, which is the comparison that matters on this platform.
-known: std.StringArrayHashMapUnmanaged(void),
-/// How many entries each directory lookout has been told about holds,
-/// counted the first time it is mentioned and kept current afterwards.
-/// Keys are owned here.
+known: path_cmp.Set(void),
+/// The half of a rename whose partner has not been delivered yet.
 ///
-/// FSEvents needs no listing to name what changed, so this exists for one
-/// reason: `lookout.Options.max_dir_entries` is a budget the caller set,
-/// and a directory past it must say `lookout.Kind.overflow` here exactly
-/// as it does on the backends that compare listings.
-counts: std.StringArrayHashMapUnmanaged(usize),
+/// FSEvents reports a rename as two `ItemRenamed` records and usually
+/// puts both in one delivery, but "usually" is not "always": a burst
+/// long enough splits a pair across two. A half is therefore held until
+/// the whole wait is over rather than until the end of its own delivery,
+/// because deciding early turns one `renamed` into a removal and a
+/// creation on a backend that says it pairs them.
+held: ?Half,
+
+/// One `ItemRenamed` record waiting for its partner.
+const Half = struct {
+    id: WatchId,
+    /// Absolute path, owned by the backend.
+    path: []u8,
+    flags: u32,
+};
 
 /// FSEvents' own coalescing window, in seconds. Kept short because
 /// lookout does its own coalescing in `Batch`, so that every backend
 /// coalesces by one rule rather than by whichever one the kernel has.
 const stream_latency: f64 = 0.01;
 
-/// How much of a delivery burst the watcher can hold between polls.
-/// Past this the delivery thread stops copying and raises `overflowed`,
-/// which the drain turns into `lookout.Kind.overflow`: losing a name is
-/// recoverable, blocking the delivery thread is not.
-const sink_buffer_len = 64 * 1024;
+/// What `lookout.Options.buffer_bytes` may ask for here.
+///
+/// The default holds a burst of ten thousand paths without losing one:
+/// a record is a twenty-byte header and the path, so four megabytes is
+/// room for ten thousand paths of nearly four hundred bytes each. It is
+/// memory held for the life of the watcher, which is the price of the
+/// delivery thread never having to allocate and never having to wait.
+const bounds: buffer.Bounds = .{
+    .min = 4 * 1024,
+    .max = 64 * 1024 * 1024,
+    .default = 4 * 1024 * 1024,
+};
+
+/// How long a delivery whose rename is missing its partner is waited for
+/// before the half is reported on its own, and how many times.
+const grace_ms = 5;
+const grace_rounds = 4;
 
 /// The lock between the delivery thread and the polling one.
 ///
@@ -111,7 +145,9 @@ const SpinLock = struct {
 /// callback.
 const Sink = struct {
     lock: SpinLock,
-    buffer: [sink_buffer_len]u8,
+    /// Sized by `lookout.Options.buffer_bytes`, allocated once at `init`
+    /// and never moved: the delivery thread writes into it.
+    buffer: []u8,
     len: usize,
     /// Set when a delivery did not fit. Cleared by the drain that reports
     /// it.
@@ -123,6 +159,9 @@ const Sink = struct {
     deliveries: usize,
     /// Paths `append` had no room for since the last drain.
     dropped: usize,
+    /// Set by `wake` from another thread, and cleared by the `wait` that
+    /// answers it.
+    woken: std.atomic.Value(bool),
     /// Read end, handed out by `fd`. Non-blocking.
     wake_r: posix.fd_t,
     /// Write end, poked once per delivery. Non-blocking, so a full pipe
@@ -134,18 +173,18 @@ const Sink = struct {
     /// do not align.
     const header_len = 20;
 
-    fn append(s: *Sink, id: WatchId, flags: u32, event: u64, path: []const u8) void {
-        if (s.len + header_len + path.len > s.buffer.len) {
+    fn append(s: *Sink, id: WatchId, flags: u32, event: u64, subject: []const u8) void {
+        if (s.len + header_len + subject.len > s.buffer.len) {
             s.overflowed = true;
             s.dropped += 1;
             return;
         }
         std.mem.writeInt(u32, s.buffer[s.len..][0..4], @intFromEnum(id), .little);
         std.mem.writeInt(u32, s.buffer[s.len + 4 ..][0..4], flags, .little);
-        std.mem.writeInt(u32, s.buffer[s.len + 8 ..][0..4], @intCast(path.len), .little);
+        std.mem.writeInt(u32, s.buffer[s.len + 8 ..][0..4], @intCast(subject.len), .little);
         std.mem.writeInt(u64, s.buffer[s.len + 12 ..][0..8], event, .little);
-        @memcpy(s.buffer[s.len + header_len ..][0..path.len], path);
-        s.len += header_len + path.len;
+        @memcpy(s.buffer[s.len + header_len ..][0..subject.len], subject);
+        s.len += header_len + subject.len;
     }
 
     fn signal(s: *Sink) void {
@@ -181,17 +220,17 @@ const Stream = struct {
         file,
     };
 
-    fn wants(st: *const Stream, path: []const u8) bool {
-        if (!std.mem.startsWith(u8, path, st.root)) return false;
-        if (path.len == st.root.len) return true;
+    fn wants(st: *const Stream, subject: []const u8) bool {
+        const rest = path_cmp.relative(st.root, subject) orelse return false;
+        if (rest.len == 0) return true;
         if (st.scope == .file) return false;
-        if (path[st.root.len] != std.fs.path.sep) return false;
         if (st.scope == .tree) return true;
-        return std.mem.indexOfScalar(u8, path[st.root.len + 1 ..], std.fs.path.sep) == null;
+        return std.mem.indexOfAny(u8, rest, path_cmp.separators) == null;
     }
 };
 
-/// Creates the delivery queue and the pipe the watcher is woken through.
+/// Creates the delivery queue, the buffer it fills, and the pipe the
+/// watcher is woken through.
 pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!FsEvents {
     var fds: [2]posix.fd_t = undefined;
     if (std.c.pipe(&fds) != 0) return switch (posix.errno(@as(c_int, -1))) {
@@ -213,13 +252,17 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
 
     const sink = gpa.create(Sink) catch return error.SystemResources;
     errdefer gpa.destroy(sink);
+    const bytes = gpa.alloc(u8, buffer.clamp(options.buffer_bytes, bounds)) catch
+        return error.SystemResources;
+    errdefer gpa.free(bytes);
     sink.* = .{
         .lock = .{},
-        .buffer = undefined,
+        .buffer = bytes,
         .len = 0,
         .overflowed = false,
         .deliveries = 0,
         .dropped = 0,
+        .woken = .init(false),
         .wake_r = fds[0],
         .wake_w = fds[1],
     };
@@ -234,10 +277,19 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .sink = sink,
         .streams = .empty,
         .staging = .empty,
-        .max_dir_entries = options.max_dir_entries,
+        .budget = .init(gpa, io, options.max_dir_entries),
+        .since = sinceOf(options.since),
         .known = .empty,
-        .counts = .empty,
+        .held = null,
     };
+}
+
+/// What to start every stream from. A position from another backend is
+/// not this backend's to read, and is the same as no position at all.
+fn sinceOf(asked: ?lookout.Position) u64 {
+    const p = asked orelse return c.kFSEventStreamEventIdSinceNow;
+    if (p.backend != .fsevents) return c.kFSEventStreamEventIdSinceNow;
+    return p.value;
 }
 
 /// Stops every stream, waits for the delivery thread to be done with
@@ -246,13 +298,14 @@ pub fn deinit(f: *FsEvents) void {
     for (f.streams.values()) |stream| f.destroy(stream);
     f.streams.deinit(f.gpa);
     f.staging.deinit(f.gpa);
-    for (f.counts.keys()) |path| f.gpa.free(path);
-    f.counts.deinit(f.gpa);
-    for (f.known.keys()) |path| f.gpa.free(path);
+    f.budget.deinit();
+    for (f.known.keys()) |p| f.gpa.free(p);
     f.known.deinit(f.gpa);
+    if (f.held) |half| f.gpa.free(half.path);
     c.dispatch_release(f.queue);
     _ = std.c.close(f.sink.wake_r);
     _ = std.c.close(f.sink.wake_w);
+    f.gpa.free(f.sink.buffer);
     f.gpa.destroy(f.sink);
     f.* = undefined;
 }
@@ -263,9 +316,18 @@ pub fn fd(f: *const FsEvents) ?posix.fd_t {
     return f.sink.wake_r;
 }
 
-/// How many watches the caller has added. See `lookout.Watcher.Stats`.
-pub fn watchCount(f: *const FsEvents) usize {
-    return f.streams.count();
+/// The volume's current event id, which `lookout.Options.since` takes
+/// back. See `lookout.Watcher.position`.
+pub fn position(f: *const FsEvents) ?u64 {
+    _ = f;
+    return c.FSEventsGetCurrentEventId();
+}
+
+/// Pokes the pipe a blocked `wait` is polling. See
+/// `lookout.Watcher.wake`.
+pub fn wake(f: *FsEvents) void {
+    f.sink.woken.store(true, .release);
+    f.sink.signal();
 }
 
 /// How many FSEvents streams this backend holds: one per watch, because
@@ -276,10 +338,16 @@ pub fn registrationCount(f: *const FsEvents) usize {
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
-pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!void {
-    for (f.streams.values()) |stream| {
-        if (std.mem.eql(u8, stream.root, abs_path)) return error.PathAlreadyWatched;
-    }
+pub fn add(
+    f: *FsEvents,
+    id: WatchId,
+    abs_path: []const u8,
+    options: lookout.AddOptions,
+    batch: *Batch,
+) lookout.Watcher.AddError!void {
+    // One stream covers a whole tree, so there is no per-directory
+    // registration here that could fail on its own.
+    _ = batch;
     const stat = try Io.Dir.cwd().statFile(f.io, abs_path, .{});
     const scope: Stream.Scope = if (stat.kind != .directory)
         .file
@@ -320,7 +388,7 @@ pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.Add
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
         @intFromEnum(id), @tagName(scope), abs_path, stream_path,
     });
-    stream.ref = try createStream(stream, stream_path, f.io);
+    stream.ref = try createStream(stream, stream_path, f.since);
     // Invalidation is what unschedules a stream, and it requires one that
     // is scheduled, so this may only run after the line below it.
     errdefer {
@@ -329,25 +397,25 @@ pub fn add(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.Add
     }
     c.FSEventStreamSetDispatchQueue(stream.ref, f.queue);
     if (c.FSEventStreamStart(stream.ref) == 0) return error.WatchLimitReached;
-    trace.log("fsevents started watch={d} since=sincenow latency={d} streams={d} latest={d} dev={d} now={d}", .{
-        @intFromEnum(id),                                 stream_latency,
-        f.streams.count() + 1,                            c.FSEventStreamGetLatestEventId(stream.ref),
-        c.FSEventStreamGetDeviceBeingWatched(stream.ref), c.FSEventsGetCurrentEventId(),
+    trace.log("fsevents started watch={d} since={d} latency={d} streams={d} latest={d} dev={d} now={d}", .{
+        @intFromEnum(id),                            f.since,
+        stream_latency,                              f.streams.count() + 1,
+        c.FSEventStreamGetLatestEventId(stream.ref), c.FSEventStreamGetDeviceBeingWatched(stream.ref),
+        c.FSEventsGetCurrentEventId(),
     });
 
     f.streams.putAssumeCapacity(id, stream);
-    if (scope != .file) f.seedCount(abs_path) catch {};
+    if (scope != .file) f.budget.seed(abs_path) catch {};
     f.seedKnown(stream) catch {};
     trace.log("fsevents seeded watch={d} known={d}", .{ @intFromEnum(id), f.known.count() });
 }
 
 /// Builds the CoreFoundation array FSEvents wants and creates the stream.
-fn createStream(stream: *Stream, path: []const u8, io: Io) lookout.Watcher.AddError!c.FSEventStreamRef {
-    _ = io;
+fn createStream(stream: *Stream, subject: []const u8, since: u64) lookout.Watcher.AddError!c.FSEventStreamRef {
     const cf_path = c.CFStringCreateWithBytes(
         null,
-        path.ptr,
-        @intCast(path.len),
+        subject.ptr,
+        @intCast(subject.len),
         c.kCFStringEncodingUTF8,
         0,
     ) orelse return error.SystemResources;
@@ -371,13 +439,14 @@ fn createStream(stream: *Stream, path: []const u8, io: Io) lookout.Watcher.AddEr
     // The latency here is FSEvents' own coalescing window. lookout keeps it
     // short and does its own in `Batch`, so that every backend coalesces
     // by the same rule rather than by whichever one the kernel has.
-    return c.FSEventStreamCreate(null, deliver, &context, paths, c.kFSEventStreamEventIdSinceNow, stream_latency, flags) orelse
+    return c.FSEventStreamCreate(null, deliver, &context, paths, since, stream_latency, flags) orelse
         error.SystemResources;
 }
 
 /// Stops watching `id`.
 pub fn remove(f: *FsEvents, id: WatchId) void {
     const entry = f.streams.fetchSwapRemove(id) orelse return;
+    f.budget.forget(entry.value.root);
     f.destroy(entry.value);
 }
 
@@ -435,30 +504,46 @@ fn deliver(
 /// Waits on the wake pipe until the drain produces something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+    const result = f.collect(batch, timeout_ms);
+    // Whatever is still held when the wait is over never found its
+    // partner, however many deliveries it waited through.
+    try f.resolveHeld(batch);
+    return result;
+}
+
+fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
     const before = batch.revision;
-    const started: Io.Timestamp = .now(f.io, .awake);
+    const deadline: Deadline = .start(f.io, timeout_ms);
 
     while (true) {
         try f.drain(batch);
-        if (batch.revision != before) return;
-
+        if (f.sink.woken.swap(false, .acquire)) return;
+        if (batch.revision != before) {
+            // A rename with no partner yet is worth waiting a moment
+            // for: the other half is on its way if the burst was simply
+            // longer than one delivery, and deciding now would turn one
+            // `renamed` into a removal and a creation.
+            var round: usize = 0;
+            while (f.held != null and round < grace_rounds) : (round += 1) {
+                if (!f.readable(grace_ms)) break;
+                try f.drain(batch);
+            }
+            return;
+        }
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still performs one non-blocking check.
-        const timeout: i32 = timeout: {
-            const total = timeout_ms orelse break :timeout -1;
-            const elapsed = started.durationTo(Io.Timestamp.now(f.io, .awake)).toMilliseconds();
-            break :timeout @intCast(@max(0, @as(i64, total) - elapsed));
-        };
-        var fds: [1]posix.pollfd = .{.{ .fd = f.sink.wake_r, .events = posix.POLL.IN, .revents = 0 }};
-        const ready = posix.poll(&fds, timeout) catch |err| switch (err) {
-            error.SystemResources => return error.SystemResources,
-            else => return error.Unexpected,
-        };
-        if (ready == 0) return;
-
-        var scratch: [256]u8 = undefined;
-        while (std.c.read(f.sink.wake_r, &scratch, scratch.len) > 0) {}
+        if (!f.readable(deadline.pollMs())) return;
     }
+}
+
+/// Waits for the wake pipe, and empties it. `false` when nothing came.
+fn readable(f: *FsEvents, timeout: i32) bool {
+    var fds: [1]posix.pollfd = .{.{ .fd = f.sink.wake_r, .events = posix.POLL.IN, .revents = 0 }};
+    const ready = posix.poll(&fds, timeout) catch return false;
+    if (ready == 0) return false;
+    var scratch: [256]u8 = undefined;
+    while (std.c.read(f.sink.wake_r, &scratch, scratch.len) > 0) {}
+    return true;
 }
 
 /// Takes everything the delivery thread has left and turns it into
@@ -493,7 +578,7 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
     }
     if (overflowed) {
         for (f.streams.values()) |stream| {
-            try batch.push(f.gpa, stream.id, stream.root, .overflow);
+            try batch.push(f.gpa, stream.id, stream.root, .overflow, .directory);
         }
     }
 
@@ -508,18 +593,80 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
         const event = std.mem.readInt(u64, bytes[offset + 12 ..][0..8], .little);
         offset += Sink.header_len;
         if (offset + len > bytes.len) break;
-        const path = bytes[offset..][0..len];
+        const subject = bytes[offset..][0..len];
         trace.log("fsevents record watch={d} event={d} flags=0x{x} path={s}", .{
-            @intFromEnum(id), event, flags, path,
+            @intFromEnum(id), event, flags, subject,
         });
-        try records.append(f.gpa, .{ .id = id, .flags = flags, .path = path });
+        try records.append(f.gpa, .{ .id = id, .flags = flags, .path = subject });
         offset += len;
     }
 
-    var i: usize = 0;
-    while (i < records.items.len) : (i += 1) {
-        i += try f.report(batch, records.items[i..]);
+    // Which records a pairing has already spoken for. FSEvents puts
+    // both halves of a rename in one delivery but not always next to
+    // each other -- the directory they are in can be named between
+    // them -- so a partner is looked for anywhere in the delivery and
+    // struck off here.
+    const used = try f.gpa.alloc(bool, records.items.len);
+    defer f.gpa.free(used);
+    @memset(used, false);
+
+    // The half held from the last drain looks for its partner here.
+    if (f.held != null) try f.rejoin(batch, records.items, used);
+
+    for (records.items, 0..) |_, i| {
+        if (used[i]) continue;
+        try f.report(batch, records.items, used, i);
     }
+}
+
+/// Joins the half held from the last drain to its partner in this one,
+/// or gives up on it.
+fn rejoin(f: *FsEvents, batch: *Batch, records: []const Record, used: []bool) lookout.Watcher.PollError!void {
+    const half = f.held orelse return;
+    const at = f.partnerOf(half.id, half.path, records, used, 0) orelse
+        return f.resolveHeld(batch);
+    const stream = f.streams.get(half.id) orelse return f.resolveHeld(batch);
+
+    f.held = null;
+    used[at] = true;
+    defer f.gpa.free(half.path);
+    const partner = records[at];
+    if (f.exists(partner.path)) {
+        try f.joined(batch, half.id, partner.path, half.path, partner.target());
+    } else {
+        try f.joined(batch, half.id, half.path, partner.path, partner.target());
+    }
+    try f.recount(batch, partner, stream);
+}
+
+/// Where in `records` the other half of a rename of `subject` is, if it
+/// is there at all.
+///
+/// The one that no longer exists is the name it came from: the inode
+/// moved, so exactly one of the two paths resolves. When neither test
+/// settles it -- the file was renamed and then deleted, or renamed out
+/// of the watch -- there is no partner and there is nothing to pair.
+fn partnerOf(
+    f: *FsEvents,
+    id: WatchId,
+    subject: []const u8,
+    records: []const Record,
+    used: []const bool,
+    from: usize,
+) ?usize {
+    const stream = f.streams.get(id) orelse return null;
+    const subject_exists = f.exists(subject);
+    for (records[from..], from..) |record, at| {
+        if (used[at]) continue;
+        if (record.id != id) continue;
+        if (record.flags & c.kFSEventStreamEventFlagItemRenamed == 0) continue;
+        if (path_cmp.eql(record.path, subject)) continue;
+        if (!stream.wants(record.path)) continue;
+        if (stream.filter.excludes(stream.root, record.path)) continue;
+        if (f.exists(record.path) == subject_exists) continue;
+        return at;
+    }
+    return null;
 }
 
 /// One delivered change, still pointing into `staging`.
@@ -527,27 +674,29 @@ const Record = struct {
     id: WatchId,
     flags: u32,
     path: []const u8,
+
+    fn target(r: Record) Target {
+        return if (r.flags & c.kFSEventStreamEventFlagItemIsDir != 0) .directory else .file;
+    }
 };
 
-/// Reports `run[0]`, and returns how many further records it consumed --
-/// one, when it paired the two halves of a rename.
-///
-/// The flags are not a sequence of things that happened. FSEvents keeps
-/// them per path and does not clear them, so a file created an hour ago
-/// and written now still arrives with `ItemCreated` set alongside
-/// `ItemModified`. What resolves them is the file: whether it is there,
-/// and how old it is. A path that is gone was removed; a path younger
-/// than the window being reported was created in it; anything else that
-/// is still there was modified.
-fn report(f: *FsEvents, batch: *Batch, run: []const Record) lookout.Watcher.PollError!usize {
-    const record = run[0];
+/// Reports one record, pairing it with another of the delivery when it
+/// is half of a rename.
+fn report(
+    f: *FsEvents,
+    batch: *Batch,
+    records: []const Record,
+    used: []bool,
+    at: usize,
+) lookout.Watcher.PollError!void {
+    const record = records[at];
     const stream = f.streams.get(record.id) orelse {
         trace.log("fsevents drop no-stream watch={d} path={s}", .{ @intFromEnum(record.id), record.path });
-        return 0;
+        return;
     };
     if (!stream.wants(record.path)) {
         trace.log("fsevents drop out-of-scope root={s} path={s}", .{ stream.root, record.path });
-        return 0;
+        return;
     }
 
     if (record.flags & (c.kFSEventStreamEventFlagMustScanSubDirs |
@@ -555,7 +704,15 @@ fn report(f: *FsEvents, batch: *Batch, run: []const Record) lookout.Watcher.Poll
         c.kFSEventStreamEventFlagKernelDropped) != 0)
     {
         trace.log("fsevents push overflow root={s}", .{stream.root});
-        try batch.push(f.gpa, record.id, stream.root, .overflow);
+        try batch.push(f.gpa, record.id, stream.root, .overflow, .directory);
+    }
+    // The marker that a replay asked for by `lookout.Options.since` has
+    // caught up with the present. Nothing happened to a path, so there
+    // is nothing to report; it is declared and swallowed rather than
+    // left to look like a change to the watch root.
+    if (record.flags & c.kFSEventStreamEventFlagHistoryDone != 0) {
+        trace.log("fsevents history done root={s}", .{stream.root});
+        return;
     }
     // The watched path itself moved or vanished. FSEvents reports both
     // against the root with one flag and does not say which, so lookout
@@ -565,26 +722,55 @@ fn report(f: *FsEvents, batch: *Batch, run: []const Record) lookout.Watcher.Poll
     if (record.flags & c.kFSEventStreamEventFlagRootChanged != 0) {
         const kind: lookout.Kind = if (f.exists(stream.root)) .renamed else .removed;
         trace.log("fsevents push {s} root={s}", .{ @tagName(kind), stream.root });
-        try batch.push(f.gpa, record.id, stream.root, kind);
-        return 0;
+        try batch.push(f.gpa, record.id, stream.root, kind, .directory);
+        return;
     }
 
     // The kernel walked the tree whatever the filter says; what the
     // filter can still do is keep the event from the caller.
     if (stream.filter.excludes(stream.root, record.path)) {
         trace.log("fsevents drop filtered path={s}", .{record.path});
-        return 0;
+        return;
     }
 
     if (record.flags & c.kFSEventStreamEventFlagItemRenamed != 0) {
-        const consumed = try f.reportRename(batch, run, stream);
-        if (consumed != 0) {
+        if (f.partnerOf(record.id, record.path, records, used, at + 1)) |partner_at| {
+            used[partner_at] = true;
+            const partner = records[partner_at];
             trace.log("fsevents push renamed path={s}", .{record.path});
+            if (f.exists(partner.path)) {
+                try f.joined(batch, record.id, partner.path, record.path, partner.target());
+            } else {
+                try f.joined(batch, record.id, record.path, partner.path, record.target());
+            }
             try f.recount(batch, record, stream);
-            return consumed;
+            try f.recount(batch, partner, stream);
+            return;
         }
+        // No partner in this delivery. It may be in the next one, so
+        // the decision waits: calling it now would turn one `renamed`
+        // into a removal and a creation on a backend that pairs them.
+        try f.hold(batch, record);
+        return;
     }
 
+    try f.reportPlain(batch, record, stream);
+}
+
+/// Reports a record that is not half of a rename, by resolving the
+/// accumulated flags against the file system.
+///
+/// The flags are not a sequence of things that happened. FSEvents keeps
+/// them per path and does not clear them, so a file created an hour ago
+/// and written now still arrives with `ItemCreated` set alongside
+/// `ItemModified`. What resolves them is the file: whether it is there,
+/// and whether lookout has seen it before.
+fn reportPlain(
+    f: *FsEvents,
+    batch: *Batch,
+    record: Record,
+    stream: *const Stream,
+) lookout.Watcher.PollError!void {
     const there = f.exists(record.path);
     const seen = f.known.contains(record.path);
 
@@ -594,20 +780,21 @@ fn report(f: *FsEvents, batch: *Batch, run: []const Record) lookout.Watcher.Poll
         // and went between two polls, and the tree is as it was.
         if (seen) {
             trace.log("fsevents push removed path={s}", .{record.path});
-            try batch.push(f.gpa, record.id, record.path, .removed);
+            try batch.push(f.gpa, record.id, record.path, .removed, record.target());
             f.forget(record.path);
+            if (record.target() == .directory) f.forgetSubtree(record.path);
             try f.recount(batch, record, stream);
         } else {
             trace.log("fsevents drop gone-unknown path={s}", .{record.path});
         }
-        return 0;
+        return;
     }
     if (!seen) {
         trace.log("fsevents push created path={s}", .{record.path});
-        try batch.push(f.gpa, record.id, record.path, .created);
+        try batch.push(f.gpa, record.id, record.path, .created, record.target());
         try f.remember(record.path);
         try f.recount(batch, record, stream);
-        return 0;
+        return;
     }
     // Contents and metadata, but not a directory's. A directory's own
     // times move whenever anything inside it moves, so reporting them
@@ -616,17 +803,17 @@ fn report(f: *FsEvents, batch: *Batch, run: []const Record) lookout.Watcher.Poll
     // more here than anywhere: FSEvents keeps these flags per path and
     // never clears them, so the first delivery naming a directory
     // carries whatever was last done to it, however long ago.
-    if (record.flags & c.kFSEventStreamEventFlagItemIsDir == 0) {
+    if (record.target() != .directory) {
         if (record.flags & c.kFSEventStreamEventFlagItemModified != 0) {
             trace.log("fsevents push modified path={s}", .{record.path});
-            try batch.push(f.gpa, record.id, record.path, .modified);
+            try batch.push(f.gpa, record.id, record.path, .modified, .file);
         } else if (record.flags & (c.kFSEventStreamEventFlagItemInodeMetaMod |
             c.kFSEventStreamEventFlagItemChangeOwner |
             c.kFSEventStreamEventFlagItemXattrMod |
             c.kFSEventStreamEventFlagItemFinderInfoMod) != 0)
         {
             trace.log("fsevents push attributes path={s}", .{record.path});
-            try batch.push(f.gpa, record.id, record.path, .attributes);
+            try batch.push(f.gpa, record.id, record.path, .attributes, .file);
         } else {
             trace.log("fsevents drop known-no-change path={s}", .{record.path});
         }
@@ -634,20 +821,113 @@ fn report(f: *FsEvents, batch: *Batch, run: []const Record) lookout.Watcher.Poll
         trace.log("fsevents drop dir-metadata path={s}", .{record.path});
     }
     try f.recount(batch, record, stream);
-    return 0;
+}
+
+/// Reports one rename and moves everything lookout remembers from the
+/// old name to the new one.
+///
+/// The second half is what a byte-for-byte record of a tree gets wrong
+/// after a directory is renamed: every path under the old name is still
+/// remembered under it, so the first write inside the new name is a path
+/// lookout has never seen and is reported as a creation.
+fn joined(
+    f: *FsEvents,
+    batch: *Batch,
+    id: WatchId,
+    to: []const u8,
+    from: []const u8,
+    target: Target,
+) lookout.Watcher.PollError!void {
+    try batch.pushRename(f.gpa, id, to, from, target);
+    try f.rekey(from, to);
+    f.budget.forget(from);
+}
+
+/// Holds an unpaired rename until the next delivery arrives. Anything
+/// already held has waited as long as it is going to.
+fn hold(f: *FsEvents, batch: *Batch, record: Record) lookout.Watcher.PollError!void {
+    if (f.held != null) try f.resolveHeld(batch);
+    const owned = try f.gpa.dupe(u8, record.path);
+    f.held = .{ .id = record.id, .path = owned, .flags = record.flags };
+    trace.log("fsevents hold renamed path={s}", .{record.path});
+}
+
+/// Reports a held half that never found its partner: the path was
+/// renamed out of the watch, or renamed and then deleted, and what is
+/// left is the removal or the creation the other backends would give.
+fn resolveHeld(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
+    const half = f.held orelse return;
+    f.held = null;
+    defer f.gpa.free(half.path);
+    const stream = f.streams.get(half.id) orelse return;
+    trace.log("fsevents unpaired renamed path={s}", .{half.path});
+    try f.reportPlain(batch, .{ .id = half.id, .flags = half.flags, .path = half.path }, stream);
 }
 
 /// Records that a path exists.
-fn remember(f: *FsEvents, path: []const u8) Allocator.Error!void {
-    if (f.known.contains(path)) return;
-    const owned = try f.gpa.dupe(u8, path);
+fn remember(f: *FsEvents, subject: []const u8) Allocator.Error!void {
+    if (f.known.contains(subject)) return;
+    const owned = try f.gpa.dupe(u8, subject);
     errdefer f.gpa.free(owned);
     try f.known.put(f.gpa, owned, {});
 }
 
 /// Records that a path does not.
-fn forget(f: *FsEvents, path: []const u8) void {
-    if (f.known.fetchSwapRemove(path)) |entry| f.gpa.free(entry.key);
+fn forget(f: *FsEvents, subject: []const u8) void {
+    if (f.known.fetchSwapRemove(subject)) |entry| f.gpa.free(entry.key);
+}
+
+/// Forgets everything remembered under a subtree that has gone.
+fn forgetSubtree(f: *FsEvents, root: []const u8) void {
+    var i: usize = 0;
+    while (i < f.known.count()) {
+        if (path_cmp.within(root, f.known.keys()[i])) {
+            f.gpa.free(f.known.keys()[i]);
+            f.known.swapRemoveAt(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Moves everything remembered under `old` to sit under `new`, which is
+/// what a directory rename does to a tree.
+fn rekey(f: *FsEvents, old: []const u8, new: []const u8) Allocator.Error!void {
+    var moved: std.ArrayList([]u8) = .empty;
+    defer {
+        for (moved.items) |p| f.gpa.free(p);
+        moved.deinit(f.gpa);
+    }
+
+    var i: usize = 0;
+    while (i < f.known.count()) {
+        const key = f.known.keys()[i];
+        const rest = path_cmp.relative(old, key) orelse {
+            i += 1;
+            continue;
+        };
+        // Built before the key it points into is freed.
+        const renamed = if (rest.len == 0)
+            try f.gpa.dupe(u8, new)
+        else
+            try std.fs.path.join(f.gpa, &.{ new, rest });
+        errdefer f.gpa.free(renamed);
+        try moved.append(f.gpa, renamed);
+        f.gpa.free(key);
+        f.known.swapRemoveAt(i);
+    }
+
+    while (moved.items.len != 0) {
+        const p = moved.pop().?;
+        if (f.known.contains(p)) {
+            f.gpa.free(p);
+            continue;
+        }
+        f.known.put(f.gpa, p, {}) catch {
+            f.gpa.free(p);
+            return error.OutOfMemory;
+        };
+    }
 }
 
 /// Walks a watch once, so that everything already there is known and the
@@ -655,7 +935,7 @@ fn forget(f: *FsEvents, path: []const u8) void {
 ///
 /// Listing only: no descriptor is kept, which is the difference between
 /// this and what the `kqueue` backend has to do.
-fn seedKnown(f: *FsEvents, stream: *const Stream) Allocator.Error!void {
+fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
     // The root itself, before anything below it: FSEvents names the
     // watched path as readily as it names an entry, and a path the
     // backend has never heard of is a path it reports as created. This
@@ -664,82 +944,26 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) Allocator.Error!void {
     if (stream.scope == .file) return;
     trace.log("fsevents seed walk root={s}", .{stream.root});
 
-    var frontier: std.ArrayList([]u8) = .empty;
-    defer {
-        for (frontier.items) |path| f.gpa.free(path);
-        frontier.deinit(f.gpa);
-    }
-    try frontier.append(f.gpa, try f.gpa.dupe(u8, stream.root));
+    const Seeding = struct {
+        f: *FsEvents,
+        stream: *const Stream,
 
-    var i: usize = 0;
-    while (i < frontier.items.len) : (i += 1) {
-        var dir = Io.Dir.openDirAbsolute(f.io, frontier.items[i], .{ .iterate = true }) catch continue;
-        defer dir.close(f.io);
-        var it = dir.iterate();
-        var seen: usize = 0;
-        while (it.next(f.io) catch null) |entry| {
-            if (seen >= f.max_dir_entries) break;
-            seen += 1;
-            const child = try std.fs.path.join(f.gpa, &.{ frontier.items[i], entry.name });
-            errdefer f.gpa.free(child);
-            if (stream.filter.excludes(stream.root, child)) {
-                trace.log("fsevents seed filtered {s}", .{child});
-                f.gpa.free(child);
-                continue;
+        fn visit(s: *@This(), entry: walk.Entry) anyerror!walk.Step {
+            if (s.stream.filter.prunes(s.stream.root, entry.path)) {
+                trace.log("fsevents seed filtered {s}", .{entry.path});
+                return .over;
             }
-            trace.log("fsevents seed remembered {s}", .{child});
-            try f.remember(child);
-            if (entry.kind == .directory and stream.scope == .tree) {
-                try frontier.append(f.gpa, child);
-            } else {
-                f.gpa.free(child);
-            }
+            trace.log("fsevents seed remembered {s}", .{entry.path});
+            try s.f.remember(entry.path);
+            return if (s.stream.scope == .tree) .into else .over;
         }
-    }
+    };
+    var seeding: Seeding = .{ .f = f, .stream = stream };
+    try walk.tree(f.gpa, f.io, stream.root, &seeding, Seeding.visit);
 }
 
-/// The flags that say something happened to the item rather than to the
-/// stream.
-const itemChangeFlags: u32 = c.kFSEventStreamEventFlagItemCreated |
-    c.kFSEventStreamEventFlagItemRemoved |
-    c.kFSEventStreamEventFlagItemRenamed |
-    c.kFSEventStreamEventFlagItemModified;
-
-/// Pairs the two halves of a rename.
-///
-/// FSEvents reports a rename as two `ItemRenamed` events in one delivery,
-/// one for each name, and does not say which is which. The one that no
-/// longer exists is the name it came from -- the inode moved, so exactly
-/// one of the two paths resolves. When that test does not settle it --
-/// the file was renamed and then deleted, or renamed out of the watch --
-/// there is nothing to pair, and the caller gets the removal and the
-/// creation the other backends would have given.
-fn reportRename(f: *FsEvents, batch: *Batch, run: []const Record, stream: *const Stream) lookout.Watcher.PollError!usize {
-    if (run.len < 2) return 0;
-    const next = run[1];
-    if (next.id != run[0].id) return 0;
-    if (next.flags & c.kFSEventStreamEventFlagItemRenamed == 0) return 0;
-    if (!stream.wants(next.path)) return 0;
-    if (stream.filter.excludes(stream.root, next.path)) return 0;
-
-    const first_exists = f.exists(run[0].path);
-    const second_exists = f.exists(next.path);
-    if (first_exists == second_exists) return 0;
-
-    if (second_exists) {
-        try batch.pushRename(f.gpa, run[0].id, next.path, run[0].path);
-        f.forget(run[0].path);
-        try f.remember(next.path);
-    } else {
-        try batch.pushRename(f.gpa, run[0].id, run[0].path, next.path);
-        f.forget(next.path);
-        try f.remember(run[0].path);
-    }
-    return 1;
-}
-
-fn exists(f: *const FsEvents, path: []const u8) bool {
-    _ = Io.Dir.cwd().statFile(f.io, path, .{ .follow_symlinks = false }) catch return false;
+fn exists(f: *const FsEvents, subject: []const u8) bool {
+    _ = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch return false;
     return true;
 }
 
@@ -752,40 +976,15 @@ fn recount(f: *FsEvents, batch: *Batch, record: Record, stream: *const Stream) l
     if (!appeared and !vanished and !renamed) return;
 
     const parent = std.fs.path.dirname(record.path) orelse return;
-    const gop = f.counts.getOrPut(f.gpa, parent) catch return error.OutOfMemory;
-    if (!gop.found_existing) {
-        const owned = f.gpa.dupe(u8, parent) catch {
-            _ = f.counts.swapRemove(parent);
-            return error.OutOfMemory;
-        };
-        gop.key_ptr.* = owned;
-        gop.value_ptr.* = f.countEntries(parent);
-    } else if (appeared) {
-        gop.value_ptr.* += 1;
-    } else if (vanished) {
-        gop.value_ptr.* -|= 1;
+    const move: Budget.Move = if (appeared)
+        .appeared
+    else if (vanished)
+        .vanished
+    else
+        .unchanged;
+    if (try f.budget.note(parent, move)) {
+        try batch.push(f.gpa, record.id, stream.root, .overflow, .directory);
     }
-    if (gop.value_ptr.* > f.max_dir_entries) {
-        try batch.push(f.gpa, record.id, stream.root, .overflow);
-    }
-}
-
-/// Seeds the budget for a directory the caller just asked to watch, so
-/// that one that is already too big says so at the first sign of life.
-fn seedCount(f: *FsEvents, path: []const u8) Allocator.Error!void {
-    if (f.counts.contains(path)) return;
-    const owned = try f.gpa.dupe(u8, path);
-    errdefer f.gpa.free(owned);
-    try f.counts.put(f.gpa, owned, f.countEntries(path));
-}
-
-fn countEntries(f: *FsEvents, path: []const u8) usize {
-    var dir = Io.Dir.openDirAbsolute(f.io, path, .{ .iterate = true }) catch return 0;
-    defer dir.close(f.io);
-    var it = dir.iterate();
-    var count: usize = 0;
-    while (it.next(f.io) catch null) |_| count += 1;
-    return count;
 }
 
 /// The CoreFoundation, CoreServices and libdispatch surface lookout uses.
@@ -810,6 +1009,8 @@ const c = struct {
     const kFSEventStreamEventFlagMustScanSubDirs: u32 = 0x00000001;
     const kFSEventStreamEventFlagUserDropped: u32 = 0x00000002;
     const kFSEventStreamEventFlagKernelDropped: u32 = 0x00000004;
+    /// The replay a past `since_when` asked for has reached the present.
+    const kFSEventStreamEventFlagHistoryDone: u32 = 0x00000010;
     const kFSEventStreamEventFlagRootChanged: u32 = 0x00000020;
     const kFSEventStreamEventFlagItemCreated: u32 = 0x00000100;
     const kFSEventStreamEventFlagItemRemoved: u32 = 0x00000200;
