@@ -1305,5 +1305,6 @@ test {
     _ = @import("path.zig");
     _ = @import("walk.zig");
     _ = @import("test_suite.zig");
+    _ = @import("test_bench.zig");
     _ = @import("test_gaps.zig");
 }
