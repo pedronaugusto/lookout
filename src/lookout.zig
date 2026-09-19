@@ -286,10 +286,10 @@ pub const WatchId = enum(u32) { _ };
 /// What happened to a path.
 ///
 /// Coalescing within one `Watcher.poll` keeps the most significant kind
-/// observed, in this order: `attributes` < `modified` < `created` <
-/// `renamed` < `removed` < `overflow`. A path created and then written
-/// inside one window reports `created`; a path written and then deleted
-/// reports `removed`.
+/// observed, in this order: `attributes` < `modified` < `closed` <
+/// `created` < `renamed` < `removed` < `overflow` < `unwatched`. A path
+/// created and then written inside one window reports `created`; a path
+/// written and then deleted reports `removed`.
 pub const Kind = enum {
     /// The path did not exist at the previous observation and does now.
     created,

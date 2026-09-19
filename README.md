@@ -2,9 +2,10 @@
 
 [![CI](https://github.com/pedronaugusto/lookout/actions/workflows/ci.yml/badge.svg)](https://github.com/pedronaugusto/lookout/actions/workflows/ci.yml)
 
-A file-system watcher for Zig. One `Watcher` type over FSEvents and
-`kqueue` on Apple platforms, `inotify` on Linux, `ReadDirectoryChangesW`
-on Windows, and a polling backend that needs nothing from the kernel.
+lookout watches a file or a directory tree and says what changed. One
+`Watcher` type sits over FSEvents and `kqueue` on Apple platforms,
+`inotify` on Linux, `ReadDirectoryChangesW` on Windows, and a polling
+backend that needs nothing from the kernel.
 
 ## Usage
 
@@ -50,8 +51,8 @@ exe.root_module.addImport("lookout", lookout_dep.module("lookout"));
 
 There are no dependencies and no C to compile. The system interfaces are
 reached through hand-written `extern` declarations; on Apple targets the
-build links CoreServices, where FSEvents lives, and nothing else is
-linked anywhere.
+build links libc and CoreServices, where FSEvents lives, and nothing is
+linked anywhere else.
 
 ## The API
 
@@ -91,14 +92,12 @@ watcher and are invalidated by the next `poll`. Copy anything you keep.
 
 ## Design
 
-### Where the work happens
-
-Everything happens on the thread that calls `poll`. Nothing runs in the
-background and nothing is called back. A program with a wait loop of its
-own takes `Watcher.fd()`, which becomes readable when there is something
-to report; it is `null` for the polling backend, which has nothing to
-wait on, and on Windows, where the watcher waits on an I/O completion
-port no other loop can take.
+**Everything happens on the thread that calls `poll`.** Nothing runs in
+the background and nothing is called back. A program with a wait loop of
+its own takes `Watcher.fd()`, which becomes readable when there is
+something to report; it is `null` for the polling backend, which has
+nothing to wait on, and on Windows, where the watcher waits on an I/O
+completion port no other loop can take.
 
 FSEvents delivers on a dispatch queue the system owns; that thread copies
 into a fixed buffer and writes one byte to a pipe, and a burst that
@@ -106,7 +105,7 @@ outruns the buffer becomes `Kind.overflow`. The allocator holds the watch
 tables and the batch of events, so a watcher with no watches holds no
 memory.
 
-### Three windows
+**Three windows decide when an event is reported.**
 
 | Option | Waits for | Reports |
 |---|---|---|
@@ -119,7 +118,7 @@ for `latency_ms` more, 50 ms by default. Everything on one path in that
 window becomes one `Event`, carrying the most significant kind:
 
 ```
-attributes  <  modified  <  closed  <  created  <  renamed  <  removed  <  overflow
+attributes < modified < closed < created < renamed < removed < overflow < unwatched
 ```
 
 A file created and then written reports `created`; a file written and
@@ -147,23 +146,19 @@ one `created`, which coalescing cannot say because `removed` outranks
 `created`. It supersedes the other two — a non-zero `debounce_ms` takes
 over from `settle_ms`, and `poll` returns as soon as a window closes.
 
-### Recursion
-
-Neither `kqueue` nor `inotify` recurses. lookout walks the tree at `add`,
-registers each directory, and registers new ones as they appear,
+**Neither `kqueue` nor `inotify` recurses.** lookout walks the tree at
+`add`, registers each directory, and registers new ones as they appear,
 reporting whatever is already inside as created — which closes the race
 for files that still exist and not for files already gone again. A deep
 tree costs one descriptor or one kernel watch per directory, against a
 per-process or per-user limit; `Watcher.stats().registrations` is the
-number that runs into it. FSEvents and `ReadDirectoryChangesW` recurse in
-the kernel, so a tree costs one stream or one handle.
+number that runs into it. FSEvents and `ReadDirectoryChangesW` recurse
+in the kernel, so a tree costs one stream or one handle.
 
-### Filtering
-
-`AddOptions.filter` says what a watch is about. `Filter.ignore` names
-what to leave out and `Filter.only` names what to keep and nothing else;
-`Filter.allow` is the caller's own predicate. All three are asked about
-every ancestor, so excluding a directory excludes its subtree.
+**`AddOptions.filter` says what a watch is about.** `Filter.ignore`
+names what to leave out and `Filter.only` names what to keep and nothing
+else; `Filter.allow` is the caller's own predicate. All three are asked
+about every ancestor, so excluding a directory excludes its subtree.
 
 A pattern is matched against the path relative to the watch root, or
 against the absolute path when the pattern is itself absolute: `*` and
@@ -183,10 +178,8 @@ costs nothing. Where the kernel recurses it cannot be told about a
 filter, so the work happens anyway and only the events are dropped.
 `prunesIgnored(backend)` says which of the two you have.
 
-### Renames
-
-FSEvents, `inotify` and `ReadDirectoryChangesW` each say which removal
-goes with which creation — both halves in one delivery, a cookie, an
+**FSEvents, `inotify` and `ReadDirectoryChangesW` each say which removal
+goes with which creation** — both halves in one delivery, a cookie, an
 old-name/new-name pair. `kqueue` and polling learn what changed by
 comparing directory listings, in which a rename and a delete-plus-create
 are the same thing. `pairsRenames(backend)` says which shape to expect,
@@ -207,10 +200,8 @@ only that the name is empty; and nothing on Windows, where the handle
 survives the rename and the rename happens in a directory the watch was
 not put on. `reportsRootMove` gives all three.
 
-### Losing events
-
-`Kind.overflow` against a watch root means the record is incomplete and
-the tree should be read again. It comes from the `inotify` queue
+**`Kind.overflow` against a watch root means the record is incomplete
+and the tree should be read again.** It comes from the `inotify` queue
 overflowing, from FSEvents dropping events, from `ReadDirectoryChangesW`
 returning an empty read or `ERROR_NOTIFY_ENUM_DIR`, from a directory
 holding more than `Options.max_dir_entries` entries, 4096 by default,
@@ -240,30 +231,25 @@ memory is held for the life of the watcher, and on Windows it is
 non-paged pool while a read is outstanding, so a large one on many
 watches costs something real.
 
-### Finished writes
-
-`settle_ms` decides a write is over when the file has been still for a
-window, which is an estimate. `inotify` is told exactly, through
+**`settle_ms` decides a write is over when the file has been still for a
+window, which is an estimate.** `inotify` is told exactly, through
 `IN_CLOSE_WRITE`: `Options.report_closes` asks for it and `Kind.closed`
-carries it. `reportsCloses(backend)` says whether the backend can produce
-one, and four of the five cannot. It is off by default because turning it
-on changes what a write looks like — `closed` outranks `modified` inside
-a coalescing window. Asking for it where it is not reported costs
-nothing; the writes still arrive as `modified`.
+carries it. `reportsCloses(backend)` says whether the backend can
+produce one, and four of the five cannot. It is off by default because
+turning it on changes what a write looks like — `closed` outranks
+`modified` inside a coalescing window. Asking for it where it is not
+reported costs nothing; the writes still arrive as `modified`.
 
-### Watching a path that is not there
+**`add` on a missing path is `error.FileNotFound` unless
+`AddOptions.pending` is set.** With it the watch is parked on the
+nearest existing ancestor, narrowed to the single entry that leads to
+the path asked for, and steps down as the path appears; when the path
+appears the watch is promoted to the real one — recursion, filter and
+all — and reported as `Kind.created`. The id comes back from `add` at
+once and does not change. Nothing that happens to the ancestor meanwhile
+is reported.
 
-`add` on a missing path is `error.FileNotFound` unless
-`AddOptions.pending` is set. With it the watch is parked on the nearest
-existing ancestor, narrowed to the single entry that leads to the path
-asked for, and steps down as the path appears; when the path appears the
-watch is promoted to the real one — recursion, filter and all — and
-reported as `Kind.created`. The id comes back from `add` at once and does
-not change. Nothing that happens to the ancestor meanwhile is reported.
-
-### Case and composition
-
-Two spellings can name one file. A volume that folds case answers to
+**Two spellings can name one file.** A volume that folds case answers to
 `Notes.txt` and `notes.txt` alike, and one that stores a letter
 decomposed answers to an accent written as one code point and as two. A
 watcher that compares paths byte for byte on such a volume does not
@@ -284,9 +270,7 @@ A case-sensitive volume on a target that folds is compared more loosely
 than it stores, so two paths differing only in case are taken for one.
 That is the same choice the platform's own tools make.
 
-### Carrying on from where you stopped
-
-A tool that runs, exits and runs again has a gap it cannot see into.
+**A tool that runs, exits and runs again has a gap it cannot see into.**
 `Watcher.position` closes it where the operating system keeps a log of
 what changed: the position is a short piece of text — `Position.token`
 writes it, `Position.parse` reads it back — and `Options.since` takes it
@@ -299,20 +283,18 @@ where it goes is the caller's business.
 Only FSEvents can answer, because only it is backed by a log the system
 keeps per volume rather than by a queue that starts empty.
 `tracksPosition` says so; the others return `null` from `position` and
-ignore `since` rather than pretending.
+ignore `since` instead of pretending.
 [`examples/since.zig`](examples/since.zig) is the round trip.
 
-### One error for the watch limit
+**`error.WatchLimitReached` is what `add` returns when the operating
+system refuses another watch**: `ENOSPC` from `inotify_add_watch`, the
+per-user `max_user_watches` cap; `ENOMEM` from `kevent`; a stream
+FSEvents will not start; a handle Windows will not take. A file that
+merely sits inside a watched directory is dropped instead, since the
+directory still reports it appearing and disappearing; only the path the
+caller named is an error.
 
-`error.WatchLimitReached` is what `add` returns when the operating system
-refuses another watch: `ENOSPC` from `inotify_add_watch`, the per-user
-`max_user_watches` cap; `ENOMEM` from `kevent`; a stream FSEvents will
-not start; a handle Windows will not take. A file that merely sits inside
-a watched directory is dropped instead, since the directory still reports
-it appearing and disappearing; only the path the caller named is an
-error.
-
-### What each backend costs
+**What each backend costs.**
 
 | Backend | Mechanism | Recursion costs | Renames | Ignored subtree |
 |---|---|---|---|---|
@@ -342,9 +324,7 @@ whole mount instead of a watch per directory, which is the standard
 answer to "one kernel watch per directory does not scale", and it needs
 `CAP_SYS_ADMIN` — a privilege a library cannot assume a process has.
 
-### Adding a backend
-
-A backend is one file and one struct with nine methods: `init`,
+**A backend is one file and one struct with nine methods**: `init`,
 `deinit`, `fd`, `registrationCount`, `add`, `remove`, `wait`, `wake` and
 `position`. `Watcher.Impl` finds it structurally, so adding one is:
 write the file, add a tag to `Impl` for the right `os.tag`, add the tag
@@ -361,37 +341,37 @@ for the bookkeeping a backend that recurses itself needs.
 
 ## Scope
 
-- Symbolic links are not followed. A link inside a watched tree is an
+- **No symbolic link is followed.** A link inside a watched tree is an
   entry, not a doorway into a directory you did not ask for.
-- A watched file that is replaced rather than written — the
-  write-to-temporary-and-rename an editor does — is reported once and
-  then goes quiet. Watch the containing directory to follow a path.
-- A `Watcher` is not thread-safe. Several may exist in one process.
-- One watcher watches a path once; a second `add` of it is
-  `error.PathAlreadyWatched`. On Linux two watches that overlap share one
-  kernel watch where they meet, and its events go to whichever came last.
-- Nothing is persisted. `Options.since` answers what changed while the
-  process was not running, and the token it takes is the caller's to
-  store.
-- Paths are compared as the target's usual file systems compare them,
-  which on Apple platforms and Windows means a case-sensitive volume is
+- **No watch follows a file that is replaced rather than written.** The
+  write-to-temporary-and-rename an editor does is reported once and then
+  goes quiet; watch the containing directory to follow a path.
+- **No `Watcher` is thread-safe.** Several may exist in one process, and
+  `wake` is the one call another thread may make.
+- **No path is watched twice by one watcher.** A second `add` is
+  `error.PathAlreadyWatched`, and on Linux two overlapping watches share
+  one kernel watch where they meet.
+- **Nothing is persisted.** `Options.since` takes a token that is the
+  caller's to store.
+- **No path is compared more strictly than its file system compares
+  it**, so on Apple platforms and Windows a case-sensitive volume is
   compared more loosely than it stores.
 
 ## Platforms
 
 | Platform | Backends | Tested |
 |---|---|---|
-| macOS, and the other Apple platforms | `fsevents` (default), `kqueue`, `poll` | macOS CI runner |
-| Linux | `inotify` (default), `poll` | Ubuntu CI runner, and `ci/linux.sh` in Docker |
-| FreeBSD, NetBSD, OpenBSD, DragonFly | `kqueue` (default), `poll` | cross-compiled only |
+| macOS | `fsevents` (default), `kqueue`, `poll` | macOS CI runner |
+| Linux | `inotify` (default), `poll` | Ubuntu CI runner |
+| FreeBSD, NetBSD | `kqueue` (default), `poll` | cross-compiled, never run |
 | Windows | `windows` (default), `poll` | `windows-latest` CI runner |
-
-The badge above is that matrix on the latest commit to `main`.
 
 CI compiles every commit for `x86_64-linux-gnu`, `aarch64-linux-gnu`,
 `x86_64-linux-musl`, `x86_64-windows-gnu`, `x86_64-windows-msvc`,
 `aarch64-windows-gnu`, `x86_64-freebsd` and `x86_64-netbsd`, test binary
-included, so no backend source can break behind an empty archive.
+included, so no backend source can break behind an empty archive. The
+other Apple platforms and the other BSDs resolve a backend of their own
+and are neither built nor run here.
 
 ## Testing
 
@@ -416,8 +396,10 @@ same machine. `pairsRenames`, `reportsRootMove`, `prunesIgnored` and
 `reportsCloses` are asserted per backend, so the tables above cannot go
 stale quietly.
 
-`ci/linux.sh` exists because `inotify` cannot run on macOS or Windows. It
-builds a Debian image with the pinned Zig from
+[`ci/linux.sh`](ci/linux.sh) is how `inotify` is exercised from a machine
+that is not Linux; it is a local script and no CI job calls it, the
+Ubuntu runner being what covers `inotify` on every push. It builds a
+Debian image with the pinned Zig from
 [`ci/linux.Dockerfile`](ci/linux.Dockerfile), mounts the working tree
 read-only, and runs `zig build test` inside it in all four optimize modes.
 Pass mode names to run fewer, or set `LOOKOUT_LINUX_IMAGE` to reuse an
@@ -427,6 +409,6 @@ image you have.
 
 Zig 0.16.0. No other dependencies.
 
-## License
+## Licence
 
 MIT. See [LICENSE](LICENSE).
