@@ -101,6 +101,11 @@ const Watch = struct {
     /// Set when the caller named a file: only this name, relative to the
     /// directory the handle is on, is the watch.
     only: ?[]u8,
+    /// What `root` was when the watch was added, and when it was last
+    /// seen to appear. A `FILE_NOTIFY_INFORMATION` record carries an
+    /// action and a name and no attributes, so the root's own removal
+    /// cannot be asked what it was; this is the answer kept from before.
+    root_target: Target,
     recursive: bool,
     /// `lookout.AddOptions.filter`, copied.
     ///
@@ -125,6 +130,21 @@ const Watch = struct {
     /// once, to `share_buffer_len`, if the size asked for is refused.
     accepted_len: usize,
     retiring_next: ?*Watch,
+
+    /// The target of a path this watch has just lost. A watch on a file
+    /// only ever reports its root, whose type it remembers; a watch on a
+    /// directory reports entries the kernel never typed, and once they
+    /// are gone there is nothing left to ask.
+    fn goneTarget(watch: *const Watch) Target {
+        return if (watch.only != null) watch.root_target else .unknown;
+    }
+
+    /// Keeps what the root was last seen to be, so that a file watch
+    /// whose root is replaced by a directory of the same name reports
+    /// the next removal as what actually left.
+    fn noteRoot(watch: *Watch, target: Target) void {
+        if (watch.only != null and target != .unknown) watch.root_target = target;
+    }
 };
 
 /// Creates the completion port.
@@ -227,6 +247,7 @@ pub fn add(
         .root_inode = stat.inode,
         .handle = handle,
         .only = only,
+        .root_target = .of(stat.kind),
         .recursive = options.recursive and is_dir,
         .filter = filter,
         .overlapped = std.mem.zeroes(c.OVERLAPPED),
@@ -344,7 +365,7 @@ fn flushRenames(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
         const old = watch.pending_rename orelse continue;
         watch.pending_rename = null;
         defer w.gpa.free(old);
-        try batch.push(w.gpa, watch.id, old, .removed, .unknown);
+        try batch.push(w.gpa, watch.id, old, .removed, watch.goneTarget());
     }
 }
 
@@ -539,8 +560,9 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
 
 /// What the path is now, for the actions that leave it there to be
 /// asked. `ReadDirectoryChangesW` carries no bit saying whether a record
-/// is about a directory, which is why this is a `stat` and why a path
-/// that is already gone is `unknown`.
+/// is about a directory, which is why this is a `stat` and why an entry
+/// that is already gone is `unknown`; the watched path itself is the
+/// exception, because `Watch.root_target` remembers it.
 fn targetOf(w: *const Windows, subject: []const u8) Target {
     const stat = Io.Dir.cwd().statFile(w.io, subject, .{ .follow_symlinks = false }) catch
         return .unknown;
@@ -551,11 +573,13 @@ fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch
     var move: Budget.Move = .unchanged;
     switch (action) {
         c.FILE_ACTION_ADDED => {
-            try batch.push(w.gpa, watch.id, subject, .created, w.targetOf(subject));
+            const target = w.targetOf(subject);
+            watch.noteRoot(target);
+            try batch.push(w.gpa, watch.id, subject, .created, target);
             move = .appeared;
         },
         c.FILE_ACTION_REMOVED => {
-            try batch.push(w.gpa, watch.id, subject, .removed, .unknown);
+            try batch.push(w.gpa, watch.id, subject, .removed, watch.goneTarget());
             move = .vanished;
         },
         c.FILE_ACTION_MODIFIED => {
@@ -574,14 +598,16 @@ fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch
         },
         c.FILE_ACTION_RENAMED_NEW_NAME => {
             move = .appeared;
+            const target = w.targetOf(subject);
+            watch.noteRoot(target);
             if (watch.pending_rename) |old| {
                 defer w.gpa.free(old);
                 watch.pending_rename = null;
-                try batch.pushRename(w.gpa, watch.id, subject, old, w.targetOf(subject));
+                try batch.pushRename(w.gpa, watch.id, subject, old, target);
             } else {
                 // Renamed in from outside the watch: a creation as far as
                 // anyone watching this tree can tell.
-                try batch.push(w.gpa, watch.id, subject, .created, w.targetOf(subject));
+                try batch.push(w.gpa, watch.id, subject, .created, target);
             }
         },
         else => {},

@@ -374,8 +374,10 @@ pub const Target = enum {
     /// A directory.
     directory,
     /// The backend was not told and the path can no longer be asked:
-    /// it is gone by the time the event is read. `Kind.removed` on
-    /// `windows` is the one that lands here.
+    /// it is gone by the time the event is read. `Kind.removed` of an
+    /// entry inside a watched directory on `windows` is the one that
+    /// lands here; a watched path itself is remembered from when the
+    /// watch was added.
     unknown,
 
     /// What a listing or a `stat` found, as a target.
@@ -425,8 +427,9 @@ pub const Event = struct {
     /// After a `Kind.removed` the path cannot be stat-ed to find out, so
     /// a caller keeping a model of the tree needs to be told. Every
     /// backend is told by the operating system, except that
-    /// `ReadDirectoryChangesW` says nothing about a path that is already
-    /// gone; that one is `unknown`.
+    /// `ReadDirectoryChangesW` says nothing about an entry that is
+    /// already gone; that one is `unknown`. A watched path itself is
+    /// always known, on every backend, from when the watch was added.
     target: Target = .unknown,
 };
 
