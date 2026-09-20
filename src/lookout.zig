@@ -885,11 +885,11 @@ pub const Watcher = struct {
     /// existing ancestor, and issues its id. See `AddOptions.pending`.
     fn addPending(w: *Watcher, path: []const u8, options: AddOptions) AddError!WatchId {
         const target = try w.absentPath(path);
-        errdefer w.gpa.free(target);
+        var owns_target = true;
+        defer if (owns_target) w.gpa.free(target);
         // It may have appeared while its name was being spelled, in which
         // case there is nothing to wait for.
         if (w.exists(target)) {
-            defer w.gpa.free(target);
             return w.register(target, options);
         }
 
@@ -919,6 +919,7 @@ pub const Watcher = struct {
         try w.pending.append(w.gpa, p);
         w.next_id += 1;
         w.anchorPending(p);
+        owns_target = false;
         return id;
     }
 
