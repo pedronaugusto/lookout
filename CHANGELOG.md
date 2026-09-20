@@ -22,6 +22,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Removing a directly watched file now reports a file target on every backend.
 - Hitting the inotify watch limit below a recursive root now reports the unwatched subtree without rejecting the root.
 - Polling now treats only an absent root as removed and returns other root stat errors.
+- Retiring a Windows watch no longer allocates while cancellation still references its buffer.
 
 ## [0.2.0] - 2026-09-19
 

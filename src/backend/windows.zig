@@ -48,9 +48,9 @@ io: Io,
 port: windows.HANDLE,
 watches: std.AutoArrayHashMapUnmanaged(WatchId, *Watch),
 /// Watches whose handle is closed but whose buffer the kernel may not
-/// have finished with. Freed when their completion arrives, or at
-/// `deinit` once the port is closed.
-retiring: std.ArrayList(*Watch),
+/// have finished with. An intrusive list so retiring a watch cannot fail
+/// for want of an allocation while overlapped I/O still references it.
+retiring: ?*Watch,
 /// How many entries each watched directory holds, against
 /// `lookout.Options.max_dir_entries`.
 budget: Budget,
@@ -124,6 +124,7 @@ const Watch = struct {
     /// How much of the buffer the kernel is willing to take. Lowered
     /// once, to `share_buffer_len`, if the size asked for is refused.
     accepted_len: usize,
+    retiring_next: ?*Watch,
 };
 
 /// Creates the completion port.
@@ -135,7 +136,7 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .io = io,
         .port = port,
         .watches = .empty,
-        .retiring = .empty,
+        .retiring = null,
         .budget = .init(gpa, io, options.max_dir_entries),
         .buffer_len = buffer.clamp(options.buffer_bytes, bounds),
     };
@@ -153,8 +154,10 @@ pub fn deinit(w: *Windows) void {
     // The port is closed before the retiring buffers are freed: after
     // that no completion can reference them.
     _ = c.CloseHandle(w.port);
-    for (w.retiring.items) |watch| w.free(watch);
-    w.retiring.deinit(w.gpa);
+    while (w.retiring) |watch| {
+        w.retiring = watch.retiring_next;
+        w.free(watch);
+    }
     w.* = undefined;
 }
 
@@ -230,6 +233,7 @@ pub fn add(
         .buffer = bytes,
         .pending_rename = null,
         .accepted_len = w.buffer_len,
+        .retiring_next = null,
     };
     w.budget.seed(dir_path) catch {};
 
@@ -311,7 +315,8 @@ pub fn remove(w: *Windows, id: WatchId) void {
     _ = c.CloseHandle(watch.handle);
     // The buffer outlives the handle until the cancelled read's
     // completion has been taken off the port.
-    w.retiring.append(w.gpa, watch) catch w.free(watch);
+    watch.retiring_next = w.retiring;
+    w.retiring = watch;
 }
 
 fn free(w: *Windows, watch: *Watch) void {
@@ -487,11 +492,14 @@ fn live(w: *Windows, id: WatchId, overlapped: ?*c.OVERLAPPED) ?*Watch {
 /// Frees a retiring watch once its cancelled read has been accounted for.
 fn retire(w: *Windows, overlapped: ?*c.OVERLAPPED) void {
     const completed = overlapped orelse return;
-    for (w.retiring.items, 0..) |watch, i| {
-        if (&watch.overlapped != completed) continue;
-        _ = w.retiring.swapRemove(i);
-        w.free(watch);
-        return;
+    var link = &w.retiring;
+    while (link.*) |watch| {
+        if (&watch.overlapped == completed) {
+            link.* = watch.retiring_next;
+            w.free(watch);
+            return;
+        }
+        link = &watch.retiring_next;
     }
 }
 
