@@ -1336,4 +1336,9 @@ test {
     _ = @import("test_bench.zig");
     _ = @import("test_gaps.zig");
     _ = @import("test_fuzz.zig");
+    // The backends this target was built with, each of which carries
+    // tests of its own. They are found when the backend is analysed,
+    // which the suite causes and a filtered run does not, so they are
+    // named here for `zig test --test-filter` to find them.
+    inline for (@typeInfo(Watcher.Impl).@"union".fields) |field| _ = field.type;
 }
