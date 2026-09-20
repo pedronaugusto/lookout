@@ -42,12 +42,14 @@ pub fn expired(d: Deadline) bool {
 
 /// What `poll(2)` wants: milliseconds, or `-1` to block indefinitely.
 pub fn pollMs(d: Deadline) i32 {
-    return @intCast(d.remainingMs() orelse return -1);
+    const remaining = d.remainingMs() orelse return -1;
+    return @intCast(@min(remaining, std.math.maxInt(i32)));
 }
 
 /// What `GetQueuedCompletionStatus` wants: milliseconds, or `INFINITE`.
 pub fn windowsMs(d: Deadline) u32 {
-    return d.remainingMs() orelse std.math.maxInt(u32);
+    const remaining = d.remainingMs() orelse return std.math.maxInt(u32);
+    return @min(remaining, std.math.maxInt(u32) - 1);
 }
 
 const testing = std.testing;
@@ -76,4 +78,12 @@ test "a deadline in the future has time left on it" {
     const left = d.remainingMs().?;
     try testing.expect(left > 0 and left <= 2_500);
     try testing.expect(!d.expired());
+}
+
+test "finite waits are clamped to each operating system API" {
+    const posix_long: Deadline = .start(testing.io, @as(u32, std.math.maxInt(i32)) + 1);
+    try testing.expectEqual(std.math.maxInt(i32), posix_long.pollMs());
+
+    const windows_long: Deadline = .start(testing.io, std.math.maxInt(u32));
+    try testing.expectEqual(std.math.maxInt(u32) - 1, windows_long.windowsMs());
 }

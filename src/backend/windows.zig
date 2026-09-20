@@ -357,11 +357,13 @@ fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
         var overlapped: ?*c.OVERLAPPED = null;
         const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, timeout);
         if (ok == 0) {
-            if (overlapped == null) return switch (c.GetLastError()) {
-                // Nothing arrived in time, or the port is gone.
-                c.WAIT_TIMEOUT => {},
-                else => error.Unexpected,
-            };
+            if (overlapped == null) {
+                // A finite timeout may have been clamped to what this API
+                // can represent, so only the original deadline ends it.
+                if (c.GetLastError() != c.WAIT_TIMEOUT) return error.Unexpected;
+                if (!deadline.expired()) continue;
+                return;
+            }
             if (key == wake_key) return;
             const failed: WatchId = @enumFromInt(@as(u32, @truncate(key)));
             const err = c.GetLastError();

@@ -319,7 +319,10 @@ fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
             error.SystemResources => return error.SystemResources,
             else => return error.Unexpected,
         };
-        if (ready == 0) return;
+        if (ready == 0) {
+            if (!deadline.expired()) continue;
+            return;
+        }
 
         var woken = false;
         if (fds[1].revents & posix.POLL.IN != 0) {

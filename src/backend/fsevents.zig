@@ -596,7 +596,10 @@ fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
         }
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still performs one non-blocking check.
-        if (!f.readable(deadline.pollMs())) return;
+        if (!f.readable(deadline.pollMs())) {
+            if (!deadline.expired()) continue;
+            return;
+        }
     }
 }
 
