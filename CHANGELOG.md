@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Removing a watch now discards changes still held by settling or debouncing.
+- Moving an entry between separate inotify watches is reported to each watch independently.
 
 ## [0.2.0] - 2026-09-19
 

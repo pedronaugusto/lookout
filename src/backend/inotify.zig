@@ -478,6 +478,22 @@ fn pair(n: *Inotify, change: *const Change, batch: *Batch) lookout.Watcher.PollE
     if (change.moved_to) {
         const half = n.pending_renames.fetchSwapRemove(change.cookie) orelse return false;
         defer n.gpa.free(half.value.path);
+        if (half.value.watch != change.watch) {
+            if (!n.excluded(half.value.watch, half.value.path)) {
+                try batch.push(
+                    n.gpa,
+                    half.value.watch,
+                    half.value.path,
+                    .removed,
+                    if (half.value.is_dir) .directory else .file,
+                );
+            }
+            if (half.value.is_dir) {
+                n.forgetSubtree(half.value.path);
+                n.budget.forget(half.value.path);
+            }
+            return false;
+        }
         if (!n.excluded(change.watch, change.path)) {
             try batch.pushRename(n.gpa, change.watch, change.path, half.value.path, change.target());
         }

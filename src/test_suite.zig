@@ -252,6 +252,48 @@ test "a rename is reported in the shape the backend documents" {
     }
 }
 
+test "inotify does not pair a move across separate watches" {
+    if (!lookout.supported(.inotify)) return error.SkipZigTest;
+
+    var f = try Fixture.init(.inotify);
+    defer f.deinit();
+    try f.tmp.dir.createDirPath(std.testing.io, "a");
+    try f.tmp.dir.createDirPath(std.testing.io, "b");
+    try f.write("a/file.txt", "one");
+
+    const gpa = std.testing.allocator;
+    const a = try f.path("a");
+    defer gpa.free(a);
+    const b = try f.path("b");
+    defer gpa.free(b);
+    const old = try f.path("a/file.txt");
+    defer gpa.free(old);
+    const new = try f.path("b/file.txt");
+    defer gpa.free(new);
+
+    const a_id = try f.watcher.add(a, .{});
+    const b_id = try f.watcher.add(b, .{});
+    try f.settle();
+    try f.tmp.dir.rename("a/file.txt", f.tmp.dir, "b/file.txt", std.testing.io);
+
+    var removed = false;
+    var created = false;
+    var waited: u32 = 0;
+    while (waited < timeout_ms and !(removed and created)) : (waited += 200) {
+        for (try f.watcher.poll(200)) |event| {
+            try std.testing.expect(event.kind != .renamed);
+            if (event.id == a_id and event.kind == .removed and std.mem.eql(u8, event.path, old)) {
+                removed = true;
+            }
+            if (event.id == b_id and event.kind == .created and std.mem.eql(u8, event.path, new)) {
+                created = true;
+            }
+        }
+    }
+    try std.testing.expect(removed);
+    try std.testing.expect(created);
+}
+
 test "settling holds a modification back until the writing stops" {
     // The poll backend only: this is about the clock, and the clock is
     // the one thing a kernel backend adds jitter to. What is being
