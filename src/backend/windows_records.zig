@@ -107,6 +107,17 @@ const testing = std.testing;
 const a_txt = std.mem.sliceAsBytes(&[_]u16{ 'a', '.', 't', 'x', 't' });
 const b_txt = std.mem.sliceAsBytes(&[_]u16{ 'b', '.', 't', 'x', 't' });
 
+test "a read that transferred nothing is an empty chain" {
+    // What `ReadDirectoryChangesW` leaves when its buffer overflowed:
+    // "the entire contents of the buffer are discarded, the
+    // lpBytesReturned parameter contains zero". The backend reads the
+    // zero as `lookout.Kind.overflow` before it decodes anything; the
+    // decoder's part is to make nothing of nothing, not an error.
+    var it = iterate(&.{});
+    try testing.expectEqual(@as(?Record, null), try it.next());
+    try testing.expectEqual(@as(?Record, null), try it.next());
+}
+
 test "a chain of two records ends at the zero offset" {
     var buffer: [128]u8 = undefined;
     var len: usize = 0;

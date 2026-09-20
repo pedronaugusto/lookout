@@ -623,6 +623,79 @@ fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch
     }
 }
 
+test "a read that completes with nothing is an overflow, and the watch reads on" {
+    // ReadDirectoryChangesW: "If the number of changes exceeds the
+    // buffer size, the entire contents of the buffer are discarded, the
+    // lpBytesReturned parameter contains zero". Through a completion
+    // port that is a packet that transferred nothing, and
+    // PostQueuedCompletionStatus can post one in the kernel's place --
+    // "Posts an I/O completion packet to an I/O completion port", with
+    // the byte count and the OVERLAPPED the caller gives it, dequeued by
+    // GetQueuedCompletionStatus like any other. It is the one overflow
+    // signal a test can make: a burst the kernel cannot hold between
+    // two reads is not something a test can order.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .windows });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    while ((try watcher.poll(200)).len != 0) {}
+    const w = &watcher.impl.windows;
+    const watch = w.watches.get(id).?;
+
+    // The read that is outstanding is taken back first -- cancelled,
+    // and its completion taken off the port -- so that the packet
+    // posted below stands in for it rather than beside it: a watch
+    // re-armed while a read is still pending would have two reads on
+    // one buffer, which is not a state the kernel ever puts it in.
+    _ = c.CancelIoEx(watch.handle, &watch.overlapped);
+    {
+        var transferred: u32 = 0;
+        var key: usize = 0;
+        var overlapped: ?*c.OVERLAPPED = null;
+        while (true) {
+            const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, 10_000);
+            if (ok == 0 and overlapped == null) return error.TestUnexpectedResult;
+            if (overlapped == &watch.overlapped) break;
+        }
+    }
+    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, @intFromEnum(id), &watch.overlapped) != 0);
+
+    var overflows: usize = 0;
+    var waited: u32 = 0;
+    while (waited < 10_000 and overflows == 0) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind != .overflow) continue;
+            try testing.expectEqual(id, event.id);
+            try testing.expectEqualStrings(root, event.path);
+            try testing.expectEqual(Target.directory, event.target);
+            overflows += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), overflows);
+
+    // Re-armed: the watch is still held, and the next change is read.
+    try testing.expect(w.watches.contains(id));
+    try tmp.dir.writeFile(io, .{ .sub_path = "after.txt", .data = "x" });
+    const after = try std.fs.path.join(gpa, &.{ root, "after.txt" });
+    defer gpa.free(after);
+    var found = false;
+    waited = 0;
+    while (waited < 10_000 and !found) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
+        }
+    }
+    try testing.expect(found);
+}
+
 /// The Win32 surface lookout uses, declared against `std.os.windows`'
 /// types.
 ///
