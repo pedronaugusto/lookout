@@ -124,21 +124,30 @@ test "a change inside a renamed directory is not a creation" {
         const wanted = try std.fs.path.join(gpa, &.{ root, "sub2", "a.txt" });
         defer gpa.free(wanted);
 
-        var kind: ?Kind = null;
+        var saw_created = false;
+        var saw_modified = false;
         waited = 0;
-        while (waited < timeout_ms and kind == null) : (waited += 200) {
+        while (waited < timeout_ms and !saw_modified) : (waited += 200) {
             for (try watcher.poll(200)) |event| {
                 if (event.kind == .overflow) lost = true;
-                if (std.mem.eql(u8, event.path, wanted)) kind = event.kind;
+                if (!std.mem.eql(u8, event.path, wanted)) continue;
+                if (event.kind == .created) saw_created = true;
+                if (event.kind == .modified) saw_modified = true;
             }
         }
         if (lost) continue;
-        if (kind != Kind.modified) {
-            std.debug.print("{s}: {?s} after a directory rename\n", .{
-                @tagName(backend), if (kind) |k| @tagName(k) else null,
+        // FSEvents can deliver the metadata change made by opening and
+        // truncating the file before its content-change record. That is
+        // not the creation this test guards against, so wait for the
+        // content change while remembering whether a creation appeared
+        // at any point on the way.
+        if (saw_created or !saw_modified) {
+            std.debug.print("{s}: created={}, modified={} after a directory rename\n", .{
+                @tagName(backend), saw_created, saw_modified,
             });
         }
-        try std.testing.expectEqual(Kind.modified, kind.?);
+        try std.testing.expect(!saw_created);
+        try std.testing.expect(saw_modified);
     }
 }
 
