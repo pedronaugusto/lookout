@@ -282,8 +282,8 @@ reported, resolved against the tree as it is now.
 lookout persists nothing. The token is the caller's to write down, and
 where it goes is the caller's business.
 
-Only FSEvents can answer, because only it is backed by a log the system
-keeps per volume rather than by a queue that starts empty.
+Only FSEvents can answer, because only it is backed by a persistent
+per-host log rather than by a queue that starts empty.
 `tracksPosition` says so; the others return `null` from `position` and
 ignore `since` instead of pretending.
 [`examples/since.zig`](examples/since.zig) is the round trip.

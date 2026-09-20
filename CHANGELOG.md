@@ -26,6 +26,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A pending path that appears during `add` now has one owner on every registration failure path.
 - `max_events` now bounds paths held for settling or debouncing as well as ready events.
 - A zero polling interval now sleeps for one millisecond between quiet scans instead of spinning.
+- Position documentation now describes the host-wide FSEvents sequence used by the backend.
 
 ## [0.2.0] - 2026-09-19
 
@@ -58,7 +59,7 @@ about itself.
   and runs again is told what it missed. The position is a short piece of text
   — `Position.token` writes it, `Position.parse` reads it back — and lookout
   persists nothing: the token is the caller's to keep. Only FSEvents can
-  answer, because only it is backed by a log the system keeps per volume
+  answer, because only it is backed by a persistent per-host log
   rather than by a queue that starts empty, and `tracksPosition` says so
   instead of pretending. A resumed watch reports what was created, changed
   and deleted while nothing was watching, resolved against the tree as it is

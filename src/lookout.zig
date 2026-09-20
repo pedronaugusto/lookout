@@ -209,11 +209,10 @@ const Poll = @import("backend/poll.zig");
 /// program can print, store and hand back, and `parse` reads that back.
 /// lookout persists nothing.
 ///
-/// A position belongs to the backend and the volume that issued it.
-/// Handing one to a different backend, or to a watcher on a different
-/// volume, is not an error and not a resumption: it is ignored and the
-/// watch starts from now, which is the same thing a caller with no
-/// position at all gets.
+/// A position belongs to the backend that issued it. FSEvents positions
+/// come from its per-host stream and can resume watched paths on any
+/// mounted volume; handing one to a different backend is ignored and the
+/// watch starts from now.
 pub const Position = struct {
     /// Which mechanism issued it.
     backend: Backend,
@@ -260,11 +259,11 @@ pub const Position = struct {
 /// `Watcher.position` returns something and `Options.since` is worth
 /// setting.
 ///
-/// Only FSEvents can. It is the only one of the five backed by a log the
-/// operating system keeps per volume rather than by a queue that starts
-/// empty, so it is the only one that can be asked what happened before
-/// the watch existed. The others return `null` from `position` and
-/// ignore `since` rather than pretending.
+/// Only FSEvents can. It is the only one of the five backed by a
+/// persistent per-host log rather than by a queue that starts empty, so
+/// it is the only one that can be asked what happened before the watch
+/// existed. The others return `null` from `position` and ignore `since`
+/// rather than pretending.
 pub fn tracksPosition(backend: Backend) bool {
     return switch (backend) {
         .auto => tracksPosition(default_backend),
@@ -520,10 +519,10 @@ pub const Options = struct {
     /// so that changes made while nothing was watching are reported
     /// rather than missed.
     ///
-    /// Only `fsevents` can answer this, because only it keeps a log per
-    /// volume that can be replayed; `tracksPosition` says so, and a
-    /// backend that cannot ignores this. A position from another
-    /// backend, or from another volume, is ignored too.
+    /// Only `fsevents` can answer this, because only it keeps a persistent
+    /// per-host log that can be replayed; `tracksPosition` says so, and a
+    /// backend that cannot ignores this. A position from another backend
+    /// is ignored too.
     ///
     /// A replayed change is reported against the tree as it is now: a
     /// file created while nothing was watching and still there arrives
