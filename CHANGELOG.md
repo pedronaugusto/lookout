@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- FSEvents now drains ordinary creations and writes without a filesystem query per record, seeds directory budgets during its existing tree walk, and counts accumulated creation flags only when a path actually becomes known.
 - FSEvents stream latency now follows `Options.latency_ms`, including a zero-second window when coalescing is disabled; the Apple default remains the rename-pairing backend, with the lower-latency small-tree choice documented explicitly.
 - Removing a watch now discards changes still held by settling or debouncing.
 - Moving an entry between separate inotify watches is reported to each watch independently.

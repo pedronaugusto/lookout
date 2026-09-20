@@ -495,7 +495,6 @@ pub fn add(
     });
 
     f.streams.putAssumeCapacity(id, stream);
-    if (scope != .file) f.budget.seed(abs_path) catch {};
     f.seedKnown(stream) catch {};
     trace.log("fsevents seeded watch={d} known={d}", .{ @intFromEnum(id), f.known.count() });
 }
@@ -734,7 +733,7 @@ fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) 
     } else {
         try f.joined(batch, taken.half.id, taken.half.path, partner.path, partner.target());
     }
-    try f.recount(batch, partner, stream);
+    try f.recount(batch, partner.path, .unchanged, stream);
 }
 
 /// What the matching in src/backend/fsevents_records.zig asks the
@@ -826,8 +825,8 @@ fn report(
             } else {
                 try f.joined(batch, record.id, record.path, partner.path, record.target());
             }
-            try f.recount(batch, record, stream);
-            try f.recount(batch, partner, stream);
+            try f.recount(batch, record.path, .unchanged, stream);
+            try f.recount(batch, partner.path, .unchanged, stream);
             return;
         }
         // No partner in this delivery. It may be in the next one, so
@@ -854,8 +853,17 @@ fn reportPlain(
     record: Record,
     stream: *const Stream,
 ) lookout.Watcher.PollError!void {
-    const there = f.exists(record.path);
     const seen = f.known.contains(.{ .id = record.id, .path = record.path });
+    // A known path with no removal flag, and a newly-created path with
+    // no removal flag, are present as far as this record can say. A
+    // later removal races any `stat` made here in exactly the same way
+    // and will carry its own record. Save the filesystem query for the
+    // ambiguous cases: accumulated removal flags and an unknown path
+    // whose flags do not say it was created.
+    const there = if (needsExistenceCheck(record.flags, seen))
+        f.exists(record.path)
+    else
+        true;
 
     if (!there) {
         // Gone. Whatever the flags remember about it, the fact now is
@@ -866,7 +874,7 @@ fn reportPlain(
             try batch.push(f.gpa, record.id, record.path, .removed, record.target());
             f.forget(record.id, record.path);
             if (record.target() == .directory) f.forgetSubtree(record.id, record.path);
-            try f.recount(batch, record, stream);
+            try f.recount(batch, record.path, .vanished, stream);
         } else {
             trace.log("fsevents drop gone-unknown path={s}", .{record.path});
         }
@@ -886,7 +894,7 @@ fn reportPlain(
         if (record.target() == .directory and stream.scope == .tree) {
             try f.adopt(batch, record.id, record.path, stream);
         }
-        try f.recount(batch, record, stream);
+        try f.recount(batch, record.path, .appeared, stream);
         return;
     }
     // Both flags on a path that still exists and was already known mean
@@ -896,7 +904,7 @@ fn reportPlain(
         trace.log("fsevents push replaced-as-removed path={s}", .{record.path});
         try batch.push(f.gpa, record.id, record.path, .removed, record.target());
         if (record.target() == .directory) try f.refreshKnown(record.id, record.path, stream);
-        try f.recount(batch, record, stream);
+        try f.recount(batch, record.path, .unchanged, stream);
         return;
     }
     // Contents and metadata, but not a directory's. A directory's own
@@ -923,7 +931,10 @@ fn reportPlain(
     } else {
         trace.log("fsevents drop dir-metadata path={s}", .{record.path});
     }
-    try f.recount(batch, record, stream);
+}
+
+fn needsExistenceCheck(flags: u32, seen: bool) bool {
+    return flags & flag.item_removed != 0 or (!seen and flags & flag.item_created == 0);
 }
 
 fn wasReplaced(flags: u32) bool {
@@ -940,6 +951,7 @@ fn adopt(
     root: []const u8,
     stream: *const Stream,
 ) lookout.Watcher.PollError!void {
+    try f.budget.begin(root);
     const Adopting = struct {
         f: *FsEvents,
         batch: *Batch,
@@ -947,6 +959,8 @@ fn adopt(
         stream: *const Stream,
 
         fn visit(a: *@This(), entry: walk.Entry) anyerror!walk.Step {
+            a.f.budget.found(entry.dir);
+            if (entry.kind == .directory) try a.f.budget.begin(entry.path);
             if (a.stream.filter.prunes(a.stream.root, entry.path)) return .over;
             if (a.f.known.contains(.{ .id = a.id, .path = entry.path })) return .into;
             if (!a.stream.filter.excludes(a.stream.root, entry.path)) {
@@ -1144,6 +1158,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
     // is the whole of the seeding for a watch on a single file.
     if (f.exists(stream.root)) try f.remember(stream.id, stream.root);
     if (stream.scope == .file) return;
+    try f.budget.begin(stream.root);
     trace.log("fsevents seed walk root={s}", .{stream.root});
 
     const Seeding = struct {
@@ -1151,6 +1166,8 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
         stream: *const Stream,
 
         fn visit(s: *@This(), entry: walk.Entry) anyerror!walk.Step {
+            s.f.budget.found(entry.dir);
+            if (entry.kind == .directory) try s.f.budget.begin(entry.path);
             if (s.stream.filter.prunes(s.stream.root, entry.path)) {
                 trace.log("fsevents seed filtered {s}", .{entry.path});
                 return .over;
@@ -1171,21 +1188,16 @@ fn exists(f: *const FsEvents, subject: []const u8) bool {
 
 /// Keeps the entry budget of the directory a change happened in, and
 /// reports `lookout.Kind.overflow` when it is past.
-fn recount(f: *FsEvents, batch: *Batch, record: Record, stream: *const Stream) lookout.Watcher.PollError!void {
-    const appeared = record.flags & flag.item_created != 0;
-    const vanished = record.flags & flag.item_removed != 0;
-    const renamed = record.renamed();
-    if (!appeared and !vanished and !renamed) return;
-
-    const parent = std.fs.path.dirname(record.path) orelse return;
-    const move: Budget.Move = if (appeared)
-        .appeared
-    else if (vanished)
-        .vanished
-    else
-        .unchanged;
+fn recount(
+    f: *FsEvents,
+    batch: *Batch,
+    subject: []const u8,
+    move: Budget.Move,
+    stream: *const Stream,
+) lookout.Watcher.PollError!void {
+    const parent = std.fs.path.dirname(subject) orelse return;
     if (try f.budget.note(parent, move)) {
-        try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
+        try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
     }
 }
 
@@ -1196,6 +1208,15 @@ test "accumulated removal and creation flags identify a replacement" {
     ));
     try std.testing.expect(!wasReplaced(flag.item_removed));
     try std.testing.expect(!wasReplaced(flag.item_created | flag.item_modified));
+}
+
+test "only ambiguous plain records query the filesystem" {
+    try std.testing.expect(!needsExistenceCheck(flag.item_created, false));
+    try std.testing.expect(!needsExistenceCheck(flag.item_created | flag.item_modified, true));
+    try std.testing.expect(!needsExistenceCheck(flag.item_modified, true));
+    try std.testing.expect(needsExistenceCheck(flag.item_modified, false));
+    try std.testing.expect(needsExistenceCheck(flag.item_removed, true));
+    try std.testing.expect(needsExistenceCheck(flag.item_removed | flag.item_created, true));
 }
 
 test "stream latency follows the watcher latency" {

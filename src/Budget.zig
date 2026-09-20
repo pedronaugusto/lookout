@@ -53,6 +53,22 @@ pub fn seed(b: *Budget, dir: []const u8) Allocator.Error!void {
     try b.counts.put(b.gpa, owned, entriesIn(b.io, dir));
 }
 
+/// Starts accounting for a directory a tree walk is about to list.
+/// `found` adds the entries from that same walk, avoiding a second
+/// listing solely to establish the budget.
+pub fn begin(b: *Budget, dir: []const u8) Allocator.Error!void {
+    if (b.counts.contains(dir)) return;
+    const owned = try b.gpa.dupe(u8, dir);
+    errdefer b.gpa.free(owned);
+    try b.counts.put(b.gpa, owned, 0);
+}
+
+/// Accounts for one entry an existing tree walk found in `dir`.
+pub fn found(b: *Budget, dir: []const u8) void {
+    const count = b.counts.getPtr(dir) orelse return;
+    count.* += 1;
+}
+
 /// Records one change in `dir` and answers whether it is now past the
 /// budget. A directory nothing has been said about yet is counted first.
 pub fn note(b: *Budget, dir: []const u8, move: Move) Allocator.Error!bool {
@@ -150,4 +166,22 @@ test "each directory has its own budget" {
 
     b.forget(root);
     try testing.expectEqual(@as(usize, 0), b.counts.count());
+}
+
+test "an existing walk seeds a directory without listing it again" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var b: Budget = .init(gpa, io, 2);
+    defer b.deinit();
+
+    try b.begin(root);
+    b.found(root);
+    b.found(root);
+    try testing.expectEqual(@as(usize, 2), b.counts.get(root).?);
+    try testing.expect(try b.note(root, .appeared));
 }
