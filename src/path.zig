@@ -83,7 +83,7 @@ pub fn relative(root: []const u8, path: []const u8) ?[]const u8 {
         if (!std.mem.startsWith(u8, path, root)) return null;
         var rest = path[root.len..];
         if (rest.len == 0) return rest;
-        if (!isSep(rest[0])) return null;
+        if ((root.len == 0 or !isSep(root[root.len - 1])) and !isSep(rest[0])) return null;
         while (rest.len != 0 and isSep(rest[0])) rest = rest[1..];
         return rest;
     }
@@ -98,7 +98,7 @@ pub fn relative(root: []const u8, path: []const u8) ?[]const u8 {
             const split = boundary orelse return null;
             var rest = path[split..];
             if (rest.len == 0) return rest;
-            if (!isSep(rest[0])) return null;
+            if ((root.len == 0 or !isSep(root[root.len - 1])) and !isSep(rest[0])) return null;
             while (rest.len != 0 and isSep(rest[0])) rest = rest[1..];
             return rest;
         };
@@ -327,6 +327,14 @@ test "what is below a root is found by comparison, not by offset" {
         // which is the whole reason this is not a byte offset.
         try testing.expectEqualStrings("a.txt", relative("/w/caf\u{00e9}", "/w/cafe\u{0301}/a.txt").?);
         try testing.expectEqualStrings("a.txt", relative("/w/CAFE", "/w/cafe/a.txt").?);
+    }
+}
+
+test "a filesystem root contains its descendants" {
+    try testing.expectEqualStrings("tmp/a", relative("/", "/tmp/a").?);
+    try testing.expect(within("/", "/tmp/a"));
+    if (builtin.os.tag == .windows) {
+        try testing.expectEqualStrings("tmp\\a", relative("C:\\", "C:\\tmp\\a").?);
     }
 }
 
