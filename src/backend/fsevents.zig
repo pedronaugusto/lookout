@@ -284,6 +284,10 @@ const Stream = struct {
         if (st.scope == .tree) return true;
         return std.mem.indexOfAny(u8, rest, path_cmp.separators) == null;
     }
+
+    fn rootTarget(st: *const Stream) Target {
+        return if (st.scope == .file) .file else .directory;
+    }
 };
 
 /// Creates the delivery queue, the buffer it fills, and the pipe the
@@ -649,7 +653,7 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
             // and a stream waiting for one that was dropped would catch
             // up for ever.
             if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
-            try batch.push(f.gpa, stream.id, stream.root, .overflow, .directory);
+            try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
         }
     }
 
@@ -747,7 +751,7 @@ fn report(
         flag.kernel_dropped) != 0)
     {
         trace.log("fsevents push overflow root={s}", .{stream.root});
-        try batch.push(f.gpa, record.id, stream.root, .overflow, .directory);
+        try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
     }
     // The marker that the system has finished reading its log back to
     // the position `lookout.Options.since` named. Nothing happened to a
@@ -773,7 +777,7 @@ fn report(
     // path again.
     if (record.flags & flag.root_changed != 0) {
         trace.log("fsevents push removed root={s}", .{stream.root});
-        try batch.push(f.gpa, record.id, stream.root, .removed, .directory);
+        try batch.push(f.gpa, record.id, stream.root, .removed, stream.rootTarget());
         return;
     }
 
@@ -1153,7 +1157,7 @@ fn recount(f: *FsEvents, batch: *Batch, record: Record, stream: *const Stream) l
     else
         .unchanged;
     if (try f.budget.note(parent, move)) {
-        try batch.push(f.gpa, record.id, stream.root, .overflow, .directory);
+        try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
     }
 }
 

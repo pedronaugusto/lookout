@@ -19,7 +19,7 @@ const Batch = @import("../Batch.zig");
 const Deadline = @import("../Deadline.zig");
 const Snapshot = @import("../Snapshot.zig");
 const Tree = @import("../Tree.zig");
-const path_cmp = @import("../path.zig");
+const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
 const Poll = @This();
@@ -167,9 +167,10 @@ fn scan(p: *Poll, batch: *Batch) Tree.ScanError!void {
 /// `lookout.Kind.renamed`, because a comparison of names cannot tell the
 /// two apart. See `lookout.reportsRootMove`.
 fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
-    var gone: std.ArrayList([]u8) = .empty;
+    const Gone = struct { id: WatchId, path: []u8, target: Target };
+    var gone: std.ArrayList(Gone) = .empty;
     defer {
-        for (gone.items) |path| p.gpa.free(path);
+        for (gone.items) |item| p.gpa.free(item.path);
         gone.deinit(p.gpa);
     }
 
@@ -178,14 +179,18 @@ fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
         // keeps its id, and must not be reported twice.
         if (!p.hasNodes(id)) continue;
         _ = Io.Dir.cwd().statFile(p.io, watch.root, .{ .follow_symlinks = false }) catch {
-            try gone.append(p.gpa, try p.gpa.dupe(u8, watch.root));
+            try gone.append(p.gpa, .{
+                .id = id,
+                .path = try p.gpa.dupe(u8, watch.root),
+                .target = watch.target,
+            });
             continue;
         };
     }
 
-    for (gone.items) |root| {
-        try batch.push(p.gpa, p.watchOf(root), root, .removed, .directory);
-        p.tree.removeSubtree(root);
+    for (gone.items) |item| {
+        try batch.push(p.gpa, item.id, item.path, .removed, item.target);
+        p.tree.removeSubtree(item.path);
     }
 }
 
@@ -195,12 +200,4 @@ fn hasNodes(p: *const Poll, id: WatchId) bool {
         if (node.watch == id) return true;
     }
     return false;
-}
-
-/// The watch whose root is `root`.
-fn watchOf(p: *const Poll, root: []const u8) WatchId {
-    for (p.tree.watches.keys(), p.tree.watches.values()) |id, watch| {
-        if (path_cmp.eql(watch.root, root)) return id;
-    }
-    unreachable;
 }

@@ -53,6 +53,7 @@ pub const Watch = struct {
     /// Absolute, canonical path, owned by the tree. This is the path
     /// `lookout.Kind.overflow` is reported against.
     root: []u8,
+    target: Target,
     /// `lookout.AddOptions.recursive`.
     recursive: bool,
     /// `lookout.AddOptions.filter`, copied: the patterns are borrowed
@@ -137,7 +138,12 @@ pub fn addWatch(
     errdefer t.gpa.free(root);
     var filter = try options.filter.dupe(t.gpa);
     errdefer filter.deinit(t.gpa);
-    try t.watches.put(t.gpa, id, .{ .root = root, .recursive = recursive, .filter = filter });
+    try t.watches.put(t.gpa, id, .{
+        .root = root,
+        .target = .of(stat.kind),
+        .recursive = recursive,
+        .filter = filter,
+    });
     errdefer _ = t.watches.swapRemove(id);
 
     const start = added.items.len;
@@ -340,6 +346,10 @@ pub fn watchRoot(t: *Tree, id: WatchId) []const u8 {
     return (t.watches.get(id) orelse return "").root;
 }
 
+pub fn watchRootTarget(t: *Tree, id: WatchId) Target {
+    return (t.watches.get(id) orelse return .unknown).target;
+}
+
 /// Whether the watch a node belongs to asked for recursion.
 fn isRecursive(t: *Tree, id: WatchId) bool {
     return (t.watches.get(id) orelse return false).recursive;
@@ -392,7 +402,7 @@ pub fn rescanDirectory(
     };
 
     if (t.nodes.getPtr(id).?.snapshot.truncated) {
-        try batch.push(t.gpa, watch, t.watchRoot(watch), .overflow, .directory);
+        try batch.push(t.gpa, watch, t.watchRoot(watch), .overflow, t.watchRootTarget(watch));
     }
 
     const dir_path = t.nodes.getPtr(id).?.path;

@@ -74,6 +74,7 @@ pending_renames: std.AutoArrayHashMapUnmanaged(PendingKey, Pending),
 const Watch = struct {
     /// Absolute, canonical path, owned by the backend.
     root: []u8,
+    target: Target,
     recursive: bool,
     /// `lookout.AddOptions.filter`, copied. An excluded directory is
     /// never registered, so the kernel is never asked for a watch on it.
@@ -216,6 +217,7 @@ pub fn add(
     errdefer filter.deinit(n.gpa);
     try n.watches.put(n.gpa, id, .{
         .root = root,
+        .target = .of(stat.kind),
         .recursive = options.recursive,
         .filter = filter,
     });
@@ -403,7 +405,7 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.Pol
     if (event.mask & linux.IN.Q_OVERFLOW != 0) {
         // The kernel does not say what was lost, so every watch is suspect.
         for (n.watches.keys(), n.watches.values()) |id, watch| {
-            try batch.push(n.gpa, id, watch.root, .overflow, .directory);
+            try batch.push(n.gpa, id, watch.root, .overflow, watch.target);
         }
         return;
     }
@@ -420,12 +422,16 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.Pol
         return;
     }
     if (event.mask & linux.IN.DELETE_SELF != 0) {
-        for (owners) |watch| try batch.push(n.gpa, watch, base, .removed, .directory);
+        for (owners) |watch| {
+            try batch.push(n.gpa, watch, base, .removed, n.targetOfWatchPath(watch, base));
+        }
         n.drop(event.wd);
         return;
     }
     if (event.mask & linux.IN.MOVE_SELF != 0) {
-        for (owners) |watch| try batch.push(n.gpa, watch, base, .renamed, .directory);
+        for (owners) |watch| {
+            try batch.push(n.gpa, watch, base, .renamed, n.targetOfWatchPath(watch, base));
+        }
         n.forget(event.wd);
         return;
     }
@@ -558,8 +564,8 @@ fn bookkeep(
     else
         .unchanged;
     if (try n.budget.note(change.dir, if (count_budget) move else .unchanged)) {
-        const root = (n.watches.get(change.watch) orelse return).root;
-        try batch.push(n.gpa, change.watch, root, .overflow, .directory);
+        const watch = n.watches.get(change.watch) orelse return;
+        try batch.push(n.gpa, change.watch, watch.root, .overflow, watch.target);
     }
 
     if (!change.is_dir) return;
@@ -577,6 +583,11 @@ fn bookkeep(
 
 fn recursive(n: *const Inotify, id: WatchId) bool {
     return (n.watches.get(id) orelse return false).recursive;
+}
+
+fn targetOfWatchPath(n: *const Inotify, id: WatchId, subject: []const u8) Target {
+    const watch = n.watches.get(id) orelse return .unknown;
+    return if (path_cmp.eql(watch.root, subject)) watch.target else .directory;
 }
 
 /// Reports every held `IN_MOVED_FROM` whose other half never came as a

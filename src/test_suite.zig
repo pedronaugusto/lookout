@@ -356,6 +356,32 @@ test "a watch on a single file reports writes to it" {
     }
 }
 
+test "removing a directly watched file reports a file target" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("a.txt", "one");
+
+        const target = try f.path("a.txt");
+        defer std.testing.allocator.free(target);
+        const id = try f.watcher.add(target, .{});
+        try f.settle();
+        try f.tmp.dir.deleteFile(std.testing.io, "a.txt");
+
+        var found = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !found) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                if (event.id != id or event.kind != .removed or
+                    !std.mem.eql(u8, event.path, target)) continue;
+                try std.testing.expectEqual(lookout.Target.file, event.target);
+                found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
 test "a watch on a file that is already there does not call it new" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);

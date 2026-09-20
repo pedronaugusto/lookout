@@ -19,6 +19,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Baselines with an `only` filter now traverse excluded ancestors to reach matching descendants.
 - Coalescing a rename into a stronger non-rename event now clears the obsolete source path.
 - A pending watch promoted onto a file now reports the creation target as a file.
+- Removing a directly watched file now reports a file target on every backend.
 
 ## [0.2.0] - 2026-09-19
 
