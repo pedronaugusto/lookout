@@ -243,10 +243,10 @@ pub fn add(
             if (r.n.pruned(r.id, entry.path)) return .over;
             r.n.register(r.id, try r.n.gpa.dupe(u8, entry.path)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.WatchLimitReached => return error.WatchLimitReached,
                 // A subdirectory that vanished, or that is not ours to
-                // read: a hole in the watch, and saying so is the
-                // difference between a quiet subtree and a silent one.
+                // read -- including one past the per-user watch limit:
+                // a hole in the watch, and saying so is the difference
+                // between a quiet subtree and a silent one.
                 else => {
                     try r.batch.trouble(r.n.gpa, r.id, entry.path, .directory);
                     return .over;
@@ -258,7 +258,6 @@ pub fn add(
     var registering: Registering = .{ .n = n, .id = id, .batch = batch };
     walk.tree(n.gpa, n.io, abs_path, &registering, Registering.visit) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.WatchLimitReached => return error.WatchLimitReached,
         else => return error.Unexpected,
     };
 }

@@ -20,6 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Coalescing a rename into a stronger non-rename event now clears the obsolete source path.
 - A pending watch promoted onto a file now reports the creation target as a file.
 - Removing a directly watched file now reports a file target on every backend.
+- Hitting the inotify watch limit below a recursive root now reports the unwatched subtree without rejecting the root.
 
 ## [0.2.0] - 2026-09-19
 
