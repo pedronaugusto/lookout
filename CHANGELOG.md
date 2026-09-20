@@ -28,6 +28,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A zero polling interval now sleeps for one millisecond between quiet scans instead of spinning.
 - Position documentation now describes the host-wide FSEvents sequence used by the backend.
 - Path comparison documentation now states that portable case folding is limited to ASCII and Latin-1.
+- A watch on a single file now reports `overflow` when FSEvents loses track of the directory the file is in.
 
 ## [0.2.0] - 2026-09-19
 

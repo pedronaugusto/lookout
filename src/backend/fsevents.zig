@@ -288,7 +288,25 @@ const Stream = struct {
     fn rootTarget(st: *const Stream) Target {
         return if (st.scope == .file) .file else .directory;
     }
+
+    /// Whether a loss the system reports at `subject` can have taken
+    /// events this watch wanted: `subject` is inside the watch, or the
+    /// watch is inside `subject`. The second half is what a watch on a
+    /// file needs, whose stream is on the parent directory: the loss is
+    /// reported at the parent, which `wants` rightly refuses as an
+    /// event, and which is nonetheless where this file's events were
+    /// lost.
+    fn concerns(st: *const Stream, subject: []const u8) bool {
+        return st.wants(subject) or path_cmp.within(subject, st.root);
+    }
 };
+
+/// The flags that say the system lost track: `MustScanSubDirs` is the
+/// instruction, and the two dropped flags are the informational ones
+/// beside it saying whether the bottleneck was in the kernel or in this
+/// process. Each becomes `lookout.Kind.overflow` on its own, because a
+/// loss the system does not say how to recover from is still a loss.
+const lost_track: u32 = flag.must_scan_sub_dirs | flag.user_dropped | flag.kernel_dropped;
 
 /// Creates the delivery queue, the buffer it fills, and the pipe the
 /// watcher is woken through.
@@ -741,17 +759,18 @@ fn report(
         trace.log("fsevents drop no-stream watch={d} path={s}", .{ @intFromEnum(record.id), record.path });
         return;
     };
+    // Before the scope check, not after it: the path a loss is reported
+    // at is the directory to rescan, which the system coalesces upwards,
+    // and for a watch on a file that is the parent directory -- a path
+    // the watch does not want an event for and cannot afford to ignore
+    // a loss at.
+    if (record.flags & lost_track != 0 and stream.concerns(record.path)) {
+        trace.log("fsevents push overflow root={s} at={s}", .{ stream.root, record.path });
+        try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
+    }
     if (!stream.wants(record.path)) {
         trace.log("fsevents drop out-of-scope root={s} path={s}", .{ stream.root, record.path });
         return;
-    }
-
-    if (record.flags & (flag.must_scan_sub_dirs |
-        flag.user_dropped |
-        flag.kernel_dropped) != 0)
-    {
-        trace.log("fsevents push overflow root={s}", .{stream.root});
-        try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
     }
     // The marker that the system has finished reading its log back to
     // the position `lookout.Options.since` named. Nothing happened to a
@@ -1168,6 +1187,137 @@ test "accumulated removal and creation flags identify a replacement" {
     ));
     try std.testing.expect(!wasReplaced(flag.item_removed));
     try std.testing.expect(!wasReplaced(flag.item_created | flag.item_modified));
+}
+
+/// One record of a delivery made by hand.
+const Synthetic = struct { path: []const u8, flags: u32 };
+
+/// Makes the delivery the system would make for `items`, through the
+/// callback it would call and into the buffer that callback writes.
+/// Nothing between the system's queue and `drain` is bypassed.
+fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
+    var paths: [4][*:0]const u8 = undefined;
+    var flags: [4]u32 = undefined;
+    var ids: [4]u64 = undefined;
+    var filled: usize = 0;
+    defer for (paths[0..filled]) |path| gpa.free(std.mem.span(path));
+    for (items) |item| {
+        paths[filled] = try gpa.dupeZ(u8, item.path);
+        flags[filled] = item.flags;
+        ids[filled] = c.FSEventsGetCurrentEventId();
+        filled += 1;
+    }
+    deliver(stream.ref, stream, filled, @ptrCast(&paths), &flags, &ids);
+}
+
+/// Polls until one `overflow` arrives, checks it against the watch it is
+/// for, and then that no second one follows it.
+fn expectOneOverflow(watcher: *lookout.Watcher, id: WatchId, root: []const u8, target: Target) !void {
+    var overflows: usize = 0;
+    var waited: u32 = 0;
+    while (waited < 10_000 and overflows == 0) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind != .overflow) continue;
+            try std.testing.expectEqual(id, event.id);
+            try std.testing.expectEqualStrings(root, event.path);
+            try std.testing.expectEqual(target, event.target);
+            overflows += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), overflows);
+    while (true) {
+        const events = try watcher.poll(200);
+        if (events.len == 0) return;
+        for (events) |event| try std.testing.expect(event.kind != .overflow);
+    }
+}
+
+test "the flags that say the system lost track are one overflow, and the watch goes on" {
+    // FSEvents.h on `kFSEventStreamEventFlagMustScanSubDirs`: "Your
+    // application must rescan not just the directory given in the event,
+    // but all its children, recursively. This can happen if there was a
+    // problem whereby events were coalesced hierarchically", with
+    // `UserDropped` and `KernelDropped` set beside it to say where. A
+    // hundred thousand creations against the smallest buffer this
+    // backend takes did not make the kernel set any of the three -- the
+    // callback is a bounded copy, so this process is never the
+    // bottleneck -- so the delivery is made by hand, through the
+    // callback the system calls and the buffer it writes.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.createDirPath(io, "sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
+    const sub = try std.fs.path.join(gpa, &.{ root, "sub" });
+    defer gpa.free(sub);
+    const file = try std.fs.path.join(gpa, &.{ root, "a.txt" });
+    defer gpa.free(file);
+
+    // The caller's half of the contract: seeded where the watch is taken.
+    var baseline: lookout.Baseline = try .seed(gpa, io, root, .{ .recursive = true });
+    defer baseline.deinit(gpa);
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const tree = try watcher.add(root, .{ .recursive = true });
+    const single = try watcher.add(file, .{});
+    while ((try watcher.poll(200)).len != 0) {}
+    const f = &watcher.impl.fsevents;
+
+    // What the lost events would have carried.
+    try tmp.dir.writeFile(io, .{ .sub_path = "missed.txt", .data = "x" });
+
+    // One delivery, the three flags across it, at the root and below it:
+    // one overflow, against the root.
+    try synthesize(gpa, f.streams.get(tree).?, &.{
+        .{ .path = root, .flags = flag.must_scan_sub_dirs | flag.kernel_dropped },
+        .{ .path = sub, .flags = flag.must_scan_sub_dirs | flag.user_dropped },
+        .{ .path = root, .flags = flag.must_scan_sub_dirs },
+    });
+    try expectOneOverflow(&watcher, tree, root, .directory);
+
+    // The tree read again, which is what the event asks for.
+    var recovered = false;
+    for (try baseline.diff(gpa)) |change| {
+        if (change.kind == .created and std.mem.endsWith(u8, change.path, "missed.txt")) recovered = true;
+    }
+    try testing.expect(recovered);
+
+    // A watch on a file has its stream on the parent directory, and the
+    // loss is reported there: a path the watch wants no event for, and
+    // the one place its events could have been lost.
+    try synthesize(gpa, f.streams.get(single).?, &.{
+        .{ .path = root, .flags = flag.must_scan_sub_dirs | flag.kernel_dropped },
+    });
+    try expectOneOverflow(&watcher, single, file, .file);
+
+    // A loss coalesced above the root took the root's events with it.
+    try synthesize(gpa, f.streams.get(tree).?, &.{
+        .{ .path = std.fs.path.dirname(root).?, .flags = flag.user_dropped },
+    });
+    try expectOneOverflow(&watcher, tree, root, .directory);
+
+    // And both watches are still watching.
+    try tmp.dir.writeFile(io, .{ .sub_path = "after.txt", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one and two" });
+    const after = try std.fs.path.join(gpa, &.{ root, "after.txt" });
+    defer gpa.free(after);
+    var saw_after = false;
+    var saw_file = false;
+    var waited: u32 = 0;
+    while (waited < 10_000 and !(saw_after and saw_file)) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.id == tree and event.kind == .created and std.mem.eql(u8, event.path, after)) saw_after = true;
+            if (event.id == single and event.kind == .modified and std.mem.eql(u8, event.path, file)) saw_file = true;
+        }
+    }
+    try testing.expect(saw_after);
+    try testing.expect(saw_file);
 }
 
 /// The CoreFoundation, CoreServices and libdispatch surface lookout uses.
