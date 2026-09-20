@@ -193,7 +193,7 @@ fn scan(b: *Baseline, gpa: Allocator, report: bool) Error!void {
             if (meta.file_kind != .directory) continue;
             const child = try std.fs.path.join(gpa, &.{ path, name });
             errdefer gpa.free(child);
-            if (b.filter.excludes(b.root, child)) {
+            if (b.filter.prunes(b.root, child)) {
                 gpa.free(child);
                 continue;
             }
@@ -428,6 +428,29 @@ test "a filter keeps a subtree out of the diff" {
     const changes = try base.diff(gpa);
     try testing.expectEqual(@as(usize, 1), changes.len);
     try testing.expect(try holds(changes, root, "keep/b.txt", .created));
+}
+
+test "an only filter traverses ancestors of matching descendants" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "src/deep");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var base = try Baseline.seed(gpa, io, root, .{
+        .recursive = true,
+        .filter = .{ .only = &.{"src/**/*.zig"} },
+    });
+    defer base.deinit(gpa);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/deep/main.zig", .data = "const x = 1;" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/deep/notes.txt", .data = "ignored" });
+
+    const changes = try base.diff(gpa);
+    try testing.expectEqual(@as(usize, 1), changes.len);
+    try testing.expect(try holds(changes, root, "src/deep/main.zig", .created));
 }
 
 test "a directory past the entry limit says the diff is incomplete" {

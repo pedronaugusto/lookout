@@ -16,6 +16,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Windows now retires a silently renamed root before it can report child paths under the old name.
 - FSEvents now reports a path removed and recreated in one delivery as removed.
 - Timeouts larger than an operating system wait can represent are now completed in safe chunks.
+- Baselines with an `only` filter now traverse excluded ancestors to reach matching descendants.
 
 ## [0.2.0] - 2026-09-19
 
