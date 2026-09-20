@@ -178,13 +178,16 @@ fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
         // Only a watch that still has nodes: one already reported gone
         // keeps its id, and must not be reported twice.
         if (!p.hasNodes(id)) continue;
-        _ = Io.Dir.cwd().statFile(p.io, watch.root, .{ .follow_symlinks = false }) catch {
-            try gone.append(p.gpa, .{
-                .id = id,
-                .path = try p.gpa.dupe(u8, watch.root),
-                .target = watch.target,
-            });
-            continue;
+        _ = Io.Dir.cwd().statFile(p.io, watch.root, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => {
+                try gone.append(p.gpa, .{
+                    .id = id,
+                    .path = try p.gpa.dupe(u8, watch.root),
+                    .target = watch.target,
+                });
+                continue;
+            },
+            else => return err,
         };
     }
 

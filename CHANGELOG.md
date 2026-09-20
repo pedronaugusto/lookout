@@ -21,6 +21,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A pending watch promoted onto a file now reports the creation target as a file.
 - Removing a directly watched file now reports a file target on every backend.
 - Hitting the inotify watch limit below a recursive root now reports the unwatched subtree without rejecting the root.
+- Polling now treats only an absent root as removed and returns other root stat errors.
 
 ## [0.2.0] - 2026-09-19
 
