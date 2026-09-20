@@ -17,6 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - FSEvents now reports a path removed and recreated in one delivery as removed.
 - Timeouts larger than an operating system wait can represent are now completed in safe chunks.
 - Baselines with an `only` filter now traverse excluded ancestors to reach matching descendants.
+- Coalescing a rename into a stronger non-rename event now clears the obsolete source path.
 
 ## [0.2.0] - 2026-09-19
 

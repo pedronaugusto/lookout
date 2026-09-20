@@ -444,8 +444,13 @@ fn record(
             return;
         }
         if (rank(kind) > rank(existing.kind)) existing.kind = kind;
+        if (existing.kind != .renamed) {
+            if (existing.from) |stale| gpa.free(stale);
+            existing.from = null;
+            return;
+        }
         if (from) |source| {
-            if (existing.from == null and existing.kind == .renamed) {
+            if (existing.from == null) {
                 existing.from = try gpa.dupe(u8, source);
             }
         }
@@ -576,6 +581,20 @@ test "a paired rename is one event carrying where it came from" {
     try testing.expectEqual(Kind.renamed, b.events.items[0].kind);
     try testing.expectEqualStrings("/tmp/new", b.events.items[0].path);
     try testing.expectEqualStrings("/tmp/old", b.events.items[0].from.?);
+}
+
+test "a stronger non-rename clears an earlier rename source" {
+    const gpa = testing.allocator;
+    var b = testBatch(.{});
+    defer b.deinit(gpa);
+
+    const id: WatchId = @enumFromInt(0);
+    try b.pushRename(gpa, id, "/tmp/new", "/tmp/old", .file);
+    try b.push(gpa, id, "/tmp/new", .removed, .file);
+
+    try testing.expectEqual(@as(usize, 1), b.events.items.len);
+    try testing.expectEqual(Kind.removed, b.events.items[0].kind);
+    try testing.expectEqual(@as(?[]const u8, null), b.events.items[0].from);
 }
 
 test "every event carries when it was seen" {
