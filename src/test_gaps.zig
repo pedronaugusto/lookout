@@ -562,6 +562,67 @@ test "a poll that expires before the replay begins is not the end of it" {
     try std.testing.expect(saw_deleted);
 }
 
+test "the inotify queue filled past its limit is one overflow, and the watch goes on" {
+    // The cross-backend `overflow` guarantee, from a kernel that really
+    // lost something. `/proc/sys/fs/inotify/max_queued_events` bounds
+    // the queue of one inotify instance -- 16384 by default -- and past
+    // it "events in excess of this limit are dropped, but an
+    // IN_Q_OVERFLOW event is always generated" (inotify(7)). Nothing
+    // polls while the burst is written, so every creation queues, and
+    // one more creation than the queue holds is a queue that overflowed
+    // whatever else each creation produced.
+    if (!lookout.supported(.inotify)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const limit: usize = limit: {
+        var buffer: [32]u8 = undefined;
+        const text = std.Io.Dir.cwd().readFile(io, "/proc/sys/fs/inotify/max_queued_events", &buffer) catch
+            break :limit 16_384;
+        break :limit std.fmt.parseInt(usize, std.mem.trim(u8, text, " \n"), 10) catch 16_384;
+    };
+    // A host tuned far past the default would take this test minutes
+    // to fill, and what it asserts is the kernel's contract, not the
+    // host's setting.
+    if (limit > 100_000) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var watcher: Watcher = try .init(gpa, io, .{
+        .backend = .inotify,
+        .max_dir_entries = 1_000_000,
+        .max_events = 0,
+    });
+    defer watcher.deinit();
+    _ = try watcher.add(root, .{});
+    while ((try watcher.poll(200)).len != 0) {}
+
+    try writeBurst(tmp.dir, limit + 1);
+
+    // The kernel keeps one overflow record and queues it once, however
+    // much was dropped while it sat there.
+    var tally: Tally = .{};
+    try tally.drain(&watcher, 1_000);
+    try std.testing.expectEqual(@as(usize, 1), tally.overflow);
+    try std.testing.expect(tally.created <= limit);
+
+    // The watch is what it was: what happens next is reported.
+    try tmp.dir.writeFile(io, .{ .sub_path = "after.txt", .data = "x" });
+    const after = try std.fs.path.join(gpa, &.{ root, "after.txt" });
+    defer gpa.free(after);
+    var found = false;
+    var waited: u32 = 0;
+    while (waited < timeout_ms and !found) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
+        }
+    }
+    try std.testing.expect(found);
+}
+
 // Last in the file on purpose. Ten thousand files created and then
 // deleted is enough churn that the operating system loses track of what
 // a watcher started just afterwards is looking at, and a test that

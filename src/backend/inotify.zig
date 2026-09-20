@@ -13,10 +13,13 @@
 //!   `lookout.Watcher.add` with `error.WatchLimitReached` for the path the
 //!   caller named, and reports `lookout.Kind.unwatched` for a directory
 //!   below it that there was no room for.
-//! * The kernel event queue is bounded. When it overflows, the kernel says
-//!   so and says nothing about what was lost; lookout reports
+//! * The kernel event queue is bounded, per inotify instance, by
+//!   `/proc/sys/fs/inotify/max_queued_events` -- 16384 by default. Past
+//!   it the kernel drops what does not fit and queues one `IN_Q_OVERFLOW`
+//!   in its place, saying nothing about what was lost; lookout reports
 //!   `lookout.Kind.overflow` against every watch root and the caller should
-//!   rescan.
+//!   rescan. A watcher polled less often than its tree changes wants the
+//!   limit raised, which is the administrator's to do.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -653,6 +656,78 @@ fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) lookout.Watc
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
+}
+
+test "the kernel's queue overflow record is an overflow against every watch" {
+    // inotify(7): "IN_Q_OVERFLOW: Event queue overflowed (wd is -1 for
+    // this event)", and of max_queued_events: "Events in excess of this
+    // limit are dropped, but an IN_Q_OVERFLOW event is always
+    // generated." The record is written here the way the kernel writes
+    // it and read back through the decoder a real read goes through,
+    // so that what is asserted is the whole path from the bytes to the
+    // batch. src/test_gaps.zig fills a real queue past the limit.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
+    const file = try std.fs.path.join(gpa, &.{ root, "a.txt" });
+    defer gpa.free(file);
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify });
+    defer watcher.deinit();
+    const dir = try watcher.add(root, .{ .recursive = true });
+    const single = try watcher.add(file, .{});
+    while ((try watcher.poll(200)).len != 0) {}
+
+    var bytes: [records.header_len]u8 = undefined;
+    const len = records.encode(&bytes, .{ .wd = -1, .mask = linux.IN.Q_OVERFLOW, .cookie = 0, .name = null });
+    var it = records.iterate(bytes[0..len]);
+    const record = (try it.next()).?;
+    try testing.expectEqual(@as(?records.Record, null), try it.next());
+
+    // Straight into the batch the next poll returns, which is where a
+    // read puts it.
+    const n = &watcher.impl.inotify;
+    try n.handle(record, &watcher.batch);
+
+    var dir_overflows: usize = 0;
+    var file_overflows: usize = 0;
+    for (watcher.batch.events.items) |event| {
+        try testing.expectEqual(lookout.Kind.overflow, event.kind);
+        if (event.id == dir) {
+            try testing.expectEqualStrings(root, event.path);
+            try testing.expectEqual(Target.directory, event.target);
+            dir_overflows += 1;
+        } else {
+            try testing.expectEqual(single, event.id);
+            try testing.expectEqualStrings(file, event.path);
+            try testing.expectEqual(Target.file, event.target);
+            file_overflows += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), dir_overflows);
+    try testing.expectEqual(@as(usize, 1), file_overflows);
+
+    // And nothing about the watches themselves changed: the next write
+    // is reported to both.
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one and two" });
+    var saw_dir = false;
+    var saw_file = false;
+    var waited: u32 = 0;
+    while (waited < 10_000 and !(saw_dir and saw_file)) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind != .modified or !std.mem.eql(u8, event.path, file)) continue;
+            if (event.id == dir) saw_dir = true;
+            if (event.id == single) saw_file = true;
+        }
+    }
+    try testing.expect(saw_dir);
+    try testing.expect(saw_file);
 }
 
 /// Asks the kernel for a watch on `path`, taking ownership of it.
