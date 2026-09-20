@@ -194,16 +194,18 @@ test "a burst arrives whole, or says what it lost" {
             });
         }
 
+        // Waited for arrival, not for silence: on a machine whose event
+        // daemon is busy elsewhere a burst can pause for more than a second
+        // and still arrive whole, and a pause is not a loss. What decides
+        // is the count, or an overflow, or the deadline -- and a burst that
+        // is short at the deadline with no overflow is exactly the failure
+        // this test exists to catch.
         var created: usize = 0;
         var overflow: usize = 0;
-        var idle: u32 = 0;
-        while (idle < 1_000) {
+        var waited_ms: u32 = 0;
+        while (created < burst and overflow == 0 and waited_ms < 30_000) {
             const events = try watcher.poll(200);
-            if (events.len == 0) {
-                idle += 200;
-                continue;
-            }
-            idle = 0;
+            if (events.len == 0) waited_ms += 200;
             for (events) |event| switch (event.kind) {
                 .created => created += 1,
                 .overflow => overflow += 1,
