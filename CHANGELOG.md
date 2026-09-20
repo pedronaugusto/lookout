@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Removing a watch now discards changes still held by settling or debouncing.
+
 ## [0.2.0] - 2026-09-19
 
 A path compared the way the file system compares it, a rename that survives

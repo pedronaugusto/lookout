@@ -1096,6 +1096,7 @@ pub const Watcher = struct {
             w.destroyPending(p);
             break;
         }
+        w.batch.discardFuture(w.gpa, id);
     }
 
     /// Waits for something to happen and returns what did.

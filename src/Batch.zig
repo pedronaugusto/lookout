@@ -236,6 +236,13 @@ fn sizeOf(b: *const Batch, subject: []const u8) ?u64 {
 /// the caller asked about. This is how they are kept out of the batch
 /// without the backends having to know why.
 pub fn discard(b: *Batch, gpa: Allocator, id: WatchId) void {
+    b.discardFuture(gpa, id);
+    b.discardEvents(gpa, id);
+}
+
+/// Drops held-back state belonging to `id` without touching events already
+/// returned to the caller.
+pub fn discardFuture(b: *Batch, gpa: Allocator, id: WatchId) void {
     _ = b.dropped.swapRemove(id);
     var t: usize = 0;
     while (t < b.troubles.items.len) {
@@ -245,6 +252,21 @@ pub fn discard(b: *Batch, gpa: Allocator, id: WatchId) void {
         }
         gpa.free(b.troubles.orderedRemove(t).path);
     }
+    var h: usize = 0;
+    while (h < b.held.count()) {
+        if (b.held.values()[h].id != id) {
+            h += 1;
+            continue;
+        }
+        const path = b.held.keys()[h];
+        const entry = b.held.values()[h];
+        b.held.swapRemoveAt(h);
+        gpa.free(path);
+        if (entry.from) |from| gpa.free(from);
+    }
+}
+
+fn discardEvents(b: *Batch, gpa: Allocator, id: WatchId) void {
     var removed = false;
     var i: usize = 0;
     while (i < b.events.items.len) {
@@ -264,19 +286,6 @@ pub fn discard(b: *Batch, gpa: Allocator, id: WatchId) void {
         for (b.events.items, 0..) |event, at| {
             b.index.putAssumeCapacity(event.path, @intCast(at));
         }
-    }
-
-    var h: usize = 0;
-    while (h < b.held.count()) {
-        if (b.held.values()[h].id != id) {
-            h += 1;
-            continue;
-        }
-        const path = b.held.keys()[h];
-        const entry = b.held.values()[h];
-        b.held.swapRemoveAt(h);
-        gpa.free(path);
-        if (entry.from) |from| gpa.free(from);
     }
 }
 

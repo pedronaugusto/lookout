@@ -857,6 +857,35 @@ test "one watcher watches a path once" {
     }
 }
 
+test "removing a watch discards events held for a quiet window" {
+    for (backends) |backend| {
+        var f = try Fixture.initOptions(.{
+            .backend = backend,
+            .poll_interval_ms = 20,
+            .debounce_ms = 300,
+        });
+        defer f.deinit();
+        try f.write("a.txt", "one");
+        const id = try f.watcher.add(f.root, .{});
+        try f.settle();
+
+        try f.write("a.txt", "two");
+        var waited: u32 = 0;
+        while (f.watcher.stats().held == 0 and waited < timeout_ms) : (waited += 20) {
+            _ = try f.watcher.poll(0);
+            if (f.watcher.stats().held == 0) {
+                std.testing.io.sleep(.fromMilliseconds(20), .awake) catch {};
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().held);
+
+        f.watcher.remove(id);
+        try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().held);
+        std.testing.io.sleep(.fromMilliseconds(350), .awake) catch {};
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+    }
+}
+
 test "a zero timeout is one check, not a refusal to look" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
