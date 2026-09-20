@@ -67,6 +67,8 @@ budget: Budget,
 /// Where every stream is started from: `since_now`, or the event id a
 /// caller kept from an earlier watcher. See `lookout.Options.since`.
 since: u64,
+/// Greatest FSEvents id this watcher has successfully drained.
+last_drained: u64,
 /// Every path each watch believes exists, seeded by walking the watch
 /// when it is added and kept current from what it reports. Path keys are
 /// owned here and compared the way the file system compares them.
@@ -325,6 +327,7 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
     const queue = c.dispatch_queue_create("dev.lookout.fsevents", null) orelse
         return error.SystemResources;
 
+    const since = sinceOf(options.since);
     return .{
         .gpa = gpa,
         .io = io,
@@ -333,7 +336,11 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .streams = .empty,
         .staging = .empty,
         .budget = .init(gpa, io, options.max_dir_entries),
-        .since = sinceOf(options.since),
+        .since = since,
+        .last_drained = if (since == c.kFSEventStreamEventIdSinceNow)
+            c.FSEventsGetCurrentEventId()
+        else
+            since,
         .known = .empty,
         .pairing = .{},
     };
@@ -371,11 +378,10 @@ pub fn fd(f: *const FsEvents) ?posix.fd_t {
     return f.sink.wake_r;
 }
 
-/// The volume's current event id, which `lookout.Options.since` takes
-/// back. See `lookout.Watcher.position`.
+/// The greatest event id this watcher has drained, which
+/// `lookout.Options.since` takes back. See `lookout.Watcher.position`.
 pub fn position(f: *const FsEvents) ?u64 {
-    _ = f;
-    return c.FSEventsGetCurrentEventId();
+    return f.last_drained;
 }
 
 /// Pokes the pipe a blocked `wait` is polling. See
@@ -677,6 +683,7 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
         if (used[i]) continue;
         try f.report(batch, delivered.items, used, i);
     }
+    for (delivered.items) |record| f.last_drained = @max(f.last_drained, record.event);
 }
 
 /// Joins the half held from the last drain to its partner in this one,

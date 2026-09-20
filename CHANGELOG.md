@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Moving an entry between separate inotify watches is reported to each watch independently.
 - Overlapping watches now keep independent registrations, state, and events for shared paths.
 - Watching a filesystem root now includes every descendant beneath its trailing separator.
+- Saved FSEvents positions now stop at the last event the watcher actually drained.
 
 ## [0.2.0] - 2026-09-19
 

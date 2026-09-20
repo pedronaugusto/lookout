@@ -1675,6 +1675,23 @@ test "a watcher says where it has got to, exactly where it can" {
     }
 }
 
+test "an FSEvents position does not pass an undrained event" {
+    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+
+    var f = try Fixture.init(.fsevents);
+    defer f.deinit();
+    _ = try f.watcher.add(f.root, .{});
+    try f.settle();
+    const before = f.watcher.position().?.value;
+
+    try f.write("queued.txt", "one");
+    std.testing.io.sleep(.fromMilliseconds(200), .awake) catch {};
+    try std.testing.expectEqual(before, f.watcher.position().?.value);
+
+    try f.expectEvent("queued.txt", .created);
+    try std.testing.expect(f.watcher.position().?.value > before);
+}
+
 test "what changed while nothing was watching is reported on resuming" {
     if (!lookout.tracksPosition(lookout.default_backend)) return error.SkipZigTest;
 
