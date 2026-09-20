@@ -18,8 +18,9 @@
 //! * Case, for the ASCII letters and for the Latin-1 letters.
 //! * Composition, for the Latin-1 letters: a precomposed letter compares
 //!   equal to its base letter followed by its accent.
-//! * Nothing else. A path in another script is compared as written,
-//!   which is what a volume that stores it verbatim does too.
+//! * Nothing else. A path in another script is compared as written even
+//!   on a case-insensitive volume; callers need the filesystem's canonical
+//!   spelling when case differs outside Latin-1.
 //!
 //! On a target whose file systems do not fold -- Linux and the BSDs --
 //! `folds_case` is false and every comparison here is a byte comparison
@@ -28,8 +29,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Whether lookout compares paths as the target's usual file systems do,
-/// ignoring case and composition, or byte for byte.
+/// Whether lookout applies portable ASCII/Latin-1 case and composition
+/// folding on this target, or compares paths byte for byte.
 ///
 /// A case-sensitive volume on a target that folds -- which both Apple
 /// platforms and Windows can be asked for -- is compared more loosely
@@ -290,7 +291,7 @@ test "a path equals itself and nothing else" {
     try testing.expect(eql("", ""));
 }
 
-test "case and composition are folded exactly where the target folds them" {
+test "case and composition are folded in the portable range" {
     const same_case = eql("/w/Notes.TXT", "/w/notes.txt");
     try testing.expectEqual(folds_case, same_case);
 
@@ -303,6 +304,11 @@ test "case and composition are folded exactly where the target folds them" {
     // which is what a volume storing it verbatim does.
     try testing.expect(eql("/w/日本", "/w/日本"));
     try testing.expect(!eql("/w/日本", "/w/日"));
+}
+
+test "case folding outside Latin-1 is deliberately not claimed" {
+    if (!folds_case) return error.SkipZigTest;
+    try testing.expect(!eql("/w/\u{0416}.txt", "/w/\u{0436}.txt"));
 }
 
 test "the folded hash agrees with the folded comparison" {

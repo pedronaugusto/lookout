@@ -16,8 +16,9 @@
 //! kernel's and the filter can only save the caller the event. That
 //! difference is `lookout.prunesIgnored`.
 //!
-//! Every comparison here is the file system's: on a volume that folds
-//! case, `*.TMP` excludes `notes.tmp`. See `path.folds_case`.
+//! On Apple and Windows targets, comparisons fold ASCII and Latin-1 case
+//! and composition, so `*.TMP` excludes `notes.tmp`. Other Unicode
+//! scripts are compared as written. See `path.folds_case`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

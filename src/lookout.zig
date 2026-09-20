@@ -24,9 +24,9 @@ const path_cmp = @import("path.zig");
 /// Which paths under a watch the caller wants. See `AddOptions.filter`.
 pub const Filter = @import("Filter.zig");
 
-/// Whether lookout compares two paths as the target's usual file systems
-/// do, ignoring case and composition, or byte for byte. See the module
-/// this comes from for exactly what is folded.
+/// Whether lookout applies its portable ASCII/Latin-1 case and composition
+/// folding, or compares paths byte for byte. See `path.zig` for the exact
+/// supported range and its limitation outside Latin-1.
 pub const folds_case = @import("path.zig").folds_case;
 
 /// What a tree looked like, and what has changed in it since. This is

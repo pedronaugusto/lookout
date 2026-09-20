@@ -39,8 +39,8 @@ hold_all: bool,
 events: std.ArrayList(Event),
 /// Maps an event's watch and path to its index in `events`. Path keys are
 /// the same allocations as `Event.path`, owned by `events`, and are
-/// compared the way the file system compares them: two spellings of one
-/// path under one watch are one event, not two.
+/// compared with lookout's platform folding rules: two supported
+/// spellings of one path under one watch are one event, not two.
 index: std.HashMapUnmanaged(EventKey, u32, EventKeyContext, std.hash_map.default_max_load_percentage),
 /// Paths that have changed but have not been quiet long enough to be
 /// reported. Survives `reset`, because a file still being written is not

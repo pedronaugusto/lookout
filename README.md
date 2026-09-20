@@ -79,7 +79,7 @@ linked anywhere else.
 | `Position` | Where a watcher had got to. `token` writes it as text, `parse` reads it back. |
 | `RootMove` | `renamed`, `removed`, or `silent` for nothing at all. |
 | `default_backend` | The backend `.auto` resolves to on this target. |
-| `folds_case` | Whether paths are compared as this target's file systems compare them, or byte for byte. |
+| `folds_case` | Whether portable ASCII/Latin-1 case and composition folding is enabled, or paths are compared byte for byte. |
 | `supported(backend)` | Whether this target was built with a backend. |
 | `pairsRenames(backend)` | Whether it reports `renamed` with a `from`, or a removal and a creation. |
 | `reportsRootMove(backend)` | Which of the three shapes a move of the watched path itself arrives as. |
@@ -263,8 +263,9 @@ So on the targets whose file systems fold — Apple platforms and Windows
 root against the path an event names, a pattern against an entry, one
 node against the subtree it is removed with, and the key an event is
 coalesced under. Case is folded for the ASCII and Latin-1 letters, and
-composition for the Latin-1 letters; a path in another script is
-compared as written, which is what a volume storing it verbatim does.
+composition for the Latin-1 letters. A path in another script is
+compared as written even when the volume itself would fold its case;
+use the filesystem's canonical spelling outside Latin-1.
 `folds_case` says which of the two this target has, and on Linux and the
 BSDs it is false and a comparison is a comparison of bytes.
 
@@ -355,9 +356,9 @@ for the bookkeeping a backend that recurses itself needs.
   one kernel watch where they meet.
 - **Nothing is persisted.** `Options.since` takes a token that is the
   caller's to store.
-- **No path is compared more strictly than its file system compares
-  it**, so on Apple platforms and Windows a case-sensitive volume is
-  compared more loosely than it stores.
+- **Portable path folding covers ASCII and Latin-1 only.** On Apple
+  platforms and Windows, case differences in other scripts still compare
+  as written even when the volume itself treats them as equal.
 
 ## Platforms
 

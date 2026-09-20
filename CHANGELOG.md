@@ -27,10 +27,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `max_events` now bounds paths held for settling or debouncing as well as ready events.
 - A zero polling interval now sleeps for one millisecond between quiet scans instead of spinning.
 - Position documentation now describes the host-wide FSEvents sequence used by the backend.
+- Path comparison documentation now states that portable case folding is limited to ASCII and Latin-1.
 
 ## [0.2.0] - 2026-09-19
 
-A path compared the way the file system compares it, a rename that survives
+ASCII and Latin-1 paths compared with filesystem-style folding, a rename that survives
 the boundary of a read, and the three questions a watcher could not answer
 about itself.
 
@@ -148,7 +149,7 @@ about itself.
   path removed and recreated inside one window is `removed`, which means
   look at this path again.
 
-- **A path is compared the way the file system compares it.** lookout compared
+- **ASCII and Latin-1 paths use filesystem-style folding.** lookout compared
   paths byte for byte, which on a volume that folds case is not a degradation
   but a silent total failure: a caller whose spelling differed from the one on
   disk had every event dropped, and nothing said why. An ignore pattern had it
