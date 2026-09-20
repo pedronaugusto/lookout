@@ -437,7 +437,8 @@ pub const Options = struct {
     /// `supported`.
     backend: Backend = .auto,
     /// How long the `poll` backend waits between scans. Ignored by every
-    /// other backend.
+    /// other backend. Zero is clamped to one millisecond so a quiet
+    /// indefinite poll still blocks instead of scanning in a busy loop.
     poll_interval_ms: u32 = 500,
     /// How long `Watcher.poll` keeps collecting after the first event of a
     /// batch arrives. Everything that lands on one path inside that window
@@ -1321,6 +1322,7 @@ test {
     _ = Baseline;
     _ = Batch;
     _ = Filter;
+    _ = Poll;
     _ = Tree;
     _ = @import("Snapshot.zig");
     _ = @import("Budget.zig");

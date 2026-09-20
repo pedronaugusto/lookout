@@ -44,10 +44,16 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
     return .{
         .gpa = gpa,
         .io = io,
-        .interval_ms = options.poll_interval_ms,
+        .interval_ms = @max(1, options.poll_interval_ms),
         .tree = .init(gpa, io, options.max_dir_entries, false),
         .woken = .init(false),
     };
+}
+
+test "a zero polling interval still sleeps between quiet scans" {
+    var p = try Poll.init(std.testing.allocator, std.testing.io, .{ .poll_interval_ms = 0 });
+    defer p.deinit();
+    try std.testing.expectEqual(@as(u32, 1), p.interval_ms);
 }
 
 /// Releases the watch tables and the directory handles they hold open.
