@@ -1630,6 +1630,17 @@ test "the descriptor becomes readable when there is something to report" {
         }};
         try std.testing.expect(try std.posix.poll(&fds, timeout_ms) > 0);
         try f.expectEvent("a.txt", .created);
+
+        // And the other half of the promise: a wait loop that fires
+        // when nothing has happened would spin. A `poll` that came
+        // back empty has taken everything the descriptor held, so
+        // right after one the descriptor is quiet -- and it stays
+        // quiet, because a tree nobody touches has nothing to report.
+        try f.settle();
+        fds[0].revents = 0;
+        try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 0));
+        fds[0].revents = 0;
+        try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 500));
     }
 }
 
