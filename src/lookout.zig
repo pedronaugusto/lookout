@@ -652,6 +652,9 @@ pub const Watcher = struct {
         /// refusing it here is the same answer on every backend rather
         /// than a difference to discover.
         registered: ?[]u8,
+        /// The type of the caller's root, retained for root-level events
+        /// after the path can no longer be stat-ed.
+        target: Target,
         /// `AddOptions.recursive`.
         recursive: bool,
     };
@@ -843,6 +846,7 @@ pub const Watcher = struct {
     /// Registers an absolute path that exists, and issues its id.
     fn register(w: *Watcher, abs: []const u8, options: AddOptions) AddError!WatchId {
         if (w.claimed(abs)) return error.PathAlreadyWatched;
+        const stat = try Io.Dir.cwd().statFile(w.io, abs, .{ .follow_symlinks = false });
         const id: WatchId = @enumFromInt(w.next_id);
         const owned = try w.gpa.dupe(u8, abs);
         errdefer w.gpa.free(owned);
@@ -855,6 +859,7 @@ pub const Watcher = struct {
         w.table.putAssumeCapacity(id, .{
             .path = owned,
             .registered = mirror,
+            .target = .of(stat.kind),
             .recursive = options.recursive,
         });
         w.next_id += 1;
@@ -881,6 +886,10 @@ pub const Watcher = struct {
         return (w.table.get(id) orelse return null).path;
     }
 
+    fn rootTarget(w: *const Watcher, id: WatchId) Target {
+        return (w.table.get(id) orelse return .unknown).target;
+    }
+
     /// Takes a watch on a path that is not there, parks it on the nearest
     /// existing ancestor, and issues its id. See `AddOptions.pending`.
     fn addPending(w: *Watcher, path: []const u8, options: AddOptions) AddError!WatchId {
@@ -905,6 +914,7 @@ pub const Watcher = struct {
         try w.table.put(w.gpa, id, .{
             .path = owned,
             .registered = null,
+            .target = .unknown,
             .recursive = options.recursive,
         });
         errdefer _ = w.table.swapRemove(id);
@@ -1070,7 +1080,10 @@ pub const Watcher = struct {
                 },
             },
         }
-        if (w.table.getPtr(p.id)) |held| held.registered = mirror else w.gpa.free(mirror);
+        if (w.table.getPtr(p.id)) |held| {
+            held.registered = mirror;
+            held.target = target;
+        } else w.gpa.free(mirror);
         try w.batch.pushDetail(w.gpa, p.id, p.target, .created, null, target);
         w.destroyPending(p);
         return true;
@@ -1178,7 +1191,7 @@ pub const Watcher = struct {
             // The batch knows it had to stop holding names; only the
             // watcher knows which root to say so against.
             const root = w.rootOf(id) orelse continue;
-            try w.batch.push(w.gpa, id, root, .overflow, .directory);
+            try w.batch.push(w.gpa, id, root, .overflow, w.rootTarget(id));
         }
     }
 

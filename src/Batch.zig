@@ -223,6 +223,12 @@ pub fn pushDetail(
             }
             return;
         }
+        if (b.limit != 0 and b.events.items.len + b.held.count() >= b.limit and
+            kind != .overflow and kind != .unwatched)
+        {
+            try b.dropped.put(gpa, id, {});
+            return;
+        }
         const owned_path = try gpa.dupe(u8, subject);
         errdefer gpa.free(owned_path);
         const owned_from = if (from) |source| try gpa.dupe(u8, source) else null;
@@ -802,6 +808,21 @@ test "the ceiling turns events away and says which watch lost them" {
     // ones turned away, because they are the answer to the ceiling.
     try b.push(gpa, id, "/tmp/root", .overflow, .directory);
     try testing.expectEqual(@as(usize, 3), b.events.items.len);
+}
+
+test "the ceiling includes paths held for debouncing" {
+    const gpa = testing.allocator;
+    var b: Batch = .init(testing.io, .{ .max_events = 2, .debounce_ms = 50 });
+    defer b.deinit(gpa);
+
+    const id: WatchId = @enumFromInt(3);
+    try b.push(gpa, id, "/tmp/a", .created, .file);
+    try b.push(gpa, id, "/tmp/b", .created, .file);
+    try b.push(gpa, id, "/tmp/c", .created, .file);
+
+    try testing.expectEqual(@as(usize, 2), b.held.count());
+    try testing.expectEqual(@as(usize, 1), b.dropped.count());
+    try testing.expectEqual(id, b.dropped.keys()[0]);
 }
 
 test "no ceiling means no ceiling" {

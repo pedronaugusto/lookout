@@ -24,6 +24,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Polling now treats only an absent root as removed and returns other root stat errors.
 - Retiring a Windows watch no longer allocates while cancellation still references its buffer.
 - A pending path that appears during `add` now has one owner on every registration failure path.
+- `max_events` now bounds paths held for settling or debouncing as well as ready events.
 
 ## [0.2.0] - 2026-09-19
 
