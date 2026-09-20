@@ -545,14 +545,18 @@ test "a poll that expires before the replay begins is not the end of it" {
     defer watcher.deinit();
     _ = try watcher.add(root, .{ .recursive = true });
 
-    // The boundary, stated: a wait that cannot have brought anything,
-    // taken before the replay can have begun.
-    try std.testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
-
     const deleted = try std.fs.path.join(gpa, &.{ root, "gone.txt" });
     defer gpa.free(deleted);
 
     var saw_deleted = false;
+    // The boundary, stated: a non-blocking wait issued immediately after
+    // the stream starts. With immediate FSEvents delivery the replay may
+    // win that race, so consume anything it already brought rather than
+    // assuming the boundary must be empty.
+    for (try watcher.poll(0)) |event| {
+        if (std.mem.eql(u8, event.path, deleted) and event.kind == .removed) saw_deleted = true;
+    }
+
     var waited: u32 = 0;
     while (waited < timeout_ms and !saw_deleted) : (waited += 200) {
         for (try watcher.poll(200)) |event| {

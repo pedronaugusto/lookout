@@ -75,6 +75,12 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the lookout tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
+    // Compile the backend-bearing test artifact without running it. This
+    // is the cross-target check: unlike the library archive on its own,
+    // the tests reach every backend selected for the target.
+    const check_step = b.step("check", "Compile the lookout tests without running them");
+    check_step.dependOn(&tests.step);
+
     //=====================================================================
     // Examples
     //

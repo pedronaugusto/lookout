@@ -18,12 +18,13 @@
 //!   `lookout.Watcher.poll`. `lookout.Watcher.fd` hands out the read end of
 //!   that pipe, so a program with a wait loop of its own still works.
 //!   How much that buffer holds is `lookout.Options.buffer_bytes`.
-//! * FSEvents coalesces on its own, before lookout sees anything, over a
-//!   window of about ten milliseconds. Several changes to one path
-//!   inside that window can arrive as one event with several flags set,
-//!   which is why a single delivery can produce a `created` and a
-//!   `modified` for one path. It is also a floor under
-//!   `lookout.Options.latency_ms` that cannot be lowered.
+//! * FSEvents coalesces on its own, before lookout sees anything. Its
+//!   stream uses `lookout.Options.latency_ms` for that window and
+//!   `NoDefer`, so the first event is requested without waiting for the
+//!   rest of the window. Passing zero removes lookout's delay, but macOS
+//!   still imposed a measured 10.459 ms median (11.714 ms p99) delivery
+//!   floor. Several changes to one path can therefore arrive as one event
+//!   with several flags set.
 //! * It is not a queue of facts but a report of what changed, so it can
 //!   say "I lost track, look again": `kFSEventStreamEventFlagMustScanSubDirs`
 //!   and the two dropped-event flags all become `lookout.Kind.overflow`.
@@ -85,11 +86,10 @@ known: std.ArrayHashMapUnmanaged(KnownKey, void, KnownKeyContext, true),
 /// The half of a rename whose partner has not been delivered yet. The
 /// path it holds is owned here -- see `records.Half`.
 pairing: records.Pairing,
-
-/// FSEvents' own coalescing window, in seconds. Kept short because
-/// lookout does its own coalescing in `Batch`, so that every backend
-/// coalesces by one rule rather than by whichever one the kernel has.
-const stream_latency: f64 = 0.01;
+/// FSEvents' coalescing window, in seconds. The stream takes the same
+/// window as `lookout.Options.latency_ms`; `NoDefer` still makes its
+/// first event immediate.
+stream_latency: f64,
 
 const KnownKey = struct {
     id: WatchId,
@@ -365,7 +365,12 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
             since,
         .known = .empty,
         .pairing = .{},
+        .stream_latency = latencySeconds(options.latency_ms),
     };
+}
+
+fn latencySeconds(milliseconds: u32) f64 {
+    return @as(f64, @floatFromInt(milliseconds)) / std.time.ms_per_s;
 }
 
 /// What to start every stream from. A position from another backend is
@@ -473,7 +478,7 @@ pub fn add(
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
         @intFromEnum(id), @tagName(scope), abs_path, stream_path,
     });
-    stream.ref = try createStream(stream, stream_path, f.since);
+    stream.ref = try createStream(stream, stream_path, f.since, f.stream_latency);
     // Invalidation is what unschedules a stream, and it requires one that
     // is scheduled, so this may only run after the line below it.
     errdefer {
@@ -484,7 +489,7 @@ pub fn add(
     if (c.FSEventStreamStart(stream.ref) == 0) return error.WatchLimitReached;
     trace.log("fsevents started watch={d} since={d} latency={d} streams={d} latest={d} dev={d} now={d}", .{
         @intFromEnum(id),                            f.since,
-        stream_latency,                              f.streams.count() + 1,
+        f.stream_latency,                            f.streams.count() + 1,
         c.FSEventStreamGetLatestEventId(stream.ref), c.FSEventStreamGetDeviceBeingWatched(stream.ref),
         c.FSEventsGetCurrentEventId(),
     });
@@ -496,7 +501,12 @@ pub fn add(
 }
 
 /// Builds the CoreFoundation array FSEvents wants and creates the stream.
-fn createStream(stream: *Stream, subject: []const u8, since: u64) lookout.Watcher.AddError!c.FSEventStreamRef {
+fn createStream(
+    stream: *Stream,
+    subject: []const u8,
+    since: u64,
+    latency: f64,
+) lookout.Watcher.AddError!c.FSEventStreamRef {
     const cf_path = c.CFStringCreateWithBytes(
         null,
         subject.ptr,
@@ -521,10 +531,9 @@ fn createStream(stream: *Stream, subject: []const u8, since: u64) lookout.Watche
     const flags: u32 = c.kFSEventStreamCreateFlagFileEvents |
         c.kFSEventStreamCreateFlagNoDefer |
         c.kFSEventStreamCreateFlagWatchRoot;
-    // The latency here is FSEvents' own coalescing window. lookout keeps it
-    // short and does its own in `Batch`, so that every backend coalesces
-    // by the same rule rather than by whichever one the kernel has.
-    return c.FSEventStreamCreate(null, deliver, &context, paths, since, stream_latency, flags) orelse
+    // NoDefer makes the first event immediate; this latency controls how
+    // long later events may be collected, matching lookout's own tail.
+    return c.FSEventStreamCreate(null, deliver, &context, paths, since, latency, flags) orelse
         error.SystemResources;
 }
 
@@ -1187,6 +1196,12 @@ test "accumulated removal and creation flags identify a replacement" {
     ));
     try std.testing.expect(!wasReplaced(flag.item_removed));
     try std.testing.expect(!wasReplaced(flag.item_created | flag.item_modified));
+}
+
+test "stream latency follows the watcher latency" {
+    try std.testing.expectEqual(@as(f64, 0.0), latencySeconds(0));
+    try std.testing.expectEqual(@as(f64, 0.05), latencySeconds(50));
+    try std.testing.expectEqual(@as(f64, 1.5), latencySeconds(1_500));
 }
 
 /// One record of a delivery made by hand.

@@ -127,11 +127,13 @@ window also reports `removed` — the one case where the coalesced kind is
 not the end state — so treat an event as "look at this path again". Zero
 switches coalescing off.
 
-`latency_ms` has a floor on FSEvents that cannot be lowered: the system
-coalesces on its own over about ten milliseconds before lookout is told
-anything, so a change arrives some eleven milliseconds after it happens
-however small this is set. `kqueue` answers in a fifth of a millisecond
-and polling in up to one `poll_interval_ms`.
+FSEvents uses the same `latency_ms` for its stream and asks the system to
+deliver the first event without waiting for the rest of the window; zero
+passes a zero-second window through. macOS still imposed a measured
+10.459 ms median (11.714 ms p99) delivery floor at zero. `kqueue` has no
+coalescing window of its own; the same test at the 50 ms default measured
+63.568 ms median (66.594 ms p99). Polling answers in up to one
+`poll_interval_ms`.
 
 `settle_ms` delays only `modified`, and waits for the file to stop
 growing as well as for the window to pass: one `stat` when the window
@@ -313,10 +315,12 @@ twenty directories inside a budget of a thousand.
 
 I made FSEvents the default on Apple platforms rather than `kqueue`,
 because it recurses without a descriptor per directory and pairs renames.
-`kqueue` is still the better answer for a handful of paths watched
-without recursion; a process that runs out of descriptors under it still
-sees files inside a watched directory appear, disappear and be renamed,
-but not be modified.
+Choose `Options.backend = .kqueue` explicitly when a small tree's lower
+latency matters more than either property. In the same 500-change test it
+measured 3.347 ms median (6.937 ms p99), but reports renames as a removal
+and a creation. A process that runs out of descriptors under it still sees
+files inside a watched directory appear, disappear and be renamed, but not
+be modified.
 
 `Options.backend` selects one explicitly and `supported` says whether
 this target has it. Asking for one this target was not built with fails

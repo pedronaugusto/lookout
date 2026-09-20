@@ -43,7 +43,9 @@ pub const Backend = enum {
     /// Pick `default_backend`.
     auto,
     /// Apple's FSEvents. Recursive in the kernel, so a tree costs no
-    /// descriptor per directory, and renames arrive paired.
+    /// descriptor per directory, and renames arrive paired. Its system
+    /// delivery has a measured roughly ten-millisecond floor even when
+    /// `Options.latency_ms` is zero.
     fsevents,
     /// BSD `kqueue` with the `EVFILT_VNODE` filter. One descriptor is held
     /// open per watched file and per watched directory.
@@ -180,8 +182,9 @@ pub fn prunesIgnored(backend: Backend) bool {
 ///
 /// On Apple targets this is `fsevents` rather than `kqueue`, because
 /// FSEvents recurses without a descriptor per directory and pairs
-/// renames. `kqueue` remains selectable, and is the better answer for a
-/// handful of paths watched without recursion.
+/// renames. `kqueue` remains explicitly selectable when lower latency on
+/// a small tree matters more than either property; it reports a rename as
+/// a removal and a creation.
 pub const default_backend: Backend = switch (builtin.os.tag) {
     .driverkit,
     .ios,
@@ -446,7 +449,11 @@ pub const Options = struct {
     /// batch arrives. Everything that lands on one path inside that window
     /// becomes a single `Event`, so a program is not woken once per write
     /// of a file being saved. Zero disables the wait and reports whatever
-    /// is already queued.
+    /// is already queued. FSEvents uses the same window for its stream and
+    /// requests delivery of the first event without waiting for the rest
+    /// of the window. Zero asks the system for no additional delay; on
+    /// macOS the measured system-delivery floor is still roughly ten
+    /// milliseconds.
     latency_ms: u32 = 50,
     /// How long a file must stop changing before its `Kind.modified` is
     /// reported. Zero, the default, reports it as soon as it is seen.
@@ -1341,4 +1348,21 @@ test {
     // which the suite causes and a filtered run does not, so they are
     // named here for `zig test --test-filter` to find them.
     inline for (@typeInfo(Watcher.Impl).@"union".fields) |field| _ = field.type;
+}
+
+test "the Apple default preserves paired renames" {
+    switch (builtin.os.tag) {
+        .driverkit,
+        .ios,
+        .maccatalyst,
+        .macos,
+        .tvos,
+        .visionos,
+        .watchos,
+        => {
+            try std.testing.expectEqual(Backend.fsevents, default_backend);
+            try std.testing.expect(pairsRenames(.auto));
+        },
+        else => return error.SkipZigTest,
+    }
 }

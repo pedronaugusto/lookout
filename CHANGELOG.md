@@ -6,8 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+- A `check` build step compiles the complete backend-bearing test artifact for cross-target verification without trying to run it.
+
 ### Fixed
 
+- FSEvents stream latency now follows `Options.latency_ms`, including a zero-second window when coalescing is disabled; the Apple default remains the rename-pairing backend, with the lower-latency small-tree choice documented explicitly.
 - Removing a watch now discards changes still held by settling or debouncing.
 - Moving an entry between separate inotify watches is reported to each watch independently.
 - Overlapping watches now keep independent registrations, state, and events for shared paths.
