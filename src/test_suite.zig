@@ -1055,6 +1055,30 @@ test "a path that does not exist yet can be watched" {
     }
 }
 
+test "a pending file is promoted with its file target" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+
+        const target = try f.path("later.txt");
+        defer std.testing.allocator.free(target);
+        const id = try f.watcher.add(target, .{ .pending = true });
+        try f.write("later.txt", "one");
+
+        var found = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !found) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                if (event.id != id or event.kind != .created or
+                    !std.mem.eql(u8, event.path, target)) continue;
+                try std.testing.expectEqual(lookout.Target.file, event.target);
+                found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
 test "what happens to the ancestor of a pending watch is not reported" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);

@@ -1047,6 +1047,11 @@ pub const Watcher = struct {
             inline else => |*impl| impl.remove(p.id),
         }
         w.unregister(p.id);
+        const target = target: {
+            const stat = Io.Dir.cwd().statFile(w.io, p.target, .{ .follow_symlinks = false }) catch
+                break :target Target.unknown;
+            break :target Target.of(stat.kind);
+        };
         const mirror = try w.gpa.dupe(u8, p.target);
         errdefer w.gpa.free(mirror);
         switch (w.impl) {
@@ -1065,7 +1070,7 @@ pub const Watcher = struct {
             },
         }
         if (w.table.getPtr(p.id)) |held| held.registered = mirror else w.gpa.free(mirror);
-        try w.batch.pushDetail(w.gpa, p.id, p.target, .created, null, .directory);
+        try w.batch.pushDetail(w.gpa, p.id, p.target, .created, null, target);
         w.destroyPending(p);
         return true;
     }
