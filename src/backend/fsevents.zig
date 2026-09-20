@@ -854,6 +854,16 @@ fn reportPlain(
         try f.recount(batch, record, stream);
         return;
     }
+    // Both flags on a path that still exists and was already known mean
+    // that the old entry left and another now occupies its name. Removal
+    // wins inside a coalescing window so the caller knows to read it anew.
+    if (wasReplaced(record.flags)) {
+        trace.log("fsevents push replaced-as-removed path={s}", .{record.path});
+        try batch.push(f.gpa, record.id, record.path, .removed, record.target());
+        if (record.target() == .directory) try f.refreshKnown(record.id, record.path, stream);
+        try f.recount(batch, record, stream);
+        return;
+    }
     // Contents and metadata, but not a directory's. A directory's own
     // times move whenever anything inside it moves, so reporting them
     // would make every ancestor of a change produce an event of its own
@@ -879,6 +889,11 @@ fn reportPlain(
         trace.log("fsevents drop dir-metadata path={s}", .{record.path});
     }
     try f.recount(batch, record, stream);
+}
+
+fn wasReplaced(flags: u32) bool {
+    return flags & (flag.item_removed | flag.item_created) ==
+        (flag.item_removed | flag.item_created);
 }
 
 /// Reports everything inside a directory that has just appeared, and
@@ -1011,6 +1026,33 @@ fn forgetWatch(f: *FsEvents, id: WatchId) void {
     }
 }
 
+fn refreshKnown(
+    f: *FsEvents,
+    id: WatchId,
+    root: []const u8,
+    stream: *const Stream,
+) lookout.Watcher.PollError!void {
+    f.forgetSubtree(id, root);
+    try f.remember(id, root);
+
+    const Refreshing = struct {
+        f: *FsEvents,
+        id: WatchId,
+        stream: *const Stream,
+
+        fn visit(r: *@This(), entry: walk.Entry) anyerror!walk.Step {
+            if (r.stream.filter.prunes(r.stream.root, entry.path)) return .over;
+            try r.f.remember(r.id, entry.path);
+            return .into;
+        }
+    };
+    var refreshing: Refreshing = .{ .f = f, .id = id, .stream = stream };
+    walk.tree(f.gpa, f.io, root, &refreshing, Refreshing.visit) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Unexpected,
+    };
+}
+
 /// Moves everything remembered under `old` to sit under `new`, which is
 /// what a directory rename does to a tree.
 fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.Error!void {
@@ -1110,6 +1152,15 @@ fn recount(f: *FsEvents, batch: *Batch, record: Record, stream: *const Stream) l
     if (try f.budget.note(parent, move)) {
         try batch.push(f.gpa, record.id, stream.root, .overflow, .directory);
     }
+}
+
+test "accumulated removal and creation flags identify a replacement" {
+    try std.testing.expect(wasReplaced(flag.item_removed | flag.item_created));
+    try std.testing.expect(wasReplaced(
+        flag.item_removed | flag.item_created | flag.item_modified,
+    ));
+    try std.testing.expect(!wasReplaced(flag.item_removed));
+    try std.testing.expect(!wasReplaced(flag.item_created | flag.item_modified));
 }
 
 /// The CoreFoundation, CoreServices and libdispatch surface lookout uses.
