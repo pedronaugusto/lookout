@@ -1191,6 +1191,35 @@ test "the watched path's own move is reported in the shape the backend documents
     }
 }
 
+test "Windows retires a renamed root before reporting stale child paths" {
+    if (!lookout.supported(.windows)) return error.SkipZigTest;
+
+    var f = try Fixture.init(.windows);
+    defer f.deinit();
+    try f.tmp.dir.createDirPath(std.testing.io, "target");
+    const target = try f.path("target");
+    defer std.testing.allocator.free(target);
+    _ = try f.watcher.add(target, .{ .recursive = true });
+    try f.settle();
+
+    try f.tmp.dir.rename("target", f.tmp.dir, "moved", std.testing.io);
+    try f.write("moved/child.txt", "one");
+
+    var unwatched = false;
+    var waited: u32 = 0;
+    while (waited < timeout_ms and !unwatched) : (waited += 200) {
+        for (try f.watcher.poll(200)) |event| {
+            if (event.kind == .unwatched and std.mem.eql(u8, event.path, target)) {
+                unwatched = true;
+            } else {
+                try std.testing.expect(!std.mem.startsWith(u8, event.path, target));
+            }
+        }
+    }
+    try std.testing.expect(unwatched);
+    try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().registrations);
+}
+
 test "stats count what the watcher holds" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);

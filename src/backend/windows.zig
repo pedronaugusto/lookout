@@ -92,6 +92,9 @@ const Watch = struct {
     id: WatchId,
     /// The path the caller named, absolute and canonical, in WTF-8.
     root: []u8,
+    /// Identity of `root` at add time, used to detect a renamed root even
+    /// if another entry is created under its old name.
+    root_inode: Io.File.INode,
     /// The directory the read is posted on: `root`, or its parent when
     /// the caller named a file.
     handle: windows.HANDLE,
@@ -218,6 +221,7 @@ pub fn add(
     watch.* = .{
         .id = id,
         .root = root,
+        .root_inode = stat.inode,
         .handle = handle,
         .only = only,
         .recursive = options.recursive and is_dir,
@@ -393,6 +397,21 @@ fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
             w.retire(overlapped);
             continue;
         };
+        if (watch.only == null) switch (w.rootState(watch)) {
+            .stands => {},
+            .gone => {
+                try batch.push(w.gpa, id, watch.root, .removed, .directory);
+                w.discard(id);
+                if (batch.revision != before) return;
+                continue;
+            },
+            .moved, .unknown => {
+                try batch.push(w.gpa, id, watch.root, .unwatched, .directory);
+                w.discard(id);
+                if (batch.revision != before) return;
+                continue;
+            },
+        };
         if (transferred == 0) {
             // The kernel had more change than it could hold between two
             // reads and says so by transferring nothing.
@@ -403,6 +422,17 @@ fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
         try w.rearm(watch, batch);
         if (batch.revision != before) return;
     }
+}
+
+const RootState = enum { stands, moved, gone, unknown };
+
+fn rootState(w: *const Windows, watch: *const Watch) RootState {
+    const named = Io.Dir.cwd().statFile(w.io, watch.root, .{ .follow_symlinks = false }) catch {
+        const opened: Io.File = .{ .handle = watch.handle, .flags = .{ .nonblocking = true } };
+        const held = opened.stat(w.io) catch return .unknown;
+        return if (held.nlink == 0) .gone else .moved;
+    };
+    return if (named.inode == watch.root_inode) .stands else .moved;
 }
 
 /// Posts the next read, and says so when it cannot be posted.
