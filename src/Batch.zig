@@ -2,9 +2,9 @@
 //! the paths it is still holding back.
 //!
 //! Backends push raw, uncoalesced events in as they read them from the
-//! operating system. The batch keeps at most one `Event` per absolute
-//! path and merges each new kind into the one already recorded, which is
-//! what turns a burst of writes on one file into a single `modified`.
+//! operating system. The batch keeps at most one `Event` per watch and
+//! absolute path and merges each new kind into the one already recorded,
+//! which is what turns a burst of writes on one file into one `modified`.
 //!
 //! Two options hold a path back rather than recording it at once.
 //! `lookout.Options.settle_ms` holds `modified` until the file has
@@ -37,16 +37,16 @@ hold_all: bool,
 /// The events of the current window, in the order their paths were first
 /// touched. Every `path` and every `from` is owned by this batch.
 events: std.ArrayList(Event),
-/// Maps an event's path to its index in `events`. Keys are the same
-/// allocations as `Event.path`, owned by `events`, and are compared the
-/// way the file system compares them: two spellings of one path are one
-/// event, not two.
-index: std.HashMapUnmanaged([]const u8, u32, path_cmp.MapContext, std.hash_map.default_max_load_percentage),
+/// Maps an event's watch and path to its index in `events`. Path keys are
+/// the same allocations as `Event.path`, owned by `events`, and are
+/// compared the way the file system compares them: two spellings of one
+/// path under one watch are one event, not two.
+index: std.HashMapUnmanaged(EventKey, u32, EventKeyContext, std.hash_map.default_max_load_percentage),
 /// Paths that have changed but have not been quiet long enough to be
 /// reported. Survives `reset`, because a file still being written is not
 /// news that expires with the poll that noticed it. Keys are owned here,
 /// and so is each `Held.from`.
-held: path_cmp.Set(Held),
+held: std.ArrayHashMapUnmanaged(EventKey, Held, EventKeyArrayContext, true),
 /// The most events one window may hold, or zero for no ceiling. See
 /// `lookout.Options.max_events`.
 limit: usize,
@@ -95,6 +95,31 @@ const Held = struct {
     size: ?u64,
 };
 
+const EventKey = struct {
+    id: WatchId,
+    path: []const u8,
+};
+
+const EventKeyContext = struct {
+    pub fn hash(_: EventKeyContext, key: EventKey) u64 {
+        return path_cmp.hash(key.path) ^ (@as(u64, @intFromEnum(key.id)) *% 0x9e3779b97f4a7c15);
+    }
+
+    pub fn eql(_: EventKeyContext, a: EventKey, b: EventKey) bool {
+        return a.id == b.id and path_cmp.eql(a.path, b.path);
+    }
+};
+
+const EventKeyArrayContext = struct {
+    pub fn hash(_: EventKeyArrayContext, key: EventKey) u32 {
+        return @truncate(EventKeyContext.hash(.{}, key));
+    }
+
+    pub fn eql(_: EventKeyArrayContext, a: EventKey, b: EventKey, _: usize) bool {
+        return EventKeyContext.eql(.{}, a, b);
+    }
+};
+
 /// A batch that owns nothing.
 ///
 /// `debounce_ms` supersedes `settle_ms`: it already holds every kind
@@ -121,8 +146,8 @@ pub fn deinit(b: *Batch, gpa: Allocator) void {
     b.reset(gpa);
     b.events.deinit(gpa);
     b.index.deinit(gpa);
-    for (b.held.keys(), b.held.values()) |path, entry| {
-        gpa.free(path);
+    for (b.held.keys(), b.held.values()) |key, entry| {
+        gpa.free(key.path);
         if (entry.from) |from| gpa.free(from);
     }
     b.held.deinit(gpa);
@@ -183,7 +208,7 @@ pub fn pushDetail(
     const now = Io.Timestamp.now(b.io, .awake);
 
     if (b.hold_ns > 0 and (b.hold_all or kind == .modified)) {
-        if (b.held.getPtr(subject)) |entry| {
+        if (b.held.getPtr(.{ .id = id, .path = subject })) |entry| {
             entry.last_ns = now.nanoseconds;
             if (kind == .modified) entry.size = b.sizeOf(subject);
             entry.target = target;
@@ -202,7 +227,7 @@ pub fn pushDetail(
         errdefer gpa.free(owned_path);
         const owned_from = if (from) |source| try gpa.dupe(u8, source) else null;
         errdefer if (owned_from) |f| gpa.free(f);
-        try b.held.put(gpa, owned_path, .{
+        try b.held.put(gpa, .{ .id = id, .path = owned_path }, .{
             .id = id,
             .kind = kind,
             .from = owned_from,
@@ -216,7 +241,7 @@ pub fn pushDetail(
     // Anything else that happens to a path ends the question of whether
     // its contents have stopped changing: the name has been created,
     // removed or moved since.
-    b.release(gpa, subject);
+    b.release(gpa, id, subject);
     return b.record(gpa, id, subject, kind, from, target, now);
 }
 
@@ -258,10 +283,10 @@ pub fn discardFuture(b: *Batch, gpa: Allocator, id: WatchId) void {
             h += 1;
             continue;
         }
-        const path = b.held.keys()[h];
+        const key = b.held.keys()[h];
         const entry = b.held.values()[h];
         b.held.swapRemoveAt(h);
-        gpa.free(path);
+        gpa.free(key.path);
         if (entry.from) |from| gpa.free(from);
     }
 }
@@ -284,7 +309,7 @@ fn discardEvents(b: *Batch, gpa: Allocator, id: WatchId) void {
         // of the list means rebuilding it. The capacity is still there.
         b.index.clearRetainingCapacity();
         for (b.events.items, 0..) |event, at| {
-            b.index.putAssumeCapacity(event.path, @intCast(at));
+            b.index.putAssumeCapacity(.{ .id = event.id, .path = event.path }, @intCast(at));
         }
     }
 }
@@ -342,7 +367,7 @@ pub fn promote(b: *Batch, gpa: Allocator) Allocator.Error!void {
             continue;
         }
         if (entry.size) |before| {
-            const subject = b.held.keys()[i];
+            const subject = b.held.keys()[i].path;
             if (b.sizeOf(subject)) |after| {
                 if (after != before) {
                     b.held.values()[i].size = after;
@@ -352,7 +377,7 @@ pub fn promote(b: *Batch, gpa: Allocator) Allocator.Error!void {
                 }
             }
         }
-        const subject = b.held.keys()[i];
+        const subject = b.held.keys()[i].path;
         b.held.swapRemoveAt(i);
         defer gpa.free(subject);
         defer if (entry.from) |from| gpa.free(from);
@@ -388,9 +413,9 @@ pub fn nextDueMs(b: *const Batch) ?u32 {
 
 /// Drops whatever is held for `path`, because something has happened to
 /// it that answers the question the hold was waiting on.
-fn release(b: *Batch, gpa: Allocator, subject: []const u8) void {
-    const entry = b.held.fetchSwapRemove(subject) orelse return;
-    gpa.free(entry.key);
+fn release(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8) void {
+    const entry = b.held.fetchSwapRemove(.{ .id = id, .path = subject }) orelse return;
+    gpa.free(entry.key.path);
     if (entry.value.from) |from| gpa.free(from);
 }
 
@@ -406,7 +431,7 @@ fn record(
     target: Target,
     time: Io.Timestamp,
 ) Allocator.Error!void {
-    if (b.index.get(subject)) |i| {
+    if (b.index.get(.{ .id = id, .path = subject })) |i| {
         const existing = &b.events.items[i];
         if (existing.target == .unknown) existing.target = target;
         if (b.hold_all) {
@@ -450,7 +475,7 @@ fn record(
         .target = target,
     });
     errdefer _ = b.events.pop();
-    try b.index.put(gpa, owned_path, @intCast(b.events.items.len - 1));
+    try b.index.put(gpa, .{ .id = id, .path = owned_path }, @intCast(b.events.items.len - 1));
 }
 
 /// How much a kind outranks another when two land on one path in one

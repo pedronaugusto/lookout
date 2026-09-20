@@ -68,7 +68,7 @@ mask: u32,
 /// whole wait is over -- see `flushRenames` -- and what stays behind
 /// then is a path that moved out of the watch, which from inside the
 /// watch is a removal.
-pending_renames: std.AutoArrayHashMapUnmanaged(u32, Pending),
+pending_renames: std.AutoArrayHashMapUnmanaged(PendingKey, Pending),
 
 /// What the caller asked for.
 const Watch = struct {
@@ -82,17 +82,22 @@ const Watch = struct {
 
 /// One half of a rename, waiting for the other.
 const Pending = struct {
-    watch: WatchId,
     /// Absolute path the entry moved from, owned by the backend.
     path: []u8,
     is_dir: bool,
 };
 
+const PendingKey = struct {
+    watch: WatchId,
+    cookie: u32,
+};
+
 /// One kernel watch descriptor.
 const Registration = struct {
-    watch: WatchId,
     /// Absolute path the descriptor stands for, owned by the backend.
     path: []u8,
+    /// Every caller watch that owns this kernel descriptor.
+    watches: std.ArrayList(WatchId),
 };
 
 /// Everything lookout asks the kernel to report. `IN.EXCL_UNLINK` keeps a
@@ -150,7 +155,10 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
 
 /// Closes the descriptors and releases every watch.
 pub fn deinit(n: *Inotify) void {
-    for (n.wds.values()) |registration| n.gpa.free(registration.path);
+    for (n.wds.values()) |*registration| {
+        n.gpa.free(registration.path);
+        registration.watches.deinit(n.gpa);
+    }
     n.wds.deinit(n.gpa);
     for (n.watches.values()) |*watch| {
         n.gpa.free(watch.root);
@@ -260,6 +268,15 @@ pub fn remove(n: *Inotify, id: WatchId) void {
     n.gpa.free(watch.value.root);
     watch.value.filter.deinit(n.gpa);
     n.removeWatchDescriptors(id);
+    var i: usize = 0;
+    while (i < n.pending_renames.count()) {
+        if (n.pending_renames.keys()[i].watch != id) {
+            i += 1;
+            continue;
+        }
+        n.gpa.free(n.pending_renames.values()[i].path);
+        n.pending_renames.swapRemoveAt(i);
+    }
 }
 
 /// Whether `subject` is outside what the watch `id` is about, so no
@@ -380,53 +397,54 @@ const Change = struct {
 /// Turns one kernel event into lookout events: read the flags, pair what
 /// can be paired, report, then keep the books.
 fn handle(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.PollError!void {
-    var change = (try n.decode(event, batch)) orelse return;
-    defer {
-        n.gpa.free(change.path);
-        n.gpa.free(change.dir);
-    }
-    const paired = try n.pair(&change, batch);
-    try n.emit(change, paired, batch);
-    try n.bookkeep(change, paired, batch);
-}
-
-/// Reads the flags, and answers everything that is over before an entry
-/// is named: the queue overflowing, a watch going away, and the watched
-/// path itself being deleted or moved.
-fn decode(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.PollError!?Change {
     if (event.mask & linux.IN.Q_OVERFLOW != 0) {
         // The kernel does not say what was lost, so every watch is suspect.
         for (n.watches.keys(), n.watches.values()) |id, watch| {
             try batch.push(n.gpa, id, watch.root, .overflow, .directory);
         }
-        return null;
+        return;
     }
-    const registration = n.wds.get(event.wd) orelse return null;
-    const watch = registration.watch;
-
-    // Copied because reporting a disappearance is also what frees it.
+    const registration = n.wds.get(event.wd) orelse return;
+    const owners = try n.gpa.dupe(WatchId, registration.watches.items);
+    defer n.gpa.free(owners);
     const base = try n.gpa.dupe(u8, registration.path);
-    errdefer n.gpa.free(base);
+    defer n.gpa.free(base);
 
     // IN_IGNORED is the kernel saying the watch is already gone, and it
     // follows IN_DELETE_SELF, so neither asks for `inotify_rm_watch`.
     if (event.mask & linux.IN.IGNORED != 0) {
-        n.gpa.free(base);
         n.drop(event.wd);
-        return null;
+        return;
     }
     if (event.mask & linux.IN.DELETE_SELF != 0) {
-        defer n.gpa.free(base);
-        try batch.push(n.gpa, watch, base, .removed, .directory);
+        for (owners) |watch| try batch.push(n.gpa, watch, base, .removed, .directory);
         n.drop(event.wd);
-        return null;
+        return;
     }
     if (event.mask & linux.IN.MOVE_SELF != 0) {
-        defer n.gpa.free(base);
-        try batch.push(n.gpa, watch, base, .renamed, .directory);
+        for (owners) |watch| try batch.push(n.gpa, watch, base, .renamed, .directory);
         n.forget(event.wd);
-        return null;
+        return;
     }
+
+    for (owners, 0..) |watch, i| {
+        var change = (try n.decode(event, watch, base)) orelse continue;
+        defer {
+            n.gpa.free(change.path);
+            n.gpa.free(change.dir);
+        }
+        const paired = try n.pair(&change, batch);
+        try n.emit(change, paired, batch);
+        try n.bookkeep(change, paired, i == 0, batch);
+    }
+}
+
+/// Reads the flags, and answers everything that is over before an entry
+/// is named: the queue overflowing, a watch going away, and the watched
+/// path itself being deleted or moved.
+fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u8) lookout.Watcher.PollError!?Change {
+    const base = try n.gpa.dupe(u8, watched);
+    errdefer n.gpa.free(base);
 
     const full = if (event.name) |name|
         try std.fs.path.join(n.gpa, &.{ base, name })
@@ -467,33 +485,18 @@ fn pair(n: *Inotify, change: *const Change, batch: *Batch) lookout.Watcher.PollE
     if (change.moved_from) {
         const owned = try n.gpa.dupe(u8, change.path);
         errdefer n.gpa.free(owned);
-        if (n.pending_renames.fetchSwapRemove(change.cookie)) |stale| n.gpa.free(stale.value.path);
-        try n.pending_renames.put(n.gpa, change.cookie, .{
-            .watch = change.watch,
+        const key: PendingKey = .{ .watch = change.watch, .cookie = change.cookie };
+        if (n.pending_renames.fetchSwapRemove(key)) |stale| n.gpa.free(stale.value.path);
+        try n.pending_renames.put(n.gpa, key, .{
             .path = owned,
             .is_dir = change.is_dir,
         });
         return true;
     }
     if (change.moved_to) {
-        const half = n.pending_renames.fetchSwapRemove(change.cookie) orelse return false;
+        const key: PendingKey = .{ .watch = change.watch, .cookie = change.cookie };
+        const half = n.pending_renames.fetchSwapRemove(key) orelse return false;
         defer n.gpa.free(half.value.path);
-        if (half.value.watch != change.watch) {
-            if (!n.excluded(half.value.watch, half.value.path)) {
-                try batch.push(
-                    n.gpa,
-                    half.value.watch,
-                    half.value.path,
-                    .removed,
-                    if (half.value.is_dir) .directory else .file,
-                );
-            }
-            if (half.value.is_dir) {
-                n.forgetSubtree(half.value.path);
-                n.budget.forget(half.value.path);
-            }
-            return false;
-        }
         if (!n.excluded(change.watch, change.path)) {
             try batch.pushRename(n.gpa, change.watch, change.path, half.value.path, change.target());
         }
@@ -501,7 +504,7 @@ fn pair(n: *Inotify, change: *const Change, batch: *Batch) lookout.Watcher.PollE
         // inodes but under the wrong names, so they are dropped and
         // taken again at the name the tree now has.
         if (change.is_dir) {
-            n.forgetSubtree(half.value.path);
+            n.forgetSubtree(change.watch, half.value.path);
             n.budget.forget(half.value.path);
         }
         return true;
@@ -534,7 +537,13 @@ fn emit(n: *Inotify, change: Change, paired: bool, batch: *Batch) lookout.Watche
 }
 
 /// Keeps the entry budget and the registrations current.
-fn bookkeep(n: *Inotify, change: Change, paired: bool, batch: *Batch) lookout.Watcher.PollError!void {
+fn bookkeep(
+    n: *Inotify,
+    change: Change,
+    paired: bool,
+    count_budget: bool,
+    batch: *Batch,
+) lookout.Watcher.PollError!void {
     // Checked on every event for the directory rather than only on the
     // ones that move the count, so that a watch added to a directory
     // that is already too big says so at the first sign of life, which
@@ -545,7 +554,7 @@ fn bookkeep(n: *Inotify, change: Change, paired: bool, batch: *Batch) lookout.Wa
         .vanished
     else
         .unchanged;
-    if (try n.budget.note(change.dir, move)) {
+    if (try n.budget.note(change.dir, if (count_budget) move else .unchanged)) {
         const root = (n.watches.get(change.watch) orelse return).root;
         try batch.push(n.gpa, change.watch, root, .overflow, .directory);
     }
@@ -558,7 +567,7 @@ fn bookkeep(n: *Inotify, change: Change, paired: bool, batch: *Batch) lookout.Wa
         try n.adopt(change.watch, change.path, batch);
     }
     if (change.vanished and !paired) {
-        n.forgetSubtree(change.path);
+        n.forgetSubtree(change.watch, change.path);
         n.budget.forget(change.path);
     }
 }
@@ -572,18 +581,19 @@ fn recursive(n: *const Inotify, id: WatchId) bool {
 /// from inside the watch is indistinguishable from a deletion.
 fn flushRenames(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!void {
     while (n.pending_renames.count() != 0) {
+        const key = n.pending_renames.keys()[0];
         const half = n.pending_renames.values()[0];
         n.pending_renames.swapRemoveAt(0);
         defer n.gpa.free(half.path);
         try batch.push(
             n.gpa,
-            half.watch,
+            key.watch,
             half.path,
             .removed,
             if (half.is_dir) .directory else .file,
         );
         if (half.is_dir) {
-            n.forgetSubtree(half.path);
+            n.forgetSubtree(key.watch, half.path);
             n.budget.forget(half.path);
         }
     }
@@ -665,10 +675,28 @@ fn register(n: *Inotify, id: WatchId, watched: []u8) lookout.Watcher.AddError!vo
     const wd: i32 = @intCast(rc);
 
     // The kernel returns the existing descriptor when the same inode is
-    // registered twice, so a replaced entry frees the path it replaces.
-    const gop = try n.wds.getOrPut(n.gpa, wd);
-    if (gop.found_existing) n.gpa.free(gop.value_ptr.path);
-    gop.value_ptr.* = .{ .watch = id, .path = watched };
+    // registered twice. Keep both caller watches attached to it.
+    if (n.wds.getPtr(wd)) |registration| {
+        registration.watches.append(n.gpa, id) catch |err| {
+            n.gpa.free(watched);
+            return err;
+        };
+        n.gpa.free(watched);
+        return;
+    }
+
+    var owners: std.ArrayList(WatchId) = .empty;
+    owners.append(n.gpa, id) catch |err| {
+        _ = linux.inotify_rm_watch(n.ifd, wd);
+        n.gpa.free(watched);
+        return err;
+    };
+    errdefer owners.deinit(n.gpa);
+    n.wds.put(n.gpa, wd, .{ .path = watched, .watches = owners }) catch |err| {
+        _ = linux.inotify_rm_watch(n.ifd, wd);
+        n.gpa.free(watched);
+        return err;
+    };
 }
 
 /// Asks the kernel to drop one watch, and forgets the path it stood for.
@@ -680,18 +708,17 @@ fn forget(n: *Inotify, wd: i32) void {
 
 /// Forgets a watch the kernel has already dropped.
 fn drop(n: *Inotify, wd: i32) void {
-    const entry = n.wds.fetchSwapRemove(wd) orelse return;
+    var entry = n.wds.fetchSwapRemove(wd) orelse return;
     n.gpa.free(entry.value.path);
+    entry.value.watches.deinit(n.gpa);
 }
 
-/// Drops the watch on `root` and on everything below it.
-fn forgetSubtree(n: *Inotify, root: []const u8) void {
+/// Drops one caller watch's ownership of `root` and everything below it.
+fn forgetSubtree(n: *Inotify, id: WatchId, root: []const u8) void {
     var i: usize = 0;
     while (i < n.wds.count()) {
         if (path_cmp.within(root, n.wds.values()[i].path)) {
-            _ = linux.inotify_rm_watch(n.ifd, n.wds.keys()[i]);
-            n.gpa.free(n.wds.values()[i].path);
-            n.wds.swapRemoveAt(i);
+            if (!n.removeOwner(i, id)) i += 1;
         } else {
             i += 1;
         }
@@ -702,12 +729,22 @@ fn forgetSubtree(n: *Inotify, root: []const u8) void {
 fn removeWatchDescriptors(n: *Inotify, id: WatchId) void {
     var i: usize = 0;
     while (i < n.wds.count()) {
-        if (n.wds.values()[i].watch == id) {
-            _ = linux.inotify_rm_watch(n.ifd, n.wds.keys()[i]);
-            n.gpa.free(n.wds.values()[i].path);
-            n.wds.swapRemoveAt(i);
-        } else {
-            i += 1;
-        }
+        if (!n.removeOwner(i, id)) i += 1;
     }
+}
+
+/// Removes `id`; answers whether the registration itself became empty.
+fn removeOwner(n: *Inotify, registration_index: usize, id: WatchId) bool {
+    const registration = &n.wds.values()[registration_index];
+    for (registration.watches.items, 0..) |owner, owner_index| {
+        if (owner != id) continue;
+        _ = registration.watches.orderedRemove(owner_index);
+        if (registration.watches.items.len != 0) return false;
+        _ = linux.inotify_rm_watch(n.ifd, n.wds.keys()[registration_index]);
+        n.gpa.free(registration.path);
+        registration.watches.deinit(n.gpa);
+        n.wds.swapRemoveAt(registration_index);
+        return true;
+    }
+    return false;
 }

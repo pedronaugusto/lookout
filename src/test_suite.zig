@@ -899,6 +899,43 @@ test "one watcher watches a path once" {
     }
 }
 
+test "overlapping watches report the same path under both ids" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "child");
+
+        const gpa = std.testing.allocator;
+        const child = try f.path("child");
+        defer gpa.free(child);
+        const changed = try f.path("child/file.txt");
+        defer gpa.free(changed);
+
+        const parent_id = try f.watcher.add(f.root, .{ .recursive = true });
+        const child_id = try f.watcher.add(child, .{});
+        try f.settle();
+        try f.write("child/file.txt", "one");
+
+        var parent_seen = false;
+        var child_seen = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !(parent_seen and child_seen)) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                if (event.kind != .created or !std.mem.eql(u8, event.path, changed)) continue;
+                if (event.id == parent_id) parent_seen = true;
+                if (event.id == child_id) child_seen = true;
+            }
+        }
+        if (!parent_seen or !child_seen) {
+            std.debug.print("{s}: parent={any}, child={any}\n", .{
+                @tagName(backend), parent_seen, child_seen,
+            });
+        }
+        try std.testing.expect(parent_seen);
+        try std.testing.expect(child_seen);
+    }
+}
+
 test "removing a watch discards events held for a quiet window" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{

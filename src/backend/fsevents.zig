@@ -67,9 +67,9 @@ budget: Budget,
 /// Where every stream is started from: `since_now`, or the event id a
 /// caller kept from an earlier watcher. See `lookout.Options.since`.
 since: u64,
-/// Every path the backend believes exists, seeded by walking each watch
-/// when it is added and kept current from what it reports. Keys owned
-/// here, and compared the way the file system compares them.
+/// Every path each watch believes exists, seeded by walking the watch
+/// when it is added and kept current from what it reports. Path keys are
+/// owned here and compared the way the file system compares them.
 ///
 /// This is the price of FSEvents' flags. They are not a sequence of
 /// things that happened: FSEvents keeps them per path and does not clear
@@ -79,7 +79,7 @@ since: u64,
 /// apart is whether lookout has seen the path before. It costs one string
 /// per watched file -- still nothing against `kqueue`'s descriptor per
 /// watched file, which is the comparison that matters on this platform.
-known: path_cmp.Set(void),
+known: std.ArrayHashMapUnmanaged(KnownKey, void, KnownKeyContext, true),
 /// The half of a rename whose partner has not been delivered yet. The
 /// path it holds is owned here -- see `records.Half`.
 pairing: records.Pairing,
@@ -88,6 +88,23 @@ pairing: records.Pairing,
 /// lookout does its own coalescing in `Batch`, so that every backend
 /// coalesces by one rule rather than by whichever one the kernel has.
 const stream_latency: f64 = 0.01;
+
+const KnownKey = struct {
+    id: WatchId,
+    path: []const u8,
+};
+
+const KnownKeyContext = struct {
+    pub fn hash(_: KnownKeyContext, key: KnownKey) u32 {
+        const mixed = path_cmp.hash(key.path) ^
+            (@as(u64, @intFromEnum(key.id)) *% 0x9e3779b97f4a7c15);
+        return @truncate(mixed);
+    }
+
+    pub fn eql(_: KnownKeyContext, a: KnownKey, b: KnownKey, _: usize) bool {
+        return a.id == b.id and path_cmp.eql(a.path, b.path);
+    }
+};
 
 /// What `lookout.Options.buffer_bytes` may ask for here.
 ///
@@ -337,7 +354,7 @@ pub fn deinit(f: *FsEvents) void {
     f.streams.deinit(f.gpa);
     f.staging.deinit(f.gpa);
     f.budget.deinit();
-    for (f.known.keys()) |p| f.gpa.free(p);
+    for (f.known.keys()) |key| f.gpa.free(key.path);
     f.known.deinit(f.gpa);
     if (f.pairing.held) |half| f.gpa.free(half.path);
     c.dispatch_release(f.queue);
@@ -487,6 +504,7 @@ fn createStream(stream: *Stream, subject: []const u8, since: u64) lookout.Watche
 pub fn remove(f: *FsEvents, id: WatchId) void {
     const entry = f.streams.fetchSwapRemove(id) orelse return;
     f.budget.forget(entry.value.root);
+    f.forgetWatch(id);
     f.destroy(entry.value);
 }
 
@@ -795,7 +813,7 @@ fn reportPlain(
     stream: *const Stream,
 ) lookout.Watcher.PollError!void {
     const there = f.exists(record.path);
-    const seen = f.known.contains(record.path);
+    const seen = f.known.contains(.{ .id = record.id, .path = record.path });
 
     if (!there) {
         // Gone. Whatever the flags remember about it, the fact now is
@@ -804,8 +822,8 @@ fn reportPlain(
         if (seen or stream.catchingUp(f.io)) {
             trace.log("fsevents push removed path={s}", .{record.path});
             try batch.push(f.gpa, record.id, record.path, .removed, record.target());
-            f.forget(record.path);
-            if (record.target() == .directory) f.forgetSubtree(record.path);
+            f.forget(record.id, record.path);
+            if (record.target() == .directory) f.forgetSubtree(record.id, record.path);
             try f.recount(batch, record, stream);
         } else {
             trace.log("fsevents drop gone-unknown path={s}", .{record.path});
@@ -815,7 +833,7 @@ fn reportPlain(
     if (!seen) {
         trace.log("fsevents push created path={s}", .{record.path});
         try batch.push(f.gpa, record.id, record.path, .created, record.target());
-        try f.remember(record.path);
+        try f.remember(record.id, record.path);
         // A directory can arrive with a tree already inside it -- an
         // archive unpacked, or a rename this backend could not pair --
         // and what is inside it is as new to lookout as the directory
@@ -873,11 +891,11 @@ fn adopt(
 
         fn visit(a: *@This(), entry: walk.Entry) anyerror!walk.Step {
             if (a.stream.filter.prunes(a.stream.root, entry.path)) return .over;
-            if (a.f.known.contains(entry.path)) return .into;
+            if (a.f.known.contains(.{ .id = a.id, .path = entry.path })) return .into;
             if (!a.stream.filter.excludes(a.stream.root, entry.path)) {
                 try a.batch.push(a.f.gpa, a.id, entry.path, .created, .of(entry.kind));
             }
-            try a.f.remember(entry.path);
+            try a.f.remember(a.id, entry.path);
             return .into;
         }
     };
@@ -904,7 +922,7 @@ fn joined(
     target: Target,
 ) lookout.Watcher.PollError!void {
     try batch.pushRename(f.gpa, id, to, from, target);
-    try f.rekey(from, to);
+    try f.rekey(id, from, to);
     f.budget.forget(from);
 }
 
@@ -945,24 +963,28 @@ fn reportHalf(f: *FsEvents, batch: *Batch, half: records.Half) lookout.Watcher.P
 }
 
 /// Records that a path exists.
-fn remember(f: *FsEvents, subject: []const u8) Allocator.Error!void {
-    if (f.known.contains(subject)) return;
+fn remember(f: *FsEvents, id: WatchId, subject: []const u8) Allocator.Error!void {
+    const key: KnownKey = .{ .id = id, .path = subject };
+    if (f.known.contains(key)) return;
     const owned = try f.gpa.dupe(u8, subject);
     errdefer f.gpa.free(owned);
-    try f.known.put(f.gpa, owned, {});
+    try f.known.put(f.gpa, .{ .id = id, .path = owned }, {});
 }
 
 /// Records that a path does not.
-fn forget(f: *FsEvents, subject: []const u8) void {
-    if (f.known.fetchSwapRemove(subject)) |entry| f.gpa.free(entry.key);
+fn forget(f: *FsEvents, id: WatchId, subject: []const u8) void {
+    if (f.known.fetchSwapRemove(.{ .id = id, .path = subject })) |entry| {
+        f.gpa.free(entry.key.path);
+    }
 }
 
 /// Forgets everything remembered under a subtree that has gone.
-fn forgetSubtree(f: *FsEvents, root: []const u8) void {
+fn forgetSubtree(f: *FsEvents, id: WatchId, root: []const u8) void {
     var i: usize = 0;
     while (i < f.known.count()) {
-        if (path_cmp.within(root, f.known.keys()[i])) {
-            f.gpa.free(f.known.keys()[i]);
+        const key = f.known.keys()[i];
+        if (key.id == id and path_cmp.within(root, key.path)) {
+            f.gpa.free(key.path);
             f.known.swapRemoveAt(i);
         } else {
             i += 1;
@@ -970,9 +992,21 @@ fn forgetSubtree(f: *FsEvents, root: []const u8) void {
     }
 }
 
+fn forgetWatch(f: *FsEvents, id: WatchId) void {
+    var i: usize = 0;
+    while (i < f.known.count()) {
+        if (f.known.keys()[i].id != id) {
+            i += 1;
+            continue;
+        }
+        f.gpa.free(f.known.keys()[i].path);
+        f.known.swapRemoveAt(i);
+    }
+}
+
 /// Moves everything remembered under `old` to sit under `new`, which is
 /// what a directory rename does to a tree.
-fn rekey(f: *FsEvents, old: []const u8, new: []const u8) Allocator.Error!void {
+fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.Error!void {
     var moved: std.ArrayList([]u8) = .empty;
     defer {
         for (moved.items) |p| f.gpa.free(p);
@@ -982,7 +1016,11 @@ fn rekey(f: *FsEvents, old: []const u8, new: []const u8) Allocator.Error!void {
     var i: usize = 0;
     while (i < f.known.count()) {
         const key = f.known.keys()[i];
-        const rest = path_cmp.relative(old, key) orelse {
+        if (key.id != id) {
+            i += 1;
+            continue;
+        }
+        const rest = path_cmp.relative(old, key.path) orelse {
             i += 1;
             continue;
         };
@@ -993,17 +1031,17 @@ fn rekey(f: *FsEvents, old: []const u8, new: []const u8) Allocator.Error!void {
             try std.fs.path.join(f.gpa, &.{ new, rest });
         errdefer f.gpa.free(renamed);
         try moved.append(f.gpa, renamed);
-        f.gpa.free(key);
+        f.gpa.free(key.path);
         f.known.swapRemoveAt(i);
     }
 
     while (moved.items.len != 0) {
         const p = moved.pop().?;
-        if (f.known.contains(p)) {
+        if (f.known.contains(.{ .id = id, .path = p })) {
             f.gpa.free(p);
             continue;
         }
-        f.known.put(f.gpa, p, {}) catch {
+        f.known.put(f.gpa, .{ .id = id, .path = p }, {}) catch {
             f.gpa.free(p);
             return error.OutOfMemory;
         };
@@ -1020,7 +1058,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
     // watched path as readily as it names an entry, and a path the
     // backend has never heard of is a path it reports as created. This
     // is the whole of the seeding for a watch on a single file.
-    if (f.exists(stream.root)) try f.remember(stream.root);
+    if (f.exists(stream.root)) try f.remember(stream.id, stream.root);
     if (stream.scope == .file) return;
     trace.log("fsevents seed walk root={s}", .{stream.root});
 
@@ -1034,7 +1072,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
                 return .over;
             }
             trace.log("fsevents seed remembered {s}", .{entry.path});
-            try s.f.remember(entry.path);
+            try s.f.remember(s.stream.id, entry.path);
             return if (s.stream.scope == .tree) .into else .over;
         }
     };
