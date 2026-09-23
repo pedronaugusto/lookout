@@ -52,14 +52,16 @@ jobs:
       - name: Test -- ReleaseSmall
         run: zig build test -Doptimize=ReleaseSmall
 
-      # The suite under ThreadSanitizer. A watcher is handed its changes on
-      # a thread the platform owns and reads them on the caller's, and a
-      # race at that crossing is a claim a detector can check and a reader
-      # cannot. Debug, because that is the mode the detector instruments
-      # most completely; not on Windows, because the runtime does not exist
-      # there.
+      # The suite under ThreadSanitizer. A watcher is handed its changes on a
+      # thread the platform owns and reads them on the caller's, and a race at
+      # that crossing is a claim a detector can check and a reader cannot.
+      # Debug, because that is the mode the detector instruments most
+      # completely. Linux only: Windows has no runtime for it, and on the hosted
+      # macOS runner the instrumented suite is killed by a segfault before its
+      # first test reports, while the same suite passes under ThreadSanitizer on
+      # a Mac, where it is run before a release.
       - name: Test -- ThreadSanitizer
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         run: zig build test -Dthread-sanitizer -Doptimize=Debug --test-timeout 120s
 
       - name: Examples
