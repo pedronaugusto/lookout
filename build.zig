@@ -54,6 +54,17 @@ pub fn build(b: *std.Build) void {
     // kernel one rather than to a weaker one of its own.
     //=====================================================================
 
+    // A watcher is handed its changes on a thread the platform owns and
+    // reads them on the caller's, and the suite writes to the tree from a
+    // thread of its own while it waits. Whether that crossing is free of
+    // races is a claim a race detector can check and a reader cannot:
+    // `zig build test -Dthread-sanitizer`.
+    const thread_sanitizer = b.option(
+        bool,
+        "thread-sanitizer",
+        "Build the tests with ThreadSanitizer",
+    ) orelse false;
+
     const tests = b.addTest(.{
         .name = "lookout-tests",
         .root_module = b.createModule(.{
@@ -61,6 +72,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = darwin,
+            .sanitize_thread = if (thread_sanitizer) true else null,
             // The fuzz targets in src/test_fuzz.zig are the reason: the
             // fuzzing runner in Zig 0.16.0 will not build a module that
             // carries error return traces.

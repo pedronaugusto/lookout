@@ -52,6 +52,16 @@ jobs:
       - name: Test -- ReleaseSmall
         run: zig build test -Doptimize=ReleaseSmall
 
+      # The suite under ThreadSanitizer. A watcher is handed its changes on
+      # a thread the platform owns and reads them on the caller's, and a
+      # race at that crossing is a claim a detector can check and a reader
+      # cannot. Debug, because that is the mode the detector instruments
+      # most completely; not on Windows, because the runtime does not exist
+      # there.
+      - name: Test -- ThreadSanitizer
+        if: runner.os != 'Windows'
+        run: zig build test -Dthread-sanitizer -Doptimize=Debug --test-timeout 120s
+
       - name: Examples
         run: zig build examples
 
