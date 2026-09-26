@@ -136,7 +136,15 @@ pub fn wait(p: *Poll, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError
 }
 
 /// Re-examines every watched path once.
+///
+/// Under cancel protection: a scan compares every directory with what it
+/// held before and records the difference, and one stopped half way would
+/// have taken some of the differences and not reported them. The sleep
+/// between scans is where a cancellation ends this backend's wait; see
+/// `Watcher.poll`.
 fn scan(p: *Poll, batch: *Batch) Tree.ScanError!void {
+    const protection = p.io.swapCancelProtection(.blocked);
+    defer _ = p.io.swapCancelProtection(protection);
     try p.checkRoots(batch);
 
     // The node list is copied first: a scan can both add nodes, when a

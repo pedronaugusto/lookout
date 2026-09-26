@@ -168,6 +168,11 @@ pub fn remove(k: *Kqueue, id: WatchId) void {
 /// Waits on the kernel queue until it reports something `batch` did not
 /// already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+    // `kevent` both waits and takes the events off the queue, so once it
+    // has returned, what it returned is recorded before anything stops:
+    // see `Watcher.poll`. The wait itself is out of `std.Io`'s reach.
+    const protection = k.io.swapCancelProtection(.blocked);
+    defer _ = k.io.swapCancelProtection(protection);
     const before = batch.revision;
     const deadline: Deadline = .start(k.io, timeout_ms);
 

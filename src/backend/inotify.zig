@@ -300,6 +300,12 @@ fn pruned(n: *const Inotify, id: WatchId, subject: []const u8) bool {
 /// Waits on the inotify descriptor until it reports something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+    // A read takes records off the descriptor, and a directory that
+    // appears is registered below it one directory at a time, so nothing
+    // in here is a place to stop: see `Watcher.poll`. The wait itself is
+    // out of `std.Io`'s reach.
+    const protection = n.io.swapCancelProtection(.blocked);
+    defer _ = n.io.swapCancelProtection(protection);
     const result = n.collect(batch, timeout_ms);
     // Whatever is still held when the wait is over never found its other
     // half, however many reads it waited through.

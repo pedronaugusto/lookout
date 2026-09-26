@@ -352,6 +352,12 @@ fn free(w: *Windows, watch: *Watch) void {
 /// Waits on the completion port until a read produces something `batch`
 /// did not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+    // A completion is taken off the port by the call that waits for it,
+    // and the read it completes is re-armed before the next, so nothing
+    // in here is a place to stop: see `Watcher.poll`. The wait itself is
+    // out of `std.Io`'s reach.
+    const protection = w.io.swapCancelProtection(.blocked);
+    defer _ = w.io.swapCancelProtection(protection);
     const result = w.collect(batch, timeout_ms);
     // Whatever is still held when the wait is over never found its other
     // half: the path moved somewhere this watch cannot see it.

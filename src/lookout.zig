@@ -9,6 +9,11 @@
 //! The library starts no threads and calls nothing back. Everything happens
 //! on the thread that calls `poll`, and a program with a loop of its own can
 //! take `Watcher.fd` and wait on the watcher alongside its other descriptors.
+//!
+//! `poll` is a `std.Io` cancellation point on every backend, and a
+//! cancellation never costs an event: see `Watcher.poll`. What ends a poll
+//! that is blocked differs by backend, and `Watcher.wake` is the one way that
+//! works on all of them.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -646,6 +651,11 @@ pub const Watcher = struct {
     /// Set by `wake` and cleared by the `poll` that answers it. The one
     /// field of a `Watcher` another thread may touch.
     woken: std.atomic.Value(bool),
+    /// Whether the events in `batch` were handed to the caller by the last
+    /// `poll`, and so are the caller's until the next one begins. A `poll`
+    /// that returned an error handed nothing out, and what it had gathered
+    /// is still the next one's to return.
+    handed_out: bool,
 
     /// What the watcher remembers about one watch.
     const Held = struct {
@@ -769,6 +779,14 @@ pub const Watcher = struct {
 
     /// Errors `poll` can return, on top of the file-system errors of
     /// re-reading watched directories.
+    ///
+    /// One set for every backend, and true for every one of them.
+    /// `error.Canceled` is in it because `poll` is a cancellation point on
+    /// all five: see `poll` for where. The backend is chosen when the
+    /// watcher is made, not when the program is compiled, so a set per
+    /// backend would be a set per value of `Options.backend` — and every
+    /// backend re-reads directories through `std.Io`, whose file-system
+    /// errors carry `error.Canceled` anyway.
     pub const PollError = Tree.ScanError || Io.Cancelable || UnexpectedError;
 
     /// A system call failed with a code lookout does not model. This is
@@ -806,6 +824,7 @@ pub const Watcher = struct {
             .table = .empty,
             .pending = .empty,
             .woken = .init(false),
+            .handed_out = false,
         };
     }
 
@@ -839,7 +858,17 @@ pub const Watcher = struct {
     ///
     /// The returned id is valid until `remove` is called with it or the
     /// watcher is deinitialized.
+    ///
+    /// A cancellation already requested is `error.Canceled`, and nothing is
+    /// added. One requested while the `add` runs is left for the next
+    /// cancellation point: a recursive watch is registered directory by
+    /// directory, and one stopped half way would be neither a watch nor a
+    /// failure to take one.
     pub fn add(w: *Watcher, path: []const u8, options: AddOptions) AddError!WatchId {
+        try w.io.checkCancel();
+        const protection = w.io.swapCancelProtection(.blocked);
+        defer _ = w.io.swapCancelProtection(protection);
+
         // The backend copies what it keeps, so this resolution is scratch
         // and a failed `add` leaves nothing behind.
         const abs = Io.Dir.cwd().realPathFileAlloc(w.io, path, w.gpa) catch |err| switch (err) {
@@ -1140,8 +1169,39 @@ pub const Watcher = struct {
     /// The returned slice, and every path in it, is owned by the watcher
     /// and is invalidated by the next call to `poll` or by `deinit`. An
     /// empty slice means the timeout expired with nothing to report.
+    ///
+    /// **Cancellation.** `poll` is a `std.Io` cancellation point on every
+    /// backend: a cancellation requested before it is called, or while it
+    /// waits, is `error.Canceled`. It is looked for on entry and each time
+    /// the backend's wait comes back, and nowhere else — never half way
+    /// through reading what the kernel reported, which runs under
+    /// `std.Io`'s cancel protection. So a cancellation costs no event: a
+    /// `poll` that returns an error has handed nothing out, and whatever it
+    /// had gathered is returned by the next one.
+    ///
+    /// What ends a poll that is *blocked* is the part that differs. The
+    /// `poll` backend waits in an `Io` sleep, and a cancellation ends that
+    /// sleep. The kernel backends wait in the kernel — `kevent`, `poll(2)`
+    /// on an inotify descriptor or on the FSEvents pipe, an I/O completion
+    /// port — where `std.Io` has no way to reach, so the wait ends when
+    /// something happens, when the timeout runs out, or when `wake` is
+    /// called, and the cancellation is reported then. `wake` is the one way
+    /// to end a blocked poll that works on every backend; see it for how to
+    /// stop a task that is polling.
     pub fn poll(w: *Watcher, timeout_ms: ?u32) PollError![]const Event {
-        w.batch.reset(w.gpa);
+        // What the last `poll` handed out is the caller's until now. What a
+        // `poll` that failed gathered was never handed out, and is this
+        // one's to return.
+        if (w.handed_out) w.batch.reset(w.gpa);
+        w.handed_out = false;
+        try w.io.checkCancel();
+        const events = try w.gather(timeout_ms);
+        w.handed_out = true;
+        return events;
+    }
+
+    /// `poll`, less the bookkeeping of what has been handed out.
+    fn gather(w: *Watcher, timeout_ms: ?u32) PollError![]const Event {
         // Before anything blocks: a watch that came back half
         // registered says so at once rather than when the tree next
         // happens to change.
@@ -1160,9 +1220,7 @@ pub const Watcher = struct {
             else
                 left;
 
-            switch (w.impl) {
-                inline else => |*impl| try impl.wait(&w.batch, wait_ms),
-            }
+            try w.wait(wait_ms);
             try w.collect();
             if (w.woken.swap(false, .acquire)) return w.batch.events.items;
             if (w.batch.events.items.len == 0 and deadline.expired()) return &.{};
@@ -1179,12 +1237,25 @@ pub const Watcher = struct {
         while (true) {
             const left = tail.remainingMs() orelse 0;
             if (left == 0) break;
-            switch (w.impl) {
-                inline else => |*impl| try impl.wait(&w.batch, left),
-            }
+            try w.wait(left);
             try w.collect();
         }
         return w.batch.events.items;
+    }
+
+    /// One wait of the backend's, and the cancellation point after it.
+    ///
+    /// Each backend decides what of its wait can be interrupted: the kernel
+    /// backends read what the kernel handed them under cancel protection,
+    /// because an event read and not yet recorded would be lost, and the
+    /// `poll` backend protects its scans and leaves its sleep open. Here is
+    /// where a cancellation that arrived during any of it is reported,
+    /// with everything the wait read already in the batch.
+    fn wait(w: *Watcher, wait_ms: ?u32) PollError!void {
+        switch (w.impl) {
+            inline else => |*impl| try impl.wait(&w.batch, wait_ms),
+        }
+        try w.io.checkCancel();
     }
 
     /// What every round of `poll` does with what a backend has just
@@ -1192,6 +1263,10 @@ pub const Watcher = struct {
     /// current, and turn a batch that hit its ceiling into the overflow
     /// that says so.
     fn collect(w: *Watcher) PollError!void {
+        // Parked watches are re-examined and promoted here, a registration
+        // at a time: nothing in it is a place to stop.
+        const protection = w.io.swapCancelProtection(.blocked);
+        defer _ = w.io.swapCancelProtection(protection);
         try w.batch.flush(w.gpa);
         try w.batch.promote(w.gpa);
         try w.settlePending();
@@ -1224,6 +1299,27 @@ pub const Watcher = struct {
     /// On the `poll` backend the return takes up to
     /// `Options.poll_interval_ms`, or a tenth of a second, whichever is
     /// less: there is nothing to interrupt, only a sleep to cut short.
+    ///
+    /// This, and not cancellation, is what lets go of a poll blocked on a
+    /// kernel backend: see `poll`. A task that polls in a loop is stopped
+    /// the same way on every backend, with a flag it reads between polls:
+    ///
+    /// ```
+    /// // The task.
+    /// while (!stopping.load(.acquire)) {
+    ///     for (try watcher.poll(null)) |event| handle(event);
+    /// }
+    /// // Stopping it, from another thread.
+    /// stopping.store(true, .release);
+    /// watcher.wake();
+    /// future.await(io); // or `cancel`: the task is already on its way out
+    /// ```
+    ///
+    /// The flag is what makes it certain. A `wake` alone can be answered by
+    /// the poll that is running when it arrives, and a cancellation
+    /// requested after that is not seen by the next poll until something
+    /// ends its wait; a wake that lands between two polls is kept for the
+    /// next one, so the flag is always read.
     pub fn wake(w: *Watcher) void {
         w.woken.store(true, .release);
         switch (w.impl) {

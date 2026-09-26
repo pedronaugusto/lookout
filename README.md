@@ -62,9 +62,9 @@ linked anywhere else.
 | `Watcher.deinit()` | Releases the watches, the descriptors and the last batch of events. |
 | `Watcher.add(path, options)` | Watches a file or a directory, optionally recursively. Returns a `WatchId`. A path already watched by this watcher is `error.PathAlreadyWatched`. |
 | `Watcher.remove(id)` | Stops a watch and releases its descriptors. |
-| `Watcher.poll(timeout_ms)` | Blocks until something happens, and returns the coalesced events. `null` blocks indefinitely; `0` reports what is already queued. |
+| `Watcher.poll(timeout_ms)` | Blocks until something happens, and returns the coalesced events. `null` blocks indefinitely; `0` reports what is already queued. A `std.Io` cancellation point on every backend. |
 | `Watcher.fd()` | The descriptor to wait on, or `null` where the backend has none. |
-| `Watcher.wake()` | Makes a blocked `poll` come back. The one thing a watcher takes from another thread. |
+| `Watcher.wake()` | Makes a blocked `poll` come back, on every backend. The one thing a watcher takes from another thread, and how a task that polls is stopped. |
 | `Watcher.backend()` | Which backend this watcher resolved to. |
 | `Watcher.stats()` | What the watcher holds: watches, registrations the operating system is keeping, paths held back by a window, events the last `poll` returned. |
 | `Watcher.watches(gpa)` | Every watch, with its path, its recursion, and whether it is still waiting for its path to appear. |
@@ -104,6 +104,46 @@ into a fixed buffer and writes one byte to a pipe, and a burst that
 outruns the buffer becomes `Kind.overflow`. The allocator holds the watch
 tables and the batch of events, so a watcher with no watches holds no
 memory.
+
+**Cancellation is honoured on every backend; what ends a blocked wait
+is not the same on all of them.** `poll` returns `error.Canceled` for a
+cancellation requested before it is called or while it waits, on every
+backend. It looks for one on entry and each time the backend's wait comes
+back. Reading what the kernel reported runs under `std.Io`'s cancel
+protection, so a cancellation never lands between taking an event off the
+kernel's queue and recording it: a `poll` that returns an error has handed
+nothing out, and the next one returns what it gathered. `add` looks once,
+on entry, and then registers the whole watch.
+
+What differs is what ends a poll that is blocked:
+
+| Backend | Blocked in | Ended by |
+|---|---|---|
+| `poll` | an `Io` sleep between scans | a cancellation, `wake`, a change, the timeout |
+| `fsevents`, `kqueue`, `inotify`, `windows` | the kernel, where `std.Io` cannot reach | `wake`, a change, the timeout; a cancellation is reported when one of those ends it |
+
+The kernel backends could be made to wake every so often and look, and
+then an idle watcher would cost a wakeup a tick for the whole of its life.
+`std.Io` in 0.16 has no way to wait on a kernel queue that a cancellation
+can interrupt, so `wake` is the interruption: one byte on a pipe, or a
+`kqueue` user event, or a completion posted to the port. A task that polls
+in a loop is stopped the same way on every backend:
+
+```zig
+// The task.
+while (!stopping.load(.acquire)) {
+    for (try watcher.poll(null)) |event| handle(event);
+}
+
+// Stopping it, from another thread.
+stopping.store(true, .release);
+watcher.wake();
+future.await(io); // or `cancel`: the task is already on its way out
+```
+
+A `wake` that lands between two polls is kept for the next one, so the
+flag is always read. This is the opposite of a task reading a terminal or
+a socket through `std.Io`, which a cancellation ends on its own.
 
 **Three windows decide when an event is reported.**
 

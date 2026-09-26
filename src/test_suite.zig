@@ -1569,6 +1569,151 @@ test "a watcher can be woken from another thread" {
     }
 }
 
+/// A task that waits for `go` without touching `std.Io`, so a
+/// cancellation requested meanwhile is still pending when it calls
+/// `then`, and then calls it once.
+fn Held(comptime Result: type, comptime then: anytype) type {
+    return struct {
+        watcher: *Watcher,
+        path: []const u8 = "",
+        go: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) Result {
+            while (!self.go.load(.acquire)) std.atomic.spinLoopHint();
+            return then(self);
+        }
+
+        /// Lets the task go from another thread, after `delay_ms`.
+        fn release(self: *@This(), delay_ms: i64) void {
+            std.testing.io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};
+            self.go.store(true, .release);
+        }
+    };
+}
+
+fn pollOnce(self: anytype) Watcher.PollError![]const lookout.Event {
+    return self.watcher.poll(timeout_ms);
+}
+
+fn addOnce(self: anytype) Watcher.AddError!lookout.WatchId {
+    return self.watcher.add(self.path, .{});
+}
+
+test "a cancellation requested before poll is reported at once" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{});
+
+        const Task = Held(Watcher.PollError![]const lookout.Event, pollOnce);
+        var task: Task = .{ .watcher = &f.watcher };
+        var future = std.testing.io.concurrent(Task.run, .{&task}) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return error.SkipZigTest,
+        };
+        const thread = try std.Thread.spawn(.{}, Task.release, .{ &task, 50 });
+        defer thread.join();
+
+        // The cancellation lands while the task is not in `std.Io` at
+        // all. Nothing will happen to the tree, so a poll that did not
+        // look for it before waiting would wait out its whole timeout,
+        // and on a kernel backend would not be told about it even then.
+        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
+        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
+        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms / 2);
+    }
+}
+
+test "a cancellation that arrives while a poll waits costs no event" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{});
+
+        const Poller = struct {
+            fn run(watcher: *Watcher) Watcher.PollError![]const lookout.Event {
+                return watcher.poll(null);
+            }
+        };
+        var future = std.testing.io.concurrent(Poller.run, .{&f.watcher}) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return error.SkipZigTest,
+        };
+        // The change comes after the cancellation has been asked for. On
+        // the `poll` backend the cancellation ends the sleep and the
+        // change is found by the next scan; on a kernel backend the change
+        // is what ends the wait, and the poll that reports the
+        // cancellation has already read it.
+        const Writer = struct {
+            fn run(dir: std.Io.Dir) void {
+                std.testing.io.sleep(.fromMilliseconds(150), .awake) catch {};
+                dir.writeFile(std.testing.io, .{ .sub_path = "late.txt", .data = "x" }) catch {};
+            }
+        };
+        std.testing.io.sleep(.fromMilliseconds(30), .awake) catch {};
+        const thread = try std.Thread.spawn(.{}, Writer.run, .{f.tmp.dir});
+        defer thread.join();
+
+        try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
+        // Handed out by the next poll rather than dropped with the one
+        // that was canceled.
+        try f.expectEvent("late.txt", .created);
+    }
+}
+
+test "a cancellation requested before add is refused, and nothing is added" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+
+        const Task = Held(Watcher.AddError!lookout.WatchId, addOnce);
+        var task: Task = .{ .watcher = &f.watcher, .path = f.root };
+        var future = std.testing.io.concurrent(Task.run, .{&task}) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return error.SkipZigTest,
+        };
+        const thread = try std.Thread.spawn(.{}, Task.release, .{ &task, 20 });
+        defer thread.join();
+
+        try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
+        const held = try f.watcher.watches(std.testing.allocator);
+        defer std.testing.allocator.free(held);
+        try std.testing.expectEqual(@as(usize, 0), held.len);
+    }
+}
+
+test "a polling task is stopped by a flag and a wake on every backend" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{});
+
+        // The recipe `Watcher.wake` gives, as written there.
+        const Task = struct {
+            watcher: *Watcher,
+            stopping: std.atomic.Value(bool) = .init(false),
+            polls: usize = 0,
+
+            fn run(self: *@This()) Watcher.PollError!void {
+                while (!self.stopping.load(.acquire)) {
+                    _ = try self.watcher.poll(null);
+                    self.polls += 1;
+                }
+            }
+        };
+        var task: Task = .{ .watcher = &f.watcher };
+        var future = std.testing.io.concurrent(Task.run, .{&task}) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return error.SkipZigTest,
+        };
+        std.testing.io.sleep(.fromMilliseconds(50), .awake) catch {};
+
+        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        task.stopping.store(true, .release);
+        f.watcher.wake();
+        try future.await(std.testing.io);
+        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
+        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+    }
+}
+
 test "a watcher says what it is watching" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);

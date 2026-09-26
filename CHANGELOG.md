@@ -4,6 +4,46 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `poll` is a `std.Io` cancellation point on every backend. It looks for a
+  cancellation on entry and each time the backend's wait comes back, and
+  returns `error.Canceled` for one requested before it was called or while
+  it waited. It used to be one only where a file-system call happened to
+  see it, which on a kernel backend blocked in the kernel was the first
+  directory re-read after the next change.
+- A `poll` that returns an error hands nothing out. What it had gathered
+  is returned by the next `poll` rather than dropped with it.
+- `add` looks for a cancellation once, on entry, and then registers the
+  whole watch. A cancellation requested while it runs is left for the next
+  cancellation point.
+- `PollError`, `poll`, `wake`, the README and the module documentation now
+  state the rule: cancellation is honoured on every backend, a blocked
+  wait on the `poll` backend is ended by one, and a blocked wait on a
+  kernel backend is ended by `wake`, a change or the timeout, with the
+  cancellation reported then. `wake` gives the flag-and-wake recipe that
+  stops a polling task on every backend.
+
+### Fixed
+
+- A cancellation that arrived while a watcher was re-reading the tree was
+  taken for the answer to the question being asked. A directory whose
+  listing was cut short was reported `removed` and its subtree stopped
+  being watched; a file whose `stat` was cut short was reported `removed`;
+  a subdirectory whose open was cut short was reported `unwatched`. And
+  since such a cancellation was consumed there, the task was never told
+  of it. The re-reading now runs under cancel protection: the kernel
+  backends' reading of what the kernel reported, the `poll` backend's
+  scans, and the re-examination of parked watches.
+- A cancellation during a recursive `add` was taken for a directory that
+  could not be read. On `inotify` the directory and everything below it
+  were left without a kernel watch, with nothing said; on FSEvents they
+  were left out of what the watcher knew, so their next change read as a
+  creation; on `kqueue` and the `poll` backend the directory was reported
+  `unwatched`. `add` now runs to the end once it has begun.
+
 ## [0.3.0] - 2026-09-20
 
 FSEvents drained without a filesystem query per record and honouring the

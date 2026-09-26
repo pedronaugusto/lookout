@@ -598,6 +598,12 @@ fn deliver(
 /// Waits on the wake pipe until the drain produces something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+    // A drain takes the delivery thread's records and decides what each
+    // one was, asking the file system as it goes, so nothing in here is a
+    // place to stop: see `Watcher.poll`. The wait itself is out of
+    // `std.Io`'s reach.
+    const protection = f.io.swapCancelProtection(.blocked);
+    defer _ = f.io.swapCancelProtection(protection);
     const result = f.collect(batch, timeout_ms);
     // Whatever is still held when the wait is over never found its
     // partner, however many deliveries it waited through.
