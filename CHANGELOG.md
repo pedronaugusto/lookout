@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- FSEvents: a file saved by renaming a new file over it and later deleted
+  was reported gone only when some other change came along, so a `poll`
+  with no timeout could wait for ever. FSEvents keeps a path's flags, so
+  the deletion arrives as a rename half with no partner; a half alone is
+  now decided once its pairing grace has passed, whatever the timeout.
+
 ### Changed
 
 - `poll` is a `std.Io` cancellation point on every backend. It looks for a

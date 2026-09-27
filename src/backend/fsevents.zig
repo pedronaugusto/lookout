@@ -638,7 +638,7 @@ fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
     while (true) {
         try f.drain(batch);
         if (f.sink.woken.swap(false, .acquire)) return;
-        if (batch.revision != before) {
+        if (batch.revision != before or f.pairing.held != null) {
             // A rename with no partner yet is worth waiting a moment
             // for: the other half is on its way if the burst was simply
             // longer than one delivery, and deciding now would turn one
@@ -648,7 +648,13 @@ fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
                 if (!f.readable(grace_ms)) break;
                 try f.drain(batch);
             }
-            return;
+            // A half alone, its partner not come within the grace, is
+            // decided now rather than when the next delivery happens to
+            // arrive, which a wait with no deadline could make never: a
+            // file saved by a rename and then deleted carries the rename
+            // in its flags.
+            try f.resolveHeld(batch);
+            if (batch.revision != before) return;
         }
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still performs one non-blocking check.

@@ -252,6 +252,41 @@ test "a rename is reported in the shape the backend documents" {
     }
 }
 
+test "a file saved by a rename and then deleted is reported gone at once, in a long wait" {
+    // An editor saves by writing a new file and renaming it over the old
+    // one; the file is later deleted. FSEvents keeps a path's flags, so the
+    // deletion arrives as a rename half with no partner, which is held for
+    // one. A wait with no deadline of its own must still decide it within
+    // the pairing grace, not when the next unrelated change comes.
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("next.md", "one");
+        _ = try f.watcher.add(f.root, .{ .recursive = true });
+        try f.settle();
+
+        try f.write("next.new", "two");
+        try f.tmp.dir.rename("next.new", f.tmp.dir, "next.md", std.testing.io);
+        try f.settle();
+
+        try f.tmp.dir.deleteFile(std.testing.io, "next.md");
+        const gone = try f.path("next.md");
+        defer std.testing.allocator.free(gone);
+        const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+        var seen = false;
+        while (!seen) {
+            const events = try f.watcher.poll(timeout_ms);
+            if (events.len == 0) break;
+            for (events) |event| {
+                if (std.mem.eql(u8, event.path, gone) and (event.kind == .removed or event.kind == .renamed)) seen = true;
+            }
+        }
+        const waited_ms = @divTrunc(started.untilNow(std.testing.io).raw.nanoseconds, std.time.ns_per_ms);
+        try std.testing.expect(seen);
+        try std.testing.expect(waited_ms < timeout_ms / 2);
+    }
+}
+
 test "inotify does not pair a move across separate watches" {
     if (!lookout.supported(.inotify)) return error.SkipZigTest;
 
