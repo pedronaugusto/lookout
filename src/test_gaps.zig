@@ -45,6 +45,15 @@ const Tally = struct {
     overflow: usize = 0,
     modified: usize = 0,
 
+    fn count(t: *Tally, events: []const lookout.Event) void {
+        for (events) |event| switch (event.kind) {
+            .created => t.created += 1,
+            .overflow => t.overflow += 1,
+            .modified => t.modified += 1,
+            else => {},
+        };
+    }
+
     fn drain(t: *Tally, watcher: *Watcher, quiet_ms: u32) !void {
         var idle: u32 = 0;
         while (idle < quiet_ms) {
@@ -398,6 +407,16 @@ test "a burst of renames is paired across the reads it is split over" {
     // A kernel that lost track of the burst says so, and what it lost is
     // not this test's to make claims about. What is being tested is the
     // record when it is complete.
+    //
+    // So the test runs its claim only when the system kept up, and whether
+    // it did is the system's. On macOS the loss is FSEvents saying
+    // `MustScanSubDirs` with `UserDropped`: fseventsd, the daemon between
+    // the kernel and every client, dropped part of the burst for this one.
+    // It does that more the busier the machine's file system is -- 13 of
+    // 20 runs on a machine building and testing beside it -- and giving
+    // the delivery queue the highest QoS did not change it (19 of 20), so
+    // there is nothing on lookout's side to make it deterministic. inotify's queue holds sixteen thousand events and
+    // these eight hundred do not reach it.
     if (overflow != 0) return error.SkipZigTest;
     if (unpaired != 0) std.debug.print("{d} paired, {d} unpaired\n", .{ renamed, unpaired });
     try std.testing.expectEqual(@as(usize, 0), unpaired);
@@ -647,13 +666,22 @@ test "the delivery buffer is the size the caller asked for" {
     // hundred paths: a ten-thousand file burst lost 95% of itself and
     // said so as one `overflow`. The size is now the caller's, and the
     // default holds the burst.
+    //
+    // Nothing polls while the burst is delivered, so what the delivery
+    // thread holds is read without draining it (`copyHeld`), and each
+    // half waits for the delivery it is about rather than for a quiet
+    // spell. A quiet spell is not the end of a burst: fseventsd was
+    // measured pausing up to eight seconds in the middle of one, and
+    // after losing track it reports the files it rescanned late and out
+    // of order, after a file created once the burst was written.
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
     if (!lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     const burst = 10_000;
 
-    // At the floor. Nothing polls while the burst is written, so the
-    // delivery thread has to hold all of it in the buffer it was given.
+    // At the floor: the buffer turns deliveries away once it is full, and
+    // the one poll after that reports what it held and the loss.
     {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
@@ -669,13 +697,18 @@ test "the delivery buffer is the size the caller asked for" {
         _ = try watcher.add(root, .{});
         try writeBurst(tmp.dir, burst);
 
+        const held = try Held.await(&watcher, burst, .overflowed);
+        try std.testing.expect(held.overflowed);
+
         var tally: Tally = .{};
-        try tally.drain(&watcher, 1_000);
+        tally.count(try watcher.poll(0));
         try std.testing.expect(tally.overflow > 0);
         try std.testing.expect(tally.created < burst);
     }
 
-    // At the default. Room for all of it.
+    // At the default: room for all of it. The system either delivers
+    // every file or says it lost track; either way lookout's own buffer
+    // turns nothing away, and every file delivered is reported.
     {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
@@ -690,21 +723,90 @@ test "the delivery buffer is the size the caller asked for" {
         _ = try watcher.add(root, .{});
         try writeBurst(tmp.dir, burst);
 
-        var tally: Tally = .{};
-        try tally.drain(&watcher, 1_000);
-        if (tally.created != burst) {
-            std.debug.print("fsevents: {d}/{d} created, {d} overflow\n", .{
-                tally.created, burst, tally.overflow,
+        const held = try Held.await(&watcher, burst, .delivered);
+        if (held.created != burst) {
+            std.debug.print("fsevents: {d}/{d} delivered; the system lost track: {}; the buffer overflowed: {}\n", .{
+                held.created, burst, held.lost_track, held.overflowed,
             });
         }
-        // The operating system can still lose track of a burst this
-        // size and say so, which is its answer and not lookout's. What
-        // must not happen again is lookout losing nineteen paths in
-        // twenty to a buffer the caller could not size.
-        if (tally.overflow == 0) {
-            try std.testing.expectEqual(burst, tally.created);
+        try std.testing.expect(!held.overflowed);
+
+        var tally: Tally = .{};
+        tally.count(try watcher.poll(0));
+        if (held.lost_track) {
+            try std.testing.expect(tally.overflow > 0);
         } else {
-            try std.testing.expect(tally.created > burst / 2);
+            try std.testing.expectEqual(@as(usize, 0), tally.overflow);
         }
+        // What arrived between the look and the poll is reported too.
+        try std.testing.expect(tally.created >= held.created);
+        try std.testing.expect(tally.created <= burst);
+        if (!held.lost_track) try std.testing.expectEqual(burst, tally.created);
     }
 }
+
+/// What the Apple backend's delivery thread holds of a `writeBurst`, read
+/// without draining it. See `the delivery buffer is the size the caller
+/// asked for`.
+const Held = struct {
+    /// Distinct burst files the system has reported created.
+    created: usize,
+    /// The system said it lost track: `MustScanSubDirs` or a dropped flag.
+    lost_track: bool,
+    /// lookout's own buffer turned a delivery away.
+    overflowed: bool,
+
+    const Until = enum {
+        /// lookout's buffer has turned a delivery away.
+        overflowed,
+        /// Every file has been delivered, the system has said it lost
+        /// track, or lookout's buffer has turned a delivery away.
+        delivered,
+    };
+
+    /// How long the system is given to deliver the burst before the test
+    /// fails. A bound on a failure, not the end of the wait: the wait
+    /// ends on the delivery. The slowest whole delivery measured was
+    /// under ten seconds.
+    const budget_ms = 60_000;
+
+    fn await(watcher: *Watcher, burst: usize, until: Until) !Held {
+        const records = @import("backend/fsevents_records.zig");
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        var seen = try std.DynamicBitSetUnmanaged.initEmpty(gpa, burst);
+        defer seen.deinit(gpa);
+
+        var waited: u32 = 0;
+        while (true) : (waited += 20) {
+            const copy = try watcher.impl.fsevents.copyHeld(gpa);
+            defer gpa.free(copy.bytes);
+            var held: Held = .{ .created = 0, .lost_track = false, .overflowed = copy.overflowed };
+            seen.unsetAll();
+            var it = records.iterate(copy.bytes);
+            while (try it.next()) |record| {
+                const lost = records.flag.must_scan_sub_dirs | records.flag.user_dropped | records.flag.kernel_dropped;
+                if (record.flags & lost != 0) held.lost_track = true;
+                if (record.flags & records.flag.item_created == 0) continue;
+                const name = std.fs.path.basename(record.path);
+                if (!std.mem.startsWith(u8, name, "burst-entry-")) continue;
+                const number = name["burst-entry-".len .. name.len - ".txt".len];
+                const i = std.fmt.parseInt(usize, number, 10) catch continue;
+                if (i < burst and !seen.isSet(i)) {
+                    seen.set(i);
+                    held.created += 1;
+                }
+            }
+            const done = switch (until) {
+                .overflowed => held.overflowed,
+                .delivered => held.overflowed or held.lost_track or held.created == burst,
+            };
+            if (done) return held;
+            if (waited >= budget_ms) {
+                std.debug.print("fsevents: {d}/{d} delivered in {d} ms, and no loss reported\n", .{ held.created, burst, waited });
+                return error.TestBurstNotDelivered;
+            }
+            try std.Io.sleep(io, .fromMilliseconds(20), .awake);
+        }
+    }
+};

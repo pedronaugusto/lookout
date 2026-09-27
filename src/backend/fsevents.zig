@@ -411,6 +411,26 @@ pub fn position(f: *const FsEvents) ?u64 {
     return f.last_drained;
 }
 
+/// A copy of what the delivery thread has handed over and no drain has
+/// taken yet, and whether `buffer_bytes` has already turned some of it
+/// away. Nothing is drained: a test that must know what the system has
+/// delivered while nobody polls -- which is the whole claim of a buffer
+/// the caller sized -- reads it here. The copy is the caller's to free.
+pub fn copyHeld(f: *FsEvents, gpa: Allocator) Allocator.Error!Held {
+    f.sink.lock.acquire();
+    defer f.sink.lock.release();
+    return .{
+        .bytes = try gpa.dupe(u8, f.sink.buffer[0..f.sink.len]),
+        .overflowed = f.sink.overflowed,
+    };
+}
+
+/// See `copyHeld`. Read `bytes` with `fsevents_records.iterate`.
+pub const Held = struct {
+    bytes: []u8,
+    overflowed: bool,
+};
+
 /// Pokes the pipe a blocked `wait` is polling. See
 /// `lookout.Watcher.wake`.
 pub fn wake(f: *FsEvents) void {
