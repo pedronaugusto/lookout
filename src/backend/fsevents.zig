@@ -233,6 +233,11 @@ const Stream = struct {
     /// When `HistoryDone` arrived, or `null` while the system is still
     /// reading its log. See `catchingUp`.
     replayed: ?Io.Timestamp,
+    /// Set, with release, once the fields the delivery thread reads are
+    /// written, and read with acquire by every delivery. FSEvents orders
+    /// its start before its first callback, but inside the framework,
+    /// where a race detector cannot see it; this says it where it can.
+    published: std.atomic.Value(bool) = .init(false),
 
     const Scope = enum {
         /// Everything under `root`.
@@ -494,6 +499,7 @@ pub fn add(
         .resumed = f.since != c.kFSEventStreamEventIdSinceNow,
         .replayed = null,
     };
+    stream.published.store(true, .release);
 
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
         @intFromEnum(id), @tagName(scope), abs_path, stream_path,
@@ -607,6 +613,9 @@ fn deliver(
     _ = ref;
     const stream: *Stream = @ptrCast(@alignCast(info.?));
     const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?));
+    // the handoff from `add`, made visible (`Stream.published`); a stream
+    // is published before it is started, so this never drops a delivery
+    if (!stream.published.load(.acquire)) return;
 
     stream.sink.lock.acquire();
     defer stream.sink.lock.release();

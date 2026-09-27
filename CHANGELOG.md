@@ -13,6 +13,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with no timeout could wait for ever. FSEvents keeps a path's flags, so
   the deletion arrives as a rename half with no partner; a half alone is
   now decided once its pairing grace has passed, whatever the timeout.
+- FSEvents: the stream a delivery reads is published to the delivery
+  thread with a release and read with an acquire. The start ordered them
+  already, inside the framework; a race detector now sees it too.
 
 ### Changed
 
