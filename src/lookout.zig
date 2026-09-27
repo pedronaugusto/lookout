@@ -1079,6 +1079,18 @@ pub const Watcher = struct {
                     inline else => |*impl| impl.remove(p.id),
                 }
                 w.anchorPending(p);
+                // What appeared between the look and the new registration
+                // has no event of its own — `mkdir -p` makes the next step
+                // and the path in one breath — so this one is looked at
+                // again now: promoted if the path is there, moved again if
+                // another step is. A wait with no deadline would otherwise
+                // hold it parked on nothing until some other change.
+                if (w.exists(p.target)) {
+                    if (try w.promotePending(p)) {
+                        _ = w.pending.orderedRemove(i);
+                        continue;
+                    }
+                } else if (p.anchor != null and w.exists(p.next)) continue;
             }
             i += 1;
         }

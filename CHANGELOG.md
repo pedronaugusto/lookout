@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A pending watch whose path appeared while it moved down to a nearer
+  ancestor — `mkdir -p` making both in one breath — was left parked on
+  nothing, so a `poll` with no timeout waited until some other change. It
+  is promoted at once. Seen once on Linux under load; the window is between
+  a look and a registration and no test forces it.
 - FSEvents: a file saved by renaming a new file over it and later deleted
   was reported gone only when some other change came along, so a `poll`
   with no timeout could wait for ever. FSEvents keeps a path's flags, so
