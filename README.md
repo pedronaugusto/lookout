@@ -216,7 +216,8 @@ match something inside it, or `only = &.{"src/**/*.zig"}` would exclude
 
 Where lookout does the recursion — `inotify`, `kqueue`, `poll` — an
 excluded directory is never opened and never registered, and its tree
-costs nothing. Where the kernel recurses it cannot be told about a
+costs nothing, whichever of the three excluded it: a predicate backed by
+a repository's ignore rules prunes as a pattern does. Where the kernel recurses it cannot be told about a
 filter, so the work happens anyway and only the events are dropped.
 `prunesIgnored(backend)` says which of the two you have.
 

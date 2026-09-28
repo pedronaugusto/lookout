@@ -73,6 +73,14 @@ only: []const []const u8 = &.{},
 /// already exclude. Returning `false` excludes the path, and with it
 /// everything below it when the path is a directory.
 ///
+/// It is asked about a directory before that directory is registered,
+/// as the patterns are, so where lookout does the recursion a directory
+/// it excludes is never opened and never costs a kernel watch or a
+/// descriptor. A predicate backed by a repository's ignore rules prunes
+/// the ignored trees exactly as `ignore` would. It is not told whether
+/// the path is a directory; a rule that applies only to directories
+/// has to look.
+///
 /// `path` is absolute, and is the path as lookout spells it. `context` is
 /// whatever was put in `context`, which lookout only passes back.
 allow: ?*const fn (context: ?*anyopaque, path: []const u8) bool = null,

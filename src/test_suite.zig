@@ -798,6 +798,92 @@ test "an ignored subtree costs nothing where lookout does the recursion" {
     }
 }
 
+test "a tree the filter ignores gets no registration however it grows" {
+    // A caller that backs `allow` with a repository's ignore rules, and
+    // one that names the usual build trees by glob, both expect those
+    // trees to cost nothing where lookout does the recursion -- not to be
+    // watched and then filtered.
+    const rules = struct {
+        /// What a repository's ignore file might say: two names, at any
+        /// depth. Asked about every path under the watch, directories
+        /// included.
+        fn allow(context: ?*anyopaque, path: []const u8) bool {
+            const asked: *usize = @ptrCast(@alignCast(context.?));
+            asked.* += 1;
+            const name = std.fs.path.basename(path);
+            return !std.mem.eql(u8, name, "build") and !std.mem.eql(u8, name, "generated");
+        }
+    };
+    for (backends) |backend| {
+        if (!lookout.prunesIgnored(backend)) continue;
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+
+        try f.tmp.dir.createDirPath(io, "src");
+        try f.tmp.dir.createDirPath(io, "node_modules/left-pad");
+        try f.tmp.dir.createDirPath(io, "zig-out/bin");
+        try f.tmp.dir.createDirPath(io, "build/obj");
+        try f.write("src/wanted.txt", "one");
+
+        var asked: usize = 0;
+        _ = try f.watcher.add(f.root, .{
+            .recursive = true,
+            .filter = .{
+                .ignore = &.{ "node_modules", "zig-*" },
+                .allow = rules.allow,
+                .context = &asked,
+            },
+        });
+        try f.settle();
+        // The root and `src`, and nothing in or below the three ignored
+        // trees -- plus, on `kqueue`, the one file it holds open to see
+        // it written.
+        const before = f.watcher.stats().registrations;
+        try std.testing.expectEqual(@as(usize, if (backend == .kqueue) 3 else 2), before);
+        try std.testing.expect(asked > 0);
+
+        // The ignored trees grow, deep, and new ones appear beside them,
+        // named by the glob and by the rule.
+        try f.tmp.dir.createDirPath(io, "node_modules/left-pad/lib/deep/deeper");
+        try f.write("node_modules/left-pad/lib/deep/index.js", "x");
+        try f.tmp.dir.createDirPath(io, "zig-out/bin/more");
+        try f.write("zig-out/bin/more/app", "x");
+        try f.tmp.dir.createDirPath(io, "zig-cache/o/1234");
+        try f.write("zig-cache/o/1234/obj", "x");
+        try f.tmp.dir.createDirPath(io, "build/obj/deep");
+        try f.write("build/obj/deep/a.o", "x");
+        try f.tmp.dir.createDirPath(io, "src/generated/deep");
+        try f.write("src/generated/deep/out.zig", "x");
+
+        // A wanted file beside them is still reported, and by then
+        // everything that happened before it has been seen.
+        try f.write("src/wanted.txt", "one and two");
+
+        const ignored = [_][]const u8{ "node_modules", "zig-out", "zig-cache", "build", "src/generated" };
+        var roots: [ignored.len][]u8 = undefined;
+        for (ignored, &roots) |sub, *slot| slot.* = try f.path(sub);
+        defer for (roots) |r| gpa.free(r);
+        const wanted = try f.path("src/wanted.txt");
+        defer gpa.free(wanted);
+
+        var found = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !found) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                for (roots) |r| try std.testing.expect(!std.mem.startsWith(u8, event.path, r));
+                if (event.kind == .modified and std.mem.eql(u8, event.path, wanted)) found = true;
+            }
+        }
+        try std.testing.expect(found);
+        for (try f.watcher.poll(200)) |event| {
+            for (roots) |r| try std.testing.expect(!std.mem.startsWith(u8, event.path, r));
+        }
+        try std.testing.expectEqual(before, f.watcher.stats().registrations);
+    }
+}
+
 test "a directory past the entry limit reports overflow against the watch root" {
     for (backends) |backend| {
         const gpa = std.testing.allocator;
