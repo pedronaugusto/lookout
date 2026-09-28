@@ -8,6 +8,7 @@
 //! the same assertions on the same machine.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const lookout = @import("lookout.zig");
 const trace = @import("trace.zig");
 
@@ -1597,6 +1598,98 @@ test "two pending watches may wait in one folder" {
         try std.testing.expect(!ledger.any(first));
         try f.tmp.dir.createDirPath(std.testing.io, "one");
         try ledger.await(&f, &.{.{ .id = first, .sub_path = "one", .kind = .created }});
+    }
+}
+
+test "the path a pending watch waits for is taken by it" {
+    // The path appears, and before any `poll` has promoted the waiting
+    // watch the caller asks for it again. That `add` used to succeed, and
+    // the promotion that followed put a second registration on the path,
+    // so every change inside it was reported under two ids.
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const later = try f.path("later");
+        defer gpa.free(later);
+
+        const waiting = try f.watcher.add(later, .{ .pending = true });
+        // Before it appears, a second wait for it is refused.
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(later, .{ .pending = true }));
+
+        try f.tmp.dir.createDirPath(std.testing.io, "later");
+        // After it appears and before the promotion, so is a watch of it.
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(later, .{}));
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(later, .{ .pending = true }));
+        try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().watches);
+
+        var ledger: Ledger = .{};
+        defer ledger.deinit();
+        try ledger.await(&f, &.{.{ .id = waiting, .sub_path = "later", .kind = .created }});
+        try f.settle();
+        const registrations = f.watcher.stats().registrations;
+        // And after the promotion too.
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(later, .{}));
+        try std.testing.expectEqual(registrations, f.watcher.stats().registrations);
+
+        try f.write("later/a.txt", "one");
+        try ledger.await(&f, &.{.{ .id = waiting, .sub_path = "later/a.txt", .kind = .created }});
+        try ledger.drain(&f);
+        for (ledger.seen.items) |key| {
+            try std.testing.expectEqual(waiting, key.id);
+            try std.testing.expectEqual(@as(usize, 1), ledger.count(key.id, key.kind, key.path));
+        }
+    }
+}
+
+test "a pending path that leads to one already watched is not watched twice" {
+    // A symbolic link appears on the way to the path a watch waits for,
+    // and leads to a path another watch has. An `add` of the link is
+    // refused as that path; the promotion is refused the same way,
+    // rather than registering the path a second time under another name.
+    // Windows makes a symbolic link only with a privilege a test cannot
+    // count on.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        try f.tmp.dir.createDirPath(io, "real/inside");
+        const real = try f.path("real/inside");
+        defer gpa.free(real);
+        const through = try f.path("link/inside");
+        defer gpa.free(through);
+
+        const held = try f.watcher.add(real, .{});
+        try f.settle();
+        const registrations = f.watcher.stats().registrations;
+        const waiting = try f.watcher.add(through, .{ .pending = true });
+
+        try f.tmp.dir.symLink(io, "real", "link", .{ .is_directory = true });
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(through, .{}));
+
+        var ledger: Ledger = .{};
+        defer ledger.deinit();
+        try ledger.await(&f, &.{.{ .id = waiting, .sub_path = "link/inside", .kind = .unwatched }});
+        try std.testing.expectEqual(@as(usize, 0), ledger.count(waiting, .created, through));
+        try std.testing.expectEqual(registrations, f.watcher.stats().registrations);
+        try std.testing.expectEqual(@as(usize, 2), f.watcher.stats().watches);
+
+        // Changes inside are reported once, to the watch that has them.
+        try f.write("real/inside/a.txt", "one");
+        try ledger.await(&f, &.{.{ .id = held, .sub_path = "real/inside/a.txt", .kind = .created }});
+        try ledger.drain(&f);
+        for (ledger.seen.items) |key| {
+            if (key.id == waiting) try std.testing.expectEqual(Kind.unwatched, key.kind);
+        }
+
+        // The id stays valid until it is removed.
+        const infos = try f.watcher.watches(gpa);
+        defer gpa.free(infos);
+        for (infos) |info| if (info.id == waiting) try std.testing.expect(!info.waiting);
+        f.watcher.remove(waiting);
+        try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().watches);
     }
 }
 

@@ -644,6 +644,16 @@ pub const AddOptions = struct {
     /// than failing with `error.PathAlreadyWatched`; each reports what it
     /// is about, and the parked watch still promotes when its path
     /// appears. Several pending watches may wait in one folder.
+    ///
+    /// The path it waits for is taken, though, from the `add` on: a
+    /// second `add` of that path, pending or not, is
+    /// `error.PathAlreadyWatched`, before the path appears and after,
+    /// exactly as for a watch taken on a path that was there. So the
+    /// answer does not depend on whether a `poll` has promoted it yet.
+    /// A path that turns out to be one another watch already has -- a
+    /// symbolic link on the way to it that leads there -- is not
+    /// watched twice either: the watch is not promoted, and says
+    /// `Kind.unwatched` against its path.
     pending: bool = false,
 };
 
@@ -687,23 +697,16 @@ pub const Watcher = struct {
         /// same path, or an ancestor while a pending watch waits, or
         /// `null` when nothing could be registered at all. Owned here.
         ///
-        /// Registered on the path itself is what makes one path one
-        /// watch: see `add`. Registered on an ancestor takes nothing, and
-        /// the ancestor stays free for a watch of its own -- see
-        /// `AddOptions.pending`.
+        /// Where it is registered has no say in what it claims. `path` is
+        /// the watch's whether it is registered there, on an ancestor, or
+        /// nowhere yet, and an ancestor is never taken by a wait in it --
+        /// see `claimed`.
         registered: ?[]u8,
         /// The type of the caller's root, retained for root-level events
         /// after the path can no longer be stat-ed.
         target: Target,
         /// `AddOptions.recursive`.
         recursive: bool,
-
-        /// Whether the backend is registered on the path itself, rather
-        /// than on an ancestor or on nothing while the path is awaited.
-        fn watching(held: Held) bool {
-            const registered = held.registered orelse return false;
-            return path_cmp.eql(registered, held.path);
-        }
     };
 
     /// One watch, as `watches` reports it.
@@ -935,18 +938,28 @@ pub const Watcher = struct {
         return id;
     }
 
-    /// Whether some watch already watches `abs` itself.
+    /// Whether some watch already watches `abs` itself, or waits for it.
     ///
-    /// Only a watch registered on its own path counts. A pending watch
-    /// parked on an ancestor holds a registration there too, but that
-    /// ancestor is not what anybody asked to watch: a caller who then
-    /// asks for it gets a watch of their own, and a second pending
-    /// watch may park on it as well. The backends keep such watches
-    /// apart -- `inotify` by giving one kernel watch several owners, the
-    /// others by registering each one separately.
+    /// Every watch claims the path it was asked for, and nothing else. A
+    /// pending watch claims the path it waits for from the moment it is
+    /// added, so that a second watch of that path is refused whether or
+    /// not a `poll` has promoted the first yet; allowing it until then
+    /// left two registrations on one path once the promotion came.
+    ///
+    /// The ancestor a pending watch is parked on is not claimed. It holds
+    /// a registration there, but that ancestor is not what anybody asked
+    /// to watch: a caller who then asks for it gets a watch of their own,
+    /// and a second pending watch may park on it as well. The backends
+    /// keep such watches apart -- `inotify` by giving one kernel watch
+    /// several owners, the others by registering each one separately.
     fn claimed(w: *const Watcher, abs: []const u8) bool {
-        for (w.table.values()) |held| {
-            if (!held.watching()) continue;
+        return w.claimedBesides(abs, null);
+    }
+
+    /// `claimed`, leaving out the watch `own`.
+    fn claimedBesides(w: *const Watcher, abs: []const u8, own: ?WatchId) bool {
+        for (w.table.keys(), w.table.values()) |id, held| {
+            if (own == id) continue;
             if (path_cmp.eql(held.path, abs)) return true;
         }
         return false;
@@ -1143,11 +1156,22 @@ pub const Watcher = struct {
     /// Swaps the ancestor watch for the real one and reports the path
     /// appearing. `false` when the path could not be watched after all,
     /// which parks it again.
+    ///
+    /// A path that is, once it is there, one another watch already has
+    /// -- reached through a symbolic link that appeared on the way -- is
+    /// not registered a second time: the watch stops waiting and says
+    /// `Kind.unwatched`, as an `add` of that path would have been
+    /// refused. `true` then too, because it is no longer waiting.
     fn promotePending(w: *Watcher, p: *Pending) PollError!bool {
         switch (w.impl) {
             inline else => |*impl| impl.remove(p.id),
         }
         w.unregister(p.id);
+        if (try w.takenElsewhere(p)) {
+            try w.batch.pushDetail(w.gpa, p.id, p.target, .unwatched, null, .unknown);
+            w.destroyPending(p);
+            return true;
+        }
         const target = target: {
             const stat = Io.Dir.cwd().statFile(w.io, p.target, .{ .follow_symlinks = false }) catch
                 break :target Target.unknown;
@@ -1177,6 +1201,19 @@ pub const Watcher = struct {
         try w.batch.pushDetail(w.gpa, p.id, p.target, .created, null, target);
         w.destroyPending(p);
         return true;
+    }
+
+    /// Whether the path a pending watch waited for, now that it is there,
+    /// resolves to a path another watch has.
+    fn takenElsewhere(w: *Watcher, p: *const Pending) Allocator.Error!bool {
+        const real = Io.Dir.cwd().realPathFileAlloc(w.io, p.target, w.gpa) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // Gone again, or not ours to resolve: the registration that
+            // follows finds out which.
+            else => return false,
+        };
+        defer w.gpa.free(real);
+        return w.claimedBesides(real, p.id);
     }
 
     fn destroyPending(w: *Watcher, p: *Pending) void {
@@ -1405,10 +1442,15 @@ pub const Watcher = struct {
                 .id = id,
                 .path = held.path,
                 .recursive = held.recursive,
-                .waiting = !held.watching(),
+                .waiting = w.waiting(id),
             };
         }
         return list;
+    }
+
+    fn waiting(w: *const Watcher, id: WatchId) bool {
+        for (w.pending.items) |p| if (p.id == id) return true;
+        return false;
     }
 
     /// What a watcher is currently holding. See `stats`.

@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A pending watch takes the path it waits for from the `add` on. A
+  second `add` of that path was accepted until a `poll` promoted the
+  first, and the promotion then registered the path a second time, so
+  every change inside it was reported under two ids; two pending watches
+  of one path did the same. Both are `PathAlreadyWatched` now, before the
+  path appears and after, so the answer no longer depends on whether a
+  `poll` came between. A path that, once there, turns out to lead through
+  a symbolic link to a path another watch has is not registered again
+  either: the pending watch stops waiting and reports `unwatched`.
 - A folder several watches reach is counted once against
   `Options.max_dir_entries`. Windows and FSEvents hand every watch its
   own record of each change, and each record was counted, so a folder
