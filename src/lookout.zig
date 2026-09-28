@@ -87,6 +87,15 @@ pub fn supported(backend: Backend) bool {
 /// Both shapes describe the same thing happening. A program that only
 /// wants to know that a path needs re-reading can ignore the difference;
 /// one that follows a file across a rename needs this.
+///
+/// Where renames are paired, a name the watch's filter excludes is
+/// treated exactly as a name outside the watch. Both names kept is
+/// `renamed`; only the new one kept is `created` there, as a rename in
+/// from outside is; only the old one kept is `removed` there, as a
+/// rename out of the watch is; neither is nothing. So a file saved by
+/// writing an excluded temporary name and renaming it over a watched one
+/// is `created` at the watched name, and an event never names an
+/// excluded path, as `Event.path` or as `Event.from`.
 pub fn pairsRenames(backend: Backend) bool {
     return switch (backend) {
         .auto => pairsRenames(default_backend),
@@ -419,6 +428,10 @@ pub const Event = struct {
     /// -- and when the watched path itself was renamed, which has no
     /// second half to pair with.
     ///
+    /// Always a path the watch is about. A rename from a name outside the
+    /// watch, or from one its filter excludes, is `Kind.created` at the
+    /// new name and carries no `from`; see `pairsRenames`.
+    ///
     /// Owned by the `Watcher` on the same terms as `path`.
     from: ?[]const u8 = null,
     /// When lookout first saw this path change in this window, read from
@@ -602,6 +615,9 @@ pub const AddOptions = struct {
     /// told about a filter, so there the excluded events are dropped and
     /// the kernel does the work regardless -- `prunesIgnored` is how a
     /// program asks which it is getting.
+    ///
+    /// An excluded path is treated exactly as a path outside the watch,
+    /// including as one half of a rename: see `pairsRenames`.
     ///
     /// The patterns are copied by `Watcher.add`; `Filter.context` is
     /// not, and whatever it points at must outlive the watch.

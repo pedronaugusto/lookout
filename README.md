@@ -220,6 +220,15 @@ costs nothing. Where the kernel recurses it cannot be told about a
 filter, so the work happens anyway and only the events are dropped.
 `prunesIgnored(backend)` says which of the two you have.
 
+An excluded path is treated exactly as a path outside the watch, and
+that includes either name of a rename. Where renames are paired, both
+names kept is `renamed`; only the new one kept is `created` there, as a
+rename in from outside is; only the old one kept is `removed` there, as
+a rename out is; neither is nothing. A file saved by writing
+`settings.new` and renaming it over `settings.toml` is `created` at
+`settings.toml` for a watch filtered to that one name, and no event names
+an excluded path, as `path` or as `from`.
+
 **FSEvents, `inotify` and `ReadDirectoryChangesW` each say which removal
 goes with which creation** — both halves in one delivery, a cookie, an
 old-name/new-name pair. `kqueue` and polling learn what changed by

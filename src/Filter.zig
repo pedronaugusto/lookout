@@ -16,6 +16,12 @@
 //! kernel's and the filter can only save the caller the event. That
 //! difference is `lookout.prunesIgnored`.
 //!
+//! An excluded path is treated exactly as a path outside the watch. A
+//! rename between a name the filter keeps and one it excludes is
+//! reported as a rename in or out of the watch would be: `created` at the
+//! kept new name, `removed` at the kept old one. See
+//! `lookout.pairsRenames`.
+//!
 //! On Apple and Windows targets, comparisons fold ASCII and Latin-1 case
 //! and composition, so `*.TMP` excludes `notes.tmp`. Other Unicode
 //! scripts are compared as written. See `path.folds_case`.

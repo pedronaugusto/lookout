@@ -287,6 +287,126 @@ test "a file saved by a rename and then deleted is reported gone at once, in a l
     }
 }
 
+/// Include lists naming one file, as a program watching its settings
+/// writes them. The second is the same list spelled so that a name it
+/// excludes is still walked into, which is the shape that reaches a
+/// backend's rename pairing with the excluded half still attached.
+const settings_filters = [_]lookout.Filter{
+    .{ .only = &.{"settings.toml"} },
+    .{ .only = &.{"**/*.toml"} },
+};
+
+/// Polls until `sub_path` is reported with `kind`, or with any kind when
+/// `kind` is `null`, and then until the watcher is quiet, failing on any
+/// event that names `never` as its path or as where it came from.
+fn expectWithout(f: *Fixture, sub_path: []const u8, kind: ?Kind, never: []const u8) !void {
+    const gpa = std.testing.allocator;
+    const wanted = try f.path(sub_path);
+    defer gpa.free(wanted);
+    const excluded = try f.path(never);
+    defer gpa.free(excluded);
+
+    var seen = false;
+    var quiet = false;
+    var waited: u32 = 0;
+    while (waited < timeout_ms and !(seen and quiet)) : (waited += 200) {
+        const events = try f.watcher.poll(200);
+        quiet = seen and events.len == 0;
+        for (events) |event| {
+            trace.log("suite saw {s} {s}", .{ @tagName(event.kind), event.path });
+            try std.testing.expect(!std.mem.eql(u8, event.path, excluded));
+            if (event.from) |from| try std.testing.expect(!std.mem.eql(u8, from, excluded));
+            const matches = if (kind) |k| event.kind == k else true;
+            if (matches and std.mem.eql(u8, event.path, wanted)) seen = true;
+        }
+    }
+    if (!seen) {
+        const name = if (kind) |k| @tagName(k) else "any";
+        std.debug.print("no {s} event for {s} within {d} ms\n", .{ name, wanted, timeout_ms });
+        return error.EventNotObserved;
+    }
+}
+
+/// What a name renamed over from a name the watch does not see is
+/// reported as. Where renames are paired, it is a rename in from outside
+/// and so `created`. Where they are not, the backend learns of it from a
+/// listing and a vnode that went, and says look again in whichever of
+/// the shapes that gives: `modified` from the listing, `removed` from the
+/// file that was replaced.
+fn renamedOver(backend: lookout.Backend) ?Kind {
+    return if (lookout.pairsRenames(backend)) .created else null;
+}
+
+test "a file saved by renaming another name over it is reported through an include list" {
+    // An editor saves by writing a new name and renaming it over the old
+    // one, and a program watching its settings names the one file it
+    // wants. The temporary name is outside what the watch is about, so
+    // the rename is one in from outside: the watched name is a new file.
+    for (backends) |backend| {
+        for (settings_filters) |filter| {
+            var f = try Fixture.init(backend);
+            defer f.deinit();
+            try f.write("settings.toml", "one");
+            _ = try f.watcher.add(f.root, .{ .filter = filter });
+            try f.settle();
+
+            try f.write("settings.new", "one and two");
+            try f.tmp.dir.rename("settings.new", f.tmp.dir, "settings.toml", std.testing.io);
+
+            try expectWithout(&f, "settings.toml", renamedOver(backend), "settings.new");
+        }
+    }
+}
+
+test "a watched file renamed to a name an include list leaves out is removed" {
+    for (backends) |backend| {
+        for (settings_filters) |filter| {
+            var f = try Fixture.init(backend);
+            defer f.deinit();
+            try f.write("settings.toml", "one");
+            _ = try f.watcher.add(f.root, .{ .filter = filter });
+            try f.settle();
+
+            try f.tmp.dir.rename("settings.toml", f.tmp.dir, "settings.old", std.testing.io);
+            try expectWithout(&f, "settings.toml", .removed, "settings.old");
+        }
+    }
+}
+
+test "a file renamed in from outside the watch over a watched one is created" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "watched");
+        try f.write("watched/a.txt", "one");
+        try f.write("outside.txt", "one and two");
+        const watched = try f.path("watched");
+        defer std.testing.allocator.free(watched);
+        _ = try f.watcher.add(watched, .{});
+        try f.settle();
+
+        try f.tmp.dir.rename("outside.txt", f.tmp.dir, "watched/a.txt", std.testing.io);
+
+        try expectWithout(&f, "watched/a.txt", renamedOver(backend), "outside.txt");
+    }
+}
+
+test "a file renamed out of the watch is removed" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "watched");
+        try f.write("watched/a.txt", "one");
+        const watched = try f.path("watched");
+        defer std.testing.allocator.free(watched);
+        _ = try f.watcher.add(watched, .{});
+        try f.settle();
+
+        try f.tmp.dir.rename("watched/a.txt", f.tmp.dir, "outside.txt", std.testing.io);
+        try expectWithout(&f, "watched/a.txt", .removed, "outside.txt");
+    }
+}
+
 test "inotify does not pair a move across separate watches" {
     if (!lookout.supported(.inotify)) return error.SkipZigTest;
 

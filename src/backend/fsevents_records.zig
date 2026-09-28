@@ -129,8 +129,10 @@ pub fn encode(out: []u8, id: WatchId, flags: u32, event: u64, path: []const u8) 
 /// pair and neither is guessed at.
 ///
 /// `ctx` answers two questions about a path: `wanted(id, path)`,
-/// whether an event for it would be reported against that watch at all,
-/// and `exists(path)`, whether the file system has it now.
+/// whether it is inside that watch's scope, and `exists(path)`, whether
+/// the file system has it now. Scope and not the watch's filter: a name
+/// the filter excludes is still the other half of a rename, and which
+/// half the caller hears about is decided on the pair.
 ///
 /// Symmetric: every test it makes is made of both records.
 pub fn pairs(a: Record, b: Record, ctx: anytype) bool {
@@ -231,7 +233,7 @@ pub const Pairing = struct {
 
 const testing = std.testing;
 
-/// A file system and a filter, answered from a list.
+/// A file system and a scope, answered from a list.
 const Fake = struct {
     present: []const []const u8,
 

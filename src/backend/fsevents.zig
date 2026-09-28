@@ -770,23 +770,29 @@ fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) 
 
     const partner = delivered[at];
     if (f.exists(partner.path)) {
-        try f.joined(batch, taken.half.id, partner.path, taken.half.path, partner.target());
+        try f.joined(batch, stream, partner.path, taken.half.path, partner.target());
     } else {
-        try f.joined(batch, taken.half.id, taken.half.path, partner.path, partner.target());
+        try f.joined(batch, stream, taken.half.path, partner.path, partner.target());
     }
     try f.recount(batch, partner.path, .unchanged, stream);
 }
 
 /// What the matching in src/backend/fsevents_records.zig asks the
-/// watcher about a path: whether an event for it would be reported
-/// against that watch at all, and whether the file system has it now.
+/// watcher about a path: whether it is inside that watch's scope, and
+/// whether the file system has it now.
+///
+/// Scope and not the filter: a rename between a name the filter keeps
+/// and one it excludes is still one rename, and which half the caller
+/// hears about is decided on the pair -- see `joined`. Refusing the
+/// excluded half here left the kept one to be read on its flags alone,
+/// and a file saved by renaming an excluded temporary over a watched
+/// name carries nothing in them that says it changed.
 const Asking = struct {
     f: *FsEvents,
 
     pub fn wanted(a: Asking, id: WatchId, subject: []const u8) bool {
         const stream = a.f.streams.get(id) orelse return false;
-        if (!stream.wants(subject)) return false;
-        return !stream.filter.excludes(stream.root, subject);
+        return stream.wants(subject);
     }
 
     pub fn exists(a: Asking, subject: []const u8) bool {
@@ -849,31 +855,41 @@ fn report(
         return;
     }
 
-    // The kernel walked the tree whatever the filter says; what the
-    // filter can still do is keep the event from the caller.
-    if (stream.filter.excludes(stream.root, record.path)) {
-        trace.log("fsevents drop filtered path={s}", .{record.path});
-        return;
-    }
-
+    // A rename is paired before the filter is asked, because the filter
+    // is about the two names and the pair is one change: see `joined`.
     if (record.renamed()) {
         if (records.partnerOf(record, delivered, used, at + 1, Asking{ .f = f })) |partner_at| {
             used[partner_at] = true;
             const partner = delivered[partner_at];
-            trace.log("fsevents push renamed path={s}", .{record.path});
             if (f.exists(partner.path)) {
-                try f.joined(batch, record.id, partner.path, record.path, partner.target());
+                try f.joined(batch, stream, partner.path, record.path, partner.target());
             } else {
-                try f.joined(batch, record.id, record.path, partner.path, record.target());
+                try f.joined(batch, stream, record.path, partner.path, record.target());
             }
             try f.recount(batch, record.path, .unchanged, stream);
             try f.recount(batch, partner.path, .unchanged, stream);
             return;
         }
-        // No partner in this delivery. It may be in the next one, so
-        // the decision waits: calling it now would turn one `renamed`
-        // into a removal and a creation on a backend that pairs them.
+        // No partner in this delivery. On a name the filter excludes,
+        // the half says nothing the caller asked about: were its partner
+        // in the next delivery, that half would be read alone as the
+        // rename in or out it would have been paired into. It is not
+        // held, where it would push out a half that is worth waiting on.
+        if (stream.filter.excludes(stream.root, record.path)) {
+            trace.log("fsevents drop filtered unpaired path={s}", .{record.path});
+            return;
+        }
+        // It may be in the next one, so the decision waits: calling it
+        // now would turn one `renamed` into a removal and a creation on
+        // a backend that pairs them.
         try f.hold(batch, record);
+        return;
+    }
+
+    // The kernel walked the tree whatever the filter says; what the
+    // filter can still do is keep the event from the caller.
+    if (stream.filter.excludes(stream.root, record.path)) {
+        trace.log("fsevents drop filtered path={s}", .{record.path});
         return;
     }
 
@@ -895,8 +911,8 @@ fn reportPlain(
     stream: *const Stream,
 ) lookout.Watcher.PollError!void {
     const seen = f.known.contains(.{ .id = record.id, .path = record.path });
-    // A known path with no removal flag, and a newly-created path with
-    // no removal flag, are present as far as this record can say. A
+    // A known path with no removal or rename flag, and a newly-created
+    // path with neither, are present as far as this record can say. A
     // later removal races any `stat` made here in exactly the same way
     // and will carry its own record. Save the filesystem query for the
     // ambiguous cases: accumulated removal flags and an unknown path
@@ -966,6 +982,16 @@ fn reportPlain(
         {
             trace.log("fsevents push attributes path={s}", .{record.path});
             try batch.push(f.gpa, record.id, record.path, .attributes, .file);
+        } else if (record.renamed() and
+            record.flags & (flag.item_created | flag.item_removed) == 0)
+        {
+            // A rename half alone, on a name that was there and still
+            // is, and nothing else said about it: something was renamed
+            // over the file from a name this watch does not see -- outside
+            // it, or excluded by its filter. The file is a new one, and
+            // `inotify` and Windows say `created` for the same move.
+            trace.log("fsevents push created renamed-over path={s}", .{record.path});
+            try batch.push(f.gpa, record.id, record.path, .created, .file);
         } else {
             trace.log("fsevents drop known-no-change path={s}", .{record.path});
         }
@@ -975,7 +1001,12 @@ fn reportPlain(
 }
 
 fn needsExistenceCheck(flags: u32, seen: bool) bool {
-    return flags & flag.item_removed != 0 or (!seen and flags & flag.item_created == 0);
+    // A rename half says the name was left or arrived at and not which,
+    // and one that reaches here had no partner to say it: renamed out
+    // of the watch leaves the flags of the file that was there, with no
+    // removal among them.
+    if (flags & (flag.item_removed | flag.item_renamed) != 0) return true;
+    return !seen and flags & flag.item_created == 0;
 }
 
 fn wasReplaced(flags: u32) bool {
@@ -1018,24 +1049,56 @@ fn adopt(
     };
 }
 
-/// Reports one rename and moves everything lookout remembers from the
-/// old name to the new one.
+/// Reports one rename, whose two names are both in the watch's scope,
+/// and keeps what lookout remembers in step with it.
 ///
-/// The second half is what a byte-for-byte record of a tree gets wrong
-/// after a directory is renamed: every path under the old name is still
-/// remembered under it, so the first write inside the new name is a path
-/// lookout has never seen and is reported as a creation.
+/// The filter is applied to the pair, and a name it excludes is treated
+/// exactly as a name outside the watch: both names kept is `renamed`;
+/// only the new one kept is `created` there, as a rename in from outside
+/// would be; only the old one kept is `removed` there, as a rename out
+/// would be; neither is nothing.
+///
+/// For a rename that stays a rename, everything remembered under the
+/// old name is moved to the new one, which is what a byte-for-byte
+/// record of a tree gets wrong after a directory is renamed: every path
+/// under the old name is still remembered under it, so the first write
+/// inside the new name is a path lookout has never seen and is reported
+/// as a creation.
 fn joined(
     f: *FsEvents,
     batch: *Batch,
-    id: WatchId,
+    stream: *const Stream,
     to: []const u8,
     from: []const u8,
     target: Target,
 ) lookout.Watcher.PollError!void {
-    try batch.pushRename(f.gpa, id, to, from, target);
-    try f.rekey(id, from, to);
+    const id = stream.id;
+    const keeps_to = !stream.filter.excludes(stream.root, to);
+    const keeps_from = !stream.filter.excludes(stream.root, from);
     f.budget.forget(from);
+    if (keeps_to and keeps_from) {
+        trace.log("fsevents push renamed path={s} from={s}", .{ to, from });
+        try batch.pushRename(f.gpa, id, to, from, target);
+        try f.rekey(id, from, to);
+        return;
+    }
+    // Whatever was remembered under the old name was remembered under a
+    // name the caller never heard about, or is about to hear is gone.
+    f.forget(id, from);
+    if (target == .directory) f.forgetSubtree(id, from);
+    if (keeps_to) {
+        trace.log("fsevents push created renamed-in path={s} from={s}", .{ to, from });
+        try batch.push(f.gpa, id, to, .created, target);
+        try f.remember(id, to);
+        // As for any directory that arrives with a tree in it: what is
+        // inside is as new to the caller as the directory is.
+        if (target == .directory and stream.scope == .tree) try f.adopt(batch, id, to, stream);
+    } else if (keeps_from) {
+        trace.log("fsevents push removed renamed-out path={s} to={s}", .{ from, to });
+        try batch.push(f.gpa, id, from, .removed, target);
+    } else {
+        trace.log("fsevents drop filtered renamed path={s} from={s}", .{ to, from });
+    }
 }
 
 /// Holds an unpaired rename until the next delivery arrives. Anything
@@ -1067,7 +1130,8 @@ fn resolveHeld(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
 
 /// Reports a half that never found its partner: the path was renamed
 /// out of the watch, or renamed and then deleted, and what is left is
-/// the removal or the creation the other backends would give.
+/// the removal or the creation the other backends would give. A half on
+/// a name the filter excludes is never held -- see `report`.
 fn reportHalf(f: *FsEvents, batch: *Batch, half: records.Half) lookout.Watcher.PollError!void {
     const stream = f.streams.get(half.id) orelse return;
     trace.log("fsevents unpaired renamed path={s}", .{half.path});
@@ -1258,6 +1322,8 @@ test "only ambiguous plain records query the filesystem" {
     try std.testing.expect(needsExistenceCheck(flag.item_modified, false));
     try std.testing.expect(needsExistenceCheck(flag.item_removed, true));
     try std.testing.expect(needsExistenceCheck(flag.item_removed | flag.item_created, true));
+    try std.testing.expect(needsExistenceCheck(flag.item_renamed, true));
+    try std.testing.expect(needsExistenceCheck(flag.item_renamed | flag.item_created | flag.item_modified, true));
 }
 
 test "stream latency follows the watcher latency" {

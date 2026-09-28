@@ -366,11 +366,14 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
 }
 
 /// Reports every held old name whose new name never came as a removal.
+/// An old name the watch does not want was held only so that its new
+/// name could be told apart from a rename in, and is not reported.
 fn flushRenames(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
     for (w.watches.values()) |watch| {
         const old = watch.pending_rename orelse continue;
         watch.pending_rename = null;
         defer w.gpa.free(old);
+        if (!wants(watch, old)) continue;
         try batch.push(w.gpa, watch.id, old, .removed, watch.goneTarget());
     }
 }
@@ -553,15 +556,72 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
         defer w.gpa.free(path);
 
         // The kernel walked the tree whatever the filter says; what the
-        // filter can still do is keep the event from the caller.
-        const wanted = if (watch.only == null)
-            !watch.filter.excludes(watch.root, path)
-        else
-            path_cmp.eql(path, watch.root);
-        if (wanted) {
-            try w.reportOne(watch, record.action, path, batch);
+        // filter can still do is keep the event from the caller. The two
+        // names of a rename are the exception: they are paired first and
+        // the filter is applied to the pair -- see `reportRename`.
+        switch (record.action) {
+            c.FILE_ACTION_RENAMED_OLD_NAME, c.FILE_ACTION_RENAMED_NEW_NAME => {
+                try w.reportRename(watch, record.action, path, batch);
+            },
+            else => if (wants(watch, path)) {
+                try w.reportOne(watch, record.action, path, batch);
+            },
         }
     }
+}
+
+/// Whether an event for `subject` is reported against `watch`: it is the
+/// watched file, for a watch on one, and it is not excluded by the
+/// filter.
+fn wants(watch: *const Watch, subject: []const u8) bool {
+    return if (watch.only == null)
+        !watch.filter.excludes(watch.root, subject)
+    else
+        path_cmp.eql(subject, watch.root);
+}
+
+/// Holds an old name, or joins a new name to the old one held.
+///
+/// Both halves are held and joined whether or not the watch wants them,
+/// and a name it does not want is then treated exactly as a name outside
+/// the watch: both names wanted is `renamed`; only the new one wanted is
+/// `created` there, as a rename in from outside would be; only the old
+/// one wanted is `removed` there, as a rename out would be; neither is
+/// nothing.
+fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+    const wanted = wants(watch, subject);
+    if (action == c.FILE_ACTION_RENAMED_OLD_NAME) {
+        // Copied before the one it replaces is freed, so a copy that
+        // fails leaves the watch holding what it held.
+        const owned = try w.gpa.dupe(u8, subject);
+        if (watch.pending_rename) |old| w.gpa.free(old);
+        watch.pending_rename = owned;
+        if (wanted) try w.recount(watch, subject, .vanished, batch);
+        return;
+    }
+    const from = watch.pending_rename;
+    watch.pending_rename = null;
+    defer if (from) |old| w.gpa.free(old);
+    const keeps_from = if (from) |old| wants(watch, old) else false;
+    // The new name is where the entry is now, so it can be asked what the
+    // entry is, whichever name is reported.
+    const target = w.targetOf(subject);
+    if (!wanted) {
+        if (keeps_from) {
+            const gone = if (target != .unknown) target else watch.goneTarget();
+            try batch.push(w.gpa, watch.id, from.?, .removed, gone);
+        }
+        return;
+    }
+    watch.noteRoot(target);
+    if (keeps_from) {
+        try batch.pushRename(w.gpa, watch.id, subject, from.?, target);
+    } else {
+        // Renamed in from outside the watch, or from a name it does not
+        // want: a creation as far as anyone watching it can tell.
+        try batch.push(w.gpa, watch.id, subject, .created, target);
+    }
+    try w.recount(watch, subject, .appeared, batch);
 }
 
 /// What the path is now, for the actions that leave it there to be
@@ -597,32 +657,20 @@ fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch
                 try batch.push(w.gpa, watch.id, subject, .modified, target);
             }
         },
-        c.FILE_ACTION_RENAMED_OLD_NAME => {
-            if (watch.pending_rename) |old| w.gpa.free(old);
-            watch.pending_rename = try w.gpa.dupe(u8, subject);
-            move = .vanished;
-        },
-        c.FILE_ACTION_RENAMED_NEW_NAME => {
-            move = .appeared;
-            const target = w.targetOf(subject);
-            watch.noteRoot(target);
-            if (watch.pending_rename) |old| {
-                defer w.gpa.free(old);
-                watch.pending_rename = null;
-                try batch.pushRename(w.gpa, watch.id, subject, old, target);
-            } else {
-                // Renamed in from outside the watch: a creation as far as
-                // anyone watching this tree can tell.
-                try batch.push(w.gpa, watch.id, subject, .created, target);
-            }
-        },
         else => {},
     }
     if (move == .unchanged) return;
-    // The budget is one directory's, not one watch's: a recursive watch
-    // over twenty directories of three hundred entries is inside a
-    // budget of a thousand, and counting every creation anywhere under
-    // the root against one number said it was not.
+    try w.recount(watch, subject, move, batch);
+}
+
+/// Keeps the entry budget of the directory `subject` is in, and reports
+/// `lookout.Kind.overflow` when it is past.
+///
+/// The budget is one directory's, not one watch's: a recursive watch
+/// over twenty directories of three hundred entries is inside a budget
+/// of a thousand, and counting every creation anywhere under the root
+/// against one number said it was not.
+fn recount(w: *Windows, watch: *Watch, subject: []const u8, move: Budget.Move, batch: *Batch) lookout.Watcher.PollError!void {
     const parent = std.fs.path.dirname(subject) orelse return;
     if (try w.budget.note(parent, move)) {
         try batch.push(w.gpa, watch.id, watch.root, .overflow, .directory);

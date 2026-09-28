@@ -498,6 +498,11 @@ fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u
 ///
 /// The kernel gives both halves one cookie, and two halves make one
 /// `renamed` instead of a removal and a creation nobody can connect.
+///
+/// The halves are paired before the filter is asked, and a name it
+/// excludes is then treated exactly as a name outside the watch: both
+/// names kept is `renamed`; only the new one kept is `created` there;
+/// only the old one kept is `removed` there; neither is nothing.
 fn pair(n: *Inotify, change: *const Change, batch: *Batch) lookout.Watcher.PollError!bool {
     if (change.moved_from) {
         const owned = try n.gpa.dupe(u8, change.path);
@@ -514,8 +519,14 @@ fn pair(n: *Inotify, change: *const Change, batch: *Batch) lookout.Watcher.PollE
         const key: PendingKey = .{ .watch = change.watch, .cookie = change.cookie };
         const half = n.pending_renames.fetchSwapRemove(key) orelse return false;
         defer n.gpa.free(half.value.path);
-        if (!n.excluded(change.watch, change.path)) {
+        const keeps_to = !n.excluded(change.watch, change.path);
+        const keeps_from = !n.excluded(change.watch, half.value.path);
+        if (keeps_to and keeps_from) {
             try batch.pushRename(n.gpa, change.watch, change.path, half.value.path, change.target());
+        } else if (keeps_to) {
+            try batch.push(n.gpa, change.watch, change.path, .created, change.target());
+        } else if (keeps_from) {
+            try batch.push(n.gpa, change.watch, half.value.path, .removed, change.target());
         }
         // The watches below a moved directory are still on the right
         // inodes but under the wrong names, so they are dropped and
@@ -600,14 +611,16 @@ fn targetOfWatchPath(n: *const Inotify, id: WatchId, subject: []const u8) Target
 
 /// Reports every held `IN_MOVED_FROM` whose other half never came as a
 /// removal: the entry moved somewhere this watch cannot see it, which
-/// from inside the watch is indistinguishable from a deletion.
+/// from inside the watch is indistinguishable from a deletion. A half on
+/// a name the filter excludes is held only so that its partner can be
+/// told apart from a rename in, and is not reported.
 fn flushRenames(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!void {
     while (n.pending_renames.count() != 0) {
         const key = n.pending_renames.keys()[0];
         const half = n.pending_renames.values()[0];
         n.pending_renames.swapRemoveAt(0);
         defer n.gpa.free(half.path);
-        try batch.push(
+        if (!n.excluded(key.watch, half.path)) try batch.push(
             n.gpa,
             key.watch,
             half.path,

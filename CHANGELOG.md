@@ -8,6 +8,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A rename between a name the filter keeps and one it excludes is
+  reported by one rule on every backend that pairs renames: an excluded
+  name is treated exactly as a name outside the watch. Only the new name
+  kept is `created` there, only the old one kept is `removed` there, both
+  kept is `renamed`, neither is nothing. FSEvents dropped the excluded
+  half before pairing and then read the kept one on its flags alone, so a
+  file saved by renaming an excluded temporary over a watched name was
+  reported only when a modified flag happened to be coalesced into the
+  record, and a watched file renamed to an excluded name was `modified`.
+  `inotify`, for an excluded name its walk still enters, reported
+  `renamed` with an excluded `from`, lost the removal when only the old
+  name was kept, and reported an excluded name renamed out as `removed`.
+  Windows skipped an excluded new name before pairing, so the kept old
+  name stayed held for the next rename's new name: lost, or paired with
+  the wrong one.
+- FSEvents: a rename half with no partner, on a file that was already
+  known, is checked for on disk. Renamed out of the watch, it is
+  `removed`; it was reported `modified`, or nothing, from flags that
+  carry no removal. Still there with nothing else in its flags,
+  something was renamed over it from outside the watch, and it is
+  `created`, as `inotify` and Windows report the same move; it was
+  dropped.
+
 - A pending watch whose path appeared while it moved down to a nearer
   ancestor — `mkdir -p` making both in one breath — was left parked on
   nothing, so a `poll` with no timeout waited until some other change. It
