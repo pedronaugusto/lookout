@@ -44,6 +44,7 @@ const path_cmp = @import("../path.zig");
 const records = @import("fsevents_records.zig");
 const trace = @import("../trace.zig");
 const walk = @import("../walk.zig");
+const Waker = @import("../Waker.zig");
 const Record = records.Record;
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
@@ -436,11 +437,18 @@ pub const Held = struct {
     overflowed: bool,
 };
 
-/// Pokes the pipe a blocked `wait` is polling. See
-/// `lookout.Watcher.wake`.
-pub fn wake(f: *FsEvents) void {
-    f.sink.woken.store(true, .release);
-    f.sink.signal();
+/// How another thread pokes a blocked `wait`: the sink, which is
+/// allocated once at `init`, never moves, and is already shared with the
+/// delivery thread. See `lookout.Watcher.wake`.
+pub fn waker(f: *const FsEvents) Waker {
+    return .{ .context = @intFromPtr(f.sink), .call = poke };
+}
+
+/// Marks the sink woken and pokes the pipe a blocked `wait` is polling.
+fn poke(context: usize) void {
+    const sink: *Sink = @ptrFromInt(context);
+    sink.woken.store(true, .release);
+    sink.signal();
 }
 
 /// How many FSEvents streams this backend holds: one per watch, because

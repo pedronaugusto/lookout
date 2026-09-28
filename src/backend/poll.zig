@@ -19,6 +19,7 @@ const Batch = @import("../Batch.zig");
 const Deadline = @import("../Deadline.zig");
 const Snapshot = @import("../Snapshot.zig");
 const Tree = @import("../Tree.zig");
+const Waker = @import("../Waker.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
@@ -28,13 +29,10 @@ gpa: Allocator,
 io: Io,
 interval_ms: u32,
 tree: Tree,
-/// Set by `wake` from another thread. There is nothing to interrupt
-/// here, only a sleep to cut short, so the sleep is taken in slices and
-/// this is read between them.
-woken: std.atomic.Value(bool),
 
-/// The longest this backend sleeps without looking at `woken`. A wake
-/// is answered within this even when `poll_interval_ms` is minutes.
+/// The longest this backend sleeps without looking at the flag `wake`
+/// sets. A wake is answered within this even when `poll_interval_ms` is
+/// minutes.
 const slice_ms = 100;
 
 /// Creates a backend that watches nothing. Never actually fails -- this
@@ -46,7 +44,6 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .io = io,
         .interval_ms = @max(1, options.poll_interval_ms),
         .tree = .init(gpa, io, options.max_dir_entries, false),
-        .woken = .init(false),
     };
 }
 
@@ -77,9 +74,14 @@ pub fn position(p: *const Poll) ?u64 {
     return null;
 }
 
-/// Cuts the sleep short. See `lookout.Watcher.wake`.
-pub fn wake(p: *Poll) void {
-    p.woken.store(true, .release);
+/// Nothing to poke: there is nothing to interrupt here, only a sleep to
+/// cut short, and `wait` reads the flag `lookout.Watcher.wake` sets
+/// between the slices it sleeps in. That flag lives in the watcher rather
+/// than here because this struct is what the polling thread writes, and
+/// a thread that wakes it must not touch it. See `Waker`.
+pub fn waker(p: *const Poll) Waker {
+    _ = p;
+    return .none;
 }
 
 /// How many paths this backend re-lists or re-stats on every tick. See
@@ -107,16 +109,24 @@ pub fn remove(p: *Poll, id: WatchId) void {
 }
 
 /// Scans, then sleeps and scans again until the scan produces an event
-/// `batch` did not already hold or `timeout_ms` expires. `null` never
-/// gives up.
-pub fn wait(p: *Poll, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+/// `batch` did not already hold, `woken` is set, or `timeout_ms` expires.
+/// `null` never gives up.
+///
+/// `woken` is `lookout.Watcher`'s own flag, and it is only read here:
+/// clearing it is the watcher's, which answers the wake.
+pub fn wait(
+    p: *Poll,
+    batch: *Batch,
+    timeout_ms: ?u32,
+    woken: *const std.atomic.Value(bool),
+) lookout.Watcher.PollError!void {
     const before = batch.revision;
     const deadline: Deadline = .start(p.io, timeout_ms);
 
     while (true) {
         try p.scan(batch);
         if (batch.revision != before) return;
-        if (p.woken.swap(false, .acquire)) return;
+        if (woken.load(.acquire)) return;
 
         var napped: u32 = 0;
         const nap_ms = nap: {
@@ -130,7 +140,7 @@ pub fn wait(p: *Poll, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError
             const slice = @min(slice_ms, nap_ms - napped);
             try p.io.sleep(.fromMilliseconds(slice), .awake);
             napped += slice;
-            if (p.woken.load(.acquire)) break;
+            if (woken.load(.acquire)) break;
         }
     }
 }

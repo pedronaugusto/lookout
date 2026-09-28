@@ -35,6 +35,7 @@ const Filter = @import("../Filter.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("inotify_records.zig");
 const walk = @import("../walk.zig");
+const Waker = @import("../Waker.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
@@ -191,11 +192,18 @@ pub fn position(n: *const Inotify) ?u64 {
     return null;
 }
 
-/// Writes one byte to the pipe a blocked `wait` is also polling. See
+/// How another thread pokes a blocked `wait`: the write end of the pipe
+/// it is also polling, which is fixed for the life of the watcher. See
 /// `lookout.Watcher.wake`.
-pub fn wake(n: *Inotify) void {
+pub fn waker(n: *const Inotify) Waker {
+    return .{ .context = @intCast(n.wake_w), .call = poke };
+}
+
+/// Writes one byte to the pipe. Non-blocking, so a full pipe costs
+/// nothing: one byte pending is as good as a thousand.
+fn poke(context: usize) void {
     const byte: [1]u8 = .{0};
-    _ = linux.write(n.wake_w, &byte, 1);
+    _ = linux.write(@intCast(context), &byte, 1);
 }
 
 /// How many kernel watches this backend holds, which is what the

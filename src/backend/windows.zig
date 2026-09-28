@@ -37,6 +37,7 @@ const Filter = @import("../Filter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("windows_records.zig");
+const Waker = @import("../Waker.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
@@ -196,10 +197,17 @@ pub fn position(w: *const Windows) ?u64 {
     return null;
 }
 
+/// How another thread pokes a blocked `wait`: the completion port, which
+/// is fixed for the life of the watcher. See `lookout.Watcher.wake`.
+pub fn waker(w: *const Windows) Waker {
+    return .{ .context = @intFromPtr(w.port), .call = post };
+}
+
 /// Posts a completion under a key no watch has, which a blocked `wait`
-/// takes as its cue to come back. See `lookout.Watcher.wake`.
-pub fn wake(w: *Windows) void {
-    _ = c.PostQueuedCompletionStatus(w.port, 0, wake_key, null);
+/// takes as its cue to come back.
+fn post(context: usize) void {
+    const port: windows.HANDLE = @ptrFromInt(context);
+    _ = c.PostQueuedCompletionStatus(port, 0, wake_key, null);
 }
 
 /// How many directory handles this backend holds: one per watch, because

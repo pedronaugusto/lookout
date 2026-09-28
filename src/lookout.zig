@@ -24,6 +24,7 @@ const Io = std.Io;
 const Batch = @import("Batch.zig");
 const Deadline = @import("Deadline.zig");
 const Tree = @import("Tree.zig");
+const Waker = @import("Waker.zig");
 const path_cmp = @import("path.zig");
 
 /// Which paths under a watch the caller wants. See `AddOptions.filter`.
@@ -664,9 +665,13 @@ pub const Watcher = struct {
     table: std.AutoArrayHashMapUnmanaged(WatchId, Held),
     /// Watches whose path does not exist yet. See `AddOptions.pending`.
     pending: std.ArrayList(*Pending),
-    /// Set by `wake` and cleared by the `poll` that answers it. The one
-    /// field of a `Watcher` another thread may touch.
+    /// Set by `wake` and cleared by the `poll` that answers it. One of
+    /// the two fields of a `Watcher` another thread may touch.
     woken: std.atomic.Value(bool),
+    /// How `wake` reaches the backend's wait, taken from it at `init` and
+    /// only read after: the other field another thread may touch. `wake`
+    /// never touches `impl`, which is the polling thread's to write.
+    waker: Waker,
     /// Whether the events in `batch` were handed to the caller by the last
     /// `poll`, and so are the caller's until the next one begins. A `poll`
     /// that returned an error handed nothing out, and what it had gathered
@@ -840,6 +845,9 @@ pub const Watcher = struct {
             .table = .empty,
             .pending = .empty,
             .woken = .init(false),
+            .waker = switch (impl) {
+                inline else => |*backend_impl| backend_impl.waker(),
+            },
             .handed_out = false,
         };
     }
@@ -1267,6 +1275,9 @@ pub const Watcher = struct {
             if (left == 0) break;
             try w.wait(left);
             try w.collect();
+            // A wake that arrives now is answered by this poll, which
+            // returns what it has rather than waiting out the tail.
+            if (w.woken.swap(false, .acquire)) break;
         }
         return w.batch.events.items;
     }
@@ -1281,6 +1292,9 @@ pub const Watcher = struct {
     /// with everything the wait read already in the batch.
     fn wait(w: *Watcher, wait_ms: ?u32) PollError!void {
         switch (w.impl) {
+            // Nothing to interrupt, only a sleep to cut short: it reads
+            // the flag `wake` sets between the slices it sleeps in.
+            .poll => |*impl| try impl.wait(&w.batch, wait_ms, &w.woken),
             inline else => |*impl| try impl.wait(&w.batch, wait_ms),
         }
         try w.io.checkCancel();
@@ -1350,9 +1364,7 @@ pub const Watcher = struct {
     /// next one, so the flag is always read.
     pub fn wake(w: *Watcher) void {
         w.woken.store(true, .release);
-        switch (w.impl) {
-            inline else => |*impl| impl.wake(),
-        }
+        w.waker.wake();
     }
 
     /// Where this watcher has got to, for `Options.since` to resume
@@ -1457,6 +1469,7 @@ test {
     _ = Filter;
     _ = Poll;
     _ = Tree;
+    _ = Waker;
     _ = @import("Snapshot.zig");
     _ = @import("Budget.zig");
     _ = @import("Deadline.zig");

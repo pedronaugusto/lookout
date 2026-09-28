@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `wake` read the backend's state while the polling thread was writing
+  it: finding which backend to poke loaded the whole backend union, and
+  on the `poll` backend the polling thread's own loads of that union read
+  the flag `wake` was storing. ThreadSanitizer reported both on Linux, in
+  the two suite tests that wake a watcher from another thread. The
+  backend now hands `init` a waker -- the pipe, the kernel queue, the
+  completion port, the FSEvents sink -- and `wake` pokes that and touches
+  nothing else; the `poll` backend's sleep reads the watcher's own flag.
+  A `wake` that arrives during the coalescing tail now ends that `poll`
+  rather than the next one.
+
 - A rename between a name the filter keeps and one it excludes is
   reported by one rule on every backend that pairs renames: an excluded
   name is treated exactly as a name outside the watch. Only the new name

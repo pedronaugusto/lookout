@@ -381,8 +381,11 @@ answer to "one kernel watch per directory does not scale", and it needs
 `CAP_SYS_ADMIN` — a privilege a library cannot assume a process has.
 
 **A backend is one file and one struct with nine methods**: `init`,
-`deinit`, `fd`, `registrationCount`, `add`, `remove`, `wait`, `wake` and
-`position`. `Watcher.Impl` finds it structurally, so adding one is:
+`deinit`, `fd`, `registrationCount`, `add`, `remove`, `wait`, `waker` and
+`position`. `waker` hands `init` what another thread needs to end a
+blocked `wait` -- a descriptor, a handle, a pointer to state that never
+moves -- so `wake` never reads the backend the polling thread is
+writing. `Watcher.Impl` finds it structurally, so adding one is:
 write the file, add a tag to `Impl` for the right `os.tag`, add the tag
 to `Backend`, and add an arm to each of `pairsRenames`,
 `reportsRootMove`, `reportsCloses`, `prunesIgnored` and

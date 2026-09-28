@@ -27,6 +27,7 @@ const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
 const Deadline = @import("../Deadline.zig");
 const Tree = @import("../Tree.zig");
+const Waker = @import("../Waker.zig");
 const WatchId = lookout.WatchId;
 
 const Kqueue = @This();
@@ -121,9 +122,15 @@ pub fn position(k: *const Kqueue) ?u64 {
     return null;
 }
 
-/// Triggers the user event a blocked `wait` is also listening for. See
+/// How another thread pokes a blocked `wait`: the kernel queue itself,
+/// which is fixed for the life of the watcher. See
 /// `lookout.Watcher.wake`.
-pub fn wake(k: *Kqueue) void {
+pub fn waker(k: *const Kqueue) Waker {
+    return .{ .context = @intCast(k.kq), .call = trigger };
+}
+
+/// Triggers the user event a blocked `wait` is also listening for.
+fn trigger(context: usize) void {
     const change: posix.Kevent = .{
         .ident = wake_ident,
         .filter = std.c.EVFILT.USER,
@@ -132,7 +139,7 @@ pub fn wake(k: *Kqueue) void {
         .data = 0,
         .udata = 0,
     };
-    _ = std.c.kevent(k.kq, (&change)[0..1], 1, undefined, 0, null);
+    _ = std.c.kevent(@intCast(context), (&change)[0..1], 1, undefined, 0, null);
 }
 
 /// How many descriptors this backend holds open for watched paths. See
