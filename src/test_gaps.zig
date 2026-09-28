@@ -707,8 +707,11 @@ test "the delivery buffer is the size the caller asked for" {
     }
 
     // At the default: room for all of it. The system either delivers
-    // every file or says it lost track; either way lookout's own buffer
-    // turns nothing away, and every file delivered is reported.
+    // every file or says it lost track, which it does under load; either
+    // way lookout's own buffer turns nothing away, and every file
+    // delivered is reported. Nothing is printed on the way: a test that
+    // writes to standard error is shown by the build runner as a failed
+    // command, whatever it returns.
     {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
@@ -724,24 +727,19 @@ test "the delivery buffer is the size the caller asked for" {
         try writeBurst(tmp.dir, burst);
 
         const held = try Held.await(&watcher, burst, .delivered);
-        if (held.created != burst) {
-            std.debug.print("fsevents: {d}/{d} delivered; the system lost track: {}; the buffer overflowed: {}\n", .{
-                held.created, burst, held.lost_track, held.overflowed,
-            });
-        }
         try std.testing.expect(!held.overflowed);
 
         var tally: Tally = .{};
         tally.count(try watcher.poll(0));
-        if (held.lost_track) {
-            try std.testing.expect(tally.overflow > 0);
-        } else {
-            try std.testing.expectEqual(@as(usize, 0), tally.overflow);
-        }
+        // What a caller is promised: every file, or an `overflow` saying
+        // that some are missing. A file lost without one is a bug.
+        if (tally.created != burst) try std.testing.expect(tally.overflow > 0);
+        // And the overflow is the system's: reported when it said it lost
+        // track, and only then, since lookout's buffer lost nothing.
+        try std.testing.expectEqual(held.lost_track, tally.overflow > 0);
         // What arrived between the look and the poll is reported too.
         try std.testing.expect(tally.created >= held.created);
         try std.testing.expect(tally.created <= burst);
-        if (!held.lost_track) try std.testing.expectEqual(burst, tally.created);
     }
 }
 
