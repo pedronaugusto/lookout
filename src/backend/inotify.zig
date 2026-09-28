@@ -276,10 +276,10 @@ pub fn add(
 /// Stops watching `id` and releases its kernel watches.
 pub fn remove(n: *Inotify, id: WatchId) void {
     var watch = n.watches.fetchSwapRemove(id) orelse return;
-    n.budget.forget(watch.value.root);
+    n.removeWatchDescriptors(id);
+    n.budget.release(watch.value.root, n, stillCounted);
     n.gpa.free(watch.value.root);
     watch.value.filter.deinit(n.gpa);
-    n.removeWatchDescriptors(id);
     var i: usize = 0;
     while (i < n.pending_renames.count()) {
         if (n.pending_renames.keys()[i].watch != id) {
@@ -289,6 +289,16 @@ pub fn remove(n: *Inotify, id: WatchId) void {
         n.gpa.free(n.pending_renames.values()[i].path);
         n.pending_renames.swapRemoveAt(i);
     }
+}
+
+/// Whether the kernel still watches `dir` for a watch that is left, so
+/// that its count outlives the watch being removed. See
+/// `Budget.release`.
+fn stillCounted(n: *const Inotify, dir: []const u8) bool {
+    for (n.wds.values()) |registration| {
+        if (path_cmp.eql(registration.path, dir)) return true;
+    }
+    return false;
 }
 
 /// Whether `subject` is outside what the watch `id` is about, so no

@@ -363,7 +363,8 @@ caller named is an error.
 
 `Options.max_dir_entries` is one directory's budget on all five: a
 recursive watch over twenty directories of three hundred entries is
-twenty directories inside a budget of a thousand.
+twenty directories inside a budget of a thousand. A directory several
+watches reach is counted once, and each of them is told when it goes past.
 
 I made FSEvents the default on Apple platforms rather than `kqueue`,
 because it recurses without a descriptor per directory and pairs renames.

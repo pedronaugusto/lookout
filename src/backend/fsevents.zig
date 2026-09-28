@@ -291,6 +291,15 @@ const Stream = struct {
         return std.mem.indexOfAny(u8, rest, path_cmp.separators) == null;
     }
 
+    /// The directories whose entries this stream reports.
+    fn reach(st: *const Stream) Budget.Reach {
+        return switch (st.scope) {
+            .tree => .{ .dir = st.root, .recursive = true },
+            .directory => .{ .dir = st.root, .recursive = false },
+            .file => .{ .dir = std.fs.path.dirname(st.root) orelse st.root, .recursive = false },
+        };
+    }
+
     fn rootTarget(st: *const Stream) Target {
         return if (st.scope == .file) .file else .directory;
     }
@@ -573,9 +582,18 @@ fn createStream(
 /// Stops watching `id`.
 pub fn remove(f: *FsEvents, id: WatchId) void {
     const entry = f.streams.fetchSwapRemove(id) orelse return;
-    f.budget.forget(entry.value.root);
+    f.budget.release(entry.value.root, f, stillCounted);
     f.forgetWatch(id);
     f.destroy(entry.value);
+}
+
+/// Whether a watch still held reports the entries of `dir`, so that its
+/// count outlives the watch being removed. See `Budget.release`.
+fn stillCounted(f: *const FsEvents, dir: []const u8) bool {
+    for (f.streams.values()) |stream| {
+        if (stream.reach().covers(dir)) return true;
+    }
+    return false;
 }
 
 fn destroy(f: *FsEvents, stream: *Stream) void {
@@ -1032,6 +1050,7 @@ fn adopt(
     stream: *const Stream,
 ) lookout.Watcher.PollError!void {
     try f.budget.begin(root);
+    defer f.budget.end();
     const Adopting = struct {
         f: *FsEvents,
         batch: *Batch,
@@ -1272,6 +1291,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
     if (f.exists(stream.root)) try f.remember(stream.id, stream.root);
     if (stream.scope == .file) return;
     try f.budget.begin(stream.root);
+    defer f.budget.end();
     trace.log("fsevents seed walk root={s}", .{stream.root});
 
     const Seeding = struct {
@@ -1301,6 +1321,13 @@ fn exists(f: *const FsEvents, subject: []const u8) bool {
 
 /// Keeps the entry budget of the directory a change happened in, and
 /// reports `lookout.Kind.overflow` when it is past.
+///
+/// Every stream the change is in hands over its own record of it -- two
+/// watches over one folder, or a pending watch parked in a folder another
+/// watch holds -- and counting each record reached the budget at a
+/// fraction of the folder's size. One record counts, chosen by
+/// `Budget.counter`, and when that takes the directory past the budget
+/// every watch the change reached is told.
 fn recount(
     f: *FsEvents,
     batch: *Batch,
@@ -1308,11 +1335,32 @@ fn recount(
     move: Budget.Move,
     stream: *const Stream,
 ) lookout.Watcher.PollError!void {
-    const parent = std.fs.path.dirname(subject) orelse return;
-    if (try f.budget.note(parent, move)) {
-        try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
+    const change: Change = .{
+        .dir = std.fs.path.dirname(subject) orelse return,
+        .subject = subject,
+    };
+    const counting = Budget.counter(f.streams.values(), change, Change.reaches) orelse return;
+    if (counting != stream) return;
+    if (!try f.budget.note(change.dir, move)) return;
+    for (f.streams.values()) |other| {
+        if (!change.reaches(other)) continue;
+        try batch.push(f.gpa, other.id, other.root, .overflow, other.rootTarget());
     }
 }
+
+/// One change to an entry, as every stream it is in hands over its own
+/// record of it.
+const Change = struct {
+    /// The directory the entry is in.
+    dir: []const u8,
+    subject: []const u8,
+
+    /// Whether `stream` reports this change: it is in the watch's scope
+    /// and its filter keeps it.
+    fn reaches(change: Change, stream: *Stream) bool {
+        return stream.wants(change.subject) and !stream.filter.excludes(stream.root, change.subject);
+    }
+};
 
 test "accumulated removal and creation flags identify a replacement" {
     try std.testing.expect(wasReplaced(flag.item_removed | flag.item_created));

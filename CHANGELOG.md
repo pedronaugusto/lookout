@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A folder several watches reach is counted once against
+  `Options.max_dir_entries`. Windows and FSEvents hand every watch its
+  own record of each change, and each record was counted, so a folder
+  that two watches shared -- overlapping watches, or a pending watch
+  parked in a folder another watch holds -- reported `overflow` at a
+  fraction of its size. FSEvents also counted what was already in a
+  folder once per watch taken on it. One record now counts, and every
+  watch the change reached is told when the folder goes past. Removing
+  one of the watches, including a pending watch leaving its folder when
+  it is promoted, keeps the count the others still use; it was dropped
+  and read again from disk, which counted changes still on their way a
+  second time.
 - A pending watch no longer takes the folder it is parked in. It recorded
   that ancestor as watched, so a later `add` of the same folder failed
   with `PathAlreadyWatched`, and a pending watch added after the folder

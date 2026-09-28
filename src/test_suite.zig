@@ -1476,6 +1476,22 @@ const Ledger = struct {
         return error.EventNotObserved;
     }
 
+    /// Polls into the ledger until the watcher has been quiet for a
+    /// while, so that a claim about what was not reported is made after
+    /// everything that was.
+    fn drain(l: *Ledger, f: *Fixture) !void {
+        var quiet: u32 = 0;
+        while (quiet < 600) {
+            const events = try f.watcher.poll(200);
+            if (events.len == 0) {
+                quiet += 200;
+                continue;
+            }
+            quiet = 0;
+            try l.note(events);
+        }
+    }
+
     const Want = struct { id: lookout.WatchId, sub_path: []const u8, kind: Kind };
 };
 
@@ -1613,6 +1629,67 @@ test "a folder shared with a pending watch keeps its entry budget" {
             try ledger.note(try f.watcher.poll(200));
         }
         try std.testing.expect(ledger.count(folder, .overflow, f.root) > 0);
+    }
+}
+
+test "a folder several watches share is counted once against its budget" {
+    // One folder reached by three watches: its parent's, recursive; its
+    // own; and a pending one parked in it. Windows and FSEvents hand each
+    // watch its own copy of every change, and each copy was counted, so
+    // the folder reached its budget at a fraction of its size -- and
+    // FSEvents counted what was already there once per watch taken on it.
+    for (backends) |backend| {
+        var f = try Fixture.initOptions(.{
+            .backend = backend,
+            .poll_interval_ms = 20,
+            .max_dir_entries = 4,
+        });
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        try f.tmp.dir.createDirPath(io, "dir");
+        try f.write("dir/f0", "x");
+        try f.write("dir/f1", "x");
+        const dir = try f.path("dir");
+        defer gpa.free(dir);
+        const later = try f.path("dir/later");
+        defer gpa.free(later);
+
+        const tree = try f.watcher.add(f.root, .{ .recursive = true });
+        const folder = try f.watcher.add(dir, .{});
+        const waiting = try f.watcher.add(later, .{ .pending = true });
+        try f.settle();
+
+        var ledger: Ledger = .{};
+        defer ledger.deinit();
+
+        // Four entries: at the budget and not past it.
+        try f.write("dir/f2", "x");
+        try f.tmp.dir.createDirPath(io, "dir/later");
+        try ledger.await(&f, &.{
+            .{ .id = tree, .sub_path = "dir/f2", .kind = .created },
+            .{ .id = tree, .sub_path = "dir/later", .kind = .created },
+            .{ .id = folder, .sub_path = "dir/f2", .kind = .created },
+            .{ .id = folder, .sub_path = "dir/later", .kind = .created },
+            .{ .id = waiting, .sub_path = "dir/later", .kind = .created },
+        });
+        try ledger.drain(&f);
+        for (ledger.seen.items) |key| {
+            if (key.kind == .overflow) {
+                std.debug.print("{s}: watch {d} overflowed at {s} with four entries under a budget of four\n", .{
+                    @tagName(backend), @intFromEnum(key.id), key.path,
+                });
+            }
+            try std.testing.expect(key.kind != .overflow);
+        }
+
+        // The fifth is past it, and both watches the folder belongs to
+        // are told.
+        try f.write("dir/f3", "x");
+        try ledger.await(&f, &.{
+            .{ .id = tree, .sub_path = "", .kind = .overflow },
+            .{ .id = folder, .sub_path = "dir", .kind = .overflow },
+        });
     }
 }
 

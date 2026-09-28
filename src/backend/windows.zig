@@ -140,6 +140,14 @@ const Watch = struct {
         return if (watch.only != null) watch.root_target else .unknown;
     }
 
+    /// Where this watch's reads are posted and how far they reach.
+    fn reach(watch: *const Watch) Budget.Reach {
+        return .{
+            .dir = if (watch.only == null) watch.root else std.fs.path.dirname(watch.root) orelse watch.root,
+            .recursive = watch.recursive,
+        };
+    }
+
     /// Keeps what the root was last seen to be, so that a file watch
     /// whose root is replaced by a directory of the same name reports
     /// the next removal as what actually left.
@@ -339,13 +347,22 @@ fn arm(w: *Windows, watch: *Watch) lookout.Watcher.AddError!void {
 pub fn remove(w: *Windows, id: WatchId) void {
     const entry = w.watches.fetchSwapRemove(id) orelse return;
     const watch = entry.value;
-    w.budget.forget(watch.root);
+    w.budget.release(watch.root, w, stillCounted);
     _ = c.CancelIoEx(watch.handle, &watch.overlapped);
     _ = c.CloseHandle(watch.handle);
     // The buffer outlives the handle until the cancelled read's
     // completion has been taken off the port.
     watch.retiring_next = w.retiring;
     w.retiring = watch;
+}
+
+/// Whether a watch still held reads the entries of `dir`, so that its
+/// count outlives the watch being removed. See `Budget.release`.
+fn stillCounted(w: *const Windows, dir: []const u8) bool {
+    for (w.watches.values()) |watch| {
+        if (watch.reach().covers(dir)) return true;
+    }
+    return false;
 }
 
 fn free(w: *Windows, watch: *Watch) void {
@@ -543,7 +560,7 @@ fn retire(w: *Windows, overlapped: ?*c.OVERLAPPED) void {
 
 /// Turns one completed read into events.
 fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.Watcher.PollError!void {
-    const dir = if (watch.only == null) watch.root else std.fs.path.dirname(watch.root) orelse watch.root;
+    const dir = watch.reach().dir;
 
     var it = records.iterate(watch.buffer[0..transferred]);
     while (true) {
@@ -678,12 +695,37 @@ fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch
 /// over twenty directories of three hundred entries is inside a budget
 /// of a thousand, and counting every creation anywhere under the root
 /// against one number said it was not.
+///
+/// Nor is it counted once per watch. Every watch that reaches the
+/// directory reads its own copy of the change -- two watches over one
+/// folder, or a pending watch parked in a folder another watch holds --
+/// and counting each copy reached the budget at half the folder's size.
+/// One copy counts, chosen by `Budget.counter`, and when that takes the
+/// directory past the budget every watch the change reached is told.
 fn recount(w: *Windows, watch: *Watch, subject: []const u8, move: Budget.Move, batch: *Batch) lookout.Watcher.PollError!void {
-    const parent = std.fs.path.dirname(subject) orelse return;
-    if (try w.budget.note(parent, move)) {
-        try batch.push(w.gpa, watch.id, watch.root, .overflow, .directory);
+    const change: Change = .{
+        .dir = std.fs.path.dirname(subject) orelse return,
+        .subject = subject,
+    };
+    if (Budget.counter(w.watches.values(), change, Change.reaches) != watch) return;
+    if (!try w.budget.note(change.dir, move)) return;
+    for (w.watches.values()) |other| {
+        if (!change.reaches(other)) continue;
+        try batch.push(w.gpa, other.id, other.root, .overflow, .directory);
     }
 }
+
+/// One change to an entry, as every watch reads its own copy of it.
+const Change = struct {
+    /// The directory the entry is in.
+    dir: []const u8,
+    subject: []const u8,
+
+    /// Whether `watch` read a copy of this change and keeps it.
+    fn reaches(change: Change, watch: *Watch) bool {
+        return watch.reach().covers(change.dir) and wants(watch, change.subject);
+    }
+};
 
 test "a read that completes with nothing is an overflow, and the watch reads on" {
     // ReadDirectoryChangesW: "If the number of changes exceeds the
