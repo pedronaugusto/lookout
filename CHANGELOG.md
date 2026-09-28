@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Export `path.relative` and `path.within` for callers that need the same
+  platform case folding and separator handling as lookout's watches.
+
 ### Fixed
 
 - Windows: a name renamed over from a name the watch does not see --

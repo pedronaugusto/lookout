@@ -27,6 +27,24 @@ const Tree = @import("Tree.zig");
 const Waker = @import("Waker.zig");
 const path_cmp = @import("path.zig");
 
+/// Paths compared as a watch compares them: the same case folding and
+/// separators (`folds_case`).
+pub const path = struct {
+    /// The part of `p` below `base`, as a slice of `p`: empty when they
+    /// name the same place, null when `p` is outside `base`.
+    pub const relative = path_cmp.relative;
+    /// Whether `p` is `base` or under it.
+    pub const within = path_cmp.within;
+};
+
+test "public path helpers use watch path comparisons" {
+    const testing = std.testing;
+    try testing.expectEqualStrings("file", path.relative("/watch", "/watch/file").?);
+    try testing.expect(path.within("/watch", "/watch"));
+    try testing.expect(!path.within("/watch", "/watcher/file"));
+    if (folds_case) try testing.expectEqualStrings("file", path.relative("/WATCH", "/watch/file").?);
+}
+
 /// Which paths under a watch the caller wants. See `AddOptions.filter`.
 pub const Filter = @import("Filter.zig");
 
@@ -904,16 +922,16 @@ pub const Watcher = struct {
     /// cancellation point: a recursive watch is registered directory by
     /// directory, and one stopped half way would be neither a watch nor a
     /// failure to take one.
-    pub fn add(w: *Watcher, path: []const u8, options: AddOptions) AddError!WatchId {
+    pub fn add(w: *Watcher, requested: []const u8, options: AddOptions) AddError!WatchId {
         try w.io.checkCancel();
         const protection = w.io.swapCancelProtection(.blocked);
         defer _ = w.io.swapCancelProtection(protection);
 
         // The backend copies what it keeps, so this resolution is scratch
         // and a failed `add` leaves nothing behind.
-        const abs = Io.Dir.cwd().realPathFileAlloc(w.io, path, w.gpa) catch |err| switch (err) {
+        const abs = Io.Dir.cwd().realPathFileAlloc(w.io, requested, w.gpa) catch |err| switch (err) {
             error.FileNotFound => if (options.pending)
-                return w.addPending(path, options)
+                return w.addPending(requested, options)
             else
                 return err,
             else => |e| return e,
@@ -989,8 +1007,8 @@ pub const Watcher = struct {
 
     /// Takes a watch on a path that is not there, parks it on the nearest
     /// existing ancestor, and issues its id. See `AddOptions.pending`.
-    fn addPending(w: *Watcher, path: []const u8, options: AddOptions) AddError!WatchId {
-        const target = try w.absentPath(path);
+    fn addPending(w: *Watcher, requested: []const u8, options: AddOptions) AddError!WatchId {
+        const target = try w.absentPath(requested);
         var owns_target = true;
         defer if (owns_target) w.gpa.free(target);
         // It may have appeared while its name was being spelled, in which
@@ -1033,12 +1051,12 @@ pub const Watcher = struct {
     /// The absolute path of something that is not there: canonical as far
     /// as it exists, and taken as written past that, because a name that
     /// does not exist has no symbolic links to resolve.
-    fn absentPath(w: *Watcher, path: []const u8) AddError![]u8 {
+    fn absentPath(w: *Watcher, requested: []const u8) AddError![]u8 {
         const lexical = lexical: {
-            if (std.fs.path.isAbsolute(path)) break :lexical try std.fs.path.resolve(w.gpa, &.{path});
+            if (std.fs.path.isAbsolute(requested)) break :lexical try std.fs.path.resolve(w.gpa, &.{requested});
             const here = try Io.Dir.cwd().realPathFileAlloc(w.io, ".", w.gpa);
             defer w.gpa.free(here);
-            break :lexical try std.fs.path.resolve(w.gpa, &.{ here, path });
+            break :lexical try std.fs.path.resolve(w.gpa, &.{ here, requested });
         };
         errdefer w.gpa.free(lexical);
 
@@ -1057,16 +1075,16 @@ pub const Watcher = struct {
     }
 
     /// The longest prefix of `path` that is there, as a slice of it.
-    fn existingPrefix(w: *const Watcher, path: []const u8) ?[]const u8 {
-        var candidate = path;
+    fn existingPrefix(w: *const Watcher, requested: []const u8) ?[]const u8 {
+        var candidate = requested;
         while (true) {
             if (w.exists(candidate)) return candidate;
             candidate = std.fs.path.dirname(candidate) orelse return null;
         }
     }
 
-    fn exists(w: *const Watcher, path: []const u8) bool {
-        _ = Io.Dir.cwd().statFile(w.io, path, .{}) catch return false;
+    fn exists(w: *const Watcher, requested: []const u8) bool {
+        _ = Io.Dir.cwd().statFile(w.io, requested, .{}) catch return false;
         return true;
     }
 

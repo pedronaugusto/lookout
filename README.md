@@ -80,6 +80,8 @@ linked anywhere else.
 | `RootMove` | `renamed`, `removed`, or `silent` for nothing at all. |
 | `default_backend` | The backend `.auto` resolves to on this target. |
 | `folds_case` | Whether portable ASCII/Latin-1 case and composition folding is enabled, or paths are compared byte for byte. |
+| `path.relative(base, p)` | The slice of `p` below `base`, empty for the base itself, or `null` when outside it; uses lookout's platform path comparisons. |
+| `path.within(base, p)` | Whether `p` is `base` or a descendant, using the same comparisons. |
 | `supported(backend)` | Whether this target was built with a backend. |
 | `pairsRenames(backend)` | Whether it reports `renamed` with a `from`, or a removal and a creation. |
 | `reportsRootMove(backend)` | Which of the three shapes a move of the watched path itself arrives as. |
