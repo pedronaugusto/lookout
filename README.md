@@ -236,7 +236,10 @@ old-name/new-name pair. `kqueue` and polling learn what changed by
 comparing directory listings, in which a rename and a delete-plus-create
 are the same thing. `pairsRenames(backend)` says which shape to expect,
 `Event.from` carries the answer where there is one, and neither backend
-guesses.
+guesses. `ReadDirectoryChangesW` writes a move onto an existing name as
+that entry's removal and then the move, which lookout reports as the
+move; a delete and a create of one name back to back are written the
+same way, so on Windows they are `created` too.
 
 Both halves of a rename arrive together, but "together" is about the
 kernel's queue and not about the buffer lookout reads it into: a burst

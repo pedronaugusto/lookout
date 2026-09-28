@@ -128,6 +128,16 @@ const Watch = struct {
     /// turns one `renamed` into a removal and a creation on a backend
     /// that says it pairs them. `flushRenames` is what lets it go.
     pending_rename: ?[]u8,
+    /// A wanted name whose removal was the last thing a read said, held
+    /// for the next read to decide. See `reportRemoval`.
+    ///
+    /// The kernel completes a read as soon as there is one record for
+    /// it, so the replaced entry's removal can end one read and the
+    /// rename that replaced it open the next. Reported at once, the
+    /// removal and the creation fall into one window where the removal
+    /// outranks it. Held rather than reported, the next read says which
+    /// it was, and `collect` gives that read a short grace to come.
+    held_removal: ?[]u8,
     /// How much of the buffer the kernel is willing to take. Lowered
     /// once, to `share_buffer_len`, if the size asked for is refused.
     accepted_len: usize,
@@ -282,6 +292,7 @@ pub fn add(
         .overlapped = std.mem.zeroes(c.OVERLAPPED),
         .buffer = bytes,
         .pending_rename = null,
+        .held_removal = null,
         .accepted_len = w.buffer_len,
         .retiring_next = null,
     };
@@ -385,6 +396,7 @@ fn free(w: *Windows, watch: *Watch) void {
     watch.filter.deinit(w.gpa);
     if (watch.only) |name| w.gpa.free(name);
     if (watch.pending_rename) |name| w.gpa.free(name);
+    if (watch.held_removal) |name| w.gpa.free(name);
     w.gpa.destroy(watch);
 }
 
@@ -399,7 +411,9 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
     defer _ = w.io.swapCancelProtection(protection);
     const result = w.collect(batch, timeout_ms);
     // Whatever is still held when the wait is over never found its other
-    // half: the path moved somewhere this watch cannot see it.
+    // half: the path moved somewhere this watch cannot see it. A removal
+    // is resolved first, being the older of the two.
+    try w.resolveRemovals(batch);
     try w.flushRenames(batch);
     return result;
 }
@@ -425,81 +439,148 @@ fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still takes one look at the port.
         const timeout: u32 = if (timeout_ms == null) c.INFINITE else deadline.windowsMs();
-
-        var transferred: u32 = 0;
-        var key: usize = 0;
-        var overlapped: ?*c.OVERLAPPED = null;
-        const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, timeout);
-        if (ok == 0) {
-            if (overlapped == null) {
-                // A finite timeout may have been clamped to what this API
-                // can represent, so only the original deadline ends it.
-                if (c.GetLastError() != c.WAIT_TIMEOUT) return error.Unexpected;
-                if (!deadline.expired()) continue;
-                return;
-            }
-            if (key == wake_key) return;
-            const failed: WatchId = @enumFromInt(@as(u32, @truncate(key)));
-            const err = c.GetLastError();
-            const watch = w.live(failed, overlapped) orelse {
-                // The completion of a read cancelled by `remove`. Its
-                // buffer has been waiting for exactly this.
-                w.retire(overlapped);
-                continue;
-            };
-            if (err == c.ERROR_NOTIFY_ENUM_DIR) {
-                // The kernel's other way of saying the buffer overflowed:
-                // more change than it could hold, so re-read the tree.
-                // The handle is still good, so the watch is re-armed.
-                try batch.push(w.gpa, failed, watch.root, .overflow, .directory);
-                w.lost(watch);
-                try w.rearm(watch, batch);
-                if (batch.revision != before) return;
-                continue;
-            }
-            // Anything else means the directory the handle is on is gone:
-            // deleted, or on a volume that went away. The handle was
-            // opened with FILE_SHARE_DELETE precisely so that this can
-            // happen, and a watched path that no longer exists is a
-            // removal like any other.
-            try batch.push(w.gpa, failed, watch.root, .removed, .directory);
-            w.discard(failed);
-            if (batch.revision != before) return;
-            continue;
+        switch (try w.take(batch, timeout)) {
+            .woken => return,
+            // A finite timeout may have been clamped to what this API
+            // can represent, so only the original deadline ends it.
+            .quiet => if (deadline.expired()) return else continue,
+            .taken => {},
         }
-
-        if (key == wake_key) return;
-        const id: WatchId = @enumFromInt(@as(u32, @truncate(key)));
-        const watch = w.live(id, overlapped) orelse {
-            w.retire(overlapped);
-            continue;
-        };
-        if (watch.only == null) switch (w.rootState(watch)) {
-            .stands => {},
-            .gone => {
-                try batch.push(w.gpa, id, watch.root, .removed, .directory);
-                w.discard(id);
-                if (batch.revision != before) return;
-                continue;
-            },
-            .moved, .unknown => {
-                try batch.push(w.gpa, id, watch.root, .unwatched, .directory);
-                w.discard(id);
-                if (batch.revision != before) return;
-                continue;
-            },
-        };
-        if (transferred == 0) {
-            // The kernel had more change than it could hold between two
-            // reads and says so by transferring nothing.
-            try batch.push(w.gpa, id, watch.root, .overflow, .directory);
-            w.lost(watch);
-        } else {
-            try w.report(watch, transferred, batch);
+        // A removal that ended its read is worth waiting a moment for:
+        // the rename that replaced the entry is on its way in the next
+        // one, and deciding now would report the name gone while a file
+        // stands there. See `Watch.held_removal`.
+        var round: usize = 0;
+        while (w.holdsRemoval() and round < grace_rounds) : (round += 1) {
+            switch (try w.take(batch, grace_ms)) {
+                .taken => {},
+                .quiet, .woken => break,
+            }
         }
-        try w.rearm(watch, batch);
+        // A removal no move followed within the grace is decided now,
+        // not when the next change happens to come, which a wait with no
+        // deadline could make never.
+        try w.resolveRemovals(batch);
         if (batch.revision != before) return;
     }
+}
+
+/// How long a removal that ended its read is held for the next read,
+/// and how many reads in a row. See `Watch.held_removal`.
+///
+/// Paid only when a read ends on a removal. The kernel writes the rename
+/// that replaced an entry in the same call as the removal, so what is
+/// missing is already buffered, or completes the read posted next, within
+/// microseconds of the removal: the grace is for the thread to be
+/// scheduled, not for anything to happen.
+const grace_ms = 25;
+const grace_rounds = 4;
+
+const Taken = enum {
+    /// A completion was taken and dealt with.
+    taken,
+    /// `timeout` passed with nothing on the port.
+    quiet,
+    /// `wake` posted.
+    woken,
+};
+
+/// Takes one completion off the port, waiting up to `timeout`, and turns
+/// it into events.
+fn take(w: *Windows, batch: *Batch, timeout: u32) lookout.Watcher.PollError!Taken {
+    var transferred: u32 = 0;
+    var key: usize = 0;
+    var overlapped: ?*c.OVERLAPPED = null;
+    const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, timeout);
+    if (ok == 0) {
+        if (overlapped == null) {
+            if (c.GetLastError() != c.WAIT_TIMEOUT) return error.Unexpected;
+            return .quiet;
+        }
+        if (key == wake_key) return .woken;
+        const failed: WatchId = @enumFromInt(@as(u32, @truncate(key)));
+        const err = c.GetLastError();
+        const watch = w.live(failed, overlapped) orelse {
+            // The completion of a read cancelled by `remove`. Its
+            // buffer has been waiting for exactly this.
+            w.retire(overlapped);
+            return .taken;
+        };
+        try w.resolveRemoval(watch, batch);
+        if (err == c.ERROR_NOTIFY_ENUM_DIR) {
+            // The kernel's other way of saying the buffer overflowed:
+            // more change than it could hold, so re-read the tree.
+            // The handle is still good, so the watch is re-armed.
+            try batch.push(w.gpa, failed, watch.root, .overflow, .directory);
+            w.lost(watch);
+            try w.rearm(watch, batch);
+            return .taken;
+        }
+        // Anything else means the directory the handle is on is gone:
+        // deleted, or on a volume that went away. The handle was
+        // opened with FILE_SHARE_DELETE precisely so that this can
+        // happen, and a watched path that no longer exists is a
+        // removal like any other.
+        try batch.push(w.gpa, failed, watch.root, .removed, .directory);
+        w.discard(failed);
+        return .taken;
+    }
+
+    if (key == wake_key) return .woken;
+    const id: WatchId = @enumFromInt(@as(u32, @truncate(key)));
+    const watch = w.live(id, overlapped) orelse {
+        w.retire(overlapped);
+        return .taken;
+    };
+    if (watch.only == null) switch (w.rootState(watch)) {
+        .stands => {},
+        .gone => {
+            try w.resolveRemoval(watch, batch);
+            try batch.push(w.gpa, id, watch.root, .removed, .directory);
+            w.discard(id);
+            return .taken;
+        },
+        .moved, .unknown => {
+            try w.resolveRemoval(watch, batch);
+            try batch.push(w.gpa, id, watch.root, .unwatched, .directory);
+            w.discard(id);
+            return .taken;
+        },
+    };
+    if (transferred == 0) {
+        // The kernel had more change than it could hold between two
+        // reads and says so by transferring nothing.
+        try w.resolveRemoval(watch, batch);
+        try batch.push(w.gpa, id, watch.root, .overflow, .directory);
+        w.lost(watch);
+    } else {
+        try w.report(watch, transferred, batch);
+    }
+    try w.rearm(watch, batch);
+    return .taken;
+}
+
+/// Whether a watch holds a removal for its next read to decide.
+fn holdsRemoval(w: *const Windows) bool {
+    for (w.watches.values()) |watch| {
+        if (watch.held_removal != null) return true;
+    }
+    return false;
+}
+
+/// Reports every held removal as the removal it is: no move onto its
+/// name came.
+fn resolveRemovals(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
+    for (w.watches.values()) |watch| try w.resolveRemoval(watch, batch);
+}
+
+/// Reports `watch`'s held removal, if it holds one.
+fn resolveRemoval(w: *Windows, watch: *Watch, batch: *Batch) lookout.Watcher.PollError!void {
+    const gone = watch.held_removal orelse return;
+    defer w.gpa.free(gone);
+    watch.held_removal = null;
+    trace.log("windows push removed held path={s}", .{gone});
+    try batch.push(w.gpa, watch.id, gone, .removed, watch.goneTarget());
 }
 
 const RootState = enum { stands, moved, gone, unknown };
@@ -598,6 +679,21 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
     const dir = watch.dir();
 
     var it = records.iterate(watch.buffer[0..transferred]);
+    if (watch.held_removal) |gone| {
+        // The last read ended on this removal; this one says whether a
+        // move onto the name came next.
+        const replaced = switch (records.arrival(it)) {
+            .moved => |record| try w.sameName(record, dir, gone),
+            .none, .unsaid => false,
+        };
+        if (replaced) {
+            trace.log("windows drop replaced held path={s}", .{gone});
+            watch.held_removal = null;
+            w.gpa.free(gone);
+        } else {
+            try w.resolveRemoval(watch, batch);
+        }
+    }
     while (true) {
         // A chain this cannot follow is a read that cannot be accounted
         // for: what is left of it is lost, and `lookout.Kind.overflow`
@@ -627,11 +723,61 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
             c.FILE_ACTION_RENAMED_OLD_NAME, c.FILE_ACTION_RENAMED_NEW_NAME => {
                 try w.reportRename(watch, record.action, path, batch);
             },
+            c.FILE_ACTION_REMOVED => if (wants(watch, path)) {
+                try w.reportRemoval(watch, it, dir, path, batch);
+            },
             else => if (wants(watch, path)) {
                 try w.reportOne(watch, record.action, path, batch);
             },
         }
     }
+}
+
+/// Reports the removal of `path`, unless the records `rest` has still to
+/// walk go on to move an entry onto its name.
+///
+/// Replacing an entry by a rename, `ReadDirectoryChangesW` writes as the
+/// replaced entry's `FILE_ACTION_REMOVED` and then the rename: an old
+/// name and a new name within the directory, or an `ADDED` from another.
+/// Reported as it comes, the removal lands in the window with the
+/// creation or the rename, and the removal outranks both, so a file saved
+/// by renaming over a watched name was reported `removed` while it stood
+/// there. The rename says everything: on `inotify` and FSEvents it is the
+/// only record of the move, and what the caller hears is `created` or
+/// `renamed` at the name, by the rule `reportRename` keeps. When the read
+/// ends before it says, the removal is held for the next one:
+/// `Watch.held_removal`.
+///
+/// The records carry no more than that. An entry deleted and another
+/// created at the same name, back to back, is written the same way as a
+/// move onto it from another directory, and is reported as that move:
+/// `created`, which says the name holds an entry it did not before.
+///
+/// Either way the entry that was at `path` left, so the count moves now.
+fn reportRemoval(w: *Windows, watch: *Watch, rest: records.Iterator, dir: []const u8, path: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+    switch (records.arrival(rest)) {
+        .moved => |record| if (try w.sameName(record, dir, path)) {
+            trace.log("windows drop replaced path={s}", .{path});
+            return w.recount(watch, path, .vanished, batch);
+        },
+        .none => {},
+        .unsaid => {
+            trace.log("windows hold removed path={s}", .{path});
+            try w.resolveRemoval(watch, batch);
+            watch.held_removal = try w.gpa.dupe(u8, path);
+            return w.recount(watch, path, .vanished, batch);
+        },
+    }
+    try w.reportOne(watch, c.FILE_ACTION_REMOVED, path, batch);
+}
+
+/// Whether `record`, read on `dir`, names `path`.
+fn sameName(w: *Windows, record: records.Record, dir: []const u8, path: []const u8) Allocator.Error!bool {
+    const relative = try record.wtf8Alloc(w.gpa);
+    defer w.gpa.free(relative);
+    const there = try std.fs.path.join(w.gpa, &.{ dir, relative });
+    defer w.gpa.free(there);
+    return path_cmp.eql(there, path);
 }
 
 /// A record's action as the documentation spells it, for the trace.
@@ -969,11 +1115,11 @@ const c = struct {
     const FILE_NOTIFY_CHANGE_CREATION: DWORD = 0x040;
     const FILE_NOTIFY_CHANGE_SECURITY: DWORD = 0x100;
 
-    const FILE_ACTION_ADDED: DWORD = 1;
-    const FILE_ACTION_REMOVED: DWORD = 2;
-    const FILE_ACTION_MODIFIED: DWORD = 3;
-    const FILE_ACTION_RENAMED_OLD_NAME: DWORD = 4;
-    const FILE_ACTION_RENAMED_NEW_NAME: DWORD = 5;
+    const FILE_ACTION_ADDED: DWORD = records.Action.added;
+    const FILE_ACTION_REMOVED: DWORD = records.Action.removed;
+    const FILE_ACTION_MODIFIED: DWORD = records.Action.modified;
+    const FILE_ACTION_RENAMED_OLD_NAME: DWORD = records.Action.renamed_old_name;
+    const FILE_ACTION_RENAMED_NEW_NAME: DWORD = records.Action.renamed_new_name;
 
     const OVERLAPPED = extern struct {
         Internal: usize,

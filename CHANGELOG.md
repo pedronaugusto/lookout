@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Windows: a name renamed over from a name the watch does not see --
+  outside it, or excluded by its filter -- is `created` there, and
+  `renamed` from a name it does see, as on `inotify` and FSEvents. So a
+  file saved by writing `settings.new` and renaming it over
+  `settings.toml` is `created` for a watch filtered to `settings.toml`.
+  `ReadDirectoryChangesW` writes the replaced entry's removal before the
+  rename's own records, and the removal outranked the creation in the
+  window, so the name was reported `removed` while a file stood there. A
+  removal the next records follow with a move onto its name is now not
+  reported; one that ends its read is held, for a grace of at most a
+  hundred milliseconds, for the next read to say. A delete and a create
+  of one name back to back are written the same way as a move onto it
+  from another directory, and are reported as that move: `created`.
+
 - Entry counts are read again from disk when changes are lost: the
   `inotify` queue overflowing, a Windows read the kernel could not hold
   (an empty read, `ERROR_NOTIFY_ENUM_DIR`, or one that cannot be

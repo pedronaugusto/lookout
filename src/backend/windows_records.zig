@@ -19,6 +19,15 @@ const Allocator = std.mem.Allocator;
 /// `NextEntryOffset`, `Action` and `FileNameLength`. The name follows.
 pub const header_len = 12;
 
+/// The `FILE_ACTION_*` numbers a record carries, as winnt.h spells them.
+pub const Action = struct {
+    pub const added: u32 = 1;
+    pub const removed: u32 = 2;
+    pub const modified: u32 = 3;
+    pub const renamed_old_name: u32 = 4;
+    pub const renamed_new_name: u32 = 5;
+};
+
 /// One record of the chain.
 pub const Record = struct {
     /// Which of the `FILE_ACTION_*` numbers the kernel used.
@@ -85,6 +94,44 @@ pub const Iterator = struct {
 
 pub fn iterate(bytes: []const u8) Iterator {
     return .{ .bytes = bytes, .offset = 0, .done = false };
+}
+
+/// What the records after a `removed` say about the name it gave up.
+pub const Arrival = union(enum) {
+    /// The record that moves an entry onto a name: an `added`, or the
+    /// `renamed_new_name` of a rename. Whether that name is the removed
+    /// one is the caller's to compare.
+    moved: Record,
+    /// No move comes next.
+    none,
+    /// The chain ends before it could say: the removal was its last
+    /// record, or an old name was with no new name after it. The rest is
+    /// in the next read.
+    unsaid,
+};
+
+/// What the records `rest` has still to walk say about a removal just
+/// before them. See `Arrival`.
+///
+/// A rename that replaces an entry is written by the kernel as the
+/// replaced entry's `removed` and then the rename's own records:
+/// `renamed_old_name` and `renamed_new_name` when the entry came from
+/// the directory the read is on, `added` alone when it came from another.
+/// The rename's records may be in the next read rather than this one, so
+/// the same question is asked of a next read from its start, which is
+/// why a new name with no old name before it is a move too. `rest` is a
+/// copy, so the caller's walk is where it was, and a chain that cannot be
+/// followed is no move: the caller's own walk comes to the same fault and
+/// says so.
+pub fn arrival(rest: Iterator) Arrival {
+    var it = rest;
+    const first = (it.next() catch return .none) orelse return .unsaid;
+    if (first.action == Action.added or first.action == Action.renamed_new_name) {
+        return .{ .moved = first };
+    }
+    if (first.action != Action.renamed_old_name) return .none;
+    const second = (it.next() catch return .none) orelse return .unsaid;
+    return if (second.action == Action.renamed_new_name) .{ .moved = second } else .none;
 }
 
 /// Writes one record the way the kernel writes it, and answers how many
@@ -188,4 +235,51 @@ test "an offset that points past the read is a named error" {
 
     var it = iterate(buffer[0..len]);
     try testing.expectError(error.TruncatedRecord, it.next());
+}
+
+test "the move that follows a removal is found, and nothing else is" {
+    var bytes: [256]u8 align(4) = undefined;
+    const Said = std.meta.Tag(Arrival);
+    const Case = struct { actions: []const u32, said: Said, arrives: ?u32 = null };
+    const cases = [_]Case{
+        // Renamed over `a.txt` from `b.txt` in the same directory.
+        .{ .actions = &.{ Action.removed, Action.renamed_old_name, Action.renamed_new_name }, .said = .moved, .arrives = Action.renamed_new_name },
+        // Moved over `a.txt` from another directory.
+        .{ .actions = &.{ Action.removed, Action.added }, .said = .moved, .arrives = Action.added },
+        // The new name first, as a next read that the old name did not
+        // fit in before begins.
+        .{ .actions = &.{ Action.removed, Action.renamed_new_name }, .said = .moved, .arrives = Action.renamed_new_name },
+        // A removal and then something else.
+        .{ .actions = &.{ Action.removed, Action.modified }, .said = .none },
+        .{ .actions = &.{ Action.removed, Action.renamed_old_name, Action.removed }, .said = .none },
+        // The chain ends before it says.
+        .{ .actions = &.{Action.removed}, .said = .unsaid },
+        .{ .actions = &.{ Action.removed, Action.renamed_old_name }, .said = .unsaid },
+    };
+    for (cases) |case| {
+        var len: usize = 0;
+        for (case.actions, 0..) |action, i| {
+            const name = if (action == Action.renamed_old_name) b_txt else a_txt;
+            len += encode(bytes[len..], action, name, i == case.actions.len - 1);
+        }
+        var it = iterate(bytes[0..len]);
+        const removal = (try it.next()).?;
+        try testing.expectEqual(Action.removed, removal.action);
+        const found = arrival(it);
+        try testing.expectEqual(case.said, std.meta.activeTag(found));
+        if (found == .moved) {
+            try testing.expectEqual(case.arrives.?, found.moved.action);
+            try testing.expectEqualSlices(u8, a_txt, found.moved.name);
+        }
+        // The caller's walk is untouched.
+        const after: ?u32 = if (case.actions.len > 1) case.actions[1] else null;
+        try testing.expectEqual(after, if (try it.next()) |r| r.action else null);
+    }
+
+    // A chain that breaks after the removal is no move.
+    var len = encode(&bytes, Action.removed, a_txt, false);
+    len += encode(bytes[len..], Action.added, a_txt, false);
+    var it = iterate(bytes[0..len]);
+    _ = try it.next();
+    try testing.expectEqual(Arrival.none, arrival(it));
 }
