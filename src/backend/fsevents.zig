@@ -1656,6 +1656,87 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     try testing.expectEqual(@as(usize, 4), f.budget.counts.get(sub).?);
 }
 
+test "a rename whose halves arrive in two deliveries is one rename" {
+    // FSEvents puts both halves of a rename in one delivery unless a
+    // burst is long enough to split them, and then the old name ends one
+    // delivery and the new name starts the next. A burst long enough to
+    // do that is also long enough for fseventsd, on a busy machine, to
+    // drop part of it -- it did in 13 of 20 runs beside a build -- so a
+    // real burst cannot be told to split and cannot be told not to drop.
+    // The split is made here instead: every pair across two deliveries,
+    // made through the callback the system calls and each drained on its
+    // own, as a burst that split every one of its pairs would be. The
+    // renames are real, so the file system answers which name is there
+    // exactly as it would; the stream is stopped first, so what is
+    // drained is only what this test delivered.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const pairs = 100;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var before: [pairs][]u8 = undefined;
+    var after: [pairs][]u8 = undefined;
+    for (0..pairs) |i| {
+        var name: [32]u8 = undefined;
+        before[i] = try std.fs.path.join(gpa, &.{ root, std.fmt.bufPrint(&name, "before-{d}.txt", .{i}) catch unreachable });
+        after[i] = try std.fs.path.join(gpa, &.{ root, std.fmt.bufPrint(&name, "after-{d}.txt", .{i}) catch unreachable });
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = before[i], .data = "x" });
+    }
+    defer for (before, after) |b, a| {
+        gpa.free(b);
+        gpa.free(a);
+    };
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    const f = &watcher.impl.fsevents;
+    const stream = f.streams.get(id).?;
+
+    // No delivery of the system's from here on: stopped, the one it may
+    // be making waited out on its serial queue, and what it left thrown
+    // away.
+    c.FSEventStreamStop(stream.ref);
+    c.dispatch_sync_f(f.queue, null, settled);
+    {
+        f.sink.lock.acquire();
+        defer f.sink.lock.release();
+        f.sink.len = 0;
+        f.sink.overflowed = false;
+    }
+    _ = f.readable(0);
+
+    for (before, after) |b, a| try Io.Dir.renameAbsolute(b, a, io);
+
+    const renamed = flag.item_renamed;
+    try synthesize(gpa, stream, &.{.{ .path = before[0], .flags = renamed }});
+    try f.drain(&watcher.batch);
+    for (1..pairs) |i| {
+        try synthesize(gpa, stream, &.{
+            .{ .path = after[i - 1], .flags = renamed },
+            .{ .path = before[i], .flags = renamed },
+        });
+        try f.drain(&watcher.batch);
+    }
+    try synthesize(gpa, stream, &.{.{ .path = after[pairs - 1], .flags = renamed }});
+    try f.drain(&watcher.batch);
+    try f.resolveHeld(&watcher.batch);
+
+    // Every pair one `renamed`, from its old name to its new one, and
+    // nothing else.
+    try testing.expectEqual(@as(usize, pairs), watcher.batch.events.items.len);
+    for (watcher.batch.events.items, 0..) |event, i| {
+        try testing.expectEqual(lookout.Kind.renamed, event.kind);
+        try testing.expectEqualStrings(after[i], event.path);
+        try testing.expectEqualStrings(before[i], event.from.?);
+    }
+}
+
 /// The CoreFoundation, CoreServices and libdispatch surface lookout uses.
 ///
 /// Hand-written rather than `@cImport`ed: this is nine functions and a

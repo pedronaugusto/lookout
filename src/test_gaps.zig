@@ -333,7 +333,26 @@ test "a burst of renames is paired across the reads it is split over" {
     // large enough to fill the read buffer splits one pair across two.
     // A half flushed at the end of its own read degrades into a removal
     // and a creation on a backend that says it pairs.
-    if (!lookout.pairsRenames(lookout.default_backend)) return error.SkipZigTest;
+    //
+    // The burst has to be one the kernel cannot lose, whatever else the
+    // machine is doing, or what the test is left holding under load is
+    // a record with holes and no claim to make about it. inotify's queue
+    // is counted in events, sixteen thousand by default, and these eight
+    // hundred do not reach it. The buffer Windows keeps between two reads
+    // is the size of the read's, 64 KiB by default, and the records of
+    // the whole burst come to under 32 KiB. Neither depends on how busy
+    // the machine is, so neither loses any of it.
+    //
+    // FSEvents does. fseventsd, between the kernel and every client,
+    // dropped part of this burst in 13 of 20 runs on a machine building
+    // beside it, and nothing on lookout's side changes that. So FSEvents
+    // is held to this claim in src/backend/fsevents.zig ("a rename whose
+    // halves arrive in two deliveries is one rename"), where every pair
+    // is split across two deliveries by hand through the callback the
+    // system calls, rather than a burst being hoped to split them and
+    // not to drop.
+    const backend = lookout.default_backend;
+    if (!lookout.pairsRenames(backend) or backend == .fsevents) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -353,23 +372,12 @@ test "a burst of renames is paired across the reads it is split over" {
     }
 
     var watcher: Watcher = try .init(gpa, io, .{
-        .backend = lookout.default_backend,
+        .backend = backend,
         .max_dir_entries = 1_000_000,
     });
     defer watcher.deinit();
     _ = try watcher.add(root, .{});
-    // The four hundred creations above are still on their way, and a
-    // backend that delivers on its own latency does not finish them by
-    // the first empty poll. A creation that lands after this point is
-    // counted below as an unpaired event, which is a straggler from the
-    // setup and not a rename this test is about, so wait for a quiet
-    // window rather than for one empty read.
-    {
-        var settling: u32 = 0;
-        while (settling < 1_000) {
-            if ((try watcher.poll(200)).len == 0) settling += 200 else settling = 0;
-        }
-    }
+    while ((try watcher.poll(200)).len != 0) {}
 
     for (0..pairs) |i| {
         var from: [64]u8 = undefined;
@@ -394,31 +402,28 @@ test "a burst of renames is paired across the reads it is split over" {
         }
         idle = 0;
         for (events) |event| switch (event.kind) {
-            .renamed => if (event.from != null) {
+            .renamed => {
+                const from = event.from orelse {
+                    unpaired += 1;
+                    continue;
+                };
+                // Each new name joined to its own old one.
+                const to_name = std.fs.path.basename(event.path);
+                const from_name = std.fs.path.basename(from);
+                try std.testing.expect(std.mem.startsWith(u8, to_name, "after-"));
+                try std.testing.expect(std.mem.startsWith(u8, from_name, "before-"));
+                try std.testing.expectEqualStrings(from_name["before-".len..], to_name["after-".len..]);
                 renamed += 1;
-            } else {
-                unpaired += 1;
             },
             .created, .removed => unpaired += 1,
             .overflow => overflow += 1,
             else => {},
         };
     }
-    // A kernel that lost track of the burst says so, and what it lost is
-    // not this test's to make claims about. What is being tested is the
-    // record when it is complete.
-    //
-    // So the test runs its claim only when the system kept up, and whether
-    // it did is the system's. On macOS the loss is FSEvents saying
-    // `MustScanSubDirs` with `UserDropped`: fseventsd, the daemon between
-    // the kernel and every client, dropped part of the burst for this one.
-    // It does that more the busier the machine's file system is -- 13 of
-    // 20 runs on a machine building and testing beside it -- and giving
-    // the delivery queue the highest QoS did not change it (19 of 20), so
-    // there is nothing on lookout's side to make it deterministic. inotify's queue holds sixteen thousand events and
-    // these eight hundred do not reach it.
-    if (overflow != 0) return error.SkipZigTest;
-    if (unpaired != 0) std.debug.print("{d} paired, {d} unpaired\n", .{ renamed, unpaired });
+    if (overflow != 0 or unpaired != 0) {
+        std.debug.print("{d} paired, {d} unpaired, {d} overflow\n", .{ renamed, unpaired, overflow });
+    }
+    try std.testing.expectEqual(@as(usize, 0), overflow);
     try std.testing.expectEqual(@as(usize, 0), unpaired);
     try std.testing.expectEqual(pairs, renamed);
 }
