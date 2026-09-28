@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A watch on a file holds no entry budget for its folder, on every
+  backend. Windows and FSEvents read the file's folder to see the file,
+  and counted the folder through that watch: seeded from disk, then
+  moved only when the file itself came or went. That count outlived the
+  folder's own watch, and a watch taken on the folder again took it up
+  stale, so the folder went past `Options.max_dir_entries` without an
+  `overflow`. No backend tells a file watch about its folder's budget
+  now, which is what `inotify`, `kqueue` and the `poll` backend already
+  did. FSEvents also no longer counts a watched directory's own root
+  against the folder above it, which no watch reports.
 - A pending watch takes the path it waits for from the `add` on. A
   second `add` of that path was accepted until a `poll` promoted the
   first, and the promotion then registered the path a second time, so

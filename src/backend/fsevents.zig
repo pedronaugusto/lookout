@@ -291,12 +291,20 @@ const Stream = struct {
         return std.mem.indexOfAny(u8, rest, path_cmp.separators) == null;
     }
 
-    /// The directories whose entries this stream reports.
-    fn reach(st: *const Stream) Budget.Reach {
+    /// The directories whose entries this stream reports, and so whose
+    /// entry budget it keeps; `null` for a watch on a file.
+    ///
+    /// A watch on a file has its stream on the folder only to see the
+    /// file. It is told nothing about the folder's other entries, so it
+    /// cannot keep the folder's count, and on no other backend is a file
+    /// watch told when its folder is past the budget. Counting the folder
+    /// through it moved the count only when the file came or went, and
+    /// that count outlived the folder's own watch.
+    fn reach(st: *const Stream) ?Budget.Reach {
         return switch (st.scope) {
             .tree => .{ .dir = st.root, .recursive = true },
             .directory => .{ .dir = st.root, .recursive = false },
-            .file => .{ .dir = std.fs.path.dirname(st.root) orelse st.root, .recursive = false },
+            .file => null,
         };
     }
 
@@ -591,7 +599,8 @@ pub fn remove(f: *FsEvents, id: WatchId) void {
 /// count outlives the watch being removed. See `Budget.release`.
 fn stillCounted(f: *const FsEvents, dir: []const u8) bool {
     for (f.streams.values()) |stream| {
-        if (stream.reach().covers(dir)) return true;
+        const reach = stream.reach() orelse continue;
+        if (reach.covers(dir)) return true;
     }
     return false;
 }
@@ -1355,10 +1364,16 @@ const Change = struct {
     dir: []const u8,
     subject: []const u8,
 
-    /// Whether `stream` reports this change: it is in the watch's scope
-    /// and its filter keeps it.
+    /// Whether `stream` reports this change as one of the entries of a
+    /// directory it reports: the directory is in its reach, the entry in
+    /// its scope, and its filter keeps it. A watch's own root is not an
+    /// entry of anything it reports, and neither is a watched file. See
+    /// `Stream.reach`.
     fn reaches(change: Change, stream: *Stream) bool {
-        return stream.wants(change.subject) and !stream.filter.excludes(stream.root, change.subject);
+        const reach = stream.reach() orelse return false;
+        return reach.covers(change.dir) and
+            stream.wants(change.subject) and
+            !stream.filter.excludes(stream.root, change.subject);
     }
 };
 

@@ -1786,6 +1786,63 @@ test "a folder several watches share is counted once against its budget" {
     }
 }
 
+test "a watch on a file holds no entry budget for its folder" {
+    // A watch on a file is about one entry, not a directory's entries:
+    // no backend reads the folder's listing for it, and none tells it
+    // when the folder is past the budget. Windows and FSEvents read the
+    // file's folder to see the file, and they counted the folder through
+    // that watch -- seeded from disk, then moved only by the file's own
+    // comings and goings -- so a count the file watch held outlived the
+    // folder's own watch and was taken up, stale, by the next one.
+    for (backends) |backend| {
+        var f = try Fixture.initOptions(.{
+            .backend = backend,
+            .poll_interval_ms = 20,
+            .max_dir_entries = 4,
+        });
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        try f.tmp.dir.createDirPath(io, "dir");
+        try f.write("dir/file", "x");
+        try f.write("dir/a", "x");
+        const dir = try f.path("dir");
+        defer gpa.free(dir);
+        const file = try f.path("dir/file");
+        defer gpa.free(file);
+
+        const first = try f.watcher.add(dir, .{});
+        const single = try f.watcher.add(file, .{});
+        try f.settle();
+        f.watcher.remove(first);
+
+        // Two entries more while only the file is watched: four, at the
+        // budget. The file's watch hears nothing of them.
+        try f.write("dir/b", "x");
+        try f.write("dir/c", "x");
+        try f.settle();
+
+        var ledger: Ledger = .{};
+        defer ledger.deinit();
+        const again = try f.watcher.add(dir, .{});
+        try ledger.drain(&f);
+        try std.testing.expectEqual(@as(usize, 0), ledger.count(again, .overflow, dir));
+
+        // The fifth is past it: the folder's watch is told, and the
+        // file's is not. Where a watch is told of a count, every watch
+        // it is for is told by the same change, so the file's watch
+        // would be in what has been read by now. (A listing backend says
+        // it again on every look while the folder stays too big, so this
+        // does not wait for quiet.)
+        try f.write("dir/d", "x");
+        try ledger.await(&f, &.{
+            .{ .id = again, .sub_path = "dir/d", .kind = .created },
+            .{ .id = again, .sub_path = "dir", .kind = .overflow },
+        });
+        try std.testing.expectEqual(@as(usize, 0), ledger.count(single, .overflow, file));
+    }
+}
+
 test "adding a path that does not exist fails" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

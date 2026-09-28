@@ -140,12 +140,24 @@ const Watch = struct {
         return if (watch.only != null) watch.root_target else .unknown;
     }
 
-    /// Where this watch's reads are posted and how far they reach.
-    fn reach(watch: *const Watch) Budget.Reach {
-        return .{
-            .dir = if (watch.only == null) watch.root else std.fs.path.dirname(watch.root) orelse watch.root,
-            .recursive = watch.recursive,
-        };
+    /// The directory the reads are posted on: `root`, or its parent
+    /// for a watch on a file.
+    fn dir(watch: *const Watch) []const u8 {
+        return if (watch.only == null) watch.root else std.fs.path.dirname(watch.root) orelse watch.root;
+    }
+
+    /// The directories whose entries this watch reports, and so whose
+    /// entry budget it keeps; `null` for a watch on a file.
+    ///
+    /// A watch on a file reads its folder only to see the file. It is
+    /// told nothing about the folder's other entries, so it cannot keep
+    /// the folder's count, and on no other backend is a file watch told
+    /// when its folder is past the budget. Counting the folder through
+    /// it moved the count only when the file came or went, and that
+    /// count outlived the folder's own watch.
+    fn reach(watch: *const Watch) ?Budget.Reach {
+        if (watch.only != null) return null;
+        return .{ .dir = watch.root, .recursive = watch.recursive };
     }
 
     /// Keeps what the root was last seen to be, so that a file watch
@@ -272,7 +284,7 @@ pub fn add(
         .accepted_len = w.buffer_len,
         .retiring_next = null,
     };
-    w.budget.seed(dir_path) catch {};
+    if (is_dir) w.budget.seed(dir_path) catch {};
 
     if (c.CreateIoCompletionPort(handle, w.port, @intFromEnum(id), 0) == null)
         return error.WatchLimitReached;
@@ -360,7 +372,8 @@ pub fn remove(w: *Windows, id: WatchId) void {
 /// count outlives the watch being removed. See `Budget.release`.
 fn stillCounted(w: *const Windows, dir: []const u8) bool {
     for (w.watches.values()) |watch| {
-        if (watch.reach().covers(dir)) return true;
+        const reach = watch.reach() orelse continue;
+        if (reach.covers(dir)) return true;
     }
     return false;
 }
@@ -560,7 +573,7 @@ fn retire(w: *Windows, overlapped: ?*c.OVERLAPPED) void {
 
 /// Turns one completed read into events.
 fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.Watcher.PollError!void {
-    const dir = watch.reach().dir;
+    const dir = watch.dir();
 
     var it = records.iterate(watch.buffer[0..transferred]);
     while (true) {
@@ -721,9 +734,11 @@ const Change = struct {
     dir: []const u8,
     subject: []const u8,
 
-    /// Whether `watch` read a copy of this change and keeps it.
+    /// Whether `watch` read a copy of this change and keeps it, as one
+    /// of the entries of a directory it reports. See `Watch.reach`.
     fn reaches(change: Change, watch: *Watch) bool {
-        return watch.reach().covers(change.dir) and wants(watch, change.subject);
+        const reach = watch.reach() orelse return false;
+        return reach.covers(change.dir) and wants(watch, change.subject);
     }
 };
 

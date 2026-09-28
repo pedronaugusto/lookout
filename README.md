@@ -367,6 +367,7 @@ caller named is an error.
 recursive watch over twenty directories of three hundred entries is
 twenty directories inside a budget of a thousand. A directory several
 watches reach is counted once, and each of them is told when it goes past.
+A watch on a file has no budget and is never told about its folder's.
 
 I made FSEvents the default on Apple platforms rather than `kqueue`,
 because it recurses without a descriptor per directory and pairs renames.

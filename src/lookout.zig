@@ -583,6 +583,13 @@ pub const Options = struct {
     /// cannot see a change. `inotify` is told every name by the kernel
     /// and keeps reporting them, and counts entries only so that the
     /// signal a caller handles is the same one on every platform.
+    ///
+    /// It is the budget of a directory a watch reports the entries of:
+    /// a watched directory, and every directory below it for a recursive
+    /// watch. A watch on a file has none. It is about one entry, and no
+    /// backend tells it when the folder the file is in is past the
+    /// budget -- Windows and FSEvents read that folder to see the file,
+    /// but are told nothing about its other entries through that watch.
     max_dir_entries: usize = 4096,
 };
 
