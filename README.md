@@ -470,9 +470,9 @@ that compile on every target, so they are fuzzed on whatever host is in
 front of the change rather than only on the one whose kernel writes
 those bytes.
 
-Setting `LOOKOUT_TRACE` in the environment makes the Apple backend and
-the suite write what they did to standard error. It is read once per
-process.
+Setting `LOOKOUT_TRACE` in the environment makes the Apple and Windows
+backends and the suite write what they did to standard error. It is read
+once per process.
 
 The suite runs whole against each backend the host can execute, so the
 polling backend is held to the same assertions as the kernel ones on the

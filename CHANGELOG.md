@@ -134,6 +134,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `LOOKOUT_TRACE` traces the Windows backend too: each record a read
+  carries, and what was made of it.
 - `poll` is a `std.Io` cancellation point on every backend. It looks for a
   cancellation on entry and each time the backend's wait comes back, and
   returns `error.Canceled` for one requested before it was called or while

@@ -2,9 +2,11 @@
 //! did not arrive.
 //!
 //! Off unless `LOOKOUT_TRACE` is set in the environment, and compiled out
-//! entirely where libc is not linked, which is where the environment
-//! cannot be read without an allocator. Every Apple target links it, and
-//! the Apple backend is what this exists for.
+//! entirely where the environment cannot be read without an allocator:
+//! where libc is not linked, except on Windows, whose environment block
+//! the process holds as one piece of memory that can be read in place.
+//! Every Apple target links libc. The Apple and Windows backends are the
+//! ones whose kernels speak in records that need a trace to follow.
 //!
 //! Lines go to standard error, one per decision, prefixed so that a run
 //! can be grepped for one path. Nothing here is on a path a caller takes
@@ -29,10 +31,36 @@ pub fn enabled() bool {
     }
     const asked = if (builtin.link_libc)
         std.c.getenv("LOOKOUT_TRACE") != null
+    else if (builtin.os.tag == .windows)
+        windowsHas("LOOKOUT_TRACE")
     else
         false;
     resolved.store(if (asked) on else off, .monotonic);
     return asked;
+}
+
+/// Whether the process environment names `name`, read from the block
+/// the process parameters point at: `NAME=value` strings in WTF-16, each
+/// ended by a zero and the whole ended by an empty one. Names are
+/// compared without case, as Windows compares them.
+fn windowsHas(comptime name: []const u8) bool {
+    var entry: [*:0]const u16 = std.os.windows.peb().ProcessParameters.Environment;
+    while (entry[0] != 0) {
+        const len = std.mem.len(entry);
+        const text = entry[0..len];
+        if (text.len > name.len and text[name.len] == '=') {
+            var same = true;
+            for (name, text[0..name.len]) |want, unit| {
+                if (unit > 0x7f or std.ascii.toUpper(@intCast(unit)) != want) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) return true;
+        }
+        entry = entry + len + 1;
+    }
+    return false;
 }
 
 /// One traced line. A no-op, and not even a formatting call, when tracing

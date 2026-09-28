@@ -38,6 +38,7 @@ const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("windows_records.zig");
 const Waker = @import("../Waker.zig");
+const trace = @import("../trace.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
@@ -614,6 +615,9 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
         // joining is only about the root.
         const path = try std.fs.path.join(w.gpa, &.{ dir, relative });
         defer w.gpa.free(path);
+        trace.log("windows record watch={d} action={s} path={s}", .{
+            @intFromEnum(watch.id), actionName(record.action), path,
+        });
 
         // The kernel walked the tree whatever the filter says; what the
         // filter can still do is keep the event from the caller. The two
@@ -628,6 +632,18 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
             },
         }
     }
+}
+
+/// A record's action as the documentation spells it, for the trace.
+fn actionName(action: u32) []const u8 {
+    return switch (action) {
+        c.FILE_ACTION_ADDED => "ADDED",
+        c.FILE_ACTION_REMOVED => "REMOVED",
+        c.FILE_ACTION_MODIFIED => "MODIFIED",
+        c.FILE_ACTION_RENAMED_OLD_NAME => "RENAMED_OLD_NAME",
+        c.FILE_ACTION_RENAMED_NEW_NAME => "RENAMED_NEW_NAME",
+        else => "unknown",
+    };
 }
 
 /// Whether an event for `subject` is reported against `watch`: it is the
