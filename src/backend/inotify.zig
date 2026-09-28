@@ -381,8 +381,22 @@ fn read(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!bool {
         else => return error.Unexpected,
     };
     if (len == 0) return false;
+    try n.handleRead(buffer[0..len], batch);
+    return true;
+}
 
-    var it = records.iterate(buffer[0..len]);
+/// Turns one buffer the kernel filled into lookout events.
+///
+/// A queue overflow among them lost changes nobody was told about, so
+/// every entry count is off by them; they are read again from disk once
+/// the buffer is done -- see `Budget.reread`. Once it is done and not at
+/// the overflow record, because the records after that one are changes
+/// made since: counted from their records and then taken in again by a
+/// re-read made before them, they would be counted twice.
+fn handleRead(n: *Inotify, bytes: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+    var lost = false;
+    defer if (lost) n.budget.reread({}, everyDirectory);
+    var it = records.iterate(bytes);
     while (true) {
         // The kernel refuses a read smaller than the next record rather
         // than returning half of one, so a tail this cannot decode is
@@ -390,10 +404,16 @@ fn read(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!bool {
         // reported; the rest of the buffer says nothing that can be
         // acted on.
         const event = it.next() catch |err| switch (err) {
-            error.TruncatedRecord => return true,
-        } orelse return true;
+            error.TruncatedRecord => return,
+        } orelse return;
+        if (event.mask & linux.IN.Q_OVERFLOW != 0) lost = true;
         try n.handle(event, batch);
     }
+}
+
+/// The queue is the whole watcher's, and so is what it lost.
+fn everyDirectory(_: void, _: []const u8) bool {
+    return true;
 }
 
 fn drainWake(n: *Inotify) void {
@@ -731,13 +751,13 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     var bytes: [records.header_len]u8 = undefined;
     const len = records.encode(&bytes, .{ .wd = -1, .mask = linux.IN.Q_OVERFLOW, .cookie = 0, .name = null });
     var it = records.iterate(bytes[0..len]);
-    const record = (try it.next()).?;
+    _ = (try it.next()).?;
     try testing.expectEqual(@as(?records.Record, null), try it.next());
 
     // Straight into the batch the next poll returns, which is where a
     // read puts it.
     const n = &watcher.impl.inotify;
-    try n.handle(record, &watcher.batch);
+    try n.handleRead(bytes[0..len], &watcher.batch);
 
     var dir_overflows: usize = 0;
     var file_overflows: usize = 0;
@@ -772,6 +792,63 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     }
     try testing.expect(saw_dir);
     try testing.expect(saw_file);
+}
+
+test "a queue overflow reads the entry counts again, so the budget holds after it" {
+    // Three creations the kernel queues and nobody reads: taken off the
+    // queue here and thrown away, which is what an overflowing queue
+    // does to the events it has no room for, and then the record that
+    // says so, written the way the kernel writes it. The count the
+    // budget kept knew nothing of the three, and a count that is not
+    // read again stays three short for as long as the watch lasts.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify, .max_dir_entries = 3 });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    while ((try watcher.poll(200)).len != 0) {}
+    const n = &watcher.impl.inotify;
+
+    for ([_][]const u8{ "a", "b", "c" }) |name| {
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
+    }
+    // inotify queues an event as the call that caused it returns, so
+    // the three are all there to be lost.
+    var scratch: [read_buffer_len]u8 align(@alignOf(linux.inotify_event)) = undefined;
+    while (true) {
+        const len = posix.read(n.ifd, &scratch) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => return err,
+        };
+        if (len == 0) break;
+    }
+
+    var bytes: [records.header_len]u8 = undefined;
+    const len = records.encode(&bytes, .{ .wd = -1, .mask = linux.IN.Q_OVERFLOW, .cookie = 0, .name = null });
+    try n.handleRead(bytes[0..len], &watcher.batch);
+    try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
+    try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
+    // Three entries: at the budget, as the folder is.
+    try testing.expectEqual(@as(usize, 3), n.budget.counts.get(root).?);
+
+    // So the fourth is past it, and the watch is told.
+    _ = try watcher.poll(0);
+    try tmp.dir.writeFile(io, .{ .sub_path = "d", .data = "x" });
+    var overflowed = false;
+    var waited: u32 = 0;
+    while (waited < 10_000 and !overflowed) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
+        }
+    }
+    try testing.expect(overflowed);
 }
 
 /// Asks the kernel for a watch on `path`, taking ownership of it.

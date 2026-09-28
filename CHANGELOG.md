@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Entry counts are read again from disk when changes are lost: the
+  `inotify` queue overflowing, a Windows read the kernel could not hold
+  (an empty read, `ERROR_NOTIFY_ENUM_DIR`, or one that cannot be
+  followed), and FSEvents losing track or a delivery not fitting its
+  buffer. The count was kept by adding up the changes reported, so the
+  ones lost were in no count, and `Options.max_dir_entries` was off by
+  them for as long as the watch lasted -- a folder could go past it with
+  no `overflow`. What is read again is what the loss touched: on Windows
+  and FSEvents, the folders the watch that lost them was counting, below
+  where the loss was said.
 - A watch on a file holds no entry budget for its folder, on every
   backend. Windows and FSEvents read the file's folder to see the file,
   and counted the folder through that watch: seeded from disk, then

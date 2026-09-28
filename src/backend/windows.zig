@@ -155,7 +155,7 @@ const Watch = struct {
     /// when its folder is past the budget. Counting the folder through
     /// it moved the count only when the file came or went, and that
     /// count outlived the folder's own watch.
-    fn reach(watch: *const Watch) ?Budget.Reach {
+    pub fn reach(watch: *const Watch) ?Budget.Reach {
         if (watch.only != null) return null;
         return .{ .dir = watch.root, .recursive = watch.recursive };
     }
@@ -451,6 +451,7 @@ fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
                 // more change than it could hold, so re-read the tree.
                 // The handle is still good, so the watch is re-armed.
                 try batch.push(w.gpa, failed, watch.root, .overflow, .directory);
+                w.lost(watch);
                 try w.rearm(watch, batch);
                 if (batch.revision != before) return;
                 continue;
@@ -491,6 +492,7 @@ fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
             // The kernel had more change than it could hold between two
             // reads and says so by transferring nothing.
             try batch.push(w.gpa, id, watch.root, .overflow, .directory);
+            w.lost(watch);
         } else {
             try w.report(watch, transferred, batch);
         }
@@ -508,6 +510,25 @@ fn rootState(w: *const Windows, watch: *const Watch) RootState {
         return if (held.nlink == 0) .gone else .moved;
     };
     return if (named.inode == watch.root_inode) .stands else .moved;
+}
+
+/// Reads again from disk the entry counts a lost read of `watch` leaves
+/// wrong: the directories it reaches whose count rests on its reads. See
+/// `Budget.reread` and `Budget.restsOn`.
+///
+/// Called once the read is over, before the next is posted: what the
+/// kernel buffers from here on is read after the count and counted on
+/// top of it, as it should be.
+fn lost(w: *Windows, watch: *const Watch) void {
+    const Loss = struct {
+        w: *const Windows,
+        watch: *const Watch,
+
+        fn stale(loss: @This(), dir: []const u8) bool {
+            return Budget.restsOn(loss.w.watches.values(), loss.watch, dir);
+        }
+    };
+    w.budget.reread(Loss{ .w = w, .watch = watch }, Loss.stale);
 }
 
 /// Posts the next read, and says so when it cannot be posted.
@@ -583,6 +604,7 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
         // say what. The caller already handles it.
         const record = it.next() catch {
             try batch.push(w.gpa, watch.id, watch.root, .overflow, .directory);
+            w.lost(watch);
             return;
         } orelse return;
 
@@ -813,6 +835,78 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
         }
     }
     try testing.expect(found);
+}
+
+test "a lost read reads the entry counts again, so the budget holds after it" {
+    // Three creations, read and counted; then the count set back to what
+    // it would have been had the kernel discarded them, which is what a
+    // read it could not hold does ("the entire contents of the buffer
+    // are discarded"). The completion that says so is posted by hand,
+    // as above. A count that is not read again stays three short for as
+    // long as the watch lasts.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .windows, .max_dir_entries = 3 });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    while ((try watcher.poll(200)).len != 0) {}
+    const w = &watcher.impl.windows;
+    const watch = w.watches.get(id).?;
+
+    for ([_][]const u8{ "a", "b", "c" }) |name| {
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
+    }
+    var created: usize = 0;
+    var waited: u32 = 0;
+    while (waited < 10_000 and created < 3) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind == .created) created += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), created);
+    w.budget.counts.getPtr(root).?.* = 0;
+
+    _ = c.CancelIoEx(watch.handle, &watch.overlapped);
+    {
+        var transferred: u32 = 0;
+        var key: usize = 0;
+        var overlapped: ?*c.OVERLAPPED = null;
+        while (true) {
+            const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, 10_000);
+            if (ok == 0 and overlapped == null) return error.TestUnexpectedResult;
+            if (overlapped == &watch.overlapped) break;
+        }
+    }
+    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, @intFromEnum(id), &watch.overlapped) != 0);
+
+    var overflowed = false;
+    waited = 0;
+    while (waited < 10_000 and !overflowed) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind == .overflow) overflowed = true;
+        }
+    }
+    try testing.expect(overflowed);
+    // Three entries: at the budget, as the folder is.
+    try testing.expectEqual(@as(usize, 3), w.budget.counts.get(root).?);
+
+    // So the fourth is past it, and the watch is told.
+    try tmp.dir.writeFile(io, .{ .sub_path = "d", .data = "x" });
+    overflowed = false;
+    waited = 0;
+    while (waited < 10_000 and !overflowed) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
+        }
+    }
+    try testing.expect(overflowed);
 }
 
 /// The Win32 surface lookout uses, declared against `std.os.windows`'

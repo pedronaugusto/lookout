@@ -300,7 +300,7 @@ const Stream = struct {
     /// watch told when its folder is past the budget. Counting the folder
     /// through it moved the count only when the file came or went, and
     /// that count outlived the folder's own watch.
-    fn reach(st: *const Stream) ?Budget.Reach {
+    pub fn reach(st: *const Stream) ?Budget.Reach {
         return switch (st.scope) {
             .tree => .{ .dir = st.root, .recursive = true },
             .directory => .{ .dir = st.root, .recursive = false },
@@ -788,11 +788,55 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
     // The half held from the last drain looks for its partner here.
     try f.rejoin(batch, delivered.items, used);
 
+    // Where the system said it lost track, and of which watch. The paths
+    // are slices of `staging`, which lives until the next drain.
+    var losses: std.ArrayList(Loss) = .empty;
+    defer losses.deinit(f.gpa);
+
     for (delivered.items, 0..) |_, i| {
         if (used[i]) continue;
-        try f.report(batch, delivered.items, used, i);
+        try f.report(batch, delivered.items, used, i, &losses);
     }
     for (delivered.items) |record| f.last_drained = @max(f.last_drained, record.event);
+
+    // What was lost is in no count, so the counts it touched are read
+    // again from disk -- see `Budget.reread`. Once the delivery is done
+    // and not where the loss was said: the records after that are
+    // changes made since, and a re-read made before them would take them
+    // in and then count them again from their records.
+    if (overflowed) {
+        // A delivery that did not fit was every watch's.
+        f.budget.reread({}, everyDirectory);
+    } else if (losses.items.len != 0) {
+        f.budget.reread(Losses{ .f = f, .items = losses.items }, Losses.stale);
+    }
+}
+
+/// One place the system said it lost track, for one watch.
+const Loss = struct {
+    stream: *const Stream,
+    /// The directory to read again, with everything below it.
+    at: []const u8,
+};
+
+/// The counts a drain's losses leave wrong: in a directory at or below
+/// where the loss was said, and resting on the reads of the watch that
+/// lost them. See `Budget.restsOn`.
+const Losses = struct {
+    f: *const FsEvents,
+    items: []const Loss,
+
+    fn stale(losses: Losses, dir: []const u8) bool {
+        for (losses.items) |loss| {
+            if (!path_cmp.within(loss.at, dir)) continue;
+            if (Budget.restsOn(losses.f.streams.values(), loss.stream, dir)) return true;
+        }
+        return false;
+    }
+};
+
+fn everyDirectory(_: void, _: []const u8) bool {
+    return true;
 }
 
 /// Joins the half held from the last drain to its partner in this one,
@@ -843,6 +887,7 @@ fn report(
     delivered: []const Record,
     used: []bool,
     at: usize,
+    losses: *std.ArrayList(Loss),
 ) lookout.Watcher.PollError!void {
     const record = delivered[at];
     const stream = f.streams.get(record.id) orelse {
@@ -857,6 +902,7 @@ fn report(
     if (record.flags & lost_track != 0 and stream.concerns(record.path)) {
         trace.log("fsevents push overflow root={s} at={s}", .{ stream.root, record.path });
         try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
+        try losses.append(f.gpa, .{ .stream = stream, .at = record.path });
     }
     if (!stream.wants(record.path)) {
         trace.log("fsevents drop out-of-scope root={s} path={s}", .{ stream.root, record.path });
@@ -1532,6 +1578,82 @@ test "the flags that say the system lost track are one overflow, and the watch g
     }
     try testing.expect(saw_after);
     try testing.expect(saw_file);
+}
+
+test "a loss the system reports reads the entry counts again, so the budget holds after it" {
+    // Three folders made and counted; then the count set back to what it
+    // would have been had their records been lost, and the loss said
+    // the two ways it is said here -- by the system, through the
+    // callback it calls, and by the delivery buffer when a delivery does
+    // not fit. A count that is not read again stays three short for as
+    // long as the watch lasts.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.createDirPath(io, "sub");
+    const sub = try std.fs.path.join(gpa, &.{ root, "sub" });
+    defer gpa.free(sub);
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .max_dir_entries = 3 });
+    defer watcher.deinit();
+    const tree = try watcher.add(root, .{ .recursive = true });
+    while ((try watcher.poll(200)).len != 0) {}
+    const f = &watcher.impl.fsevents;
+
+    for ([_][]const u8{ "sub/a", "sub/b", "sub/c" }) |name| try tmp.dir.createDirPath(io, name);
+    var created: usize = 0;
+    var waited: u32 = 0;
+    while (waited < 10_000 and created < 3) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind == .created) created += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), created);
+    while ((try watcher.poll(200)).len != 0) {}
+    try testing.expectEqual(@as(usize, 3), f.budget.counts.get(sub).?);
+    const root_count = f.budget.counts.get(root).?;
+
+    // Lost track at `sub`: its count is read again, and nothing above it.
+    f.budget.counts.getPtr(sub).?.* = 0;
+    f.budget.counts.getPtr(root).?.* = root_count + 5;
+    try synthesize(gpa, f.streams.get(tree).?, &.{
+        .{ .path = sub, .flags = flag.must_scan_sub_dirs | flag.user_dropped },
+    });
+    try expectOneOverflow(&watcher, tree, root, .directory);
+    try testing.expectEqual(@as(usize, 3), f.budget.counts.get(sub).?);
+    try testing.expectEqual(root_count + 5, f.budget.counts.get(root).?);
+    f.budget.counts.getPtr(root).?.* = root_count;
+
+    // So the fourth is past it, and the watch is told.
+    try tmp.dir.createDirPath(io, "sub/d");
+    var overflowed = false;
+    waited = 0;
+    while (waited < 10_000 and !overflowed) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind == .overflow and event.id == tree) overflowed = true;
+        }
+    }
+    try testing.expect(overflowed);
+    // `sub` is past the budget now, so each record left of `sub/d` says
+    // so again; they are read out before the next loss is made.
+    while ((try watcher.poll(200)).len != 0) {}
+
+    // A delivery that did not fit: every watch lost it, so every count
+    // is read again.
+    f.budget.counts.getPtr(sub).?.* = 0;
+    {
+        f.sink.lock.acquire();
+        defer f.sink.lock.release();
+        f.sink.overflowed = true;
+        f.sink.signal();
+    }
+    try expectOneOverflow(&watcher, tree, root, .directory);
+    try testing.expectEqual(@as(usize, 4), f.budget.counts.get(sub).?);
 }
 
 /// The CoreFoundation, CoreServices and libdispatch surface lookout uses.

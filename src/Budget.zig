@@ -5,8 +5,8 @@
 //! past the budget because the listing itself is truncated -- see
 //! `Snapshot.truncated`. The backends the kernel names entries for do
 //! not list anything, so for them the count is kept here: seeded once by
-//! reading the directory, and moved by the creations and removals the
-//! kernel reports.
+//! reading the directory, moved by the creations and removals the kernel
+//! reports, and read again when the system says it lost some of them.
 //!
 //! It exists so that the signal a caller handles is the same one on
 //! every platform. It is counted per directory and not per watch: a
@@ -144,6 +144,50 @@ pub fn release(
             i += 1;
         }
     }
+}
+
+/// Reads again from disk the count of every directory `stale(context,
+/// dir)` names, for a read that was lost.
+///
+/// A count is kept by adding up the changes a watch is told about, so a
+/// read the system lost -- a queue that overflowed, a buffer it could
+/// not hold, a stream it lost track of -- leaves the count short of, or
+/// past, what the directory holds, and every answer after that is off by
+/// as much. Reading the directory again is the one way back to what it
+/// holds. A change made after the loss and before this read, and read
+/// after it, is counted a second time, as a change made between a
+/// watch's registration and its first count is.
+pub fn reread(
+    b: *Budget,
+    context: anytype,
+    comptime stale: fn (@TypeOf(context), []const u8) bool,
+) void {
+    for (b.counts.keys(), b.counts.values()) |dir, *count| {
+        if (stale(context, dir)) count.* = entriesIn(b.io, dir);
+    }
+}
+
+/// Whether the count of `dir` rests on what `loser` reads, on a backend
+/// that hands every watch its own copy of each change: `loser` reaches
+/// `dir`, and no watch with a lower id reaches it and keeps every entry
+/// in it. That one's copy of each change there is the one `counter`
+/// counts, and a read `loser` lost took nothing from it -- reading such
+/// a count again would only count a second time the changes that watch
+/// has still to read.
+///
+/// `watches` is a slice of anything with an `id` field, a `reach()`
+/// returning `?Reach` (`null` for a watch that reaches no directory),
+/// and a `filter` whose `isEmpty()` says it keeps every entry. `loser`
+/// is one of them.
+pub fn restsOn(watches: anytype, loser: anytype, dir: []const u8) bool {
+    const reach = loser.reach() orelse return false;
+    if (!reach.covers(dir)) return false;
+    for (watches) |other| {
+        if (rank(other.id) >= rank(loser.id)) continue;
+        const other_reach = other.reach() orelse continue;
+        if (other_reach.covers(dir) and other.filter.isEmpty()) return false;
+    }
+    return true;
 }
 
 /// How far one watch's own reads reach, on a backend that hands every
@@ -297,6 +341,77 @@ test "a watch removed leaves the counts another watch still holds" {
     b.release(root, Left{ .dir = kept }, Left.counts);
     try testing.expectEqual(@as(usize, 1), b.counts.count());
     try testing.expectEqual(@as(usize, 1), b.counts.get(kept).?);
+}
+
+test "a lost read has its counts read again from disk, and only those" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.createDirPath(io, "lost");
+    try tmp.dir.createDirPath(io, "kept");
+    const lost = try std.fs.path.join(gpa, &.{ root, "lost" });
+    defer gpa.free(lost);
+    const kept = try std.fs.path.join(gpa, &.{ root, "kept" });
+    defer gpa.free(kept);
+
+    var b: Budget = .init(gpa, io, 2);
+    defer b.deinit();
+    try b.seed(lost);
+    try b.seed(kept);
+    // Three entries each, which neither count was told about.
+    for ([_][]const u8{ "lost/a", "lost/b", "lost/c", "kept/a", "kept/b", "kept/c" }) |name| {
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
+    }
+
+    const Lost = struct {
+        dir: []const u8,
+        fn stale(l: @This(), dir: []const u8) bool {
+            return path.eql(l.dir, dir);
+        }
+    };
+    b.reread(Lost{ .dir = lost }, Lost.stale);
+    try testing.expectEqual(@as(usize, 3), b.counts.get(lost).?);
+    try testing.expectEqual(@as(usize, 0), b.counts.get(kept).?);
+    // And the next change is measured against what is there.
+    try testing.expect(try b.note(lost, .appeared));
+}
+
+test "a count rests on the lowest watch that keeps every entry" {
+    const Keeps = struct {
+        all: bool,
+        fn isEmpty(k: @This()) bool {
+            return k.all;
+        }
+    };
+    const Watch = struct {
+        id: u32,
+        within: ?Reach,
+        filter: Keeps,
+        fn reach(w: @This()) ?Reach {
+            return w.within;
+        }
+    };
+    const file: Watch = .{ .id = 0, .within = null, .filter = .{ .all = true } };
+    const filtered: Watch = .{ .id = 1, .within = .{ .dir = "/w", .recursive = true }, .filter = .{ .all = false } };
+    const folder: Watch = .{ .id = 2, .within = .{ .dir = "/w/sub", .recursive = false }, .filter = .{ .all = true } };
+    const tree: Watch = .{ .id = 3, .within = .{ .dir = "/w", .recursive = true }, .filter = .{ .all = true } };
+    const watches = [_]Watch{ tree, folder, file, filtered };
+
+    // A watch on a file reaches no directory, and keeps no count.
+    try testing.expect(!restsOn(&watches, file, "/w"));
+    // A filtered watch may be the one that counted some entries.
+    try testing.expect(restsOn(&watches, filtered, "/w/sub"));
+    // Nothing below it keeps every entry of `/w/sub` before it.
+    try testing.expect(restsOn(&watches, folder, "/w/sub"));
+    // `folder` keeps every entry of `/w/sub` and has the lower id.
+    try testing.expect(!restsOn(&watches, tree, "/w/sub"));
+    // `/w` is `tree`'s: `filtered`, before it, keeps only some.
+    try testing.expect(restsOn(&watches, tree, "/w"));
+    // Not a directory it reaches.
+    try testing.expect(!restsOn(&watches, folder, "/w"));
 }
 
 test "an existing walk seeds a directory without listing it again" {
