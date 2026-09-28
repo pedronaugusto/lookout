@@ -241,7 +241,7 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollEr
     };
     if (gone) |kind| {
         try batch.push(k.gpa, watch, path, kind, target);
-        k.tree.removeSubtree(path);
+        k.tree.removeSubtree(watch, path);
         k.closeOrphanedFiles();
         return;
     }
@@ -297,7 +297,7 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) lookout.Watcher
                     if (std.mem.eql(u8, node.path, k.tree.watchRoot(node.watch)))
                         return translateOpen(err);
                     try batch.trouble(k.gpa, node.watch, node.path, .file);
-                    k.tree.removeSubtree(node.path);
+                    k.tree.removeSubtree(node.watch, node.path);
                     continue;
                 };
                 errdefer _ = std.c.close(opened);
@@ -322,7 +322,7 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) lookout.Watcher
                 .NOMEM => {
                     if (root) return error.WatchLimitReached;
                     try batch.trouble(k.gpa, node.watch, node.path, .directory);
-                    k.tree.removeSubtree(node.path);
+                    k.tree.removeSubtree(node.watch, node.path);
                 },
                 .NOENT, .BADF => continue,
                 else => return error.Unexpected,

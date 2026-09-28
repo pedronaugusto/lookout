@@ -217,7 +217,7 @@ fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
 
     for (gone.items) |item| {
         try batch.push(p.gpa, item.id, item.path, .removed, item.target);
-        p.tree.removeSubtree(item.path);
+        p.tree.removeSubtree(item.id, item.path);
     }
 }
 

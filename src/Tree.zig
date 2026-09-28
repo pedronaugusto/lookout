@@ -318,18 +318,34 @@ pub fn removeWatch(t: *Tree, id: WatchId) void {
     }
 }
 
-/// Drops the node at `path` and every node below it. Used when a watched
-/// directory itself disappears.
-pub fn removeSubtree(t: *Tree, root: []const u8) void {
+/// Drops the node of `watch` at `root` and every node of it below.
+/// Used when a watched directory itself disappears.
+///
+/// Only that one watch's: another watch holding a node on the same path
+/// -- a pending watch parked on a folder that is also watched, or two
+/// watches that overlap -- is told of the disappearance by its own node
+/// and reports it itself. Dropping its nodes here would have taken its
+/// event with them.
+pub fn removeSubtree(t: *Tree, watch: WatchId, root: []const u8) void {
+    // `root` may be the path of one of the nodes being dropped, so that
+    // node goes last, once nothing is compared with it any more.
+    var itself: ?NodeId = null;
     var i: usize = 0;
     while (i < t.nodes.count()) {
-        if (path_cmp.within(root, t.nodes.values()[i].path)) {
-            t.destroy(&t.nodes.values()[i]);
-            t.nodes.swapRemoveAt(i);
-        } else {
+        const node = &t.nodes.values()[i];
+        if (node.watch != watch or !path_cmp.within(root, node.path)) {
             i += 1;
+        } else if (node.path.ptr == root.ptr) {
+            itself = t.nodes.keys()[i];
+            i += 1;
+        } else {
+            t.destroy(node);
+            t.nodes.swapRemoveAt(i);
         }
     }
+    const id = itself orelse return;
+    t.destroy(t.nodes.getPtr(id).?);
+    _ = t.nodes.swapRemove(id);
 }
 
 fn destroy(t: *Tree, node: *Node) void {
@@ -396,7 +412,7 @@ pub fn rescanDirectory(
             const gone = try t.gpa.dupe(u8, node.path);
             defer t.gpa.free(gone);
             try batch.push(t.gpa, watch, gone, .removed, .directory);
-            t.removeSubtree(gone);
+            t.removeSubtree(watch, gone);
             return;
         },
     };
@@ -434,7 +450,7 @@ pub fn rescanDirectory(
                     errdefer t.gpa.free(owned);
                     _ = try t.createFile(watch, owned, meta, added);
                 },
-                .removed => t.removeSubtree(child),
+                .removed => t.removeSubtree(watch, child),
                 else => {},
             }
             continue;
@@ -442,7 +458,7 @@ pub fn rescanDirectory(
         if (!recursive or change.file_kind != .directory) continue;
         switch (change.kind) {
             .created => try t.adopt(watch, child, batch, added),
-            .removed => t.removeSubtree(child),
+            .removed => t.removeSubtree(watch, child),
             else => {},
         }
     }
@@ -530,7 +546,7 @@ pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {
         const gone = try t.gpa.dupe(u8, node.path);
         defer t.gpa.free(gone);
         try batch.push(t.gpa, node.watch, gone, .removed, .file);
-        t.removeSubtree(gone);
+        t.removeSubtree(node.watch, gone);
         return;
     };
     const before = node.meta;

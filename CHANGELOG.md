@@ -8,6 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A pending watch no longer takes the folder it is parked in. It recorded
+  that ancestor as watched, so a later `add` of the same folder failed
+  with `PathAlreadyWatched`, and a pending watch added after the folder
+  was parked on nothing, found only when a `poll` happened to look. Only
+  a watch registered on its own path counts now: the folder's watch and
+  the parked one each report what they are about, the parked one still
+  promotes when its path appears, and several may wait in one folder.
+  Two things this brought out are fixed with it. `inotify` counted a
+  folder's entries only through the first watch sharing its kernel
+  watch, so when that was a parked one, whose filter leaves every other
+  entry out, the folder's watch never reported `overflow`. `kqueue` and
+  the `poll` backend dropped every watch's registrations under a path
+  that went, so of two watches on it only the one the system reported
+  first said `removed`.
+- `kqueue`: an entry below a watch that could not be registered is
+  dropped with everything under it. The drop compared each path against
+  the entry's own, which it had just freed, so what was under it could
+  be left registered.
+
 - `wake` read the backend's state while the polling thread was writing
   it: finding which backend to poke loaded the whole backend union, and
   on the `poll` backend the polling thread's own loads of that union read

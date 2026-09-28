@@ -1327,6 +1327,209 @@ test "a pending watch on a path that is already there is an ordinary watch" {
     }
 }
 
+/// Every event a test saw, by watch, path and kind, so a test about
+/// two watches can say both that each heard what it should and that
+/// neither heard anything twice or anything that was the other's.
+const Ledger = struct {
+    const Key = struct { id: lookout.WatchId, kind: Kind, path: []u8 };
+    seen: std.ArrayList(Key) = .empty,
+
+    fn deinit(l: *Ledger) void {
+        for (l.seen.items) |key| std.testing.allocator.free(key.path);
+        l.seen.deinit(std.testing.allocator);
+    }
+
+    fn note(l: *Ledger, events: []const lookout.Event) !void {
+        for (events) |event| {
+            trace.log("suite ledger id={d} {s} {s}", .{ @intFromEnum(event.id), @tagName(event.kind), event.path });
+            try l.seen.append(std.testing.allocator, .{
+                .id = event.id,
+                .kind = event.kind,
+                .path = try std.testing.allocator.dupe(u8, event.path),
+            });
+        }
+    }
+
+    fn count(l: *const Ledger, id: lookout.WatchId, kind: Kind, path: []const u8) usize {
+        var n: usize = 0;
+        for (l.seen.items) |key| {
+            if (key.id == id and key.kind == kind and std.mem.eql(u8, key.path, path)) n += 1;
+        }
+        return n;
+    }
+
+    fn any(l: *const Ledger, id: lookout.WatchId) bool {
+        for (l.seen.items) |key| if (key.id == id) return true;
+        return false;
+    }
+
+    /// Polls into the ledger until every one of `wants` has been seen at
+    /// least once, or gives up.
+    fn await(l: *Ledger, f: *Fixture, wants: []const Want) !void {
+        const gpa = std.testing.allocator;
+        var waited: u32 = 0;
+        while (waited < timeout_ms) : (waited += 200) {
+            try l.note(try f.watcher.poll(200));
+            var all = true;
+            for (wants) |want| {
+                const p = try f.path(want.sub_path);
+                defer gpa.free(p);
+                if (l.count(want.id, want.kind, p) == 0) all = false;
+            }
+            if (all) return;
+        }
+        for (wants) |want| {
+            const p = try f.path(want.sub_path);
+            defer gpa.free(p);
+            if (l.count(want.id, want.kind, p) == 0) {
+                std.debug.print("{s}: no {s} for watch {d} at {s} within {d} ms\n", .{
+                    @tagName(f.watcher.backend()), @tagName(want.kind), @intFromEnum(want.id), p, timeout_ms,
+                });
+            }
+        }
+        return error.EventNotObserved;
+    }
+
+    const Want = struct { id: lookout.WatchId, sub_path: []const u8, kind: Kind };
+};
+
+test "a pending watch does not take the folder it waits in" {
+    // Both orders: the folder watched after the pending watch parked on
+    // it, and before. A parked watch used to count as a watch of the
+    // folder, so the first order failed with `PathAlreadyWatched`, and
+    // in the second the pending watch parked on nothing at all.
+    for ([_]bool{ true, false }) |pending_first| for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const io = std.testing.io;
+        try f.tmp.dir.createDirPath(io, "dir");
+        const dir = try f.path("dir");
+        defer gpa.free(dir);
+        const later = try f.path("dir/later");
+        defer gpa.free(later);
+
+        var waiting: lookout.WatchId = undefined;
+        var folder: lookout.WatchId = undefined;
+        if (pending_first) {
+            waiting = try f.watcher.add(later, .{ .pending = true });
+            folder = try f.watcher.add(dir, .{});
+        } else {
+            folder = try f.watcher.add(dir, .{});
+            waiting = try f.watcher.add(later, .{ .pending = true });
+        }
+        // Parked with a registration of its own on the folder, not on
+        // nothing: the kernel tells it when its path appears, rather than
+        // the next poll happening to look.
+        try std.testing.expect(f.watcher.table.get(waiting).?.registered != null);
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(dir, .{}));
+        try f.settle();
+
+        var ledger: Ledger = .{};
+        defer ledger.deinit();
+
+        // The folder's own watch hears the folder; the parked one hears
+        // nothing of it.
+        try f.write("dir/a.txt", "one");
+        try ledger.await(&f, &.{.{ .id = folder, .sub_path = "dir/a.txt", .kind = .created }});
+        try std.testing.expect(!ledger.any(waiting));
+
+        // The path appears: the parked watch is promoted and says so, and
+        // the folder's watch hears its new entry.
+        try f.tmp.dir.createDirPath(io, "dir/later");
+        try ledger.await(&f, &.{
+            .{ .id = waiting, .sub_path = "dir/later", .kind = .created },
+            .{ .id = folder, .sub_path = "dir/later", .kind = .created },
+        });
+        try std.testing.expectEqual(@as(usize, 2), f.watcher.stats().watches);
+        try f.settle();
+
+        // Both are real watches now, each of its own path.
+        try f.write("dir/later/b.txt", "two");
+        try f.write("dir/c.txt", "three");
+        try ledger.await(&f, &.{
+            .{ .id = waiting, .sub_path = "dir/later/b.txt", .kind = .created },
+            .{ .id = folder, .sub_path = "dir/c.txt", .kind = .created },
+        });
+
+        // And each is told when its own path goes, whichever of the two
+        // registrations the system reports first.
+        try f.tmp.dir.deleteTree(io, "dir");
+        try ledger.await(&f, &.{
+            .{ .id = waiting, .sub_path = "dir/later", .kind = .removed },
+            .{ .id = folder, .sub_path = "dir", .kind = .removed },
+        });
+        try f.settle();
+
+        // Nothing heard twice, and nothing heard by the wrong watch.
+        for (ledger.seen.items) |key| {
+            if (key.kind == .created or key.kind == .removed) {
+                try std.testing.expectEqual(@as(usize, 1), ledger.count(key.id, key.kind, key.path));
+            }
+            if (key.id == waiting) {
+                try std.testing.expect(std.mem.startsWith(u8, key.path, later));
+            }
+        }
+    };
+}
+
+test "two pending watches may wait in one folder" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const one = try f.path("one");
+        defer gpa.free(one);
+        const two = try f.path("two");
+        defer gpa.free(two);
+
+        const first = try f.watcher.add(one, .{ .pending = true });
+        const second = try f.watcher.add(two, .{ .pending = true });
+        try std.testing.expect(f.watcher.table.get(first).?.registered != null);
+        try std.testing.expect(f.watcher.table.get(second).?.registered != null);
+
+        var ledger: Ledger = .{};
+        defer ledger.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "two");
+        try ledger.await(&f, &.{.{ .id = second, .sub_path = "two", .kind = .created }});
+        try std.testing.expect(!ledger.any(first));
+        try f.tmp.dir.createDirPath(std.testing.io, "one");
+        try ledger.await(&f, &.{.{ .id = first, .sub_path = "one", .kind = .created }});
+    }
+}
+
+test "a folder shared with a pending watch keeps its entry budget" {
+    for (backends) |backend| {
+        var f = try Fixture.initOptions(.{
+            .backend = backend,
+            .poll_interval_ms = 20,
+            .max_dir_entries = 2,
+        });
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const later = try f.path("later");
+        defer gpa.free(later);
+
+        // Parked first, so on `inotify` it is the first owner of the one
+        // kernel watch the two share, and it leaves every entry but its
+        // own out. The count is the folder's, not the parked watch's.
+        _ = try f.watcher.add(later, .{ .pending = true });
+        const folder = try f.watcher.add(f.root, .{});
+        for (0..6) |i| {
+            var name: [8]u8 = undefined;
+            try f.write(std.fmt.bufPrint(&name, "f{d}", .{i}) catch unreachable, "x");
+        }
+
+        var ledger: Ledger = .{};
+        defer ledger.deinit();
+        var waited: u32 = 0;
+        while (waited < timeout_ms and ledger.count(folder, .overflow, f.root) == 0) : (waited += 200) {
+            try ledger.note(try f.watcher.poll(200));
+        }
+        try std.testing.expect(ledger.count(folder, .overflow, f.root) > 0);
+    }
+}
+
 test "adding a path that does not exist fails" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

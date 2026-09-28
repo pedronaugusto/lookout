@@ -300,7 +300,9 @@ the path asked for, and steps down as the path appears; when the path
 appears the watch is promoted to the real one — recursion, filter and
 all — and reported as `Kind.created`. The id comes back from `add` at
 once and does not change. Nothing that happens to the ancestor meanwhile
-is reported.
+is reported, and the ancestor is not taken: a watch of that folder, added
+before or after, is a watch of its own, and several pending watches may
+wait in one folder.
 
 **Two spellings can name one file.** A volume that folds case answers to
 `Notes.txt` and `notes.txt` alike, and one that stores a letter
@@ -409,7 +411,8 @@ for the bookkeeping a backend that recurses itself needs.
   `wake` is the one call another thread may make.
 - **No path is watched twice by one watcher.** A second `add` is
   `error.PathAlreadyWatched`, and on Linux two overlapping watches share
-  one kernel watch where they meet.
+  one kernel watch where they meet. A pending watch parked on a folder
+  is not a watch of that folder, and does not count.
 - **Nothing is persisted.** `Options.since` takes a token that is the
   caller's to store.
 - **Portable path folding covers ASCII and Latin-1 only.** On Apple

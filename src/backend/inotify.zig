@@ -452,7 +452,13 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.Pol
         return;
     }
 
-    for (owners, 0..) |watch, i| {
+    // One entry appearing is one entry however many watches share the
+    // directory, so it is counted once -- by the first watch the entry
+    // is part of, rather than by the first owner, which may be a watch
+    // whose filter leaves it out: a pending watch parked on the folder,
+    // say, which is about one name in it and nothing else.
+    var counted = false;
+    for (owners) |watch| {
         var change = (try n.decode(event, watch, base)) orelse continue;
         defer {
             n.gpa.free(change.path);
@@ -460,7 +466,8 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.Pol
         }
         const paired = try n.pair(&change, batch);
         try n.emit(change, paired, batch);
-        try n.bookkeep(change, paired, i == 0, batch);
+        try n.bookkeep(change, paired, !counted, batch);
+        counted = true;
     }
 }
 

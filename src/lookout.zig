@@ -639,11 +639,11 @@ pub const AddOptions = struct {
     /// the ancestor while the watch waits is reported: it is not what the
     /// caller asked about.
     ///
-    /// The ancestor is a watch like any other, so it cannot be a path
-    /// this same watcher already watches. When it is, the watch stays
-    /// parked with nothing registered and is re-examined on every `poll`,
-    /// which makes it as prompt as the polls rather than as prompt as the
-    /// kernel.
+    /// The ancestor is not taken by the wait. A watch of that same folder
+    /// added before or after is a watch of its own and succeeds, rather
+    /// than failing with `error.PathAlreadyWatched`; each reports what it
+    /// is about, and the parked watch still promotes when its path
+    /// appears. Several pending watches may wait in one folder.
     pending: bool = false,
 };
 
@@ -687,17 +687,23 @@ pub const Watcher = struct {
         /// same path, or an ancestor while a pending watch waits, or
         /// `null` when nothing could be registered at all. Owned here.
         ///
-        /// This is what makes one path one watch. `inotify` returns the
-        /// same kernel watch descriptor for the same inode, so a second
-        /// registration would quietly take the first one's events over;
-        /// refusing it here is the same answer on every backend rather
-        /// than a difference to discover.
+        /// Registered on the path itself is what makes one path one
+        /// watch: see `add`. Registered on an ancestor takes nothing, and
+        /// the ancestor stays free for a watch of its own -- see
+        /// `AddOptions.pending`.
         registered: ?[]u8,
         /// The type of the caller's root, retained for root-level events
         /// after the path can no longer be stat-ed.
         target: Target,
         /// `AddOptions.recursive`.
         recursive: bool,
+
+        /// Whether the backend is registered on the path itself, rather
+        /// than on an ancestor or on nothing while the path is awaited.
+        fn watching(held: Held) bool {
+            const registered = held.registered orelse return false;
+            return path_cmp.eql(registered, held.path);
+        }
     };
 
     /// One watch, as `watches` reports it.
@@ -929,11 +935,19 @@ pub const Watcher = struct {
         return id;
     }
 
-    /// Whether some watch already holds a registration on `abs`.
+    /// Whether some watch already watches `abs` itself.
+    ///
+    /// Only a watch registered on its own path counts. A pending watch
+    /// parked on an ancestor holds a registration there too, but that
+    /// ancestor is not what anybody asked to watch: a caller who then
+    /// asks for it gets a watch of their own, and a second pending
+    /// watch may park on it as well. The backends keep such watches
+    /// apart -- `inotify` by giving one kernel watch several owners, the
+    /// others by registering each one separately.
     fn claimed(w: *const Watcher, abs: []const u8) bool {
         for (w.table.values()) |held| {
-            const registered = held.registered orelse continue;
-            if (path_cmp.eql(registered, abs)) return true;
+            if (!held.watching()) continue;
+            if (path_cmp.eql(held.path, abs)) return true;
         }
         return false;
     }
@@ -1039,17 +1053,18 @@ pub const Watcher = struct {
     /// Puts the watch on the nearest existing ancestor of a path that is
     /// not there yet, narrowed to the one entry that leads to it.
     ///
-    /// Failing is not an error: the ancestor may be gone again, or may be
-    /// a path this watcher already watches. The watch stays parked and
-    /// the next `poll` tries again.
+    /// Failing is not an error: the ancestor may be gone again. The watch
+    /// stays parked and the next `poll` tries again.
+    ///
+    /// The ancestor may be a path this watcher already watches, or one
+    /// another pending watch is parked on. The registration is this
+    /// watch's own either way, under its own id and its own filter, so
+    /// neither watch hears the other's events or loses its own.
     fn anchorPending(w: *Watcher, p: *Pending) void {
         p.anchor = null;
         w.unregister(p.id);
         const present = w.existingPrefix(p.target) orelse return;
         if (present.len == p.target.len) return;
-        // The ancestor is a watch like any other and cannot be one this
-        // watcher already holds.
-        if (w.claimed(present)) return;
         p.next = p.target[0..nextStep(p.target, present.len)];
         const mirror = w.gpa.dupe(u8, present) catch return;
         switch (w.impl) {
@@ -1390,7 +1405,7 @@ pub const Watcher = struct {
                 .id = id,
                 .path = held.path,
                 .recursive = held.recursive,
-                .waiting = held.registered == null or !path_cmp.eql(held.registered.?, held.path),
+                .waiting = !held.watching(),
             };
         }
         return list;
