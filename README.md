@@ -304,7 +304,8 @@ reported costs nothing; the writes still arrive as `modified`.
 nearest existing ancestor, narrowed to the single entry that leads to
 the path asked for, and steps down as the path appears; when the path
 appears the watch is promoted to the real one — recursion, filter and
-all — and reported as `Kind.created`. The id comes back from `add` at
+all — and reported as `Kind.created`, with what the directory already
+holds by then that the watch would report. The id comes back from `add` at
 once and does not change. Nothing that happens to the ancestor meanwhile
 is reported, and the ancestor is not taken: a watch of that folder, added
 before or after, is a watch of its own, and several pending watches may

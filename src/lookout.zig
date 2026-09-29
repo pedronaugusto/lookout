@@ -25,6 +25,7 @@ const Batch = @import("Batch.zig");
 const Deadline = @import("Deadline.zig");
 const Tree = @import("Tree.zig");
 const Waker = @import("Waker.zig");
+const walk = @import("walk.zig");
 const path_cmp = @import("path.zig");
 
 /// Paths compared as a watch compares them: the same case folding and
@@ -655,7 +656,9 @@ pub const AddOptions = struct {
     /// single entry that leads to the path asked for, and steps down as
     /// the path appears. When the path itself appears the watch is
     /// promoted to the real one -- recursion, filter and all -- and the
-    /// appearance is reported as `Kind.created` against it. A tool
+    /// appearance is reported as `Kind.created` against it, with whatever
+    /// the directory already holds by then that the watch would report.
+    /// A tool
     /// watching a directory its own first run creates no longer has to
     /// poll for it.
     ///
@@ -1224,8 +1227,36 @@ pub const Watcher = struct {
             held.target = target;
         } else w.gpa.free(mirror);
         try w.batch.pushDetail(w.gpa, p.id, p.target, .created, null, target);
+        if (target == .directory) try w.reportMade(p);
         w.destroyPending(p);
         return true;
+    }
+
+    /// Reports as created what a promoted directory already holds: what
+    /// was made in it between its appearing and the watch taken on it,
+    /// which no watch was there to see -- `mkdir -p` and a write into the
+    /// new folder are one breath. Only what the watch would report: its
+    /// filter, and below the first level only when it recurses. The batch
+    /// keeps one event per path, so a backend that reports the same entry
+    /// itself reports it once.
+    fn reportMade(w: *Watcher, p: *const Pending) PollError!void {
+        const Made = struct {
+            w: *Watcher,
+            p: *const Pending,
+
+            fn visit(m: @This(), entry: walk.Entry) anyerror!walk.Step {
+                if (m.p.filter.prunes(m.p.target, entry.path)) return .over;
+                if (!m.p.filter.excludes(m.p.target, entry.path)) {
+                    try m.w.batch.pushDetail(m.w.gpa, m.p.id, entry.path, .created, null, Target.of(entry.kind));
+                }
+                return if (entry.kind == .directory and m.p.recursive) .into else .over;
+            }
+        };
+        walk.tree(w.gpa, w.io, p.target, Made{ .w = w, .p = p }, Made.visit) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // gone again, or not ours to read: the watch says the rest
+            else => {},
+        };
     }
 
     /// Whether the path a pending watch waited for, now that it is there,

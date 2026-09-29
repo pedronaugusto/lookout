@@ -1323,6 +1323,51 @@ test "a path that does not exist yet can be watched" {
     }
 }
 
+test "what is made in a pending path as it appears is reported by the watch it becomes" {
+    // The folder and what goes into it are made before the watcher reads
+    // a thing: the watch is promoted after the entries are already there,
+    // and they are reported as created against it rather than lost in
+    // the gap between the parked watch and the real one.
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const target = try f.path("later");
+        defer gpa.free(target);
+
+        const id = try f.watcher.add(target, .{ .pending = true, .recursive = true });
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(200)).len);
+
+        try f.tmp.dir.createDirPath(std.testing.io, "later/sub");
+        try f.write("later/a.txt", "one");
+        try f.write("later/sub/b.txt", "two");
+
+        var ledger: Ledger = .{};
+        defer ledger.deinit();
+        try ledger.await(&f, &.{
+            .{ .id = id, .sub_path = "later", .kind = .created },
+            .{ .id = id, .sub_path = "later/a.txt", .kind = .created },
+            .{ .id = id, .sub_path = "later/sub/b.txt", .kind = .created },
+        });
+
+        // each once, whether the backend saw it as well or not
+        while (true) {
+            const events = try f.watcher.poll(120);
+            if (events.len == 0) break;
+            try ledger.note(events);
+        }
+        for ([_][]const u8{ "later/a.txt", "later/sub/b.txt" }) |sub_path| {
+            const p = try f.path(sub_path);
+            defer gpa.free(p);
+            try std.testing.expectEqual(@as(usize, 1), ledger.count(id, .created, p));
+        }
+
+        // and the watch is the real one from then on
+        try f.write("later/sub/c.txt", "three");
+        try ledger.await(&f, &.{.{ .id = id, .sub_path = "later/sub/c.txt", .kind = .created }});
+    }
+}
+
 test "a pending file is promoted with its file target" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
