@@ -64,10 +64,18 @@ pub fn count(b: *const Budget, dir: []const u8) ?usize {
 /// Counts what `dir` holds now, so that a directory that is already too
 /// big says so at the first sign of life rather than after the budget's
 /// worth of changes.
+///
+/// A directory already counted is read again and its count replaced, as
+/// `begin` counts it again from a walk: what another watch left may be
+/// only what it heard.
 pub fn seed(b: *Budget, dir: []const u8) Allocator.Error!void {
-    if (b.counts.contains(dir)) return;
     var names = try namesIn(b.gpa, b.io, dir);
     errdefer freeNames(b.gpa, &names);
+    if (b.counts.getPtr(dir)) |counted| {
+        freeNames(b.gpa, counted);
+        counted.* = names;
+        return;
+    }
     const owned = try b.gpa.dupe(u8, dir);
     errdefer b.gpa.free(owned);
     try b.counts.put(b.gpa, owned, names);
