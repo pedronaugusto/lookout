@@ -2,8 +2,7 @@
 //! `inotify`, `ReadDirectoryChangesW` and polling.
 //!
 //! A `Watcher` owns a set of watches. Each watch is a path — a file or a
-//! directory — added with `Watcher.add`, changed with `Watcher.refilter`,
-//! and dropped with `Watcher.remove`.
+//! directory — added with `Watcher.add` and dropped with `Watcher.remove`.
 //! `Watcher.poll` blocks until something happens and hands back the events
 //! that happened, one per path, coalesced.
 //!
@@ -1278,17 +1277,11 @@ pub const Watcher = struct {
     /// recursion. Patterns are copied; the predicate context remains the
     /// caller's and must outlive this filter. An unknown id is an error.
     ///
-    /// A change completed after this call returns is tested against the
-    /// new filter, subject to the backend's usual event-loss limits.
-    /// Events already returned by `poll` stay valid and are not replayed.
-    /// Collected but unreturned events from newly excluded paths are
-    /// dropped; queued backend records are tested when they are read.
-    /// There is no snapshot boundary for a write overlapping this call:
-    /// a short-lived file in a newly admitted directory may be gone
-    /// before that directory is registered, as during recursive `add`.
-    /// Existing newly admitted directories are registered before return
-    /// where the backend registers directories individually. A pending
-    /// watch keeps the replacement filter for its eventual promotion.
+    /// The new filter applies to events delivered after this call. Events
+    /// already returned by `poll` are not replayed. Events in flight may
+    /// have happened under the old filter but are judged by the new one;
+    /// no ordering boundary against concurrent file-system writes is
+    /// implied. Newly admitted directories are registered before return.
     pub fn refilter(w: *Watcher, id: WatchId, filter: Filter) RefilterError!void {
         if (!w.table.contains(id)) return error.UnknownWatch;
         try w.io.checkCancel();
