@@ -905,7 +905,7 @@ fn recount(w: *Windows, watch: *Watch, subject: []const u8, move: Budget.Move, b
         .subject = subject,
     };
     if (Budget.counter(w.watches.values(), change, Change.reaches) != watch) return;
-    if (!try w.budget.note(change.dir, move)) return;
+    if (!try w.budget.note(change.dir, std.fs.path.basename(subject), move)) return;
     for (w.watches.values()) |other| {
         if (!change.reaches(other)) continue;
         try batch.push(w.gpa, other.id, other.root, .overflow, .directory);
@@ -1033,7 +1033,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
         }
     }
     try testing.expectEqual(@as(usize, 3), created);
-    w.budget.counts.getPtr(root).?.* = 0;
+    try w.budget.misread(root, true, 0);
 
     _ = c.CancelIoEx(watch.handle, &watch.overlapped);
     {
@@ -1057,7 +1057,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     }
     try testing.expect(overflowed);
     // Three entries: at the budget, as the folder is.
-    try testing.expectEqual(@as(usize, 3), w.budget.counts.get(root).?);
+    try testing.expectEqual(@as(usize, 3), w.budget.count(root).?);
 
     // So the fourth is past it, and the watch is told.
     try tmp.dir.writeFile(io, .{ .sub_path = "d", .data = "x" });

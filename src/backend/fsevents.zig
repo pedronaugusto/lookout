@@ -1113,7 +1113,7 @@ fn adopt(
         stream: *const Stream,
 
         fn visit(a: *@This(), entry: walk.Entry) anyerror!walk.Step {
-            a.f.budget.found(entry.dir);
+            try a.f.budget.found(entry.dir, entry.name);
             if (entry.kind == .directory) try a.f.budget.begin(entry.path);
             if (a.stream.filter.prunes(a.stream.root, entry.path)) return .over;
             if (a.f.known.contains(.{ .id = a.id, .path = entry.path })) return .into;
@@ -1354,7 +1354,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
         stream: *const Stream,
 
         fn visit(s: *@This(), entry: walk.Entry) anyerror!walk.Step {
-            s.f.budget.found(entry.dir);
+            try s.f.budget.found(entry.dir, entry.name);
             if (entry.kind == .directory) try s.f.budget.begin(entry.path);
             if (s.stream.filter.prunes(s.stream.root, entry.path)) {
                 trace.log("fsevents seed filtered {s}", .{entry.path});
@@ -1396,7 +1396,7 @@ fn recount(
     };
     const counting = Budget.counter(f.streams.values(), change, Change.reaches) orelse return;
     if (counting != stream) return;
-    if (!try f.budget.note(change.dir, move)) return;
+    if (!try f.budget.note(change.dir, std.fs.path.basename(subject), move)) return;
     for (f.streams.values()) |other| {
         if (!change.reaches(other)) continue;
         try batch.push(f.gpa, other.id, other.root, .overflow, other.rootTarget());
@@ -1615,19 +1615,19 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     }
     try testing.expectEqual(@as(usize, 3), created);
     while ((try watcher.poll(200)).len != 0) {}
-    try testing.expectEqual(@as(usize, 3), f.budget.counts.get(sub).?);
-    const root_count = f.budget.counts.get(root).?;
+    try testing.expectEqual(@as(usize, 3), f.budget.count(sub).?);
+    const root_count = f.budget.count(root).?;
 
     // Lost track at `sub`: its count is read again, and nothing above it.
-    f.budget.counts.getPtr(sub).?.* = 0;
-    f.budget.counts.getPtr(root).?.* = root_count + 5;
+    try f.budget.misread(sub, true, 0);
+    try f.budget.misread(root, false, 5);
     try synthesize(gpa, f.streams.get(tree).?, &.{
         .{ .path = sub, .flags = flag.must_scan_sub_dirs | flag.user_dropped },
     });
     try expectOneOverflow(&watcher, tree, root, .directory);
-    try testing.expectEqual(@as(usize, 3), f.budget.counts.get(sub).?);
-    try testing.expectEqual(root_count + 5, f.budget.counts.get(root).?);
-    f.budget.counts.getPtr(root).?.* = root_count;
+    try testing.expectEqual(@as(usize, 3), f.budget.count(sub).?);
+    try testing.expectEqual(root_count + 5, f.budget.count(root).?);
+    try f.budget.misread(root, false, 0);
 
     // So the fourth is past it, and the watch is told.
     try tmp.dir.createDirPath(io, "sub/d");
@@ -1645,7 +1645,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
 
     // A delivery that did not fit: every watch lost it, so every count
     // is read again.
-    f.budget.counts.getPtr(sub).?.* = 0;
+    try f.budget.misread(sub, true, 0);
     {
         f.sink.lock.acquire();
         defer f.sink.lock.release();
@@ -1653,7 +1653,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
         f.sink.signal();
     }
     try expectOneOverflow(&watcher, tree, root, .directory);
-    try testing.expectEqual(@as(usize, 4), f.budget.counts.get(sub).?);
+    try testing.expectEqual(@as(usize, 4), f.budget.count(sub).?);
 }
 
 test "a rename whose halves arrive in two deliveries is one rename" {

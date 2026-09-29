@@ -1725,6 +1725,45 @@ test "a folder shared with a pending watch keeps its entry budget" {
     }
 }
 
+test "a folder a pending watch alone held is counted true for the watch taken there next" {
+    // While only a pending watch is parked on a folder, it keeps its own
+    // name and lets every other change there go by -- and on `inotify`
+    // the folder's count went by with them. A directory watch taken on
+    // the folder after it found the folder counted already, took that
+    // count as it was, and was told nothing when the folder passed its
+    // budget.
+    for (backends) |backend| {
+        var f = try Fixture.initOptions(.{
+            .backend = backend,
+            .poll_interval_ms = 20,
+            .max_dir_entries = 2,
+        });
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const later = try f.path("later");
+        defer gpa.free(later);
+
+        _ = try f.watcher.add(later, .{ .pending = true });
+        try f.settle();
+        // two entries while only the parked watch is there: at the budget
+        try f.write("f0", "x");
+        try f.write("f1", "x");
+        try f.settle();
+
+        const folder = try f.watcher.add(f.root, .{});
+        try f.settle();
+        // the third is past it
+        try f.write("f2", "x");
+        var ledger: Ledger = .{};
+        defer ledger.deinit();
+        var waited: u32 = 0;
+        while (waited < timeout_ms and ledger.count(folder, .overflow, f.root) == 0) : (waited += 200) {
+            try ledger.note(try f.watcher.poll(200));
+        }
+        try std.testing.expect(ledger.count(folder, .overflow, f.root) > 0);
+    }
+}
+
 test "a folder several watches share is counted once against its budget" {
     // One folder reached by three watches: its parent's, recursive; its
     // own; and a pending one parked in it. Windows and FSEvents hand each

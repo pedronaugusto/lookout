@@ -482,12 +482,20 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.Pol
         return;
     }
 
-    // One entry appearing is one entry however many watches share the
-    // directory, so it is counted once -- by the first watch the entry
-    // is part of, rather than by the first owner, which may be a watch
-    // whose filter leaves it out: a pending watch parked on the folder,
-    // say, which is about one name in it and nothing else.
-    var counted = false;
+    // The folder's entries move with the change whatever the watches
+    // make of it: before any of them is asked, and whether or not one
+    // keeps the entry. A pending watch parked on the folder, which is
+    // about one name in it, lets every other change there go by, and a
+    // directory watch taken there later counts on what this keeps.
+    if (event.name) |name| {
+        const move: Budget.Move = if (event.mask & (linux.IN.CREATE | linux.IN.MOVED_TO) != 0)
+            .appeared
+        else if (event.mask & (linux.IN.DELETE | linux.IN.MOVED_FROM) != 0)
+            .vanished
+        else
+            .unchanged;
+        if (move != .unchanged and n.budget.count(base) != null) _ = try n.budget.note(base, name, move);
+    }
     for (owners) |watch| {
         var change = (try n.decode(event, watch, base)) orelse continue;
         defer {
@@ -496,8 +504,7 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.Pol
         }
         const paired = try n.pair(&change, batch);
         try n.emit(change, paired, batch);
-        try n.bookkeep(change, paired, !counted, batch);
-        counted = true;
+        try n.bookkeep(change, paired, batch);
     }
 }
 
@@ -614,20 +621,14 @@ fn bookkeep(
     n: *Inotify,
     change: Change,
     paired: bool,
-    count_budget: bool,
     batch: *Batch,
 ) lookout.Watcher.PollError!void {
     // Checked on every event for the directory rather than only on the
     // ones that move the count, so that a watch added to a directory
     // that is already too big says so at the first sign of life, which
-    // is what the listing backends do.
-    const move: Budget.Move = if (change.appeared)
-        .appeared
-    else if (change.vanished)
-        .vanished
-    else
-        .unchanged;
-    if (try n.budget.note(change.dir, if (count_budget) move else .unchanged)) {
+    // is what the listing backends do. The count itself moved in
+    // `handle`, once for the folder.
+    if (try n.budget.note(change.dir, std.fs.path.basename(change.path), .unchanged)) {
         const watch = n.watches.get(change.watch) orelse return;
         try batch.push(n.gpa, change.watch, watch.root, .overflow, watch.target);
     }
@@ -836,7 +837,7 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
     try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
     try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
     // Three entries: at the budget, as the folder is.
-    try testing.expectEqual(@as(usize, 3), n.budget.counts.get(root).?);
+    try testing.expectEqual(@as(usize, 3), n.budget.count(root).?);
 
     // So the fourth is past it, and the watch is told.
     _ = try watcher.poll(0);

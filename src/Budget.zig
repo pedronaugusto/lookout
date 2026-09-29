@@ -26,12 +26,17 @@ gpa: Allocator,
 io: Io,
 /// Mirrors `lookout.Options.max_dir_entries`.
 max: usize,
-/// One count per directory the backend has been told about. Keys owned
-/// here, compared as the file system compares them.
-counts: path.Set(usize),
+/// The entries of each directory the backend has been told about, by
+/// name: a set, so that a creation reported twice, or a removal of a
+/// name never counted, moves nothing. Keys and names owned here, compared
+/// as the file system compares them.
+counts: path.Set(Names),
 /// The directories the walk under way started counting, and so the only
 /// ones whose entries it adds. Keys borrowed from `counts`. See `begin`.
 walking: path.Set(void),
+
+/// One directory's entries, by name.
+pub const Names = path.Set(void);
 
 /// What happened to a directory's entry count.
 pub const Move = enum { appeared, vanished, unchanged };
@@ -41,10 +46,19 @@ pub fn init(gpa: Allocator, io: Io, max: usize) Budget {
 }
 
 pub fn deinit(b: *Budget) void {
-    for (b.counts.keys()) |key| b.gpa.free(key);
+    for (b.counts.keys(), b.counts.values()) |key, *names| {
+        freeNames(b.gpa, names);
+        b.gpa.free(key);
+    }
     b.counts.deinit(b.gpa);
     b.walking.deinit(b.gpa);
     b.* = undefined;
+}
+
+/// How many entries `dir` is counted as holding, when it is counted.
+pub fn count(b: *const Budget, dir: []const u8) ?usize {
+    const names = b.counts.getPtr(dir) orelse return null;
+    return names.count();
 }
 
 /// Counts what `dir` holds now, so that a directory that is already too
@@ -52,9 +66,11 @@ pub fn deinit(b: *Budget) void {
 /// worth of changes.
 pub fn seed(b: *Budget, dir: []const u8) Allocator.Error!void {
     if (b.counts.contains(dir)) return;
+    var names = try namesIn(b.gpa, b.io, dir);
+    errdefer freeNames(b.gpa, &names);
     const owned = try b.gpa.dupe(u8, dir);
     errdefer b.gpa.free(owned);
-    try b.counts.put(b.gpa, owned, entriesIn(b.io, dir));
+    try b.counts.put(b.gpa, owned, names);
 }
 
 /// Starts accounting for a directory a tree walk is about to list.
@@ -70,15 +86,15 @@ pub fn begin(b: *Budget, dir: []const u8) Allocator.Error!void {
     try b.walking.ensureUnusedCapacity(b.gpa, 1);
     const owned = try b.gpa.dupe(u8, dir);
     errdefer b.gpa.free(owned);
-    try b.counts.put(b.gpa, owned, 0);
+    try b.counts.put(b.gpa, owned, .empty);
     b.walking.putAssumeCapacity(owned, {});
 }
 
-/// Accounts for one entry an existing tree walk found in `dir`.
-pub fn found(b: *Budget, dir: []const u8) void {
+/// Accounts for one entry, `name`, an existing tree walk found in `dir`.
+pub fn found(b: *Budget, dir: []const u8, name: []const u8) Allocator.Error!void {
     if (!b.walking.contains(dir)) return;
-    const count = b.counts.getPtr(dir) orelse return;
-    count.* += 1;
+    const names = b.counts.getPtr(dir) orelse return;
+    try addName(b.gpa, names, name);
 }
 
 /// Closes the walk `begin` opened: what it counted is the count now.
@@ -86,9 +102,18 @@ pub fn end(b: *Budget) void {
     b.walking.clearRetainingCapacity();
 }
 
-/// Records one change in `dir` and answers whether it is now past the
-/// budget. A directory nothing has been said about yet is counted first.
-pub fn note(b: *Budget, dir: []const u8, move: Move) Allocator.Error!bool {
+/// Records what happened to the entry `name` of `dir` and answers whether
+/// the directory is now past the budget. A directory nothing has been
+/// said about yet is counted first, from disk, where the change already
+/// is.
+///
+/// A name that appears is counted once however often it is reported,
+/// and one that goes is uncounted only if it was counted: the count is
+/// the folder's, whichever watch hears of the change, and whether or not
+/// one heard of it before -- a watch parked on a folder for one name in
+/// it, which lets every other change there go by, leaves the count as
+/// true as any other.
+pub fn note(b: *Budget, dir: []const u8, name: []const u8, move: Move) Allocator.Error!bool {
     const gop = try b.counts.getOrPut(b.gpa, dir);
     if (!gop.found_existing) {
         const owned = b.gpa.dupe(u8, dir) catch |err| {
@@ -96,13 +121,17 @@ pub fn note(b: *Budget, dir: []const u8, move: Move) Allocator.Error!bool {
             return err;
         };
         gop.key_ptr.* = owned;
-        gop.value_ptr.* = entriesIn(b.io, dir);
+        gop.value_ptr.* = namesIn(b.gpa, b.io, dir) catch |err| {
+            b.gpa.free(owned);
+            _ = b.counts.swapRemove(dir);
+            return err;
+        };
     } else switch (move) {
-        .appeared => gop.value_ptr.* += 1,
-        .vanished => gop.value_ptr.* -|= 1,
+        .appeared => try addName(b.gpa, gop.value_ptr, name),
+        .vanished => if (gop.value_ptr.fetchSwapRemove(name)) |kv| b.gpa.free(kv.key),
         .unchanged => {},
     }
-    return gop.value_ptr.* > b.max;
+    return gop.value_ptr.count() > b.max;
 }
 
 /// Drops `dir` and every directory under it, for a subtree that has gone.
@@ -110,9 +139,7 @@ pub fn forget(b: *Budget, dir: []const u8) void {
     var i: usize = 0;
     while (i < b.counts.count()) {
         if (path.within(dir, b.counts.keys()[i])) {
-            _ = b.walking.swapRemove(b.counts.keys()[i]);
-            b.gpa.free(b.counts.keys()[i]);
-            b.counts.swapRemoveAt(i);
+            b.dropAt(i);
         } else {
             i += 1;
         }
@@ -126,7 +153,7 @@ pub fn forget(b: *Budget, dir: []const u8) void {
 /// A folder another watch still reaches keeps its count. Dropping it,
 /// as `forget` does, had the next change there count the folder again
 /// from disk -- which by then held entries whose changes were still on
-/// their way, and each of those was then counted a second time.
+/// their way.
 pub fn release(
     b: *Budget,
     dir: []const u8,
@@ -137,33 +164,59 @@ pub fn release(
     while (i < b.counts.count()) {
         const key = b.counts.keys()[i];
         if (path.within(dir, key) and !counted(context, key)) {
-            _ = b.walking.swapRemove(key);
-            b.gpa.free(key);
-            b.counts.swapRemoveAt(i);
+            b.dropAt(i);
         } else {
             i += 1;
         }
     }
 }
 
-/// Reads again from disk the count of every directory `stale(context,
+fn dropAt(b: *Budget, i: usize) void {
+    const key = b.counts.keys()[i];
+    _ = b.walking.swapRemove(key);
+    freeNames(b.gpa, &b.counts.values()[i]);
+    b.gpa.free(key);
+    b.counts.swapRemoveAt(i);
+}
+
+/// For a test: the count of `dir` as a lost read would leave it, `real`
+/// names forgotten and `made_up` names that are not on disk in their
+/// place (a NUL is in no real name). A directory not counted is left
+/// alone.
+pub fn misread(b: *Budget, dir: []const u8, forget_real: bool, made_up: usize) Allocator.Error!void {
+    const names = b.counts.getPtr(dir) orelse return;
+    var i: usize = 0;
+    while (i < names.count()) {
+        const name = names.keys()[i];
+        if (forget_real or std.mem.indexOfScalar(u8, name, 0) != null) {
+            b.gpa.free(name);
+            names.swapRemoveAt(i);
+        } else i += 1;
+    }
+    var buf: [32]u8 = undefined;
+    for (0..made_up) |k| try addName(b.gpa, names, std.fmt.bufPrint(&buf, "\x00made-up {d}", .{k}) catch unreachable);
+}
+
+/// Reads again from disk the entries of every directory `stale(context,
 /// dir)` names, for a read that was lost.
 ///
-/// A count is kept by adding up the changes a watch is told about, so a
-/// read the system lost -- a queue that overflowed, a buffer it could
-/// not hold, a stream it lost track of -- leaves the count short of, or
-/// past, what the directory holds, and every answer after that is off by
-/// as much. Reading the directory again is the one way back to what it
-/// holds. A change made after the loss and before this read, and read
-/// after it, is counted a second time, as a change made between a
-/// watch's registration and its first count is.
+/// The entries are kept by the changes a watch is told about, so a read
+/// the system lost -- a queue that overflowed, a buffer it could not
+/// hold, a stream it lost track of -- leaves them short of, or past, what
+/// the directory holds. Reading the directory again is the one way back
+/// to what it holds. A change made after the loss and before this read,
+/// and read after it, finds its name already there, or already gone, and
+/// moves nothing. Out of memory, a directory keeps the entries it had.
 pub fn reread(
     b: *Budget,
     context: anytype,
     comptime stale: fn (@TypeOf(context), []const u8) bool,
 ) void {
-    for (b.counts.keys(), b.counts.values()) |dir, *count| {
-        if (stale(context, dir)) count.* = entriesIn(b.io, dir);
+    for (b.counts.keys(), b.counts.values()) |dir, *names| {
+        if (!stale(context, dir)) continue;
+        var fresh = namesIn(b.gpa, b.io, dir) catch continue;
+        freeNames(b.gpa, names);
+        names.* = fresh.move();
     }
 }
 
@@ -242,16 +295,31 @@ fn rank(id: anytype) u64 {
     };
 }
 
-/// How many entries `path` holds, or zero when it is not a directory or
+/// The names `dir_path` holds, or none when it is not a directory or
 /// cannot be read. An unreadable directory is a budget of nothing rather
 /// than a failed `add`.
-pub fn entriesIn(io: Io, dir_path: []const u8) usize {
-    var dir = Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return 0;
+fn namesIn(gpa: Allocator, io: Io, dir_path: []const u8) Allocator.Error!Names {
+    var names: Names = .empty;
+    errdefer freeNames(gpa, &names);
+    var dir = Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return names;
     defer dir.close(io);
     var it = dir.iterate();
-    var count: usize = 0;
-    while (it.next(io) catch null) |_| count += 1;
-    return count;
+    while (it.next(io) catch null) |entry| try addName(gpa, &names, entry.name);
+    return names;
+}
+
+fn addName(gpa: Allocator, names: *Names, name: []const u8) Allocator.Error!void {
+    const gop = try names.getOrPut(gpa, name);
+    if (gop.found_existing) return;
+    gop.key_ptr.* = gpa.dupe(u8, name) catch |err| {
+        _ = names.swapRemove(name);
+        return err;
+    };
+}
+
+fn freeNames(gpa: Allocator, names: *Names) void {
+    for (names.keys()) |name| gpa.free(name);
+    names.deinit(gpa);
 }
 
 const testing = std.testing;
@@ -271,10 +339,10 @@ test "a directory is counted once and then kept current" {
     defer b.deinit();
 
     try b.seed(root);
-    try testing.expectEqual(@as(usize, 2), b.counts.get(root).?);
-    try testing.expect(!try b.note(root, .appeared));
-    try testing.expect(try b.note(root, .appeared));
-    try testing.expect(!try b.note(root, .vanished));
+    try testing.expectEqual(@as(usize, 2), b.count(root).?);
+    try testing.expect(!try b.note(root, "c.txt", .appeared));
+    try testing.expect(try b.note(root, "d.txt", .appeared));
+    try testing.expect(!try b.note(root, "d.txt", .vanished));
 }
 
 test "each directory has its own budget" {
@@ -299,11 +367,11 @@ test "each directory has its own budget" {
     // change being reported is already on disk by then.
     try b.seed(one);
     try b.seed(two);
-    try testing.expect(!try b.note(one, .appeared));
-    try testing.expect(!try b.note(one, .appeared));
-    try testing.expect(try b.note(one, .appeared));
+    try testing.expect(!try b.note(one, "a", .appeared));
+    try testing.expect(!try b.note(one, "b", .appeared));
+    try testing.expect(try b.note(one, "c", .appeared));
     // The other directory has spent nothing of its own.
-    try testing.expect(!try b.note(two, .appeared));
+    try testing.expect(!try b.note(two, "a", .appeared));
 
     b.forget(root);
     try testing.expectEqual(@as(usize, 0), b.counts.count());
@@ -330,7 +398,7 @@ test "a watch removed leaves the counts another watch still holds" {
     try b.seed(gone);
     // A count that differs from what is on disk, so that a count read
     // again from disk would show.
-    _ = try b.note(kept, .appeared);
+    _ = try b.note(kept, "counted", .appeared);
 
     const Left = struct {
         dir: []const u8,
@@ -340,7 +408,7 @@ test "a watch removed leaves the counts another watch still holds" {
     };
     b.release(root, Left{ .dir = kept }, Left.counts);
     try testing.expectEqual(@as(usize, 1), b.counts.count());
-    try testing.expectEqual(@as(usize, 1), b.counts.get(kept).?);
+    try testing.expectEqual(@as(usize, 1), b.count(kept).?);
 }
 
 test "a lost read has its counts read again from disk, and only those" {
@@ -373,10 +441,10 @@ test "a lost read has its counts read again from disk, and only those" {
         }
     };
     b.reread(Lost{ .dir = lost }, Lost.stale);
-    try testing.expectEqual(@as(usize, 3), b.counts.get(lost).?);
-    try testing.expectEqual(@as(usize, 0), b.counts.get(kept).?);
+    try testing.expectEqual(@as(usize, 3), b.count(lost).?);
+    try testing.expectEqual(@as(usize, 0), b.count(kept).?);
     // And the next change is measured against what is there.
-    try testing.expect(try b.note(lost, .appeared));
+    try testing.expect(try b.note(lost, "d", .appeared));
 }
 
 test "a count rests on the lowest watch that keeps every entry" {
@@ -426,11 +494,11 @@ test "an existing walk seeds a directory without listing it again" {
     defer b.deinit();
 
     try b.begin(root);
-    b.found(root);
-    b.found(root);
+    try b.found(root, "a");
+    try b.found(root, "b");
     b.end();
-    try testing.expectEqual(@as(usize, 2), b.counts.get(root).?);
-    try testing.expect(try b.note(root, .appeared));
+    try testing.expectEqual(@as(usize, 2), b.count(root).?);
+    try testing.expect(try b.note(root, "c", .appeared));
 }
 
 test "a second walk of a directory already counted adds nothing" {
@@ -449,23 +517,23 @@ test "a second walk of a directory already counted adds nothing" {
     defer b.deinit();
 
     try b.begin(root);
-    b.found(root);
-    b.found(root);
+    try b.found(root, "a");
+    try b.found(root, "sub");
     b.end();
 
     // The second walk also meets a directory nobody counted yet, and
     // that one it does count.
     try b.begin(root);
-    b.found(root);
+    try b.found(root, "a");
     try b.begin(sub);
-    b.found(root);
-    b.found(sub);
+    try b.found(root, "sub");
+    try b.found(sub, "x");
     b.end();
 
-    try testing.expectEqual(@as(usize, 2), b.counts.get(root).?);
-    try testing.expectEqual(@as(usize, 1), b.counts.get(sub).?);
-    try testing.expect(!try b.note(root, .appeared));
-    try testing.expect(try b.note(root, .appeared));
+    try testing.expectEqual(@as(usize, 2), b.count(root).?);
+    try testing.expectEqual(@as(usize, 1), b.count(sub).?);
+    try testing.expect(!try b.note(root, "b", .appeared));
+    try testing.expect(try b.note(root, "c", .appeared));
 }
 
 test "a change every watch reads its own copy of is counted once" {
@@ -524,11 +592,11 @@ test "a change every watch reads its own copy of is counted once" {
                 const watch = pointers[i];
                 if (!copy.reads(watch)) continue;
                 if (counter(&pointers, copy, Copy.reads) != watch) continue;
-                if (try b.note(folder, .appeared)) passed = true;
+                if (try b.note(folder, name, .appeared)) passed = true;
             }
         }
         try testing.expect(!passed);
-        try testing.expectEqual(@as(usize, 3), b.counts.get(folder).?);
+        try testing.expectEqual(@as(usize, 3), b.count(folder).?);
 
         // The fourth is past it, and is counted once too.
         const copy: Copy = .{ .dir = folder, .name = "c" };
@@ -538,10 +606,10 @@ test "a change every watch reads its own copy of is counted once" {
             if (!copy.reads(watch)) continue;
             if (counter(&pointers, copy, Copy.reads) != watch) continue;
             counted += 1;
-            try testing.expect(try b.note(folder, .appeared));
+            try testing.expect(try b.note(folder, "c", .appeared));
         }
         try testing.expectEqual(@as(usize, 1), counted);
-        try testing.expectEqual(@as(usize, 4), b.counts.get(folder).?);
+        try testing.expectEqual(@as(usize, 4), b.count(folder).?);
     }
 }
 
@@ -568,4 +636,34 @@ test "a change is counted by the lowest id it reached and was kept by" {
     // A folder whose name starts the same way is not below `/w/sub`.
     try testing.expectEqual(@as(u32, 3), counter(&watches, Change{ .dir = "/w/subway/x" }, Change.reads).?.id);
     try testing.expect(counter(&watches, Change{ .dir = "/elsewhere" }, Change.reads) == null);
+}
+
+test "a name reported twice is one entry, and one never counted goes without taking another with it" {
+    // The count a parked watch left behind, or a change heard again after
+    // a lost read, is the folder's as it is on disk.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "a", .data = "x" });
+
+    var b: Budget = .init(gpa, io, 2);
+    defer b.deinit();
+    try b.seed(root);
+    try testing.expectEqual(@as(usize, 1), b.count(root).?);
+    // `a` was on disk when the folder was counted: its creation, heard
+    // late, is already in
+    try testing.expect(!try b.note(root, "a", .appeared));
+    try testing.expectEqual(@as(usize, 1), b.count(root).?);
+    // a removal of a name never counted takes nothing
+    try testing.expect(!try b.note(root, "never", .vanished));
+    try testing.expectEqual(@as(usize, 1), b.count(root).?);
+    try testing.expect(!try b.note(root, "b", .appeared));
+    try testing.expect(!try b.note(root, "b", .appeared));
+    try testing.expect(try b.note(root, "c", .appeared));
+    try testing.expect(!try b.note(root, "c", .vanished));
+    try testing.expect(!try b.note(root, "c", .vanished));
+    try testing.expectEqual(@as(usize, 2), b.count(root).?);
 }
