@@ -969,6 +969,71 @@ test "refilter drops held events that the new filter excludes" {
     }
 }
 
+test "a folder appearing under a newly admitted path during refilter is reached" {
+    const Gate = struct {
+        go: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(bool) = .init(false),
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn allow(context: ?*anyopaque, subject: []const u8) bool {
+            const gate: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.mem.eql(u8, std.fs.path.basename(subject), "new") and
+                !gate.go.swap(true, .acq_rel))
+            {
+                while (!gate.done.load(.acquire))
+                    std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+            }
+            return true;
+        }
+
+        fn create(gate: *@This(), dir: std.Io.Dir) void {
+            while (!gate.go.load(.acquire))
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+            dir.createDirPath(std.testing.io, "new/racing") catch {
+                gate.failed.store(true, .release);
+                gate.done.store(true, .release);
+                return;
+            };
+            dir.writeFile(std.testing.io, .{ .sub_path = "new/racing/inside.txt", .data = "x" }) catch {
+                gate.failed.store(true, .release);
+            };
+            gate.done.store(true, .release);
+        }
+    };
+
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "new");
+        const id = try f.watcher.add(f.root, .{
+            .recursive = true,
+            .filter = .{ .ignore = &.{"new"} },
+        });
+        const before = f.watcher.stats().registrations;
+        var gate: Gate = .{};
+        {
+            const thread = try std.Thread.spawn(.{}, Gate.create, .{ &gate, f.tmp.dir });
+            errdefer {
+                gate.go.store(true, .release);
+                thread.join();
+            }
+            if (backend == .windows) {
+                // This backend's kernel already traverses all directories;
+                // refilter does not invoke the caller's predicate itself.
+                gate.go.store(true, .release);
+            }
+            try f.watcher.refilter(id, .{ .allow = Gate.allow, .context = &gate });
+            gate.go.store(true, .release);
+            thread.join();
+        }
+        try std.testing.expect(!gate.failed.load(.acquire));
+        if (lookout.prunesIgnored(backend))
+            try std.testing.expect(f.watcher.stats().registrations >= before + 2);
+        try f.write("new/racing/after.txt", "x");
+        try f.expectEvent("new/racing/after.txt", .created);
+    }
+}
+
 /// Excludes anything whose name starts with a dot, which is the kind of
 /// rule a pattern list cannot state and a caller can.
 fn notHidden(context: ?*anyopaque, path: []const u8) bool {
