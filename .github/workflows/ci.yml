@@ -40,6 +40,9 @@ jobs:
       - name: Formatting
         run: zig fmt --check build.zig build.zig.zon src examples
 
+      - name: Casts out of the type system carry their reason
+        run: python3 ci/casts.py
+
       - name: Test -- Debug
         run: zig build test -Doptimize=Debug
 

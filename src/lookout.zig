@@ -777,7 +777,7 @@ pub const Watcher = struct {
         /// The ancestor watch's filter. Everything but the next step down
         /// is somebody else's business.
         fn onlyNext(context: ?*anyopaque, subject: []const u8) bool {
-            const p: *const Pending = @ptrCast(@alignCast(context.?));
+            const p: *const Pending = @ptrCast(@alignCast(context.?)); // safe: the filter's context is the Pending it was made with
             return path_cmp.eql(subject, p.next);
         }
     };

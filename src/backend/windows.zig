@@ -231,7 +231,7 @@ pub fn position(w: *const Windows) ?u64 {
 /// How another thread pokes a blocked `wait`: the completion port, which
 /// is fixed for the life of the watcher. See `lookout.Watcher.wake`.
 pub fn waker(w: *const Windows) Waker {
-    return .{ .context = @intFromPtr(w.port), .call = post };
+    return .{ .context = @intFromPtr(w.port), .call = post }; // safe: the port's handle value, fixed for the watcher's life, turned back by post alone
 }
 
 /// Posts a completion under a key no watch has, which a blocked `wait`

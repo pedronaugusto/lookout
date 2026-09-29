@@ -458,7 +458,7 @@ pub const Held = struct {
 /// allocated once at `init`, never moves, and is already shared with the
 /// delivery thread. See `lookout.Watcher.wake`.
 pub fn waker(f: *const FsEvents) Waker {
-    return .{ .context = @intFromPtr(f.sink), .call = poke };
+    return .{ .context = @intFromPtr(f.sink), .call = poke }; // safe: the sink's address, allocated at init and never moved, turned back by poke alone
 }
 
 /// Marks the sink woken and pokes the pipe a blocked `wait` is polling.
@@ -646,8 +646,8 @@ fn deliver(
     ids: [*]const u64,
 ) callconv(.c) void {
     _ = ref;
-    const stream: *Stream = @ptrCast(@alignCast(info.?));
-    const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?));
+    const stream: *Stream = @ptrCast(@alignCast(info.?)); // safe: info is the Stream the stream was created with, alive until it is invalidated
+    const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?)); // safe: without kFSEventStreamCreateFlagUseCFTypes, paths is a C array of C strings, count long
     // the handoff from `add`, made visible (`Stream.published`); a stream
     // is published before it is started, so this never drops a delivery
     if (!stream.published.load(.acquire)) return;
@@ -1467,7 +1467,7 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
         ids[filled] = c.FSEventsGetCurrentEventId();
         filled += 1;
     }
-    deliver(stream.ref, stream, filled, @ptrCast(&paths), &flags, &ids);
+    deliver(stream.ref, stream, filled, @ptrCast(&paths), &flags, &ids); // safe: the same C array of C strings FSEvents hands deliver
 }
 
 /// Polls until one `overflow` arrives, checks it against the watch it is
