@@ -297,6 +297,71 @@ pub fn discardFuture(b: *Batch, gpa: Allocator, id: WatchId) void {
     }
 }
 
+/// Applies a replacement filter to changes already collected for one
+/// watch. A slice already handed to the caller stays valid; held and
+/// unreturned changes are narrowed before the next delivery.
+pub fn refilter(
+    b: *Batch,
+    gpa: Allocator,
+    id: WatchId,
+    root: []const u8,
+    filter: lookout.Filter,
+    handed_out: bool,
+) void {
+    var t: usize = 0;
+    while (t < b.troubles.items.len) {
+        const pending = b.troubles.items[t];
+        if (pending.id == id and filter.excludes(root, pending.path)) {
+            gpa.free(b.troubles.orderedRemove(t).path);
+        } else t += 1;
+    }
+    var h: usize = 0;
+    while (h < b.held.count()) {
+        const key = b.held.keys()[h];
+        const entry = b.held.values()[h];
+        if (key.id != id) {
+            h += 1;
+        } else if (filter.excludes(root, key.path)) {
+            b.held.swapRemoveAt(h);
+            gpa.free(key.path);
+            if (entry.from) |from| gpa.free(from);
+        } else {
+            if (entry.kind == .renamed and entry.from != null and
+                filter.excludes(root, entry.from.?))
+            {
+                gpa.free(entry.from.?);
+                b.held.values()[h].from = null;
+                b.held.values()[h].kind = .created;
+            }
+            h += 1;
+        }
+    }
+    if (handed_out) return;
+    var removed = false;
+    var i: usize = 0;
+    while (i < b.events.items.len) {
+        const event = &b.events.items[i];
+        if (event.id != id) {
+            i += 1;
+        } else if (filter.excludes(root, event.path)) {
+            const gone = b.events.orderedRemove(i);
+            gpa.free(gone.path);
+            if (gone.from) |from| gpa.free(from);
+            removed = true;
+        } else {
+            if (event.kind == .renamed and event.from != null and
+                filter.excludes(root, event.from.?))
+            {
+                gpa.free(event.from.?);
+                event.from = null;
+                event.kind = .created;
+            }
+            i += 1;
+        }
+    }
+    if (removed) b.rebuildIndex();
+}
+
 fn discardEvents(b: *Batch, gpa: Allocator, id: WatchId) void {
     var removed = false;
     var i: usize = 0;
@@ -313,10 +378,14 @@ fn discardEvents(b: *Batch, gpa: Allocator, id: WatchId) void {
     if (removed) {
         // The index is a position per path, so removing from the middle
         // of the list means rebuilding it. The capacity is still there.
-        b.index.clearRetainingCapacity();
-        for (b.events.items, 0..) |event, at| {
-            b.index.putAssumeCapacity(.{ .id = event.id, .path = event.path }, @intCast(at));
-        }
+        b.rebuildIndex();
+    }
+}
+
+fn rebuildIndex(b: *Batch) void {
+    b.index.clearRetainingCapacity();
+    for (b.events.items, 0..) |event, at| {
+        b.index.putAssumeCapacity(.{ .id = event.id, .path = event.path }, @intCast(at));
     }
 }
 
