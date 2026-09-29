@@ -1558,6 +1558,7 @@ test {
     _ = @import("buffer.zig");
     _ = @import("path.zig");
     _ = @import("walk.zig");
+    _ = @import("trace.zig");
     _ = @import("test_suite.zig");
     _ = @import("test_bench.zig");
     _ = @import("test_gaps.zig");

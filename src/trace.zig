@@ -44,7 +44,13 @@ pub fn enabled() bool {
 /// ended by a zero and the whole ended by an empty one. Names are
 /// compared without case, as Windows compares them.
 fn windowsHas(comptime name: []const u8) bool {
-    var entry: [*:0]const u16 = std.os.windows.peb().ProcessParameters.Environment;
+    return blockHas(std.os.windows.peb().ProcessParameters.Environment, name);
+}
+
+/// Whether the environment block `block`, laid out as `windowsHas` says,
+/// names `name`. `name` is upper case.
+fn blockHas(block: [*:0]const u16, comptime name: []const u8) bool {
+    var entry: [*:0]const u16 = block;
     while (entry[0] != 0) {
         const len = std.mem.len(entry);
         const text = entry[0..len];
@@ -68,4 +74,29 @@ fn windowsHas(comptime name: []const u8) bool {
 pub fn log(comptime fmt: []const u8, args: anytype) void {
     if (!enabled()) return;
     std.debug.print("lookout: " ++ fmt ++ "\n", args);
+}
+
+test "an environment block names a variable in any case, by its whole name, and only before its value" {
+    const block = std.unicode.utf8ToUtf16LeStringLiteral("Path=C:\\x\x00LOOKOUT_TRACEX=1\x00lookout_trace=\x00OTHER=LOOKOUT_TRACE=1\x00\x00");
+    try std.testing.expect(blockHas(block, "LOOKOUT_TRACE"));
+    try std.testing.expect(blockHas(block, "PATH"));
+    // a longer name that starts the same way, and the name inside a value
+    const without = std.unicode.utf8ToUtf16LeStringLiteral("LOOKOUT_TRACEX=1\x00OTHER=LOOKOUT_TRACE=1\x00\x00");
+    try std.testing.expect(!blockHas(without, "LOOKOUT_TRACE"));
+    // a unit past ASCII never matches a letter of the name
+    const wide = [_:0]u16{ 0x00cc, '=', '1', 0, 0 };
+    try std.testing.expect(!blockHas(&wide, "I"));
+    // an empty block
+    const empty = [_:0]u16{0};
+    try std.testing.expect(!blockHas(&empty, "LOOKOUT_TRACE"));
+}
+
+test "tracing is read once and remembered" {
+    const was = resolved.load(.monotonic);
+    defer resolved.store(was, .monotonic);
+    resolved.store(on, .monotonic);
+    try std.testing.expect(enabled());
+    resolved.store(off, .monotonic);
+    try std.testing.expect(!enabled());
+    log("never printed {d}", .{1});
 }
