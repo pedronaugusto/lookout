@@ -1309,11 +1309,14 @@ pub const Watcher = struct {
     /// recursion. Patterns are copied; the predicate context remains the
     /// caller's and must outlive this filter. An unknown id is an error.
     ///
-    /// A change completed after this call returns is tested against the
-    /// new filter, subject to the backend's usual event-loss limits.
+    /// On return, every collected event not yet returned by `poll`,
+    /// including an event held for debouncing or settling, is reconciled
+    /// with the new filter: an excluded path is dropped, and a rename
+    /// from an excluded path into an included one becomes a creation.
     /// Events already returned by `poll` stay valid and are not replayed.
-    /// Collected but unreturned events from newly excluded paths are
-    /// dropped; queued backend records are tested when they are read.
+    /// Queued backend records are tested against the new filter when read;
+    /// changes completed after return use it too, subject to the backend's
+    /// usual event-loss limits.
     /// There is no snapshot boundary for a write overlapping this call:
     /// a short-lived file in a newly admitted directory may be gone
     /// before that directory is registered, as during recursive `add`.

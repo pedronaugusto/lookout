@@ -84,6 +84,12 @@ const Fixture = struct {
         try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = data });
     }
 
+    fn overwrite(f: *Fixture, sub_path: []const u8, data: []const u8) !void {
+        const file = try f.tmp.dir.openFile(std.testing.io, sub_path, .{ .mode = .read_write });
+        defer file.close(std.testing.io);
+        try file.writePositionalAll(std.testing.io, data, 0);
+    }
+
     /// The absolute path an event for `sub_path` will carry.
     ///
     /// The suite writes its sub-paths with `/`, which is not what an
@@ -949,7 +955,7 @@ test "refilter drops held events that the new filter excludes" {
         defer std.testing.allocator.free(excluded);
         const new = try f.path("new/after.txt");
         defer std.testing.allocator.free(new);
-        try f.write("old/held.txt", "after and longer");
+        try f.overwrite("old/held.txt", "after!");
         var waited: u32 = 0;
         var held_old = false;
         while (waited < timeout_ms and !held_old) : (waited += 1) {
@@ -964,7 +970,7 @@ test "refilter drops held events that the new filter excludes" {
         try f.watcher.refilter(id, .{ .ignore = &.{"old"} });
         for (f.watcher.batch.held.keys()) |key|
             try std.testing.expect(key.id != id or !lookout.path.within(excluded, key.path));
-        try f.write("new/after.txt", "after and longer");
+        try f.overwrite("new/after.txt", "after!");
         var saw = false;
         waited = 0;
         while (waited < timeout_ms and !saw) : (waited += 200) {
