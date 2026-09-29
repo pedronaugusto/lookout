@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Watcher.refilter(id, filter)` changes a live watch's filter without
+  removing its registration or changing its id. Newly admitted directories
+  are registered where the backend watches directories individually;
+  excluded ones are released, and newly reached directories enter the
+  entry budget.
+
 - Export `path.relative` and `path.within` for callers that need the same
   platform case folding and separator handling as lookout's watches.
 

@@ -61,6 +61,7 @@ linked anywhere else.
 | `Watcher.init(gpa, io, options)` | A watcher holding no watches. `io` is the `std.Io` every file-system operation goes through, captured for the watcher's lifetime. |
 | `Watcher.deinit()` | Releases the watches, the descriptors and the last batch of events. |
 | `Watcher.add(path, options)` | Watches a file or a directory, optionally recursively. Returns a `WatchId`. A path already watched by this watcher is `error.PathAlreadyWatched`. |
+| `Watcher.refilter(id, filter)` | Replaces a live watch's globs and predicate in place, keeping its id, root and recursion. Patterns are copied. Returns `error.UnknownWatch` for an unknown id. |
 | `Watcher.remove(id)` | Stops a watch and releases its descriptors. |
 | `Watcher.poll(timeout_ms)` | Blocks until something happens, and returns the coalesced events. `null` blocks indefinitely; `0` reports what is already queued. A `std.Io` cancellation point on every backend. |
 | `Watcher.fd()` | The descriptor to wait on, or `null` where the backend has none. |
@@ -88,6 +89,11 @@ linked anywhere else.
 | `prunesIgnored(backend)` | Whether an excluded directory is left unregistered, or only has its events dropped. |
 | `reportsCloses(backend)` | Whether the backend is told that a file open for writing has been closed. |
 | `tracksPosition(backend)` | Whether it can say where it has got to, so `position` answers and `since` is worth setting. |
+
+When ignore rules change, keep the watch id and pass the full replacement
+filter: `try watcher.refilter(id, .{ .ignore = new_patterns });`. Its
+recursion stays as it was when added; omitted filter fields use their
+defaults.
 
 The events a `poll` returns, and every path in them, belong to the
 watcher and are invalidated by the next `poll`. Copy anything you keep.
