@@ -108,13 +108,6 @@ pub fn remove(p: *Poll, id: WatchId) void {
     p.tree.removeWatch(id);
 }
 
-/// Changes a watch's filter while retaining its root and snapshots.
-pub fn refilter(p: *Poll, id: WatchId, filter: lookout.Filter, batch: *Batch) lookout.Watcher.RefilterError!void {
-    var added: std.ArrayList(Tree.NodeId) = .empty;
-    defer added.deinit(p.gpa);
-    try p.tree.refilter(id, filter, &added, batch);
-}
-
 /// Scans, then sleeps and scans again until the scan produces an event
 /// `batch` did not already hold, `woken` is set, or `timeout_ms` expires.
 /// `null` never gives up.

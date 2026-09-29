@@ -380,16 +380,6 @@ pub fn remove(w: *Windows, id: WatchId) void {
     w.retiring = watch;
 }
 
-/// Replaces the delivery filter; the kernel's recursive read stays armed.
-pub fn refilter(w: *Windows, id: WatchId, next: lookout.Filter, batch: *Batch) lookout.Watcher.RefilterError!void {
-    _ = batch;
-    const watch = w.watches.get(id) orelse return error.UnknownWatch;
-    const replacement = try next.dupe(w.gpa);
-    var previous = watch.filter;
-    watch.filter = replacement;
-    previous.deinit(w.gpa);
-}
-
 /// Whether a watch still held reads the entries of `dir`, so that its
 /// count outlives the watch being removed. See `Budget.release`.
 fn stillCounted(w: *const Windows, dir: []const u8) bool {

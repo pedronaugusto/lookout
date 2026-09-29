@@ -172,15 +172,6 @@ pub fn remove(k: *Kqueue, id: WatchId) void {
     k.closeOrphanedFiles();
 }
 
-/// Reconciles descriptors with a live watch's new filter.
-pub fn refilter(k: *Kqueue, id: WatchId, filter: lookout.Filter, batch: *Batch) lookout.Watcher.RefilterError!void {
-    var added: std.ArrayList(Tree.NodeId) = .empty;
-    defer added.deinit(k.gpa);
-    try k.tree.refilter(id, filter, &added, batch);
-    try k.register(added.items, batch);
-    k.closeOrphanedFiles();
-}
-
 /// Waits on the kernel queue until it reports something `batch` did not
 /// already hold, or `timeout_ms` expires. `null` never gives up.
 pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {

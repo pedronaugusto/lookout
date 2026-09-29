@@ -212,10 +212,6 @@ fn descend(t: *Tree, parent_id: NodeId, added: *std.ArrayList(NodeId), batch: *B
             t.gpa.free(child_path);
             continue;
         }
-        if (t.hasNode(watch, child_path)) {
-            t.gpa.free(child_path);
-            continue;
-        }
         _ = t.createDirectory(watch, child_path, added) catch |err| switch (err) {
             // A subdirectory that vanished between the listing and the
             // open is not an error; the parent's next scan reports it.
@@ -284,10 +280,6 @@ fn trackEntries(t: *Tree, dir_id: NodeId, added: *std.ArrayList(NodeId)) AddErro
             t.gpa.free(child);
             continue;
         }
-        if (t.hasNode(dir_node.watch, child)) {
-            t.gpa.free(child);
-            continue;
-        }
         _ = try t.createFile(dir_node.watch, child, meta, added);
     }
 }
@@ -324,69 +316,6 @@ pub fn removeWatch(t: *Tree, id: WatchId) void {
             i += 1;
         }
     }
-}
-
-/// Reconciles the nodes of one watch with a new filter. The root remains
-/// registered while newly admitted descendants are opened and then old
-/// excluded descendants are released.
-pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeId), batch: *Batch) AddError!void {
-    const watch = t.watches.getPtr(id) orelse return;
-    const replacement = try next.dupe(t.gpa);
-    var previous = watch.filter;
-    watch.filter = replacement;
-    errdefer {
-        watch.filter.deinit(t.gpa);
-        watch.filter = previous;
-        for (added.items) |node_id| {
-            const node = t.nodes.getPtr(node_id) orelse continue;
-            t.destroy(node);
-            _ = t.nodes.swapRemove(node_id);
-        }
-        added.clearRetainingCapacity();
-    }
-
-    if (watch.recursive) {
-        var frontier: usize = 0;
-        // The existing directory nodes are reconsidered, followed by the
-        // nodes this pass opens. Their snapshots supply the first frontier.
-        var dirs: std.ArrayList(NodeId) = .empty;
-        defer dirs.deinit(t.gpa);
-        for (t.nodes.keys(), t.nodes.values()) |node_id, node| {
-            if (node.watch == id and node.role == .directory and
-                (path_cmp.eql(node.path, watch.root) or !t.pruned(id, node.path)))
-                try dirs.append(t.gpa, node_id);
-        }
-        while (frontier < dirs.items.len) : (frontier += 1) {
-            const start = added.items.len;
-            if (t.track_entries) try t.trackEntries(dirs.items[frontier], added);
-            try t.descend(dirs.items[frontier], added, batch);
-            for (added.items[start..]) |node_id| {
-                if ((t.nodes.get(node_id) orelse continue).role == .directory)
-                    try dirs.append(t.gpa, node_id);
-            }
-        }
-    }
-
-    // Keep the root even when a predicate rejects its spelling: the root
-    // is the watch's anchor, and filters apply to entries beneath it.
-    var i: usize = 0;
-    while (i < t.nodes.count()) {
-        const node = t.nodes.values()[i];
-        if (node.watch == id and !path_cmp.eql(node.path, watch.root) and
-            t.pruned(id, node.path))
-        {
-            t.destroy(&t.nodes.values()[i]);
-            t.nodes.swapRemoveAt(i);
-        } else i += 1;
-    }
-    previous.deinit(t.gpa);
-}
-
-fn hasNode(t: *const Tree, id: WatchId, subject: []const u8) bool {
-    for (t.nodes.values()) |node| {
-        if (node.watch == id and path_cmp.eql(node.path, subject)) return true;
-    }
-    return false;
 }
 
 /// Drops the node of `watch` at `root` and every node of it below.
