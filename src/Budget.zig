@@ -77,13 +77,19 @@ pub fn seed(b: *Budget, dir: []const u8) Allocator.Error!void {
 /// `found` adds the entries from that same walk, avoiding a second
 /// listing solely to establish the budget, and `end` closes the walk.
 ///
-/// A directory already counted is left as it is, and so are its entries
-/// when the walk finds them: they are counted already. A second watch
-/// taken on a folder another one holds walks it again, and adding what
-/// that walk found counted every entry once per watch.
+/// A directory already counted is counted again from what the walk finds:
+/// the count is a set of names, so a second watch walking a folder another
+/// holds counts each entry once, and the walk is the truth of what is
+/// there. A watch parked on a folder for one name in it lets every other
+/// change there go by, and the count it left is only what it heard.
 pub fn begin(b: *Budget, dir: []const u8) Allocator.Error!void {
-    if (b.counts.contains(dir)) return;
     try b.walking.ensureUnusedCapacity(b.gpa, 1);
+    if (b.counts.getEntry(dir)) |counted| {
+        for (counted.value_ptr.keys()) |name| b.gpa.free(name);
+        counted.value_ptr.clearRetainingCapacity();
+        b.walking.putAssumeCapacity(counted.key_ptr.*, {});
+        return;
+    }
     const owned = try b.gpa.dupe(u8, dir);
     errdefer b.gpa.free(owned);
     try b.counts.put(b.gpa, owned, .empty);
