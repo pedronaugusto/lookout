@@ -430,6 +430,9 @@ const Change = struct {
     dir: []u8,
     /// The absolute path of the entry, owned by `handle`.
     path: []u8,
+    /// Whether the kernel named an entry of `dir`, rather than reporting
+    /// on the watched path itself -- a watched file, say.
+    named: bool,
     cookie: u32,
     is_dir: bool,
     appeared: bool,
@@ -534,6 +537,7 @@ fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u
         .wd = event.wd,
         .dir = base,
         .path = full,
+        .named = event.name != null,
         .cookie = event.cookie,
         .is_dir = event.mask & linux.IN.ISDIR != 0,
         .appeared = event.mask & (linux.IN.CREATE | linux.IN.MOVED_TO) != 0,
@@ -627,8 +631,9 @@ fn bookkeep(
     // ones that move the count, so that a watch added to a directory
     // that is already too big says so at the first sign of life, which
     // is what the listing backends do. The count itself moved in
-    // `handle`, once for the folder.
-    if (try n.budget.note(change.dir, std.fs.path.basename(change.path), .unchanged)) {
+    // `handle`, once for the folder. A change to a watched file is no
+    // entry of anything: the file is no directory, and has no count.
+    if (change.named and try n.budget.note(change.dir, std.fs.path.basename(change.path), .unchanged)) {
         const watch = n.watches.get(change.watch) orelse return;
         try batch.push(n.gpa, change.watch, watch.root, .overflow, watch.target);
     }
@@ -957,4 +962,37 @@ fn removeOwner(n: *Inotify, registration_index: usize, id: WatchId) bool {
         return true;
     }
     return false;
+}
+
+test "a watch on a file keeps no count keyed by the file" {
+    // The kernel reports a watched file's own changes on the file's
+    // watch, with no name: the file was taken for a directory, and a
+    // count of nothing was kept under its path for as long as the watch
+    // lasted.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const file = try std.fs.path.join(gpa, &.{ root, "file" });
+    defer gpa.free(file);
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify });
+    defer watcher.deinit();
+    const id = try watcher.add(file, .{});
+    while ((try watcher.poll(200)).len != 0) {}
+    try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "y" });
+    var modified = false;
+    var waited: u32 = 0;
+    while (waited < 10_000 and !modified) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (event.kind == .modified and event.id == id) modified = true;
+        }
+    }
+    try testing.expect(modified);
+    try testing.expect(watcher.impl.inotify.budget.count(file) == null);
 }
