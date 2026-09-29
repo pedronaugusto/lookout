@@ -939,29 +939,38 @@ test "refilter drops held events that the new filter excludes" {
         defer f.deinit();
         try f.tmp.dir.createDirPath(std.testing.io, "old");
         try f.tmp.dir.createDirPath(std.testing.io, "new");
+        try f.write("old/held.txt", "before");
+        try f.write("new/after.txt", "before");
         const id = try f.watcher.add(f.root, .{ .recursive = true });
         try f.settle();
         const old = try f.path("old/held.txt");
         defer std.testing.allocator.free(old);
+        const excluded = try f.path("old");
+        defer std.testing.allocator.free(excluded);
         const new = try f.path("new/after.txt");
         defer std.testing.allocator.free(new);
-        try f.write("old/held.txt", "x");
+        try f.write("old/held.txt", "after and longer");
         var waited: u32 = 0;
-        while (waited < timeout_ms and f.watcher.stats().held == 0) : (waited += 1) {
+        var held_old = false;
+        while (waited < timeout_ms and !held_old) : (waited += 1) {
             for (try f.watcher.poll(0)) |event|
                 try std.testing.expect(!std.mem.eql(u8, event.path, old));
+            for (f.watcher.batch.held.keys()) |key| {
+                if (key.id == id and std.mem.eql(u8, key.path, old)) held_old = true;
+            }
             try std.testing.io.sleep(.fromMilliseconds(1), .awake);
         }
-        try std.testing.expect(f.watcher.stats().held > 0);
+        try std.testing.expect(held_old);
         try f.watcher.refilter(id, .{ .ignore = &.{"old"} });
-        try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().held);
-        try f.write("new/after.txt", "x");
+        for (f.watcher.batch.held.keys()) |key|
+            try std.testing.expect(key.id != id or !lookout.path.within(excluded, key.path));
+        try f.write("new/after.txt", "after and longer");
         var saw = false;
         waited = 0;
         while (waited < timeout_ms and !saw) : (waited += 200) {
             for (try f.watcher.poll(200)) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, old));
-                if (event.id == id and event.kind == .created and
+                if (event.id == id and event.kind == .modified and
                     std.mem.eql(u8, event.path, new)) saw = true;
             }
         }
