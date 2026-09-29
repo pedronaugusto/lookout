@@ -835,6 +835,9 @@ pub const Watcher = struct {
         PathAlreadyWatched,
     } || Tree.AddError || UnexpectedError;
 
+    /// Errors changing a live watch's filter.
+    pub const RefilterError = AddError || error{UnknownWatch};
+
     /// Errors `poll` can return, on top of the file-system errors of
     /// re-reading watched directories.
     ///
@@ -1299,6 +1302,33 @@ pub const Watcher = struct {
             break;
         }
         w.batch.discardFuture(w.gpa, id);
+    }
+
+    /// Replaces the filter of a live watch without changing its id, root or
+    /// recursion. Patterns are copied; the predicate context remains the
+    /// caller's and must outlive this filter. An unknown id is an error.
+    ///
+    /// The new filter applies to events delivered after this call. Events
+    /// already returned by `poll` are not replayed. Events in flight may
+    /// have happened under the old filter but are judged by the new one;
+    /// no ordering boundary against concurrent file-system writes is
+    /// implied. Newly admitted directories are registered before return.
+    pub fn refilter(w: *Watcher, id: WatchId, filter: Filter) RefilterError!void {
+        if (!w.table.contains(id)) return error.UnknownWatch;
+        try w.io.checkCancel();
+        const protection = w.io.swapCancelProtection(.blocked);
+        defer _ = w.io.swapCancelProtection(protection);
+        for (w.pending.items) |p| {
+            if (p.id != id) continue;
+            const replacement = try filter.dupe(w.gpa);
+            p.filter.deinit(w.gpa);
+            p.filter = replacement;
+            return;
+        }
+        switch (w.impl) {
+            inline else => |*impl| try impl.refilter(id, filter, &w.batch),
+        }
+        w.batch.refilter(w.gpa, id, w.table.get(id).?.path, filter, w.handed_out);
     }
 
     /// Waits for something to happen and returns what did.

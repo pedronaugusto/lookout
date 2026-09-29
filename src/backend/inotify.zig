@@ -291,6 +291,74 @@ pub fn remove(n: *Inotify, id: WatchId) void {
     }
 }
 
+/// Reconciles this watch's directory registrations with a new filter.
+/// New directories are registered before excluded ones are released.
+pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) lookout.Watcher.RefilterError!void {
+    const watch = n.watches.getPtr(id) orelse return error.UnknownWatch;
+    const replacement = try next.dupe(n.gpa);
+    var previous = watch.filter;
+    watch.filter = replacement;
+    errdefer {
+        watch.filter.deinit(n.gpa);
+        watch.filter = previous;
+        var rollback: usize = 0;
+        while (rollback < n.wds.count()) {
+            const registration = &n.wds.values()[rollback];
+            if (!path_cmp.eql(registration.path, watch.root) and
+                previous.prunes(watch.root, registration.path))
+            {
+                if (!n.removeOwner(rollback, id)) rollback += 1;
+            } else rollback += 1;
+        }
+        n.budget.release(watch.root, n, stillCounted);
+    }
+
+    if (watch.recursive and watch.target == .directory) {
+        const Registering = struct {
+            n: *Inotify,
+            id: WatchId,
+            batch: *Batch,
+
+            fn visit(r: *@This(), entry: walk.Entry) anyerror!walk.Step {
+                if (entry.kind != .directory or r.n.pruned(r.id, entry.path)) return .over;
+                if (!r.n.ownsPath(r.id, entry.path)) {
+                    r.n.register(r.id, try r.n.gpa.dupe(u8, entry.path)) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            try r.batch.trouble(r.n.gpa, r.id, entry.path, .directory);
+                            return .over;
+                        },
+                    };
+                    try r.n.budget.seed(entry.path);
+                }
+                return .into;
+            }
+        };
+        var registering: Registering = .{ .n = n, .id = id, .batch = batch };
+        walk.tree(n.gpa, n.io, watch.root, &registering, Registering.visit) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Unexpected,
+        };
+    }
+    var i: usize = 0;
+    while (i < n.wds.count()) {
+        const registration = &n.wds.values()[i];
+        if (!path_cmp.eql(registration.path, watch.root) and n.pruned(id, registration.path)) {
+            if (!n.removeOwner(i, id)) i += 1;
+        } else i += 1;
+    }
+    n.budget.release(watch.root, n, stillCounted);
+    previous.deinit(n.gpa);
+}
+
+fn ownsPath(n: *const Inotify, id: WatchId, subject: []const u8) bool {
+    for (n.wds.values()) |registration| {
+        if (!path_cmp.eql(registration.path, subject)) continue;
+        for (registration.watches.items) |owner| if (owner == id) return true;
+    }
+    return false;
+}
+
 /// Whether the kernel still watches `dir` for a watch that is left, so
 /// that its count outlives the watch being removed. See
 /// `Budget.release`.
@@ -859,6 +927,10 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
 
 /// Asks the kernel for a watch on `path`, taking ownership of it.
 fn register(n: *Inotify, id: WatchId, watched: []u8) lookout.Watcher.AddError!void {
+    if (n.ownsPath(id, watched)) {
+        n.gpa.free(watched);
+        return;
+    }
     const path_z = posix.toPosixPath(watched) catch {
         n.gpa.free(watched);
         return error.NameTooLong;
@@ -892,6 +964,12 @@ fn register(n: *Inotify, id: WatchId, watched: []u8) lookout.Watcher.AddError!vo
     // The kernel returns the existing descriptor when the same inode is
     // registered twice. Keep both caller watches attached to it.
     if (n.wds.getPtr(wd)) |registration| {
+        for (registration.watches.items) |owner| {
+            if (owner == id) {
+                n.gpa.free(watched);
+                return;
+            }
+        }
         registration.watches.append(n.gpa, id) catch |err| {
             n.gpa.free(watched);
             return err;

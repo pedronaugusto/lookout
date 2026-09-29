@@ -595,6 +595,42 @@ pub fn remove(f: *FsEvents, id: WatchId) void {
     f.destroy(entry.value);
 }
 
+/// Replaces the delivery filter without restarting the stream.
+pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) lookout.Watcher.RefilterError!void {
+    _ = batch;
+    const stream = f.streams.get(id) orelse return error.UnknownWatch;
+    const replacement = try next.dupe(f.gpa);
+    var previous = stream.filter;
+    stream.filter = replacement;
+    errdefer {
+        stream.filter.deinit(f.gpa);
+        stream.filter = previous;
+    }
+    f.seedKnown(stream) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Unexpected,
+    };
+    var i: usize = 0;
+    while (i < f.known.count()) {
+        const key = f.known.keys()[i];
+        if (key.id == id and stream.filter.prunes(stream.root, key.path)) {
+            f.gpa.free(key.path);
+            f.known.swapRemoveAt(i);
+        } else i += 1;
+    }
+    const NewlyReached = struct {
+        stream: *const Stream,
+        old: Filter,
+
+        fn includes(r: @This(), dir: []const u8) bool {
+            return r.old.prunes(r.stream.root, dir) and
+                !r.stream.filter.prunes(r.stream.root, dir);
+        }
+    };
+    f.budget.reread(NewlyReached{ .stream = stream, .old = previous }, NewlyReached.includes);
+    previous.deinit(f.gpa);
+}
+
 /// Whether a watch still held reports the entries of `dir`, so that its
 /// count outlives the watch being removed. See `Budget.release`.
 fn stillCounted(f: *const FsEvents, dir: []const u8) bool {

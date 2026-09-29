@@ -720,6 +720,117 @@ test "an ignored subtree is watched by nobody" {
     }
 }
 
+test "refilter changes a live watch's admitted paths and registrations" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        const io = std.testing.io;
+        const gpa = std.testing.allocator;
+        try f.tmp.dir.createDirPath(io, "old/deep");
+        try f.tmp.dir.createDirPath(io, "new/deep");
+        const id = try f.watcher.add(f.root, .{
+            .recursive = true,
+            .filter = .{ .ignore = &.{"new"} },
+        });
+        try f.settle();
+        const before = f.watcher.stats().registrations;
+        try f.watcher.refilter(id, .{ .ignore = &.{"old"} });
+        try std.testing.expectEqual(before, f.watcher.stats().registrations);
+        const infos = try f.watcher.watches(gpa);
+        defer gpa.free(infos);
+        try std.testing.expectEqual(@as(usize, 1), infos.len);
+        try std.testing.expectEqual(id, infos[0].id);
+        try std.testing.expect(infos[0].recursive);
+
+        const excluded = try f.path("old/deep/excluded.txt");
+        defer gpa.free(excluded);
+        const admitted = try f.path("new/deep/admitted.txt");
+        defer gpa.free(admitted);
+        try f.write("old/deep/excluded.txt", "x");
+        try f.write("new/deep/admitted.txt", "x");
+        var saw = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                try std.testing.expect(!std.mem.eql(u8, event.path, excluded));
+                if (event.id == id and event.kind == .created and
+                    std.mem.eql(u8, event.path, admitted)) saw = true;
+            }
+            if (saw) break;
+        }
+        try std.testing.expect(saw);
+        try std.testing.expectError(error.UnknownWatch, f.watcher.refilter(@enumFromInt(0xffffffff), .none));
+    }
+}
+
+test "refilter seeds the entry budget of newly admitted directories" {
+    for (backends) |backend| {
+        var f = try Fixture.initOptions(.{
+            .backend = backend,
+            .poll_interval_ms = 20,
+            .max_dir_entries = 2,
+        });
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "new");
+        try f.write("new/a", "x");
+        try f.write("new/b", "x");
+        const id = try f.watcher.add(f.root, .{
+            .recursive = true,
+            .filter = .{ .ignore = &.{"new"} },
+        });
+        try f.settle();
+        try f.watcher.refilter(id, .none);
+        try f.write("new/c", "x");
+        var overflowed = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !overflowed) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                if (event.id == id and event.kind == .overflow and
+                    std.mem.eql(u8, event.path, f.root)) overflowed = true;
+            }
+        }
+        try std.testing.expect(overflowed);
+    }
+}
+
+test "refilter does not count a queued creation twice" {
+    for (backends) |backend| {
+        var f = try Fixture.initOptions(.{
+            .backend = backend,
+            .poll_interval_ms = 20,
+            .max_dir_entries = 2,
+        });
+        defer f.deinit();
+        try f.tmp.dir.createDirPath(std.testing.io, "keep");
+        const id = try f.watcher.add(f.root, .{
+            .recursive = true,
+            .filter = .{ .ignore = &.{"*.tmp"} },
+        });
+        try f.settle();
+        try f.write("keep/seed.txt", "x");
+        try f.expectEvent("keep/seed.txt", .created);
+        try f.settle();
+        // This creation may already be queued by the kernel when the
+        // filter changes. Reading its directory into the budget and then
+        // counting the queued creation again would invent an overflow.
+        try f.write("keep/live.tmp", "x");
+        try f.watcher.refilter(id, .none);
+        try f.write("keep/live.tmp", "xx");
+        const subject = try f.path("keep/live.tmp");
+        defer std.testing.allocator.free(subject);
+        var saw = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !saw) : (waited += 200) {
+            for (try f.watcher.poll(200)) |event| {
+                try std.testing.expect(event.id != id or event.kind != .overflow);
+                if (event.id == id and std.mem.eql(u8, event.path, subject) and
+                    (event.kind == .created or event.kind == .modified)) saw = true;
+            }
+        }
+        try std.testing.expect(saw);
+    }
+}
+
 /// Excludes anything whose name starts with a dot, which is the kind of
 /// rule a pattern list cannot state and a caller can.
 fn notHidden(context: ?*anyopaque, path: []const u8) bool {
