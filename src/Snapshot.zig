@@ -72,7 +72,8 @@ pub fn deinit(s: *Snapshot, gpa: Allocator) void {
 ///
 /// At most `max_entries` entries are tracked. A directory with more sets
 /// `truncated`, which the caller reports as `Kind.overflow`, because
-/// changes past the limit cannot be seen.
+/// changes past the limit cannot be seen. Once entries are remembered,
+/// a truncated scan keeps them until a complete listing can be compared.
 ///
 /// On error the snapshot is left as it was, so a scan that fails halfway —
 /// the directory was deleted under it — does not turn the next successful
@@ -85,16 +86,40 @@ pub fn refresh(
     max_entries: usize,
     changes: *std.ArrayList(Change),
 ) RefreshError!void {
-    var next = try read(gpa, io, dir, max_entries);
+    var next = try readListing(gpa, io, dir, max_entries);
     errdefer next.deinit(gpa);
     try next.compare(s, gpa, changes);
+    if (next.truncated and s.entries.count() != 0) {
+        // The names actually read can still report a creation or write.
+        // Missing names cannot report removals, and this partial listing
+        // cannot replace the one kept for the next complete comparison.
+        s.truncated = true;
+        next.deinit(gpa);
+        return;
+    }
     s.deinit(gpa);
     s.* = next;
 }
 
 /// Reads a listing without advancing the snapshot it will be compared to.
-/// The caller owns the result, including when comparison later fails.
-pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize) RefreshError!Snapshot {
+/// If it is truncated, keeps the remembered entries: an omitted name is
+/// not evidence of a removal. The caller owns the result.
+pub fn read(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize) RefreshError!Snapshot {
+    var next = try readListing(gpa, io, dir, max_entries);
+    errdefer next.deinit(gpa);
+    if (next.truncated and before.entries.count() != 0) {
+        next.deinit(gpa);
+        next = .{ .entries = .empty, .truncated = true };
+        for (before.entries.keys(), before.entries.values()) |name, meta| {
+            const owned = try gpa.dupe(u8, name);
+            errdefer gpa.free(owned);
+            try next.entries.put(gpa, owned, meta);
+        }
+    }
+    return next;
+}
+
+fn readListing(gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize) RefreshError!Snapshot {
     var next: Snapshot = .empty;
     errdefer next.deinit(gpa);
 
@@ -144,6 +169,7 @@ pub fn compare(s: *const Snapshot, before: *const Snapshot, gpa: Allocator, chan
             try append(changes, gpa, name, .attributes, meta.file_kind);
         }
     }
+    if (s.truncated) return;
     for (before.entries.keys(), before.entries.values()) |name, meta| {
         if (s.entries.contains(name)) continue;
         try append(changes, gpa, name, .removed, meta.file_kind);
@@ -232,4 +258,29 @@ test "a directory over the limit is tracked up to it and marked truncated" {
     try snapshot.refresh(gpa, io, tmp.dir, 3, &changes);
     try std.testing.expect(snapshot.truncated);
     try std.testing.expectEqual(@as(usize, 3), changes.items.len);
+}
+
+test "a truncated refresh keeps the last listing for later comparison" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "one" });
+    var snapshot: Snapshot = .empty;
+    defer snapshot.deinit(gpa);
+    var changes: std.ArrayList(Change) = .empty;
+    defer {
+        freeChanges(gpa, &changes);
+        changes.deinit(gpa);
+    }
+    try snapshot.refresh(gpa, io, tmp.dir, 1, &changes);
+    freeChanges(gpa, &changes);
+    try snapshot.refresh(gpa, io, tmp.dir, 0, &changes);
+    try std.testing.expect(snapshot.truncated);
+    try std.testing.expectEqual(@as(usize, 0), changes.items.len);
+    try std.testing.expect(snapshot.entries.contains("kept"));
+    try tmp.dir.deleteFile(io, "kept");
+    try snapshot.refresh(gpa, io, tmp.dir, 1, &changes);
+    try std.testing.expectEqual(@as(usize, 1), changes.items.len);
+    try std.testing.expectEqual(Kind.removed, changes.items[0].kind);
 }

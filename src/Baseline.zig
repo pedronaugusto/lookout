@@ -211,10 +211,10 @@ const Scan = struct {
 
             const index = try s.remember(gpa, path);
             Snapshot.freeChanges(gpa, &s.scratch);
-            s.dirs.values()[index].snapshot = try Snapshot.read(gpa, b.io, dir, b.max_dir_entries);
+            const before = if (b.dirs.getPtr(path)) |remembered| &remembered.snapshot else &Snapshot.empty;
+            s.dirs.values()[index].snapshot = try before.read(gpa, b.io, dir, b.max_dir_entries);
 
             if (report) {
-                const before = if (b.dirs.getPtr(path)) |remembered| &remembered.snapshot else &Snapshot.empty;
                 try s.dirs.values()[index].snapshot.compare(before, gpa, &s.scratch);
                 try s.reportChanges(gpa, path, index);
             }
@@ -623,4 +623,30 @@ test "a failed baseline allocation leaves every change for the retry" {
             try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
         }
     }
+}
+
+test "a truncated baseline keeps remembered subtrees until a complete scan" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "sub/deep");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sub/deep/kept", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
+    defer base.deinit(gpa);
+
+    // No entries can be read with this budget. Nothing about a path's
+    // existence follows from its absence in that listing.
+    base.max_dir_entries = 0;
+    const incomplete = try base.diff(gpa);
+    try testing.expect(count(incomplete, .overflow) > 0);
+    try testing.expectEqual(@as(usize, 0), count(incomplete, .removed));
+    try testing.expectEqual(@as(usize, 3), base.dirs.count());
+    try tmp.dir.deleteFile(io, "sub/deep/kept");
+    base.max_dir_entries = 4096;
+    const complete = try base.diff(gpa);
+    try testing.expect(try holds(complete, root, "sub/deep/kept", .removed));
+    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
 }
