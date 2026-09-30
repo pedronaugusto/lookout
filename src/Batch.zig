@@ -8,9 +8,10 @@
 //!
 //! Two options hold a path back rather than recording it at once.
 //! `lookout.Options.settle_ms` holds `modified` until the file has
-//! stopped changing; `lookout.Options.debounce_ms` holds every kind until
-//! the path has been quiet, and then reports the kind seen last. See
-//! `promote`.
+//! stopped changing; `lookout.Options.debounce_ms` holds ordinary changes
+//! until the path has been quiet, and then reports the kind seen last.
+//! Loss notices are recorded at once and outrank ordinary changes in
+//! every mode: `overflow` < `unwatched`. See `promote`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -31,7 +32,7 @@ io: Io,
 /// How long a held path must be quiet before it is reported, in
 /// nanoseconds. Zero means nothing is ever held.
 hold_ns: i96,
-/// Whether every kind is held (`lookout.Options.debounce_ms`) or only
+/// Whether every ordinary kind is held (`lookout.Options.debounce_ms`) or only
 /// `modified` (`lookout.Options.settle_ms`).
 hold_all: bool,
 /// The events of the current window, in the order their paths were first
@@ -122,7 +123,7 @@ const EventKeyArrayContext = struct {
 
 /// A batch that owns nothing.
 ///
-/// `debounce_ms` supersedes `settle_ms`: it already holds every kind
+/// `debounce_ms` supersedes `settle_ms`: it already holds every ordinary kind
 /// until the path is quiet, which is the stronger of the two rules.
 pub fn init(io: Io, options: lookout.Options) Batch {
     const debouncing = options.debounce_ms > 0;
@@ -207,7 +208,14 @@ pub fn pushDetail(
     b.revision += 1;
     const now = Io.Timestamp.now(b.io, .awake);
 
-    if (b.hold_ns > 0 and (b.hold_all or kind == .modified)) {
+    // A loss notice ends the hold for this path. Later changes in the
+    // same delivery merge into that notice rather than starting a new
+    // hold that could outlive it and imply a complete answer next time.
+    const recorded_loss = if (b.index.get(.{ .id = id, .path = subject })) |i|
+        isLoss(b.events.items[i].kind)
+    else
+        false;
+    if (!isLoss(kind) and !recorded_loss and b.hold_ns > 0 and (b.hold_all or kind == .modified)) {
         if (b.held.getPtr(.{ .id = id, .path = subject })) |entry| {
             entry.last_ns = now.nanoseconds;
             if (kind == .modified) entry.size = b.sizeOf(subject);
@@ -223,9 +231,7 @@ pub fn pushDetail(
             }
             return;
         }
-        if (b.limit != 0 and b.events.items.len + b.held.count() >= b.limit and
-            kind != .overflow and kind != .unwatched)
-        {
+        if (b.limit != 0 and b.events.items.len + b.held.count() >= b.limit) {
             try b.dropped.put(gpa, id, {});
             return;
         }
@@ -249,14 +255,6 @@ pub fn pushDetail(
     // removed or moved since.
     try b.record(gpa, id, subject, kind, from, target, now);
     b.release(gpa, id, subject);
-}
-
-/// Records a recovery notice immediately, even when ordinary paths are
-/// debounced. The watcher keeps the notice pending until this succeeds.
-pub fn recover(b: *Batch, gpa: Allocator, id: WatchId, root: []const u8, target: Target) Allocator.Error!void {
-    b.revision += 1;
-    try b.record(gpa, id, root, .overflow, null, target, .now(b.io, .awake));
-    b.release(gpa, id, root);
 }
 
 /// How large a file is now, or `null` when it cannot be asked. Read only
@@ -518,7 +516,7 @@ fn record(
     if (b.index.get(.{ .id = id, .path = subject })) |i| {
         const existing = &b.events.items[i];
         if (existing.target == .unknown) existing.target = target;
-        if (b.hold_all) {
+        if (b.hold_all and !isLoss(kind) and !isLoss(existing.kind)) {
             // Debouncing already decided what the window says: the kind
             // seen last, and the rename it came with or none at all.
             const owned_from = if (from) |source| try gpa.dupe(u8, source) else null;
@@ -544,9 +542,7 @@ fn record(
     // Past the ceiling the batch stops holding names. The two kinds that
     // say the record is incomplete are exactly what a caller needs then,
     // so they are never the ones turned away.
-    if (b.limit != 0 and b.events.items.len >= b.limit and
-        kind != .overflow and kind != .unwatched)
-    {
+    if (b.limit != 0 and b.events.items.len >= b.limit and !isLoss(kind)) {
         try b.dropped.put(gpa, id, {});
         return;
     }
@@ -567,10 +563,13 @@ fn record(
     try b.index.put(gpa, .{ .id = id, .path = owned_path }, @intCast(b.events.items.len - 1));
 }
 
+fn isLoss(kind: Kind) bool {
+    return kind == .overflow or kind == .unwatched;
+}
+
 /// How much a kind outranks another when two land on one path in one
 /// window. The order is documented on `lookout.Kind`: a stronger statement
-/// about the path wins, and `overflow` — which says the record is
-/// incomplete — wins over every claim that it is complete.
+/// about the path wins, and loss notices win over every ordinary change.
 fn rank(kind: Kind) u3 {
     return switch (kind) {
         .attributes => 0,
@@ -725,7 +724,57 @@ test "a name event settles the question of the contents" {
     try testing.expectEqual(Kind.removed, b.events.items[0].kind);
 }
 
-test "debouncing holds every kind and reports the one seen last" {
+test "loss notices bypass holding and displace held changes" {
+    const gpa = testing.allocator;
+    const id: WatchId = @enumFromInt(0);
+    for ([_]lookout.Options{
+        .{ .debounce_ms = 50, .max_events = 1 },
+        .{ .settle_ms = 50, .max_events = 1 },
+    }) |options| {
+        for ([_]Kind{ .overflow, .unwatched }) |kind| {
+            var b = testBatch(options);
+            defer b.deinit(gpa);
+            try b.push(gpa, id, "/watch", .modified, .file);
+            try b.push(gpa, id, "/watch", kind, .file);
+            try testing.expectEqual(@as(usize, 1), b.events.items.len);
+            try testing.expectEqual(kind, b.events.items[0].kind);
+            try testing.expectEqual(@as(usize, 0), b.held.count());
+            try testing.expectEqual(@as(?u32, null), b.nextDueMs());
+
+            // A later change in this delivery cannot escape into the
+            // next poll as a claim that the answer was complete.
+            try b.pushRename(gpa, id, "/watch", "/old", .file);
+            try b.push(gpa, id, "/watch", .modified, .file);
+            try testing.expectEqual(kind, b.events.items[0].kind);
+            try testing.expectEqual(@as(?[]const u8, null), b.events.items[0].from);
+            try testing.expectEqual(@as(usize, 0), b.held.count());
+        }
+    }
+}
+
+test "loss notices keep their precedence in a debounced delivery" {
+    const gpa = testing.allocator;
+    const id: WatchId = @enumFromInt(0);
+    const kinds = std.enums.values(Kind);
+    for (kinds) |first| {
+        for (kinds) |last| {
+            if (first != .overflow and first != .unwatched and
+                last != .overflow and last != .unwatched) continue;
+            var b = testBatch(.{ .debounce_ms = 50 });
+            defer b.deinit(gpa);
+            const now: Io.Timestamp = .now(testing.io, .awake);
+            // These are records ready for delivery, including promoted
+            // changes and allocation recovery, which share this merge.
+            try b.record(gpa, id, "/watch", first, if (first == .renamed) "/old" else null, .file, now);
+            try b.record(gpa, id, "/watch", last, if (last == .renamed) "/old" else null, .file, now);
+            const expected: Kind = if (first == .unwatched or last == .unwatched) .unwatched else .overflow;
+            try testing.expectEqual(expected, b.events.items[0].kind);
+            try testing.expectEqual(@as(?[]const u8, null), b.events.items[0].from);
+        }
+    }
+}
+
+test "debouncing holds ordinary kinds and reports the one seen last" {
     const gpa = testing.allocator;
     var b = testBatch(.{ .debounce_ms = 50 });
     defer b.deinit(gpa);

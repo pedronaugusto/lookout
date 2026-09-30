@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Breaking: `overflow` and `unwatched` bypass debounce and settling, clear held changes on the same watch and path, and retain their precedence until delivery: ordinary changes < overflow < unwatched.
+
 - Breaking: after `poll` returns `OutOfMemory`, retrying reports `overflow` for every still-live watch root; unread kernel deliveries remain pending where possible, and recovery survives repeated allocation failures and wakeups.
 
 - Breaking: `Watcher.InitError` includes `OutOfMemory`; FSEvents preserves sink and buffer allocator failures instead of reporting `SystemResources`.

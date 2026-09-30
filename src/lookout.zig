@@ -355,6 +355,12 @@ pub const WatchId = enum(u32) { _ };
 /// `created` < `renamed` < `removed` < `overflow` < `unwatched`. A path
 /// created and then written inside one window reports `created`; a path
 /// written and then deleted reports `removed`.
+/// With `Options.debounce_ms`, ordinary changes report the kind seen last.
+/// `overflow` and `unwatched` bypass holding in every mode and keep the
+/// precedence above: neither can be replaced by an ordinary change, and
+/// `unwatched` wins when both loss notices name the same watch and path.
+/// A loss notice clears any held change on that path; later changes in
+/// the same batch cannot start another hold there.
 pub const Kind = enum {
     /// The path did not exist at the previous observation and does now.
     created,
@@ -531,19 +537,21 @@ pub const Options = struct {
     /// facts about a name rather than about contents, and are reported at
     /// once whatever this is set to.
     settle_ms: u32 = 0,
-    /// How long a path must be quiet before it is reported at all. Zero,
+    /// How long an ordinary change must be quiet before it is reported. Zero,
     /// the default, is off.
     ///
     /// This is the third and strongest of the three windows, and it
     /// answers a different question from the other two. `latency_ms`
     /// merges what arrives together and reports the most significant kind
     /// seen; `settle_ms` waits for a file's contents to stop changing.
-    /// `debounce_ms` holds *every* kind until the path has been quiet for
+    /// `debounce_ms` holds every ordinary kind until the path has been quiet for
     /// the window and then reports it once, carrying the kind seen
     /// **last** rather than the most significant one. A file created and
     /// then deleted inside one window is one `removed`; a file deleted
     /// and then recreated is one `created`, which coalescing cannot say
     /// because `removed` outranks `created`.
+    /// `overflow` and `unwatched` are immediate and retain their precedence
+    /// over ordinary changes; see `Kind`.
     ///
     /// That is what a caller rebuilding from the end state wants, and it
     /// is why it supersedes both of the others: a non-zero `debounce_ms`
@@ -1384,6 +1392,9 @@ pub const Watcher = struct {
     /// batch arrives, collection continues for `Options.latency_ms` more
     /// so that a burst on one path becomes one event; a `timeout_ms` of
     /// `0` skips that wait.
+    /// `overflow` and `unwatched` bypass settling and debouncing and remain
+    /// in the batch until handed out, even if later ordinary changes name
+    /// the same path. See `Kind` for precedence.
     ///
     /// The returned slice, and every path in it, is owned by the watcher
     /// and is invalidated by the next call to `poll` or by `deinit`. An
@@ -1451,7 +1462,7 @@ pub const Watcher = struct {
     fn recover(w: *Watcher) Allocator.Error!void {
         for (w.table.keys(), w.table.values()) |id, held| {
             if (!held.incomplete) continue;
-            try w.batch.recover(w.gpa, id, held.path, held.target);
+            try w.batch.push(w.gpa, id, held.path, .overflow, held.target);
         }
     }
 

@@ -170,7 +170,7 @@ a socket through `std.Io`, which a cancellation ends on its own.
 |---|---|---|
 | `latency_ms` | everything that arrives together | the most significant kind of the burst |
 | `settle_ms` | a file's contents to stop changing | `modified`, once the writing is over |
-| `debounce_ms` | a path to go quiet, whatever happened to it | one event, carrying the kind seen **last** |
+| `debounce_ms` | an ordinary change on a path to go quiet | one event, carrying the kind seen **last** |
 
 `poll` blocks until the first event of a batch arrives and then collects
 for `latency_ms` more, 50 ms by default. Everything on one path in that
@@ -206,6 +206,12 @@ about a name, and are reported at once whatever this is set to.
 one `created`, which coalescing cannot say because `removed` outranks
 `created`. It supersedes the other two — a non-zero `debounce_ms` takes
 over from `settle_ms`, and `poll` returns as soon as a window closes.
+
+`overflow` and `unwatched` bypass both holding windows. In every mode,
+they outrank ordinary changes, and `unwatched` outranks `overflow` when
+both name the same watch and path. A loss notice clears any held change
+on that path and stays in the batch until returned; later ordinary
+changes in that batch cannot replace it or start another hold there.
 
 **Neither `kqueue` nor `inotify` recurses.** lookout walks the tree at
 `add`, registers each directory, and registers new ones as they appear,

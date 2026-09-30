@@ -1250,6 +1250,28 @@ test "a directory past the entry limit reports overflow against the watch root" 
     }
 }
 
+test "an overflow is returned before the debounce window closes" {
+    var f = try Fixture.initOptions(.{
+        .backend = .poll,
+        .poll_interval_ms = 20,
+        .debounce_ms = 300,
+        .max_dir_entries = 2,
+    });
+    defer f.deinit();
+    const id = try f.watcher.add(f.root, .{});
+    for (0..3) |i| {
+        var name: [8]u8 = undefined;
+        try f.write(try std.fmt.bufPrint(&name, "f{d}", .{i}), "x");
+    }
+    // A non-blocking poll must return the scan's actual loss notice,
+    // even though no ordinary change has had time to go quiet.
+    const events = try f.watcher.poll(0);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqual(Kind.overflow, events[0].kind);
+    try std.testing.expectEqual(id, events[0].id);
+    try std.testing.expectEqualStrings(f.root, events[0].path);
+}
+
 test "what an overflow lost can be read back from a baseline" {
     for (backends) |backend| {
         const gpa = std.testing.allocator;
