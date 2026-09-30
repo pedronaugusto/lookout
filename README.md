@@ -399,9 +399,9 @@ whole mount instead of a watch per directory, which is the standard
 answer to "one kernel watch per directory does not scale", and it needs
 `CAP_SYS_ADMIN` — a privilege a library cannot assume a process has.
 
-**A backend is one file and one struct with nine methods**: `init`,
-`deinit`, `fd`, `registrationCount`, `add`, `remove`, `wait`, `waker` and
-`position`. `waker` hands `init` what another thread needs to end a
+**A backend is one file and one struct with ten methods**: `init`,
+`deinit`, `fd`, `registrationCount`, `add`, `remove`, `refilter`, `wait`,
+`waker` and `position`. `waker` hands `init` what another thread needs to end a
 blocked `wait` -- a descriptor, a handle, a pointer to state that never
 moves -- so `wake` never reads the backend the polling thread is
 writing. `Watcher.Impl` finds it structurally, so adding one is:
@@ -457,7 +457,7 @@ and are neither built nor run here.
 ```
 zig build test          # the suite, once per backend this host has
 zig build test --fuzz   # the fuzz targets, until you stop them
-sh ci/linux.sh          # the suite on Linux, in Docker, all four modes
+ci/linux.sh             # the suite on Linux, in Docker, all four modes
 ```
 
 The suite includes three budgets — how long after a change `poll` comes

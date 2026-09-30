@@ -17,7 +17,6 @@ const Io = std.Io;
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
 const Deadline = @import("../Deadline.zig");
-const Snapshot = @import("../Snapshot.zig");
 const Tree = @import("../Tree.zig");
 const Waker = @import("../Waker.zig");
 const Target = lookout.Target;

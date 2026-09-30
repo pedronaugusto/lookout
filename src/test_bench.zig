@@ -14,8 +14,6 @@
 //! magnitude, not a percentage.
 
 const std = @import("std");
-const builtin = @import("builtin");
-
 const lookout = @import("lookout.zig");
 const Watcher = lookout.Watcher;
 
