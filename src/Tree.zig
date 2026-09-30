@@ -247,7 +247,10 @@ fn createDirectory(t: *Tree, watch: WatchId, path: []u8, added: *std.ArrayList(N
         .snapshot = .empty,
         .meta = undefined,
     });
-    errdefer _ = t.nodes.swapRemove(id);
+    errdefer {
+        t.nodes.getPtr(id).?.snapshot.deinit(t.gpa);
+        _ = t.nodes.swapRemove(id);
+    }
     t.next_node += 1;
 
     // The listing taken here is the baseline: the caller asked to be told
@@ -262,7 +265,15 @@ fn createDirectory(t: *Tree, watch: WatchId, path: []u8, added: *std.ArrayList(N
     const node = t.nodes.getPtr(id).?;
     try node.snapshot.refresh(t.gpa, t.io, dir, t.max_dir_entries, &baseline);
 
+    const start = added.items.len;
     try added.append(t.gpa, id);
+    errdefer {
+        // This scope still owns the directory's handle and snapshot, and
+        // its caller still owns the path. Child nodes have already taken
+        // theirs, so roll them back before releasing this directory.
+        t.rollback(added, start + 1);
+        added.shrinkRetainingCapacity(start);
+    }
     if (t.track_entries) try t.trackEntries(id, added);
     return id;
 }
@@ -681,5 +692,35 @@ test "tree access failures keep registrations and report no removals" {
         try tree.rescanDirectory(directory_id, &batch, &added);
         try tree.rescanFile(file_id, &batch);
         try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+    }
+}
+
+test "a failed tree registration releases every snapshot and path" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry", .data = "x" });
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const gpa = failing.allocator();
+        {
+            var tree: Tree = .init(gpa, std.testing.io, 8, true);
+            defer tree.deinit();
+            var added: std.ArrayList(NodeId) = .empty;
+            defer added.deinit(gpa);
+            var batch: Batch = .init(std.testing.io, .{});
+            defer batch.deinit(gpa);
+            if (tree.addWatch(@enumFromInt(0), root, .{}, &added, &batch)) |_| {
+                break;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expectEqual(@as(usize, 0), tree.nodes.count());
+                try std.testing.expectEqual(@as(usize, 0), tree.watches.count());
+                try std.testing.expectEqual(@as(usize, 0), added.items.len);
+            }
+        }
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
 }

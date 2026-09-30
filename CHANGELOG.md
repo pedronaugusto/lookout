@@ -23,6 +23,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Failed tree registration releases its directory snapshot and any file nodes created before the failure.
+
 - A tree walk releases its root path when allocating the initial frontier fails.
 
 - A failed first budget count publishes no directory or partial listing, so cleanup and retry remain valid.
