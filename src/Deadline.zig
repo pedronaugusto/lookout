@@ -55,7 +55,9 @@ pub fn windowsMs(d: Deadline) u32 {
 const testing = std.testing;
 
 test "no timeout never expires and never clamps" {
-    const d: Deadline = .start(testing.io, null);
+    var vtable: Io.VTable = undefined;
+    const io = @import("test_clock.zig").frozen(&vtable, testing.io);
+    const d: Deadline = .start(io, null);
     try testing.expectEqual(@as(?u32, null), d.remainingMs());
     try testing.expect(!d.expired());
     try testing.expectEqual(@as(i32, -1), d.pollMs());
@@ -63,7 +65,9 @@ test "no timeout never expires and never clamps" {
 }
 
 test "a timeout that has run out clamps to zero rather than going negative" {
-    var d: Deadline = .start(testing.io, 10);
+    var vtable: Io.VTable = undefined;
+    const io = @import("test_clock.zig").frozen(&vtable, testing.io);
+    var d: Deadline = .start(io, 10);
     // Reaching back in time is the same as waiting, and a test that
     // waits on a wall clock is a test that fails on a loaded machine.
     d.started.nanoseconds -= 100 * std.time.ns_per_ms;
@@ -74,16 +78,20 @@ test "a timeout that has run out clamps to zero rather than going negative" {
 }
 
 test "a deadline in the future has time left on it" {
-    const d: Deadline = .start(testing.io, 2_500);
+    var vtable: Io.VTable = undefined;
+    const io = @import("test_clock.zig").frozen(&vtable, testing.io);
+    const d: Deadline = .start(io, 2_500);
     const left = d.remainingMs().?;
     try testing.expect(left > 0 and left <= 2_500);
     try testing.expect(!d.expired());
 }
 
 test "finite waits are clamped to each operating system API" {
-    const posix_long: Deadline = .start(testing.io, @as(u32, std.math.maxInt(i32)) + 1);
+    var vtable: Io.VTable = undefined;
+    const io = @import("test_clock.zig").frozen(&vtable, testing.io);
+    const posix_long: Deadline = .start(io, @as(u32, std.math.maxInt(i32)) + 1);
     try testing.expectEqual(std.math.maxInt(i32), posix_long.pollMs());
 
-    const windows_long: Deadline = .start(testing.io, std.math.maxInt(u32));
+    const windows_long: Deadline = .start(io, std.math.maxInt(u32));
     try testing.expectEqual(std.math.maxInt(u32) - 1, windows_long.windowsMs());
 }

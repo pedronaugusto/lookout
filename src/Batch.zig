@@ -636,13 +636,10 @@ fn rank(kind: Kind) u3 {
 
 const testing = std.testing;
 
-fn testBatch(options: lookout.Options) Batch {
-    return .init(testing.io, options);
-}
-
 test "one event per path, strongest kind wins" {
     const gpa = testing.allocator;
-    var b = testBatch(.{});
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{});
     defer b.deinit(gpa);
 
     const id: WatchId = @enumFromInt(0);
@@ -659,7 +656,8 @@ test "one event per path, strongest kind wins" {
 
 test "removal outranks creation and overflow outranks everything" {
     const gpa = testing.allocator;
-    var b = testBatch(.{});
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{});
     defer b.deinit(gpa);
 
     const id: WatchId = @enumFromInt(7);
@@ -673,7 +671,8 @@ test "removal outranks creation and overflow outranks everything" {
 
 test "a finished write outranks the writing, and a creation outranks both" {
     const gpa = testing.allocator;
-    var b = testBatch(.{});
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{});
     defer b.deinit(gpa);
 
     const id: WatchId = @enumFromInt(0);
@@ -691,7 +690,8 @@ test "a finished write outranks the writing, and a creation outranks both" {
 
 test "reset drops the previous window" {
     const gpa = testing.allocator;
-    var b = testBatch(.{});
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{});
     defer b.deinit(gpa);
 
     try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
@@ -703,7 +703,8 @@ test "reset drops the previous window" {
 
 test "a paired rename is one event carrying where it came from" {
     const gpa = testing.allocator;
-    var b = testBatch(.{});
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{});
     defer b.deinit(gpa);
 
     try b.pushRename(gpa, @enumFromInt(0), "/tmp/new", "/tmp/old", .file);
@@ -715,7 +716,8 @@ test "a paired rename is one event carrying where it came from" {
 
 test "a stronger non-rename clears an earlier rename source" {
     const gpa = testing.allocator;
-    var b = testBatch(.{});
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{});
     defer b.deinit(gpa);
 
     const id: WatchId = @enumFromInt(0);
@@ -729,12 +731,13 @@ test "a stronger non-rename clears an earlier rename source" {
 
 test "every event carries when it was seen" {
     const gpa = testing.allocator;
-    var b = testBatch(.{});
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{});
     defer b.deinit(gpa);
 
-    const before: Io.Timestamp = .now(testing.io, .awake);
+    const before: Io.Timestamp = .now(b.io, .awake);
     try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
-    const after: Io.Timestamp = .now(testing.io, .awake);
+    const after: Io.Timestamp = .now(b.io, .awake);
 
     const stamped = b.events.items[0].time;
     try testing.expect(stamped.nanoseconds >= before.nanoseconds);
@@ -743,7 +746,8 @@ test "every event carries when it was seen" {
 
 test "a settling modification is held back until it is due" {
     const gpa = testing.allocator;
-    var b = testBatch(.{ .settle_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
 
     try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified, .file);
@@ -762,7 +766,8 @@ test "a settling modification is held back until it is due" {
 
 test "a name event settles the question of the contents" {
     const gpa = testing.allocator;
-    var b = testBatch(.{ .settle_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
 
     try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified, .file);
@@ -779,7 +784,8 @@ test "loss notices bypass holding and displace held changes" {
         .{ .settle_ms = 50, .max_events = 1 },
     }) |options| {
         for ([_]Kind{ .overflow, .unwatched }) |kind| {
-            var b = testBatch(options);
+            var vtable: Io.VTable = undefined;
+            var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), options);
             defer b.deinit(gpa);
             try b.push(gpa, id, "/watch", .modified, .file);
             try b.push(gpa, id, "/watch", kind, .file);
@@ -807,9 +813,10 @@ test "loss notices keep their precedence in a debounced delivery" {
         for (kinds) |last| {
             if (first != .overflow and first != .unwatched and
                 last != .overflow and last != .unwatched) continue;
-            var b = testBatch(.{ .debounce_ms = 50 });
+            var vtable: Io.VTable = undefined;
+            var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .debounce_ms = 50 });
             defer b.deinit(gpa);
-            const now: Io.Timestamp = .now(testing.io, .awake);
+            const now: Io.Timestamp = .now(b.io, .awake);
             // These are records ready for delivery, including promoted
             // changes and allocation recovery, which share this merge.
             try b.record(gpa, id, "/watch", first, if (first == .renamed) "/old" else null, .file, now);
@@ -823,7 +830,8 @@ test "loss notices keep their precedence in a debounced delivery" {
 
 test "debouncing holds ordinary kinds and reports the one seen last" {
     const gpa = testing.allocator;
-    var b = testBatch(.{ .debounce_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
     const id: WatchId = @enumFromInt(0);
@@ -846,7 +854,8 @@ test "debouncing holds ordinary kinds and reports the one seen last" {
 
 test "a debounced rename keeps where it came from" {
     const gpa = testing.allocator;
-    var b = testBatch(.{ .debounce_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
     try b.push(gpa, @enumFromInt(0), "/tmp/new", .modified, .file);
@@ -860,7 +869,8 @@ test "a debounced rename keeps where it came from" {
 
 test "debouncing stamps an event with when the path first changed" {
     const gpa = testing.allocator;
-    var b = testBatch(.{ .debounce_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
     try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
@@ -874,7 +884,8 @@ test "debouncing stamps an event with when the path first changed" {
 
 test "a push that is held still moves the revision" {
     const gpa = testing.allocator;
-    var b = testBatch(.{ .debounce_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
     const before = b.revision;
@@ -885,7 +896,8 @@ test "a push that is held still moves the revision" {
 
 test "discarding a watch takes its events and its held paths with it" {
     const gpa = testing.allocator;
-    var b = testBatch(.{ .debounce_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
     const kept: WatchId = @enumFromInt(1);
@@ -926,7 +938,8 @@ test "a held modification that is still growing is not reported yet" {
     const target = try tmp.dir.realPathFileAlloc(io, "big.bin", gpa);
     defer gpa.free(target);
 
-    var b: Batch = .init(io, .{ .settle_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b: Batch = .init(@import("test_clock.zig").frozen(&vtable, io), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
 
     try b.push(gpa, @enumFromInt(0), target, .modified, .file);
@@ -949,7 +962,8 @@ test "a held modification that is still growing is not reported yet" {
 
 test "a path that cannot be measured is still reported when it goes quiet" {
     const gpa = testing.allocator;
-    var b: Batch = .init(testing.io, .{ .settle_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b: Batch = .init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
 
     // Nothing is at this path, so there is no size to compare and the
@@ -1054,7 +1068,8 @@ test "a failed batch flush leaves trouble queued for the retry" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var b = testBatch(.{});
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{});
     defer b.deinit(gpa);
     try b.trouble(gpa, @enumFromInt(0), root, .directory);
     var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
@@ -1073,7 +1088,8 @@ test "a failed batch promotion leaves the rename held for the retry" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var b = testBatch(.{ .debounce_ms = 1 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .debounce_ms = 1 });
     defer b.deinit(gpa);
     try b.pushRename(gpa, @enumFromInt(0), root, "before", .directory);
     b.held.values()[0].last_ns -= std.time.ns_per_s;
@@ -1094,7 +1110,8 @@ test "a failed batch replacement leaves the settling event held" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var b = testBatch(.{ .settle_ms = 1 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .settle_ms = 1 });
     defer b.deinit(gpa);
     const id: WatchId = @enumFromInt(0);
     try b.push(gpa, id, root, .modified, .directory);
@@ -1108,7 +1125,8 @@ test "a failed batch replacement leaves the settling event held" {
 
 test "a paired rename ends the source path's settling hold" {
     const gpa = testing.allocator;
-    var b = testBatch(.{ .settle_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
     const id: WatchId = @enumFromInt(0);
     try b.push(gpa, id, "/watch/old", .modified, .file);
@@ -1121,7 +1139,8 @@ test "a paired rename ends the source path's settling hold" {
 
 test "a debounced rename replaces its source within the same event ceiling" {
     const gpa = testing.allocator;
-    var b = testBatch(.{ .debounce_ms = 50, .max_events = 1 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .debounce_ms = 50, .max_events = 1 });
     defer b.deinit(gpa);
     const id: WatchId = @enumFromInt(0);
     try b.push(gpa, id, "/watch/old", .modified, .file);
@@ -1135,7 +1154,8 @@ test "a debounced rename replaces its source within the same event ceiling" {
 
 test "a failed rename leaves its source hold available for retry" {
     const gpa = testing.allocator;
-    var b = testBatch(.{ .settle_ms = 50 });
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
     const id: WatchId = @enumFromInt(0);
     try b.push(gpa, id, "/watch/old", .modified, .file);
