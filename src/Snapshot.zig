@@ -85,17 +85,23 @@ pub fn refresh(
     max_entries: usize,
     changes: *std.ArrayList(Change),
 ) RefreshError!void {
-    var next: std.StringArrayHashMapUnmanaged(Meta) = .empty;
-    var truncated = false;
-    errdefer {
-        for (next.keys()) |name| gpa.free(name);
-        next.deinit(gpa);
-    }
+    var next = try read(gpa, io, dir, max_entries);
+    errdefer next.deinit(gpa);
+    try next.compare(s, gpa, changes);
+    s.deinit(gpa);
+    s.* = next;
+}
+
+/// Reads a listing without advancing the snapshot it will be compared to.
+/// The caller owns the result, including when comparison later fails.
+pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize) RefreshError!Snapshot {
+    var next: Snapshot = .empty;
+    errdefer next.deinit(gpa);
 
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        if (next.count() >= max_entries) {
-            truncated = true;
+        if (next.entries.count() >= max_entries) {
+            next.truncated = true;
             break;
         }
         // An entry can be gone between the listing and the stat; that is a
@@ -106,45 +112,42 @@ pub fn refresh(
         };
         const name = try gpa.dupe(u8, entry.name);
         errdefer gpa.free(name);
-        try next.put(gpa, name, .{
+        try next.entries.put(gpa, name, .{
             .size = stat.size,
             .mtime_ns = stat.mtime.nanoseconds,
             .ctime_ns = stat.ctime.nanoseconds,
             .file_kind = stat.kind,
         });
     }
+    return next;
+}
 
-    // Everything below only appends to `changes`, so a failure there leaves
-    // the caller with a prefix of the real changes and the old snapshot —
-    // the next scan re-derives the rest.
+/// Appends the differences without changing either listing. On error,
+/// nothing is appended and the caller can retry against the same pair.
+pub fn compare(s: *const Snapshot, before: *const Snapshot, gpa: Allocator, changes: *std.ArrayList(Change)) Allocator.Error!void {
     const start = changes.items.len;
     errdefer {
         for (changes.items[start..]) |change| gpa.free(change.name);
         changes.shrinkRetainingCapacity(start);
     }
 
-    for (next.keys(), next.values()) |name, meta| {
-        const before = s.entries.get(name) orelse {
+    for (s.entries.keys(), s.entries.values()) |name, meta| {
+        const old = before.entries.get(name) orelse {
             try append(changes, gpa, name, .created, meta.file_kind);
             continue;
         };
-        if (before.file_kind != meta.file_kind) {
+        if (old.file_kind != meta.file_kind) {
             try append(changes, gpa, name, .created, meta.file_kind);
-        } else if (before.size != meta.size or before.mtime_ns != meta.mtime_ns) {
+        } else if (old.size != meta.size or old.mtime_ns != meta.mtime_ns) {
             try append(changes, gpa, name, .modified, meta.file_kind);
-        } else if (before.ctime_ns != meta.ctime_ns) {
+        } else if (old.ctime_ns != meta.ctime_ns) {
             try append(changes, gpa, name, .attributes, meta.file_kind);
         }
     }
-    for (s.entries.keys(), s.entries.values()) |name, meta| {
-        if (next.contains(name)) continue;
+    for (before.entries.keys(), before.entries.values()) |name, meta| {
+        if (s.entries.contains(name)) continue;
         try append(changes, gpa, name, .removed, meta.file_kind);
     }
-
-    for (s.entries.keys()) |name| gpa.free(name);
-    s.entries.deinit(gpa);
-    s.entries = next;
-    s.truncated = truncated;
 }
 
 fn append(

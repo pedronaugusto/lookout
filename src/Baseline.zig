@@ -43,16 +43,12 @@ dirs: std.StringArrayHashMapUnmanaged(Remembered),
 /// What the last `diff` found. Every path is owned here and is dropped by
 /// the next `diff` or by `deinit`.
 changes: std.ArrayList(Change),
-/// Scratch the listing comparison writes into, reused between scans so
-/// that a steady tree costs no allocation per diff.
+/// Scratch the listing comparison writes into, reused between directories.
 scratch: std.ArrayList(Snapshot.Change),
 
 /// One directory's remembered listing.
 const Remembered = struct {
     snapshot: Snapshot,
-    /// Whether the scan in progress reached it. A directory nothing
-    /// reached is one that is no longer there.
-    seen: bool,
 };
 
 /// What a baseline covers, which should be what the watch covers: a
@@ -139,8 +135,9 @@ pub fn deinit(b: *Baseline, gpa: Allocator) void {
 /// invalidated by the next `diff` or by `deinit` -- the same terms as
 /// `lookout.Watcher.poll`, so that the two can be handled by one piece of
 /// code. Calling it twice in a row returns nothing the second time.
+/// An error leaves the remembered tree unchanged, so retrying reports
+/// changes that have not yet been returned.
 pub fn diff(b: *Baseline, gpa: Allocator) Error![]const Change {
-    b.clearChanges(gpa);
     try b.scan(gpa, true);
     return b.changes.items;
 }
@@ -149,132 +146,149 @@ pub fn diff(b: *Baseline, gpa: Allocator) Error![]const Change {
 /// set, every difference found becomes a `Change`; without it the walk is
 /// only there to take the listings, which is what `seed` wants.
 fn scan(b: *Baseline, gpa: Allocator, report: bool) Error!void {
-    for (b.dirs.values()) |*remembered| remembered.seen = false;
-
-    var frontier: std.ArrayList([]u8) = .empty;
+    // The scan owns new listings and paths until all traversal and reporting
+    // have succeeded. The remembered tree stays available for comparison
+    // throughout; publishing the result needs no allocation.
+    var next: Scan = .{ .baseline = b, .scratch = b.scratch };
+    b.scratch = .empty;
     defer {
-        for (frontier.items) |path| gpa.free(path);
-        frontier.deinit(gpa);
+        b.scratch = next.scratch;
+        next.deinit(gpa);
     }
-    try frontier.append(gpa, try gpa.dupe(u8, b.root));
+    try next.run(gpa, report);
+    std.mem.swap(@TypeOf(b.dirs), &b.dirs, &next.dirs);
+    std.mem.swap(@TypeOf(b.changes), &b.changes, &next.changes);
+}
 
-    var i: usize = 0;
-    while (i < frontier.items.len) : (i += 1) {
-        const path = frontier.items[i];
-        var dir = Io.Dir.openDirAbsolute(b.io, path, .{ .iterate = true }) catch |err| {
-            switch (err) {
-                error.FileNotFound, error.NotDir => {},
-                else => return err,
+/// Owns only the listings and returned paths being prepared. The root and
+/// scan options belong to the baseline, which is borrowed until commit.
+const Scan = struct {
+    baseline: *const Baseline,
+    dirs: std.StringArrayHashMapUnmanaged(Remembered) = .empty,
+    changes: std.ArrayList(Change) = .empty,
+    scratch: std.ArrayList(Snapshot.Change),
+
+    fn deinit(s: *Scan, gpa: Allocator) void {
+        for (s.dirs.keys(), s.dirs.values()) |path, *remembered| {
+            gpa.free(path);
+            remembered.snapshot.deinit(gpa);
+        }
+        s.dirs.deinit(gpa);
+        for (s.changes.items) |change| gpa.free(change.path);
+        s.changes.deinit(gpa);
+    }
+
+    fn run(s: *Scan, gpa: Allocator, report: bool) Error!void {
+        const b = s.baseline;
+        var frontier: std.ArrayList([]u8) = .empty;
+        defer {
+            for (frontier.items) |path| gpa.free(path);
+            frontier.deinit(gpa);
+        }
+        {
+            const root = try gpa.dupe(u8, b.root);
+            errdefer gpa.free(root);
+            try frontier.append(gpa, root);
+        }
+
+        var i: usize = 0;
+        while (i < frontier.items.len) : (i += 1) {
+            const path = frontier.items[i];
+            var dir = Io.Dir.openDirAbsolute(b.io, path, .{ .iterate = true }) catch |err| {
+                switch (err) {
+                    error.FileNotFound, error.NotDir => {},
+                    else => return err,
+                }
+                // A subdirectory that has gone is reported by its parent's
+                // own comparison, so there is nothing to say here. The root
+                // has no parent to report it.
+                if (i != 0) continue;
+                if (!report) return err;
+                try s.record(gpa, b.root, .removed);
+                return;
+            };
+            defer dir.close(b.io);
+
+            const index = try s.remember(gpa, path);
+            Snapshot.freeChanges(gpa, &s.scratch);
+            s.dirs.values()[index].snapshot = try Snapshot.read(gpa, b.io, dir, b.max_dir_entries);
+
+            if (report) {
+                const before = if (b.dirs.getPtr(path)) |remembered| &remembered.snapshot else &Snapshot.empty;
+                try s.dirs.values()[index].snapshot.compare(before, gpa, &s.scratch);
+                try s.reportChanges(gpa, path, index);
             }
-            // A subdirectory that has gone is reported by its parent's
-            // own comparison, so there is nothing to say here. The root
-            // has no parent to report it.
-            if (i != 0) continue;
-            if (!report) return err;
-            try b.record(gpa, b.root, .removed);
-            b.forgetAll(gpa);
-            return;
-        };
-        defer dir.close(b.io);
+            if (!b.recursive) continue;
 
-        const index = try b.remember(gpa, path);
-        Snapshot.freeChanges(gpa, &b.scratch);
-        try b.dirs.values()[index].snapshot.refresh(
-            gpa,
-            b.io,
-            dir,
-            b.max_dir_entries,
-            &b.scratch,
-        );
-
-        if (report) try b.reportChanges(gpa, path, index);
-        if (!b.recursive) continue;
-
-        // The listing just taken is the list of subdirectories to walk,
-        // so descending costs no syscall of its own.
-        const snapshot = &b.dirs.values()[index].snapshot;
-        for (snapshot.entries.keys(), snapshot.entries.values()) |name, meta| {
-            if (meta.file_kind != .directory) continue;
-            const child = try std.fs.path.join(gpa, &.{ path, name });
-            errdefer gpa.free(child);
-            if (b.filter.prunes(b.root, child)) {
-                gpa.free(child);
-                continue;
+            // The listing just taken is the list of subdirectories to walk,
+            // so descending costs no syscall of its own.
+            const snapshot = &s.dirs.values()[index].snapshot;
+            for (snapshot.entries.keys(), snapshot.entries.values()) |name, meta| {
+                if (meta.file_kind != .directory) continue;
+                const child = try std.fs.path.join(gpa, &.{ path, name });
+                errdefer gpa.free(child);
+                if (b.filter.prunes(b.root, child)) {
+                    gpa.free(child);
+                    continue;
+                }
+                try frontier.append(gpa, child);
             }
-            try frontier.append(gpa, child);
+        }
+
+        if (report) try s.reportLost(gpa);
+    }
+
+    /// Turns one directory's comparison into changes.
+    fn reportChanges(s: *Scan, gpa: Allocator, path: []const u8, index: usize) Error!void {
+        const b = s.baseline;
+        if (s.dirs.values()[index].snapshot.truncated) {
+            try s.record(gpa, b.root, .overflow);
+        }
+        for (s.scratch.items) |change| {
+            // A directory's own times move whenever anything inside it
+            // moves, and reporting that would put an entry in the diff for
+            // every ancestor of every change. It is left out here for the
+            // same reason the backends leave it out of their events.
+            if (change.file_kind == .directory and
+                (change.kind == .modified or change.kind == .attributes)) continue;
+
+            const child = try std.fs.path.join(gpa, &.{ path, change.name });
+            defer gpa.free(child);
+            if (b.filter.excludes(b.root, child)) continue;
+            try s.record(gpa, child, change.kind);
         }
     }
 
-    try b.reportLost(gpa, report);
-}
-
-/// Turns one directory's comparison into changes.
-fn reportChanges(b: *Baseline, gpa: Allocator, path: []const u8, index: usize) Error!void {
-    if (b.dirs.values()[index].snapshot.truncated) {
-        try b.record(gpa, b.root, .overflow);
-    }
-    for (b.scratch.items) |change| {
-        // A directory's own times move whenever anything inside it
-        // moves, and reporting that would put an entry in the diff for
-        // every ancestor of every change. It is left out here for the
-        // same reason the backends leave it out of their events.
-        if (change.file_kind == .directory and
-            (change.kind == .modified or change.kind == .attributes)) continue;
-
-        const child = try std.fs.path.join(gpa, &.{ path, change.name });
-        defer gpa.free(child);
-        if (b.filter.excludes(b.root, child)) continue;
-        try b.record(gpa, child, change.kind);
-    }
-}
-
-/// Drops the directories the scan did not reach, reporting what was in
-/// them as removed.
-///
-/// The directory itself is reported by its parent's comparison; what was
-/// inside it is only remembered here, and a caller rebuilding from a diff
-/// wants the files by name.
-fn reportLost(b: *Baseline, gpa: Allocator, report: bool) Error!void {
-    var i: usize = 0;
-    while (i < b.dirs.count()) {
-        if (b.dirs.values()[i].seen) {
-            i += 1;
-            continue;
-        }
-        const path = b.dirs.keys()[i];
-        if (report) {
-            const snapshot = b.dirs.values()[i].snapshot;
-            for (snapshot.entries.keys()) |name| {
+    /// Reports the contents of directories the scan did not reach. Their
+    /// listings still belong to the previous baseline until the scan commits.
+    /// The directory itself is reported by its parent's comparison.
+    fn reportLost(s: *Scan, gpa: Allocator) Error!void {
+        const b = s.baseline;
+        for (b.dirs.keys(), b.dirs.values()) |path, remembered| {
+            if (s.dirs.contains(path)) continue;
+            for (remembered.snapshot.entries.keys()) |name| {
                 const child = try std.fs.path.join(gpa, &.{ path, name });
                 defer gpa.free(child);
                 if (b.filter.excludes(b.root, child)) continue;
-                try b.record(gpa, child, .removed);
+                try s.record(gpa, child, .removed);
             }
         }
-        gpa.free(path);
-        b.dirs.values()[i].snapshot.deinit(gpa);
-        b.dirs.swapRemoveAt(i);
     }
-}
 
-/// The index of `path`'s remembered listing, creating an empty one the
-/// first time. Marks it as reached by the scan in progress.
-fn remember(b: *Baseline, gpa: Allocator, path: []const u8) Allocator.Error!usize {
-    if (b.dirs.getIndex(path)) |index| {
-        b.dirs.values()[index].seen = true;
-        return index;
+    /// Gives the scan ownership of a directory's new listing.
+    fn remember(s: *Scan, gpa: Allocator, path: []const u8) Allocator.Error!usize {
+        const owned = try gpa.dupe(u8, path);
+        errdefer gpa.free(owned);
+        try s.dirs.put(gpa, owned, .{ .snapshot = .empty });
+        return s.dirs.getIndex(path).?;
     }
-    const owned = try gpa.dupe(u8, path);
-    errdefer gpa.free(owned);
-    try b.dirs.put(gpa, owned, .{ .snapshot = .empty, .seen = true });
-    return b.dirs.getIndex(path).?;
-}
 
-fn record(b: *Baseline, gpa: Allocator, path: []const u8, kind: Kind) Allocator.Error!void {
-    const owned = try gpa.dupe(u8, path);
-    errdefer gpa.free(owned);
-    try b.changes.append(gpa, .{ .path = owned, .kind = kind });
-}
+    fn record(s: *Scan, gpa: Allocator, path: []const u8, kind: Kind) Allocator.Error!void {
+        const owned = try gpa.dupe(u8, path);
+        errdefer gpa.free(owned);
+        try s.changes.append(gpa, .{ .path = owned, .kind = kind });
+    }
+};
 
 fn clearChanges(b: *Baseline, gpa: Allocator) void {
     for (b.changes.items) |change| gpa.free(change.path);
@@ -542,6 +556,70 @@ test "directory access failures are not removals" {
             try testing.expectEqual(before, base.dirs.count());
             try testing.expectEqual(@as(usize, 0), count(base.changes.items, .removed));
             base.io = io;
+            try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+        }
+    }
+}
+
+test "a failed baseline traversal leaves changes for the retry" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "blocked");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
+    defer base.deinit(gpa);
+    try tmp.dir.writeFile(io, .{ .sub_path = "new", .data = "one" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "blocked/new", .data = "two" });
+
+    var vtable = io.vtable.*;
+    vtable.dirOpenDir = struct {
+        fn open(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+            if (std.mem.eql(u8, std.fs.path.basename(path), "blocked")) return error.AccessDenied;
+            return testing.io.vtable.dirOpenDir(userdata, dir, path, options);
+        }
+    }.open;
+    base.io.vtable = &vtable;
+    try testing.expectError(error.AccessDenied, base.diff(gpa));
+    base.io = io;
+    const changes = try base.diff(gpa);
+    try testing.expect(try holds(changes, root, "new", .created));
+    try testing.expect(try holds(changes, root, "blocked/new", .created));
+    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+}
+
+test "a failed baseline allocation leaves every change for the retry" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "sub");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        try tmp.dir.writeFile(io, .{ .sub_path = "old", .data = "one" });
+        try tmp.dir.writeFile(io, .{ .sub_path = "sub/changed", .data = "one" });
+        var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
+        defer base.deinit(gpa);
+        try tmp.dir.deleteFile(io, "old");
+        try tmp.dir.writeFile(io, .{ .sub_path = "new", .data = "one" });
+        try tmp.dir.writeFile(io, .{ .sub_path = "sub/changed", .data = "one and two" });
+        defer tmp.dir.deleteFile(io, "new") catch unreachable;
+
+        var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        if (base.diff(failing.allocator())) |_| {
+            try testing.expect(!failing.has_induced_failure);
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            const changes = try base.diff(gpa);
+            try testing.expect(try holds(changes, root, "old", .removed));
+            try testing.expect(try holds(changes, root, "new", .created));
+            try testing.expect(try holds(changes, root, "sub/changed", .modified));
             try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
         }
     }
