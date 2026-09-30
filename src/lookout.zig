@@ -1668,7 +1668,7 @@ test {
     _ = @import("backend/windows.zig");
     _ = @import("trace.zig");
     _ = @import("test_suite.zig");
-    _ = @import("test_bench.zig");
+    _ = @import("test_resources.zig");
     _ = @import("test_gaps.zig");
     _ = @import("test_fuzz.zig");
     // The backends this target was built with, each of which carries

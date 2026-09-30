@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Move wake, orphan-rename and cancellation speed limits out of the unit suite into an opt-in quiet-machine harness; unit tests count delivered changes and cancellation work instead, retaining their hang bounds.
+
 - Breaking: replace `Watcher.position`, `Position`, `Options.since` and `tracksPosition` with owned `Watcher.checkpoint(gpa)`, `Checkpoint`, `Options.checkpoint` and `tracksCheckpoint`; tokens keep per-watch cursors and unhanded changes, and old scalar tokens are refused.
 
 - Breaking: `overflow` and `unwatched` bypass debounce and settling, clear held changes on the same watch and path, and retain their precedence until delivery: ordinary changes < overflow < unwatched.

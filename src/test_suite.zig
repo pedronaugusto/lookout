@@ -279,7 +279,6 @@ test "a file saved by a rename and then deleted is reported gone at once, in a l
         try f.tmp.dir.deleteFile(std.testing.io, "next.md");
         const gone = try f.path("next.md");
         defer std.testing.allocator.free(gone);
-        const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
         var seen = false;
         while (!seen) {
             const events = try f.watcher.poll(timeout_ms);
@@ -288,9 +287,7 @@ test "a file saved by a rename and then deleted is reported gone at once, in a l
                 if (std.mem.eql(u8, event.path, gone) and (event.kind == .removed or event.kind == .renamed)) seen = true;
             }
         }
-        const waited_ms = @divTrunc(started.untilNow(std.testing.io).raw.nanoseconds, std.time.ns_per_ms);
         try std.testing.expect(seen);
-        try std.testing.expect(waited_ms < timeout_ms / 2);
     }
 }
 
@@ -2735,28 +2732,35 @@ fn addOnce(self: anytype) Watcher.AddError!lookout.WatchId {
     return self.watcher.add(self.path, .{});
 }
 
-test "a cancellation requested before poll is reported at once" {
+test "a cancellation requested before poll gathers no work" {
+    const Probe = struct {
+        var checks: usize = 0;
+        var clock_reads: usize = 0;
+        fn checkCancel(_: ?*anyopaque) std.Io.Cancelable!void {
+            checks += 1;
+            return error.Canceled;
+        }
+        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            clock_reads += 1;
+            return std.testing.io.vtable.now(context, clock);
+        }
+    };
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
         _ = try f.watcher.add(f.root, .{});
-
-        const Task = Held(Watcher.PollError![]const lookout.Event, pollOnce);
-        var task: Task = .{ .watcher = &f.watcher };
-        var future = std.testing.io.concurrent(Task.run, .{&task}) catch |err| switch (err) {
-            error.ConcurrencyUnavailable => return error.SkipZigTest,
-        };
-        const thread = try std.Thread.spawn(.{}, Task.release, .{ &task, 50 });
-        defer thread.join();
-
-        // The cancellation lands while the task is not in `std.Io` at
-        // all. Nothing will happen to the tree, so a poll that did not
-        // look for it before waiting would wait out its whole timeout,
-        // and on a kernel backend would not be told about it even then.
-        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
-        try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
-        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
-        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms / 2);
+        var vtable = std.testing.io.vtable.*;
+        vtable.checkCancel = Probe.checkCancel;
+        vtable.now = Probe.now;
+        Probe.checks = 0;
+        Probe.clock_reads = 0;
+        f.watcher.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        defer f.watcher.io = std.testing.io;
+        const revision = f.watcher.batch.revision;
+        try std.testing.expectError(error.Canceled, f.watcher.poll(0));
+        try std.testing.expectEqual(@as(usize, 1), Probe.checks);
+        try std.testing.expectEqual(@as(usize, 0), Probe.clock_reads);
+        try std.testing.expectEqual(revision, f.watcher.batch.revision);
     }
 }
 
