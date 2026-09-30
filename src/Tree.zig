@@ -476,16 +476,16 @@ pub fn rescanDirectory(
     Snapshot.freeChanges(t.gpa, &t.changes);
     defer Snapshot.freeChanges(t.gpa, &t.changes);
     node.snapshot.refresh(t.gpa, t.io, node.dir, t.max_dir_entries, &t.changes) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
         // The directory is gone, or is no longer a directory. Report it and
         // stop watching what is below it.
-        else => {
+        error.FileNotFound, error.NotDir => {
             const gone = try t.gpa.dupe(u8, node.path);
             defer t.gpa.free(gone);
             try batch.push(t.gpa, watch, gone, .removed, .directory);
             t.removeSubtree(watch, gone);
             return;
         },
+        else => return err,
     };
 
     if (t.nodes.getPtr(id).?.snapshot.truncated) {
@@ -613,12 +613,15 @@ pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {
     const node = t.nodes.getPtr(id) orelse return;
     if (node.role != .file) return;
 
-    const stat = Io.Dir.cwd().statFile(t.io, node.path, .{ .follow_symlinks = false }) catch {
-        const gone = try t.gpa.dupe(u8, node.path);
-        defer t.gpa.free(gone);
-        try batch.push(t.gpa, node.watch, gone, .removed, .file);
-        t.removeSubtree(node.watch, gone);
-        return;
+    const stat = Io.Dir.cwd().statFile(t.io, node.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => {
+            const gone = try t.gpa.dupe(u8, node.path);
+            defer t.gpa.free(gone);
+            try batch.push(t.gpa, node.watch, gone, .removed, .file);
+            t.removeSubtree(node.watch, gone);
+            return;
+        },
+        else => return err,
     };
     const before = node.meta;
     node.meta = .{
@@ -631,5 +634,52 @@ pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {
         try batch.push(t.gpa, node.watch, node.path, .modified, .of(stat.kind));
     } else if (before.ctime_ns != stat.ctime.nanoseconds) {
         try batch.push(t.gpa, node.watch, node.path, .attributes, .of(stat.kind));
+    }
+}
+
+test "tree access failures keep registrations and report no removals" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const file = try std.fs.path.join(gpa, &.{ root, "kept" });
+    defer gpa.free(file);
+
+    inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
+        var tree: Tree = .init(gpa, io, 4096, false);
+        defer tree.deinit();
+        var batch: Batch = .init(io, .{});
+        defer batch.deinit(gpa);
+        var added: std.ArrayList(NodeId) = .empty;
+        defer added.deinit(gpa);
+        try tree.addWatch(@enumFromInt(0), root, .{}, &added, &batch);
+        const directory_id = added.items[0];
+        try tree.addWatch(@enumFromInt(1), file, .{}, &added, &batch);
+        const file_id = added.items[1];
+
+        var vtable = io.vtable.*;
+        vtable.dirRead = struct {
+            fn read(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
+                return failure;
+            }
+        }.read;
+        vtable.dirStatFile = struct {
+            fn stat(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
+                return failure;
+            }
+        }.stat;
+        tree.io.vtable = &vtable;
+        try testing.expectError(failure, tree.rescanDirectory(directory_id, &batch, &added));
+        try testing.expectError(failure, tree.rescanFile(file_id, &batch));
+        try testing.expectEqual(@as(usize, 2), tree.nodes.count());
+        try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+        tree.io = io;
+        try tree.rescanDirectory(directory_id, &batch, &added);
+        try tree.rescanFile(file_id, &batch);
+        try testing.expectEqual(@as(usize, 0), batch.events.items.len);
     }
 }

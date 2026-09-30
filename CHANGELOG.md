@@ -19,6 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Polling and kqueue tree scans retain registrations when listing or file metadata access fails instead of reporting removals.
+
 - Document the FSEvents sink and buffer allocated at initialization and their allocator failures reported as SystemResources.
 
 - Baseline diffs commit listings and returned paths together, so failed traversal or allocation leaves every change available to a retry.
