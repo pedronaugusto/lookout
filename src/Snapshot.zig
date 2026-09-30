@@ -86,19 +86,30 @@ pub fn refresh(
     max_entries: usize,
     changes: *std.ArrayList(Change),
 ) RefreshError!void {
+    var next = try s.prepare(gpa, io, dir, max_entries, changes);
+    s.accept(gpa, &next);
+}
+
+/// Prepares a listing and its changes without advancing the baseline.
+/// The caller owns the result until every change has been accounted for.
+pub fn prepare(s: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize, changes: *std.ArrayList(Change)) RefreshError!Snapshot {
     var next = try readListing(gpa, io, dir, max_entries);
     errdefer next.deinit(gpa);
     try next.compare(s, gpa, changes);
+    return next;
+}
+
+/// Publishes a prepared listing without allocation. A truncated listing
+/// reports only what it read and keeps the last complete baseline.
+pub fn accept(s: *Snapshot, gpa: Allocator, next: *Snapshot) void {
     if (next.truncated and s.entries.count() != 0) {
-        // The names actually read can still report a creation or write.
-        // Missing names cannot report removals, and this partial listing
-        // cannot replace the one kept for the next complete comparison.
         s.truncated = true;
         next.deinit(gpa);
         return;
     }
     s.deinit(gpa);
-    s.* = next;
+    s.* = next.*;
+    next.* = undefined;
 }
 
 /// Reads a listing without advancing the snapshot it will be compared to.

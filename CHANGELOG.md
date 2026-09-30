@@ -25,6 +25,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Tree scans publish directory listings and file metadata after reporting succeeds, rolling back newly adopted nodes on failure so a retry sees the whole change.
+
 - FSEvents moves remembered subtree names together only after every replacement path and map slot is ready.
 
 - FSEvents retains a held rename and its pairing when reporting, replacement or rejoining fails.
