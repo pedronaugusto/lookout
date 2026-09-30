@@ -23,6 +23,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Polling releases a staged removal path when its removal list cannot grow, retaining the registration for retry.
+
 - Failed tree registration releases its directory snapshot and any file nodes created before the failure.
 
 - A tree walk releases its root path when allocating the initial frontier fails.
