@@ -19,6 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Document polling's open directory handles, both backends that recurse in the kernel, and baseline retry and truncation behavior.
+
 - Queued unwatched events, held changes and overflow notices remain pending until their transfer into the batch succeeds.
 
 - FSEvents reports overflow when a path's existence cannot be checked, retaining known paths and refusing ambiguous rename pairs.

@@ -278,6 +278,9 @@ It does not say what was lost, because by then the names are gone. Seed
 a `Baseline` where the watch is taken and `diff` it when the overflow
 arrives: it re-reads the tree and returns the changes the events would
 have carried, on the same ownership terms as the slice `poll` returns.
+An access or allocation error leaves the baseline unchanged for a retry.
+A truncated listing reports `overflow` and keeps remembered entries and
+subtrees until a complete listing can be compared.
 
 `Kind.unwatched` is the other half and says more: lookout is no longer
 watching that path, and nothing under it will be reported until the
@@ -375,7 +378,7 @@ caller named is an error.
 | `kqueue` | `EVFILT_VNODE` on a descriptor per watched path, plus a listing comparison to name the entry that changed. | one descriptor per directory **and per file** | removal + creation | never opened, never registered |
 | `inotify` | One kernel watch per directory; the kernel names the entry and gives each rename a cookie. | one kernel watch per directory | paired | never opened, never registered |
 | `windows` | `ReadDirectoryChangesW` with overlapped reads drained through a completion port. | nothing: recursion is a flag | paired | events dropped; the kernel recurses regardless |
-| `poll` | Re-stat and re-list on a timer. | one listing per directory per tick | removal + creation | never opened, never registered |
+| `poll` | Re-stat and re-list on a timer. | one open handle and one listing per directory per tick | removal + creation | never opened, never registered |
 
 `Options.max_dir_entries` is one directory's budget on all five: a
 recursive watch over twenty directories of three hundred entries is

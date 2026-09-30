@@ -107,9 +107,9 @@ pub const Backend = enum {
     /// through an I/O completion port. Recursive by flag, and renames
     /// arrive paired.
     windows,
-    /// Re-stat and re-list watched paths on a timer. Needs no kernel
-    /// support and holds no descriptor, at the cost of latency and of
-    /// walking every watched directory on every tick.
+    /// Re-stat and re-list watched paths on a timer. Needs no notification
+    /// queue, but holds a handle per watched directory, at the cost of
+    /// latency and of walking every watched directory on every tick.
     poll,
 };
 

@@ -1,6 +1,6 @@
 //! The Apple backend: FSEvents.
 //!
-//! FSEvents is the only mechanism here that recurses in the kernel. A
+//! FSEvents and `ReadDirectoryChangesW` recurse in the kernel. A
 //! whole tree costs one stream and no descriptors, where `kqueue` costs
 //! one descriptor per directory and per file; it names the entry that
 //! changed, where `kqueue` says only that a directory moved; it pairs
