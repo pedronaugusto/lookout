@@ -878,7 +878,16 @@ fn everyDirectory(_: void, _: []const u8) bool {
 /// or gives up on it.
 fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) lookout.Watcher.PollError!void {
     const taken = f.pairing.take(delivered, used, Asking{ .f = f }) orelse return;
-    defer f.gpa.free(taken.half.path);
+    errdefer {
+        f.pairing.held = taken.half;
+        if (taken.partner) |at| used[at] = false;
+    }
+    try f.reportTaken(batch, delivered, taken);
+    f.gpa.free(taken.half.path);
+}
+
+/// The pairing owns the half until reporting it and its partner succeeds.
+fn reportTaken(f: *FsEvents, batch: *Batch, delivered: []const Record, taken: records.Pairing.Taken) lookout.Watcher.PollError!void {
     const at = taken.partner orelse return f.reportHalf(batch, taken.half);
     const stream = f.streams.get(taken.half.id) orelse return f.reportHalf(batch, taken.half);
 
@@ -1227,24 +1236,24 @@ fn hold(f: *FsEvents, batch: *Batch, record: Record) lookout.Watcher.PollError!v
     // the next delivery is read, and a dupe that fails must leave what
     // is already held where it was.
     const owned = try f.gpa.dupe(u8, record.path);
+    errdefer f.gpa.free(owned);
+    try f.resolveHeld(batch);
     trace.log("fsevents hold renamed path={s}", .{record.path});
-    const stale = f.pairing.carry(.{
+    f.pairing.held = .{
         .id = record.id,
         .path = owned,
         .flags = record.flags,
         .event = record.event,
-    }) orelse return;
-    defer f.gpa.free(stale.path);
-    try f.reportHalf(batch, stale);
+    };
 }
 
 /// Gives up on a half that never found its partner, at the end of the
 /// whole wait rather than at the end of one delivery.
 fn resolveHeld(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
     const half = f.pairing.held orelse return;
-    f.pairing.held = null;
-    defer f.gpa.free(half.path);
     try f.reportHalf(batch, half);
+    f.pairing.held = null;
+    f.gpa.free(half.path);
 }
 
 /// Reports a half that never found its partner: the path was renamed
@@ -1924,3 +1933,56 @@ const c = struct {
         work: *const fn (?*anyopaque) callconv(.c) void,
     ) void;
 };
+
+test "a failed FSEvents held rename transfer keeps its path" {
+    try expectHeldRenameFailure(.resolve);
+}
+
+test "a failed FSEvents held rename replacement keeps its path" {
+    try expectHeldRenameFailure(.replace);
+}
+
+test "a failed FSEvents held rename rejoin keeps its path" {
+    try expectHeldRenameFailure(.rejoin);
+}
+
+fn expectHeldRenameFailure(comptime transfer: enum { resolve, replace, rejoin }) !void {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "old", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const old = try std.fs.path.join(testing.allocator, &.{ root, "old" });
+    defer testing.allocator.free(old);
+    var watcher = try lookout.Watcher.init(testing.allocator, testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    const backend = &watcher.impl.fsevents;
+    try tmp.dir.deleteFile(testing.io, "old");
+    const record: Record = .{ .id = id, .path = old, .flags = flag.item_renamed, .event = 1 };
+    try backend.hold(&watcher.batch, record);
+    const original = backend.pairing.held.?.path.ptr;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = if (transfer == .replace) 1 else 0 });
+    backend.gpa = failing.allocator();
+    defer backend.gpa = testing.allocator;
+    var used = [_]bool{};
+    const result = switch (transfer) {
+        .resolve => backend.resolveHeld(&watcher.batch),
+        .replace => backend.hold(&watcher.batch, record),
+        .rejoin => backend.rejoin(&watcher.batch, &.{}, &used),
+    };
+    try testing.expectError(error.OutOfMemory, result);
+    try testing.expect(backend.pairing.held != null);
+    try testing.expectEqual(original, backend.pairing.held.?.path.ptr);
+    try testing.expectEqualStrings(old, backend.pairing.held.?.path);
+    // With replacement, equality by contents is not enough: the original
+    // allocation must still be held and the incoming copy released.
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    backend.gpa = testing.allocator;
+    try backend.resolveHeld(&watcher.batch);
+    try testing.expect(backend.pairing.held == null);
+    try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
+    try testing.expectEqual(lookout.Kind.removed, watcher.batch.events.items[0].kind);
+}
+
