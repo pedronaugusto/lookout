@@ -37,14 +37,22 @@ io: Io,
 /// The kqueue descriptor, which is what `lookout.Watcher.fd` hands out.
 kq: posix.fd_t,
 tree: Tree,
-/// The descriptors opened for watched files. Directories are registered
-/// through the handle `Tree` already holds open.
-file_fds: std.AutoArrayHashMapUnmanaged(Tree.NodeId, posix.fd_t),
+/// Only registrations the kernel has accepted. Files own their descriptor
+/// here; directory descriptors remain owned by Tree. A node missing from
+/// this table still needs registration, even after its creation was scanned.
+registrations: std.AutoArrayHashMapUnmanaged(Tree.NodeId, Registration),
+retry_registration: bool = false,
+
 /// EV_CLEAR has already removed these flags from the kernel queue.
 /// Keep the delivery and its position across failed reporting attempts.
 delivery: [events_per_call]posix.Kevent = undefined,
 delivery_len: usize = 0,
 delivery_at: usize = 0,
+
+const Registration = struct {
+    fd: posix.fd_t,
+    owns_file: bool,
+};
 
 /// Everything `EVFILT_VNODE` can report. lookout asks for all of it and
 /// decides what to do with each bit when it arrives.
@@ -86,7 +94,7 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .io = io,
         .kq = rc,
         .tree = .init(gpa, io, options.max_dir_entries, true),
-        .file_fds = .empty,
+        .registrations = .empty,
     };
     // The one thing on this queue that is not a file: how another
     // thread makes a blocked `wait` come back.
@@ -107,8 +115,10 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
 
 /// Closes the kernel queue and every watched descriptor.
 pub fn deinit(k: *Kqueue) void {
-    for (k.file_fds.values()) |file_fd| _ = std.c.close(file_fd);
-    k.file_fds.deinit(k.gpa);
+    for (k.registrations.values()) |registration| {
+        if (registration.owns_file) _ = std.c.close(registration.fd);
+    }
+    k.registrations.deinit(k.gpa);
     k.tree.deinit();
     _ = std.c.close(k.kq);
     k.* = undefined;
@@ -147,10 +157,10 @@ fn trigger(context: usize) void {
     _ = std.c.kevent(@intCast(context), (&change)[0..1], 1, undefined, 0, null);
 }
 
-/// How many descriptors this backend holds open for watched paths. See
-/// `lookout.Watcher.Stats`.
+/// How many paths the kernel queue has accepted. Nodes awaiting a retry
+/// are not registrations yet. See `lookout.Watcher.Stats`.
 pub fn registrationCount(k: *const Kqueue) usize {
-    return k.tree.nodes.count();
+    return k.registrations.count();
 }
 
 /// Registers `abs_path`, a copy of which the backend keeps.
@@ -174,7 +184,7 @@ pub fn add(
 /// Stops watching `id` and closes its descriptors.
 pub fn remove(k: *Kqueue, id: WatchId) void {
     k.tree.removeWatch(id);
-    k.closeOrphanedFiles();
+    k.closeOrphanedRegistrations();
 }
 
 /// Reconciles descriptors with a live watch's new filter.
@@ -183,7 +193,7 @@ pub fn refilter(k: *Kqueue, id: WatchId, filter: lookout.Filter, batch: *Batch) 
     defer added.deinit(k.gpa);
     try k.tree.refilter(id, filter, &added, batch);
     try k.register(added.items, batch);
-    k.closeOrphanedFiles();
+    k.closeOrphanedRegistrations();
 }
 
 /// Waits on the kernel queue until it reports something `batch` did not
@@ -195,6 +205,7 @@ pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
     const protection = k.io.swapCancelProtection(.blocked);
     defer _ = k.io.swapCancelProtection(protection);
     const before = batch.revision;
+    if (k.retry_registration) try k.retryRegistrations(batch);
     const deadline: Deadline = .start(k.io, timeout_ms);
 
     while (true) {
@@ -265,7 +276,7 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollEr
     if (gone) |kind| {
         try batch.push(k.gpa, watch, path, kind, target);
         k.tree.removeSubtree(watch, path);
-        k.closeOrphanedFiles();
+        k.closeOrphanedRegistrations();
         return;
     }
 
@@ -275,7 +286,7 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollEr
                 var added: std.ArrayList(Tree.NodeId) = .empty;
                 defer added.deinit(k.gpa);
                 try k.tree.rescanDirectory(node_id, batch, &added);
-                k.closeOrphanedFiles();
+                k.closeOrphanedRegistrations();
                 k.register(added.items, batch) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     // The descriptor limit, reached while registering
@@ -304,12 +315,15 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollEr
 
 /// Tells the kernel about newly created nodes.
 fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) lookout.Watcher.AddError!void {
+    errdefer k.retry_registration = true;
     for (ids) |id| {
+        if (k.registrations.contains(id)) continue;
         const node = k.tree.nodes.get(id) orelse continue;
+        // Reserve the ownership handoff before asking the kernel.
+        try k.registrations.ensureUnusedCapacity(k.gpa, 1);
         const target: posix.fd_t = switch (node.role) {
             .directory => node.dir.handle,
             .file => file: {
-                if (k.file_fds.get(id)) |existing| break :file existing;
                 const opened = posix.openat(posix.AT.FDCWD, node.path, file_open_flags, 0) catch |err| {
                     // Failing to watch the path the caller named is an
                     // error. Failing to watch a file that merely happens
@@ -323,10 +337,12 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) lookout.Watcher
                     k.tree.removeSubtree(node.watch, node.path);
                     continue;
                 };
-                errdefer _ = std.c.close(opened);
-                try k.file_fds.put(k.gpa, id, opened);
                 break :file opened;
             },
+        };
+        var installed = false;
+        defer if (node.role == .file and !installed) {
+            _ = std.c.close(target);
         };
         const change: posix.Kevent = .{
             .ident = @intCast(target),
@@ -346,25 +362,47 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) lookout.Watcher
                     if (root) return error.WatchLimitReached;
                     try batch.trouble(k.gpa, node.watch, node.path, .directory);
                     k.tree.removeSubtree(node.watch, node.path);
+                    continue;
                 },
                 .NOENT, .BADF => continue,
                 else => return error.Unexpected,
             }
         }
+        k.registrations.putAssumeCapacity(id, .{ .fd = target, .owns_file = node.role == .file });
+        installed = true;
     }
+}
+
+/// Reconciles an interrupted registration pass without depending on the
+/// caller's temporary list of newly created nodes. Only failures need
+/// this full traversal; ordinary waits still do work per kernel event.
+fn retryRegistrations(k: *Kqueue, batch: *Batch) lookout.Watcher.PollError!void {
+    k.closeOrphanedRegistrations();
+    var i: usize = 0;
+    while (i < k.tree.nodes.count()) {
+        const id = k.tree.nodes.keys()[i];
+        k.register(&.{id}, batch) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Unexpected => return error.Unexpected,
+            else => {},
+        };
+        if (k.tree.nodes.contains(id)) i += 1;
+    }
+    k.retry_registration = false;
 }
 
 /// Closes the file descriptors of nodes the tree no longer holds. Closing
 /// a descriptor is also what removes its registration from the queue, so
 /// there is nothing else to undo.
-fn closeOrphanedFiles(k: *Kqueue) void {
+fn closeOrphanedRegistrations(k: *Kqueue) void {
     var i: usize = 0;
-    while (i < k.file_fds.count()) {
-        if (k.tree.nodes.contains(k.file_fds.keys()[i])) {
+    while (i < k.registrations.count()) {
+        if (k.tree.nodes.contains(k.registrations.keys()[i])) {
             i += 1;
         } else {
-            _ = std.c.close(k.file_fds.values()[i]);
-            k.file_fds.swapRemoveAt(i);
+            const registration = k.registrations.values()[i];
+            if (registration.owns_file) _ = std.c.close(registration.fd);
+            k.registrations.swapRemoveAt(i);
         }
     }
 }
@@ -424,4 +462,45 @@ test "allocation failure during delivery retains unread kqueue flags" {
         try testing.expect(saw_first and saw_last);
     }
     try testing.expect(fail_index > 0);
+}
+
+test "a failed kqueue registration is retried before waiting again" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var k = try Kqueue.init(failing.allocator(), testing.io, .{});
+    defer k.deinit();
+    var batch = Batch.init(testing.io, .{});
+    defer batch.deinit(failing.allocator());
+    try k.add(@enumFromInt(0), root, .{ .recursive = true }, &batch);
+    const parent = k.tree.nodes.keys()[0];
+    try tmp.dir.createDirPath(testing.io, "child");
+    for (0..40) |i| {
+        var name: [64]u8 = undefined;
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = try std.fmt.bufPrint(&name, "child/file{d}", .{i}), .data = "one" });
+    }
+    var added: std.ArrayList(Tree.NodeId) = .empty;
+    defer added.deinit(failing.allocator());
+    try k.tree.rescanDirectory(parent, &batch, &added);
+    // The snapshot is now committed, but the kernel has not accepted
+    // these nodes. A later scan cannot rediscover their creation.
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, k.register(added.items, &batch));
+    failing.fail_index = std.math.maxInt(usize);
+    try testing.expectEqual(k.registrations.count(), k.registrationCount());
+    try k.wait(&batch, 0);
+    batch.reset(failing.allocator());
+    for (0..40) |i| {
+        var name: [64]u8 = undefined;
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = try std.fmt.bufPrint(&name, "child/file{d}", .{i}), .data = "changed size" });
+    }
+    try k.wait(&batch, 0);
+    var modified: usize = 0;
+    for (batch.events.items) |event| {
+        if (event.kind == .modified) modified += 1;
+    }
+    try testing.expectEqual(@as(usize, 40), modified);
 }

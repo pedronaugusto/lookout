@@ -25,6 +25,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Kqueue owns a table of accepted registrations and retries missing nodes before waiting, so a failed registration cannot leave scanned files quietly unwatched.
+
 - Tree scans publish directory listings and file metadata after reporting succeeds, rolling back newly adopted nodes on failure so a retry sees the whole change.
 
 - FSEvents moves remembered subtree names together only after every replacement path and map slot is ready.
