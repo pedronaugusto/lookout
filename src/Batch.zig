@@ -208,6 +208,15 @@ pub fn pushDetail(
     from: ?[]const u8,
     target: Target,
 ) Allocator.Error!void {
+    const source = if (kind == .renamed and from != null and !path_cmp.eql(subject, from.?)) from else null;
+    const replaced_hold: usize = if (source) |path| @intFromBool(b.held.contains(.{ .id = id, .path = path })) else 0;
+    try b.pushAtPath(gpa, id, subject, kind, from, target, replaced_hold);
+    // Only a successfully recorded destination ends the source's hold.
+    // This applies to native renames and restored deferred changes alike.
+    if (source) |path| b.release(gpa, id, path);
+}
+
+fn pushAtPath(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target, replaced_hold: usize) Allocator.Error!void {
     b.revision += 1;
     const now = Io.Timestamp.now(b.io, .awake);
 
@@ -234,7 +243,7 @@ pub fn pushDetail(
             }
             return;
         }
-        if (b.limit != 0 and b.events.items.len + b.held.count() >= b.limit) {
+        if (b.limit != 0 and b.events.items.len + b.held.count() - replaced_hold >= b.limit) {
             try b.dropped.put(gpa, id, {});
             return;
         }
@@ -1095,4 +1104,46 @@ test "a failed batch replacement leaves the settling event held" {
     try b.push(gpa, id, root, .created, .directory);
     try testing.expectEqual(@as(usize, 0), b.held.count());
     try testing.expectEqual(Kind.created, b.events.items[0].kind);
+}
+
+test "a paired rename ends the source path's settling hold" {
+    const gpa = testing.allocator;
+    var b = testBatch(.{ .settle_ms = 50 });
+    defer b.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try b.push(gpa, id, "/watch/old", .modified, .file);
+    try b.pushRename(gpa, id, "/watch/new", "/watch/old", .file);
+    try testing.expectEqual(@as(usize, 0), b.held.count());
+    try testing.expectEqual(@as(usize, 1), b.events.items.len);
+    try testing.expectEqual(Kind.renamed, b.events.items[0].kind);
+    try testing.expectEqualStrings("/watch/old", b.events.items[0].from.?);
+}
+
+test "a debounced rename replaces its source within the same event ceiling" {
+    const gpa = testing.allocator;
+    var b = testBatch(.{ .debounce_ms = 50, .max_events = 1 });
+    defer b.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try b.push(gpa, id, "/watch/old", .modified, .file);
+    try b.deferChange(gpa, id, "/watch/new", .renamed, "/watch/old", .file);
+    try b.flush(gpa);
+    try testing.expectEqual(@as(usize, 0), b.dropped.count());
+    try testing.expectEqual(@as(usize, 1), b.held.count());
+    try testing.expectEqualStrings("/watch/new", b.held.keys()[0].path);
+    try testing.expectEqualStrings("/watch/old", b.held.values()[0].from.?);
+}
+
+test "a failed rename leaves its source hold available for retry" {
+    const gpa = testing.allocator;
+    var b = testBatch(.{ .settle_ms = 50 });
+    defer b.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try b.push(gpa, id, "/watch/old", .modified, .file);
+    var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, b.pushRename(failing.allocator(), id, "/watch/new", "/watch/old", .file));
+    try testing.expectEqual(@as(usize, 1), b.held.count());
+    try testing.expectEqualStrings("/watch/old", b.held.keys()[0].path);
+    try testing.expectEqual(@as(usize, 0), b.events.items.len);
+    try b.pushRename(gpa, id, "/watch/new", "/watch/old", .file);
+    try testing.expectEqual(@as(usize, 0), b.held.count());
 }
