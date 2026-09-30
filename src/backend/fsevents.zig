@@ -884,7 +884,8 @@ fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) 
     const stream = f.streams.get(taken.half.id) orelse return f.reportHalf(batch, taken.half);
 
     const partner = delivered[at];
-    if (f.exists(partner.path)) {
+    const there = f.exists(partner.path) orelse return f.incomplete(batch, stream);
+    if (there) {
         try f.joined(batch, stream, partner.path, taken.half.path, partner.target());
     } else {
         try f.joined(batch, stream, taken.half.path, partner.path, partner.target());
@@ -910,7 +911,7 @@ const Asking = struct {
         return stream.wants(subject);
     }
 
-    pub fn exists(a: Asking, subject: []const u8) bool {
+    pub fn exists(a: Asking, subject: []const u8) ?bool {
         return a.f.exists(subject);
     }
 };
@@ -978,7 +979,8 @@ fn report(
         if (records.partnerOf(record, delivered, used, at + 1, Asking{ .f = f })) |partner_at| {
             used[partner_at] = true;
             const partner = delivered[partner_at];
-            if (f.exists(partner.path)) {
+            const there = f.exists(partner.path) orelse return f.incomplete(batch, stream);
+            if (there) {
                 try f.joined(batch, stream, partner.path, record.path, partner.target());
             } else {
                 try f.joined(batch, stream, record.path, partner.path, record.target());
@@ -1035,7 +1037,7 @@ fn reportPlain(
     // ambiguous cases: accumulated removal flags and an unknown path
     // whose flags do not say it was created.
     const there = if (needsExistenceCheck(record.flags, seen))
-        f.exists(record.path)
+        f.exists(record.path) orelse return f.incomplete(batch, stream)
     else
         true;
 
@@ -1379,7 +1381,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
     // watched path as readily as it names an entry, and a path the
     // backend has never heard of is a path it reports as created. This
     // is the whole of the seeding for a watch on a single file.
-    if (f.exists(stream.root)) try f.remember(stream.id, stream.root);
+    if (f.exists(stream.root) orelse return error.Unexpected) try f.remember(stream.id, stream.root);
     if (stream.scope == .file) return;
     try f.budget.begin(stream.root);
     defer f.budget.end();
@@ -1405,9 +1407,58 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
     try walk.tree(f.gpa, f.io, stream.root, &seeding, Seeding.visit);
 }
 
-fn exists(f: *const FsEvents, subject: []const u8) bool {
-    _ = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch return false;
+/// Unknown is distinct from absent: it cannot decide a rename or removal.
+fn exists(f: *const FsEvents, subject: []const u8) ?bool {
+    _ = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return false,
+        else => return null,
+    };
     return true;
+}
+
+fn incomplete(f: *FsEvents, batch: *Batch, stream: *const Stream) Allocator.Error!void {
+    try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
+}
+
+test "FSEvents access failures preserve known paths and report an incomplete answer" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const kept = try std.fs.path.join(gpa, &.{ root, "kept" });
+    defer gpa.free(kept);
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    const f = &watcher.impl.fsevents;
+    const stream = f.streams.get(id).?;
+    inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
+        var vtable = io.vtable.*;
+        vtable.dirStatFile = struct {
+            fn stat(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
+                if (std.mem.eql(u8, std.fs.path.basename(path), "kept")) return failure;
+                return testing.io.vtable.dirStatFile(userdata, dir, path, options);
+            }
+        }.stat;
+        f.io.vtable = &vtable;
+        try testing.expect(!records.pairs(
+            .{ .id = id, .path = kept, .flags = flag.item_renamed, .event = 0 },
+            .{ .id = id, .path = root, .flags = flag.item_renamed, .event = 0 },
+            Asking{ .f = f },
+        ));
+        try f.reportPlain(&watcher.batch, .{ .id = id, .path = kept, .flags = flag.item_removed, .event = 0 }, stream);
+        try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
+        try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
+        try testing.expectEqualStrings(root, watcher.batch.events.items[0].path);
+        try testing.expect(f.known.contains(.{ .id = id, .path = kept }));
+        f.io = io;
+        watcher.batch.reset(gpa);
+    }
 }
 
 /// Keeps the entry budget of the directory a change happened in, and

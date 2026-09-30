@@ -143,12 +143,14 @@ pub fn pairs(a: Record, b: Record, ctx: anytype) bool {
 ///
 /// The answer costs a `stat`, and `partnerOf` asks it of one record
 /// against many.
-fn pairsKnowing(a: Record, a_exists: bool, b: Record, ctx: anytype) bool {
+fn pairsKnowing(a: Record, a_exists: ?bool, b: Record, ctx: anytype) bool {
     if (a.id != b.id) return false;
     if (!a.renamed() or !b.renamed()) return false;
     if (path_cmp.eql(a.path, b.path)) return false;
     if (!ctx.wanted(a.id, a.path) or !ctx.wanted(b.id, b.path)) return false;
-    return ctx.exists(b.path) != a_exists;
+    const there = a_exists orelse return false;
+    const other: ?bool = ctx.exists(b.path);
+    return (other orelse return false) != there;
 }
 
 /// Where in `records` the other half of `subject` is, at or after

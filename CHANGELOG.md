@@ -19,6 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- FSEvents reports overflow when a path's existence cannot be checked, retaining known paths and refusing ambiguous rename pairs.
+
 - A baseline reports a missing root once, until the root has been seen again.
 
 - Truncated directory scans retain remembered entries and subtrees until a complete listing can establish what changed.
