@@ -1,0 +1,10 @@
+.{
+    .name = .lookout_benchmark,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x8f614f8ea3b59ff6,
+    .dependencies = .{
+        .lookout = .{ .path = ".." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

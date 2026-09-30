@@ -1,0 +1,11 @@
+build/
+zig-out/
+.zig-cache/
+target/
+go-mod/
+__pycache__/
+*.pyc
+results*.tsv
+results*.txt
+*.prof
+results*.tmp

@@ -1,0 +1,18 @@
+[package]
+name = "lookout-rust-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libc = "=0.2.177"
+notify = "=8.2.0"
+notify-debouncer-full = "=0.6.0"
+
+[[bin]]
+name = "notify-raw-bench"
+path = "notify_raw.rs"
+
+[[bin]]
+name = "notify-debounced-bench"
+path = "notify_debounced.rs"
