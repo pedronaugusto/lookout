@@ -352,10 +352,9 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         if (std.c.fcntl(end, c.F_SETFL, flags | c.O_NONBLOCK) < 0) return error.Unexpected;
     }
 
-    const sink = gpa.create(Sink) catch return error.SystemResources;
+    const sink = try gpa.create(Sink);
     errdefer gpa.destroy(sink);
-    const bytes = gpa.alloc(u8, buffer.clamp(options.buffer_bytes, bounds)) catch
-        return error.SystemResources;
+    const bytes = try gpa.alloc(u8, buffer.clamp(options.buffer_bytes, bounds));
     errdefer gpa.free(bytes);
     sink.* = .{
         .lock = .{},
@@ -1418,6 +1417,23 @@ fn exists(f: *const FsEvents, subject: []const u8) ?bool {
 
 fn incomplete(f: *FsEvents, batch: *Batch, stream: *const Stream) Allocator.Error!void {
     try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
+}
+
+test "FSEvents initialization preserves sink allocator failure" {
+    try expectInitAllocationFailure(0);
+}
+
+test "FSEvents initialization preserves buffer allocator failure" {
+    try expectInitAllocationFailure(1);
+}
+
+fn expectInitAllocationFailure(fail_index: usize) !void {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+    try std.testing.expectError(error.OutOfMemory, lookout.Watcher.init(
+        failing.allocator(),
+        std.testing.io,
+        .{ .backend = .fsevents },
+    ));
 }
 
 test "FSEvents access failures preserve known paths and report an incomplete answer" {

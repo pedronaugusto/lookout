@@ -112,7 +112,7 @@ into a fixed buffer and writes one byte to a pipe, and a burst that
 outruns the buffer becomes `Kind.overflow`. FSEvents allocates its delivery
 sink and buffer at `init`, even with no watches; the buffer defaults to
 4 MiB and `Options.buffer_bytes` sets its size. If either allocation fails,
-`init` returns `error.SystemResources`. The other backends allocate watch
+`init` returns `error.OutOfMemory`. The other backends allocate watch
 tables and event batches as they need them.
 
 **Cancellation is honoured on every backend; what ends a blocked wait

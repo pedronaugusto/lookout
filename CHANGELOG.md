@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: `Watcher.InitError` includes `OutOfMemory`; FSEvents preserves sink and buffer allocator failures instead of reporting `SystemResources`.
+
 ### Added
 
 - `Watcher.refilter(id, filter)` changes a live watch's filter without
@@ -31,7 +35,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Polling and kqueue tree scans retain registrations when listing or file metadata access fails instead of reporting removals.
 
-- Document the FSEvents sink and buffer allocated at initialization and their allocator failures reported as SystemResources.
+- Document the FSEvents sink and buffer allocated at initialization and their allocator failures.
 
 - Baseline diffs commit listings and returned paths together, so failed traversal or allocation leaves every change available to a retry.
 

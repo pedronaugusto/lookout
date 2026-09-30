@@ -835,10 +835,10 @@ pub const Watcher = struct {
         },
     };
 
-    /// Errors `init` can return when creating the backend's kernel resources.
+    /// Errors `init` can return when creating the backend's resources.
     /// FSEvents also allocates its delivery sink and `Options.buffer_bytes`
-    /// buffer here, even with no watches, and maps allocator failures to
-    /// `SystemResources`. Other backends allocate as watches are added.
+    /// buffer here, even with no watches. Allocator failures are
+    /// `OutOfMemory`. Other backends allocate as watches are added.
     pub const InitError = error{
         /// `Options.backend` names a backend this target was not built
         /// with. See `supported`.
@@ -847,9 +847,10 @@ pub const Watcher = struct {
         SystemFdQuotaExceeded,
         /// This process may not open another descriptor.
         ProcessFdQuotaExceeded,
-        /// The system could not create the notification queue, or the
-        /// allocator could not create the FSEvents delivery sink or buffer.
+        /// The system could not create the notification queue.
         SystemResources,
+        /// The allocator could not create the FSEvents delivery sink or buffer.
+        OutOfMemory,
     } || UnexpectedError;
 
     /// Errors `add` can return, on top of the file-system errors of
