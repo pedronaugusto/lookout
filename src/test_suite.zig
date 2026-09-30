@@ -3129,7 +3129,7 @@ test "an include list reports what it names and nothing else" {
 }
 
 test "resuming retains a debounced change that poll has not handed out" {
-    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -3170,7 +3170,7 @@ test "resuming retains a debounced change that poll has not handed out" {
 }
 
 test "checkpoints keep settling and rename changes beside handed deliveries" {
-    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     for ([_]lookout.Options{ .{ .settle_ms = 200 }, .{ .debounce_ms = 200 } }) |holding| {
@@ -3250,7 +3250,7 @@ test "checkpoints keep settling and rename changes beside handed deliveries" {
 }
 
 test "a crash before checkpoint persistence replays the uncommitted delivery" {
-    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var f = try Fixture.initOptions(.{ .backend = .fsevents, .latency_ms = 0 });
     defer f.deinit();
@@ -3284,7 +3284,7 @@ test "a crash before checkpoint persistence replays the uncommitted delivery" {
 }
 
 test "checkpoint allocation failures leave the delivery and snapshot owned" {
-    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var f = try Fixture.init(.fsevents);
     defer f.deinit();
@@ -3329,7 +3329,7 @@ fn tryCheckpoint(watcher: *const Watcher, gpa: std.mem.Allocator) !lookout.Check
 }
 
 test "checkpoint restoration rolls back a failed add and preserves prior slices" {
-    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var f = try Fixture.init(.fsevents);

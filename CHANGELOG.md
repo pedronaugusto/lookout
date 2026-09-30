@@ -31,6 +31,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Native checkpoint regression tests select their backend at compile time, so the shared suite also compiles on targets without FSEvents.
+
 - An incomplete directory-budget reread keeps its prior names and reports uncertainty until a complete listing succeeds, instead of treating inaccessible entries as absent.
 
 - Batch and deadline arithmetic tests use a frozen clock, so a runner pause cannot expire their input between samples or cross the platform wait clamp.
