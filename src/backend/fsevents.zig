@@ -1042,10 +1042,6 @@ fn report(
         try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
         try losses.append(f.gpa, .{ .stream = stream, .at = record.path });
     }
-    if (!stream.wants(record.path)) {
-        trace.log("fsevents drop out-of-scope root={s} path={s}", .{ stream.root, record.path });
-        return;
-    }
     // The marker that the system has finished reading its log back to
     // the position `lookout.Options.checkpoint` named. Nothing happened to a
     // path, so there is nothing to report; it is declared and swallowed
@@ -1055,6 +1051,10 @@ fn report(
     if (record.flags & flag.history_done != 0) {
         if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
         trace.log("fsevents history done root={s}", .{stream.root});
+        return;
+    }
+    if (!stream.wants(record.path)) {
+        trace.log("fsevents drop out-of-scope root={s} path={s}", .{ stream.root, record.path });
         return;
     }
     // The watched path itself moved or vanished. FSEvents reports both
@@ -2247,4 +2247,28 @@ test "checkpoints preserve independent cursors and unread stream records" {
     const ra = try resumed.add(first, .{});
     try std.testing.expectEqual(@as(u64, 101), resumed.impl.fsevents.streams.get(ra).?.cursor);
     try std.testing.expectEqual(@as(u64, 202), resumed.impl.fsevents.streams.get(rb).?.cursor);
+}
+
+test "a file stream accepts the replay sentinel outside its event scope" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "file", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, "file", gpa);
+    defer gpa.free(root);
+    const parent = std.fs.path.dirname(root).?;
+    var backend = try FsEvents.init(gpa, testing.io, .{});
+    defer backend.deinit();
+    var batch = Batch.init(testing.io, .{});
+    defer batch.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try backend.add(id, root, .{}, &batch);
+    const stream = backend.streams.get(id).?;
+    stream.resumed = true;
+    try synthesize(gpa, stream, &.{.{ .path = parent, .flags = flag.history_done }});
+    try backend.drain(&batch);
+    if (stream.replayed == null) std.debug.print("file replay sentinel discarded root={s} parent={s} scope={s}\n", .{ root, parent, @tagName(stream.scope) });
+    try testing.expect(stream.replayed != null);
+    try testing.expectEqual(@as(usize, 0), batch.events.items.len);
 }

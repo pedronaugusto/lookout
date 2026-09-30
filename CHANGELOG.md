@@ -31,6 +31,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- FSEvents accepts replay completion as stream state before applying path scope, so a file watch can finish catching up when the sentinel names its parent.
+
 - A paired rename releases the source path's settling or debounce hold after recording the destination, so the old name cannot later report a stale modification.
 
 - The held-event refilter test stages its input before polling, so runner pauses cannot promote it before inspection; failures print the backend, phase and delivery state.
