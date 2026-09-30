@@ -23,6 +23,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Windows retains held removals and rename paths until their batch transfer succeeds, so allocation failures leave them retryable.
+
 - Polling releases a staged removal path when its removal list cannot grow, retaining the registration for retry.
 
 - Failed tree registration releases its directory snapshot and any file nodes created before the failure.

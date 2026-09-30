@@ -434,10 +434,10 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
 fn flushRenames(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
     for (w.watches.values()) |watch| {
         const old = watch.pending_rename orelse continue;
+        if (wants(watch, old))
+            try batch.push(w.gpa, watch.id, old, .removed, watch.goneTarget());
         watch.pending_rename = null;
-        defer w.gpa.free(old);
-        if (!wants(watch, old)) continue;
-        try batch.push(w.gpa, watch.id, old, .removed, watch.goneTarget());
+        w.gpa.free(old);
     }
 }
 
@@ -587,10 +587,10 @@ fn resolveRemovals(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
 /// Reports `watch`'s held removal, if it holds one.
 fn resolveRemoval(w: *Windows, watch: *Watch, batch: *Batch) lookout.Watcher.PollError!void {
     const gone = watch.held_removal orelse return;
-    defer w.gpa.free(gone);
-    watch.held_removal = null;
     trace.log("windows push removed held path={s}", .{gone});
     try batch.push(w.gpa, watch.id, gone, .removed, watch.goneTarget());
+    watch.held_removal = null;
+    w.gpa.free(gone);
 }
 
 const RootState = enum { stands, moved, gone, unknown };
@@ -832,8 +832,11 @@ fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, ba
         return;
     }
     const from = watch.pending_rename;
-    watch.pending_rename = null;
-    defer if (from) |old| w.gpa.free(old);
+    var transferred = false;
+    defer if (transferred) {
+        watch.pending_rename = null;
+        if (from) |old| w.gpa.free(old);
+    };
     const keeps_from = if (from) |old| wants(watch, old) else false;
     // The new name is where the entry is now, so it can be asked what the
     // entry is, whichever name is reported.
@@ -843,6 +846,7 @@ fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, ba
             const gone = if (target != .unknown) target else watch.goneTarget();
             try batch.push(w.gpa, watch.id, from.?, .removed, gone);
         }
+        transferred = true;
         return;
     }
     watch.noteRoot(target);
@@ -854,6 +858,7 @@ fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, ba
         try batch.push(w.gpa, watch.id, subject, .created, target);
     }
     try w.recount(watch, subject, .appeared, batch);
+    transferred = true;
 }
 
 /// What the path is now, for the actions that leave it there to be
@@ -937,6 +942,7 @@ const Change = struct {
 };
 
 test "a read that completes with nothing is an overflow, and the watch reads on" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
     // ReadDirectoryChangesW: "If the number of changes exceeds the
     // buffer size, the entire contents of the buffer are discarded, the
     // lpBytesReturned parameter contains zero". Through a completion
@@ -1010,6 +1016,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
 }
 
 test "a lost read reads the entry counts again, so the budget holds after it" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
     // Three creations, read and counted; then the count set back to what
     // it would have been had the kernel discarded them, which is what a
     // read it could not hold does ("the entire contents of the buffer
@@ -1189,3 +1196,72 @@ const c = struct {
         lpCompletionRoutine: ?OVERLAPPED_COMPLETION_ROUTINE,
     ) callconv(.winapi) BOOL;
 };
+
+test "a failed Windows removal transfer keeps its held path" {
+    try expectHeldTransferFailure(.removal);
+}
+
+test "a failed Windows rename flush keeps its held path" {
+    try expectHeldTransferFailure(.flush);
+}
+
+test "a failed Windows rename pair transfer keeps its held path" {
+    try expectHeldTransferFailure(.pair);
+}
+
+fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !void {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const old_path = try std.fs.path.join(testing.allocator, &.{ root, "old" });
+    defer testing.allocator.free(old_path);
+    const new_path = try std.fs.path.join(testing.allocator, &.{ root, "new" });
+    defer testing.allocator.free(new_path);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    // Only the state used by these platform-independent transfers is live.
+    var backend: Windows = undefined;
+    backend.gpa = failing.allocator();
+    backend.io = testing.io;
+    backend.watches = .empty;
+    defer backend.watches.deinit(testing.allocator);
+    backend.budget = .init(testing.allocator, testing.io, 8);
+    defer backend.budget.deinit();
+    var watch: Watch = undefined;
+    watch.id = @enumFromInt(0);
+    watch.root = root;
+    watch.only = null;
+    watch.filter = .none;
+    watch.root_target = .directory;
+    watch.recursive = false;
+    watch.held_removal = null;
+    watch.pending_rename = null;
+    defer if (watch.held_removal) |held| testing.allocator.free(held);
+    defer if (watch.pending_rename) |held| testing.allocator.free(held);
+    try backend.watches.put(testing.allocator, watch.id, &watch);
+    var batch: Batch = .init(testing.io, .{});
+    defer batch.deinit(testing.allocator);
+    const held = try testing.allocator.dupe(u8, old_path);
+    if (transfer == .removal) watch.held_removal = held else watch.pending_rename = held;
+
+    const result = switch (transfer) {
+        .removal => backend.resolveRemoval(&watch, &batch),
+        .flush => backend.flushRenames(&batch),
+        .pair => backend.reportRename(&watch, c.FILE_ACTION_RENAMED_NEW_NAME, new_path, &batch),
+    };
+    try testing.expectError(error.OutOfMemory, result);
+    const kept = if (transfer == .removal) watch.held_removal else watch.pending_rename;
+    try testing.expect(kept != null);
+    try testing.expectEqualStrings(old_path, kept.?);
+    try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+    backend.gpa = testing.allocator;
+    switch (transfer) {
+        .removal => try backend.resolveRemoval(&watch, &batch),
+        .flush => try backend.flushRenames(&batch),
+        .pair => try backend.reportRename(&watch, c.FILE_ACTION_RENAMED_NEW_NAME, new_path, &batch),
+    }
+    try testing.expectEqual(@as(usize, 1), batch.events.items.len);
+    try testing.expectEqual(if (transfer == .pair) lookout.Kind.renamed else .removed, batch.events.items[0].kind);
+    try testing.expect(watch.held_removal == null and watch.pending_rename == null);
+}

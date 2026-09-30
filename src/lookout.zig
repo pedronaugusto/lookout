@@ -1659,6 +1659,8 @@ test {
     _ = @import("buffer.zig");
     _ = @import("path.zig");
     _ = @import("walk.zig");
+    // Held-event transfers use no Windows calls and are tested on every host.
+    _ = @import("backend/windows.zig");
     _ = @import("trace.zig");
     _ = @import("test_suite.zig");
     _ = @import("test_bench.zig");
