@@ -128,24 +128,23 @@ pub fn end(b: *Budget) void {
 /// it, which lets every other change there go by, leaves the count as
 /// true as any other.
 pub fn note(b: *Budget, dir: []const u8, name: []const u8, move: Move) Allocator.Error!bool {
-    const gop = try b.counts.getOrPut(b.gpa, dir);
-    if (!gop.found_existing) {
-        const owned = b.gpa.dupe(u8, dir) catch |err| {
-            _ = b.counts.swapRemove(dir);
-            return err;
-        };
-        gop.key_ptr.* = owned;
-        gop.value_ptr.* = namesIn(b.gpa, b.io, dir) catch |err| {
-            b.gpa.free(owned);
-            _ = b.counts.swapRemove(dir);
-            return err;
-        };
-    } else switch (move) {
-        .appeared => try addName(b.gpa, gop.value_ptr, name),
-        .vanished => if (gop.value_ptr.fetchSwapRemove(name)) |kv| b.gpa.free(kv.key),
-        .unchanged => {},
+    if (b.counts.getPtr(dir)) |names| {
+        switch (move) {
+            .appeared => try addName(b.gpa, names, name),
+            .vanished => if (names.fetchSwapRemove(name)) |kv| b.gpa.free(kv.key),
+            .unchanged => {},
+        }
+        return names.count() > b.max;
     }
-    return gop.value_ptr.count() > b.max;
+
+    // Publish only a complete listing. Until the map takes it, this scope
+    // owns both the directory key and every entry name.
+    var names = try namesIn(b.gpa, b.io, dir);
+    errdefer freeNames(b.gpa, &names);
+    const owned = try b.gpa.dupe(u8, dir);
+    errdefer b.gpa.free(owned);
+    try b.counts.put(b.gpa, owned, names);
+    return names.count() > b.max;
 }
 
 /// Drops `dir` and every directory under it, for a subtree that has gone.
@@ -337,6 +336,32 @@ fn freeNames(gpa: Allocator, names: *Names) void {
 }
 
 const testing = std.testing;
+
+test "a failed first budget count leaves no directory for the retry" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "entry", .data = "x" });
+
+    // Exercise the map, directory path, listing and entry-name allocations.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var budget: Budget = .init(failing.allocator(), testing.io, 8);
+        defer budget.deinit();
+        if (budget.note(root, "entry", .appeared)) |_| {
+            try testing.expectEqual(@as(usize, 1), budget.count(root).?);
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(@as(usize, 0), budget.counts.count());
+            failing.fail_index = std.math.maxInt(usize);
+            try testing.expect(!try budget.note(root, "entry", .appeared));
+            try testing.expectEqual(@as(usize, 1), budget.count(root).?);
+        }
+    }
+}
 
 test "a directory is counted once and then kept current" {
     const gpa = testing.allocator;

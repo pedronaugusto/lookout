@@ -23,6 +23,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A failed first budget count publishes no directory or partial listing, so cleanup and retry remain valid.
+
 - Document polling's open directory handles, both backends that recurse in the kernel, and baseline retry and truncation behavior.
 
 - Queued unwatched events, held changes and overflow notices remain pending until their transfer into the batch succeeds.
