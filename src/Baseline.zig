@@ -52,8 +52,8 @@ const Remembered = struct {
 };
 
 /// What a baseline covers, which should be what the watch covers: a
-/// baseline narrower than its watch reports changes the watch would not
-/// have, and a wider one misses none but costs more to take.
+/// baseline narrower than its watch misses changes the watch would have
+/// reported, and a wider one reports extra paths and costs more to take.
 pub const Options = struct {
     /// Cover every directory below `path` as well.
     recursive: bool = false,

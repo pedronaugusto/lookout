@@ -62,9 +62,9 @@ buffer_len: usize,
 
 /// What `lookout.Options.buffer_bytes` may ask for here.
 ///
-/// The floor is a few times the largest single record -- twelve bytes and
-/// a name of up to 32767 UTF-16 units -- so that one change can always be
-/// reported. The ceiling is a size past which the call is a bad idea
+/// The floor is 4 KiB; a record with a long relative name can exceed it
+/// and require an overflow notice and a rescan. The ceiling is a size
+/// past which the call is a bad idea
 /// rather than a refusal: the buffer is non-paged pool while a read is
 /// outstanding, one per watch. The default is what a network share will
 /// take, which is the one size that works everywhere.

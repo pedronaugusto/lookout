@@ -769,7 +769,7 @@ pub const Watcher = struct {
         /// `AddOptions.recursive`.
         recursive: bool,
         /// An allocation failure may have interrupted this watch's delivery.
-        /// Set without allocation and cleared only after overflow is recorded.
+        /// Set without allocation and cleared only after its notice is handed out.
         incomplete: bool = false,
     };
 
@@ -1641,8 +1641,8 @@ pub const Watcher = struct {
         /// Paths the operating system has been told about on this
         /// watcher's behalf: one per kernel watch on `inotify`, one per
         /// open descriptor on `kqueue`, one per stream on `fsevents`, one
-        /// per directory handle on `windows`, and one per directory
-        /// listed on `poll`.
+        /// per directory handle on `windows`, and one per path scanned
+        /// on `poll`.
         ///
         /// This is the number that runs into the limits — the per-user
         /// cap on `inotify` watches, the per-process cap on descriptors —
