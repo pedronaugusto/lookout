@@ -251,6 +251,14 @@ pub fn pushDetail(
     b.release(gpa, id, subject);
 }
 
+/// Records a recovery notice immediately, even when ordinary paths are
+/// debounced. The watcher keeps the notice pending until this succeeds.
+pub fn recover(b: *Batch, gpa: Allocator, id: WatchId, root: []const u8, target: Target) Allocator.Error!void {
+    b.revision += 1;
+    try b.record(gpa, id, root, .overflow, null, target, .now(b.io, .awake));
+    b.release(gpa, id, root);
+}
+
 /// How large a file is now, or `null` when it cannot be asked. Read only
 /// for a path `settle_ms` is holding, so a watcher without that option
 /// set never makes this call.

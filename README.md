@@ -115,6 +115,15 @@ sink and buffer at `init`, even with no watches; the buffer defaults to
 `init` returns `error.OutOfMemory`. The other backends allocate watch
 tables and event batches as they need them.
 
+**Allocation failure leaves recovery pending.** A `poll` returning
+`error.OutOfMemory` has handed nothing out. Retry it: unread deliveries
+stay in the backend where possible, and the retry reports `Kind.overflow`
+against every still-live watch root before it returns successfully.
+Rescan those roots. This conservative notice also covers backend state
+changed before the failure; it survives repeated allocation failures and
+is reported even after a `wake`, without waiting for settling or
+debouncing. Events already gathered stay available to the retry.
+
 **Cancellation is honoured on every backend; what ends a blocked wait
 is not the same on all of them.** `poll` returns `error.Canceled` for a
 cancellation requested before it is called or while it waits, on every

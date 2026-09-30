@@ -63,6 +63,9 @@ sink: *Sink,
 streams: std.AutoArrayHashMapUnmanaged(WatchId, *Stream),
 /// Scratch the drain copies the sink into, reused between polls.
 staging: std.ArrayList(u8),
+/// The staging delivery's loss flag stays with its bytes until reporting
+/// succeeds, including a delivery containing only an overflow notice.
+staging_overflowed: bool = false,
 /// How many entries each watched directory holds, against
 /// `lookout.Options.max_dir_entries`.
 budget: Budget,
@@ -703,11 +706,10 @@ pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollE
     // `std.Io`'s reach.
     const protection = f.io.swapCancelProtection(.blocked);
     defer _ = f.io.swapCancelProtection(protection);
-    const result = f.collect(batch, timeout_ms);
+    try f.collect(batch, timeout_ms);
     // Whatever is still held when the wait is over never found its
     // partner, however many deliveries it waited through.
     try f.resolveHeld(batch);
-    return result;
 }
 
 fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
@@ -757,27 +759,27 @@ fn readable(f: *FsEvents, timeout: i32) bool {
 /// Takes everything the delivery thread has left and turns it into
 /// events.
 fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
-    f.staging.clearRetainingCapacity();
-    var overflowed = false;
+    // A failed drain keeps its bytes. Replaying can repeat bookkeeping,
+    // which Watcher.poll covers with its conservative recovery notice.
+    errdefer f.budget.reread({}, everyDirectory);
+    var overflowed = f.staging_overflowed;
     var deliveries: usize = 0;
     var dropped: usize = 0;
-    {
+    if (f.staging.items.len == 0 and !f.staging_overflowed) {
         f.sink.lock.acquire();
         defer f.sink.lock.release();
         overflowed = f.sink.overflowed;
-        f.sink.overflowed = false;
         deliveries = f.sink.deliveries;
         dropped = f.sink.dropped;
-        f.sink.deliveries = 0;
-        f.sink.dropped = 0;
         f.staging.appendSlice(f.gpa, f.sink.buffer[0..f.sink.len]) catch {
-            // The buffer stays where it is: a drain that cannot allocate
-            // reports the loss and tries again next time rather than
-            // throwing the delivery away.
-            f.sink.overflowed = overflowed;
+            // Nothing has left the sink, including its loss notice.
             return error.OutOfMemory;
         };
         f.sink.len = 0;
+        f.sink.overflowed = false;
+        f.sink.deliveries = 0;
+        f.sink.dropped = 0;
+        f.staging_overflowed = overflowed;
     }
     if (trace.enabled() and (deliveries != 0 or f.staging.items.len != 0)) {
         trace.log("fsevents drain deliveries={d} bytes={d} dropped={d} overflowed={}", .{
@@ -845,6 +847,8 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
     } else if (losses.items.len != 0) {
         f.budget.reread(Losses{ .f = f, .items = losses.items }, Losses.stale);
     }
+    f.staging.clearRetainingCapacity();
+    f.staging_overflowed = false;
 }
 
 /// One place the system said it lost track, for one watch.
@@ -2003,4 +2007,48 @@ test "a failed FSEvents rekey keeps every remembered name" {
             try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
         }
     }
+}
+
+test "allocation failure during delivery retains FSEvents bytes and position" {
+    const testing = std.testing;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+        defer testing.allocator.free(root);
+        const first = try std.fs.path.join(testing.allocator, &.{ root, "first" });
+        defer testing.allocator.free(first);
+        const last = try std.fs.path.join(testing.allocator, &.{ root, "last" });
+        defer testing.allocator.free(last);
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        var f = try FsEvents.init(failing.allocator(), testing.io, .{ .latency_ms = 0 });
+        defer f.deinit();
+        var batch = Batch.init(testing.io, .{});
+        defer batch.deinit(failing.allocator());
+        const id: WatchId = @enumFromInt(0);
+        try f.add(id, root, .{}, &batch);
+        // No disk changes after registration: only this synthetic delivery.
+        try synthesize(testing.allocator, f.streams.get(id).?, &.{
+            .{ .path = first, .flags = flag.item_created },
+            .{ .path = last, .flags = flag.item_created },
+        });
+        const before = f.position();
+        failing.fail_index = failing.alloc_index + fail_index;
+        const answer = f.drain(&batch);
+        failing.fail_index = std.math.maxInt(usize);
+        if (answer) |_| break else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(before, f.position());
+        }
+        try f.drain(&batch);
+        var saw_first = false;
+        var saw_last = false;
+        for (batch.events.items) |event| {
+            if (std.mem.eql(u8, event.path, first)) saw_first = true;
+            if (std.mem.eql(u8, event.path, last)) saw_last = true;
+        }
+        try testing.expect(saw_first and saw_last);
+    }
+    try testing.expect(fail_index > 0);
 }

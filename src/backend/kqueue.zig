@@ -40,6 +40,11 @@ tree: Tree,
 /// The descriptors opened for watched files. Directories are registered
 /// through the handle `Tree` already holds open.
 file_fds: std.AutoArrayHashMapUnmanaged(Tree.NodeId, posix.fd_t),
+/// EV_CLEAR has already removed these flags from the kernel queue.
+/// Keep the delivery and its position across failed reporting attempts.
+delivery: [events_per_call]posix.Kevent = undefined,
+delivery_len: usize = 0,
+delivery_at: usize = 0,
 
 /// Everything `EVFILT_VNODE` can report. lookout asks for all of it and
 /// decides what to do with each bit when it arrives.
@@ -193,6 +198,8 @@ pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
     const deadline: Deadline = .start(k.io, timeout_ms);
 
     while (true) {
+        const woken = try k.drain(batch);
+        if (woken or batch.revision != before) return;
         // The one thing the shared deadline does not hand out: this is
         // the only backend that wants a `timespec`, and Windows gives
         // the name no shape to build one from.
@@ -206,25 +213,32 @@ pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
             break :ptr &storage;
         };
 
-        var events: [events_per_call]posix.Kevent = undefined;
         const empty: [0]posix.Kevent = .{};
-        const count = std.c.kevent(k.kq, &empty, 0, &events, events.len, timeout_ptr);
+        const count = std.c.kevent(k.kq, &empty, 0, &k.delivery, k.delivery.len, timeout_ptr);
         if (count < 0) switch (posix.errno(count)) {
             .INTR => continue,
             else => return error.Unexpected,
         };
         if (count == 0 and timeout_ptr != null) return;
 
-        var woken = false;
-        for (events[0..@intCast(count)]) |event| {
-            if (event.filter == std.c.EVFILT.USER) {
-                woken = true;
-                continue;
-            }
-            try k.handle(event, batch);
-        }
-        if (woken or batch.revision != before) return;
+        k.delivery_len = @intCast(count);
+        k.delivery_at = 0;
     }
+}
+
+fn drain(k: *Kqueue, batch: *Batch) lookout.Watcher.PollError!bool {
+    var woken = false;
+    while (k.delivery_at < k.delivery_len) : (k.delivery_at += 1) {
+        const event = k.delivery[k.delivery_at];
+        if (event.filter == std.c.EVFILT.USER) {
+            woken = true;
+            continue;
+        }
+        try k.handle(event, batch);
+    }
+    k.delivery_len = 0;
+    k.delivery_at = 0;
+    return woken;
 }
 
 /// Turns one kernel event into lookout events.
@@ -371,4 +385,43 @@ fn translateOpen(err: posix.OpenError) lookout.Watcher.AddError {
         error.NoDevice => error.NoDevice,
         else => error.Unexpected,
     };
+}
+
+test "allocation failure during delivery retains unread kqueue flags" {
+    const testing = std.testing;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "first", .data = "x" });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "last", .data = "x" });
+        const first = try tmp.dir.realPathFileAlloc(testing.io, "first", testing.allocator);
+        defer testing.allocator.free(first);
+        const last = try tmp.dir.realPathFileAlloc(testing.io, "last", testing.allocator);
+        defer testing.allocator.free(last);
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        var k = try Kqueue.init(failing.allocator(), testing.io, .{});
+        defer k.deinit();
+        var batch = Batch.init(testing.io, .{});
+        defer batch.deinit(failing.allocator());
+        try k.add(@enumFromInt(0), first, .{}, &batch);
+        try k.add(@enumFromInt(1), last, .{}, &batch);
+        try k.wait(&batch, 0);
+        batch.reset(failing.allocator());
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "first", .data = "changed" });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "last", .data = "changed" });
+        failing.fail_index = failing.alloc_index + fail_index;
+        const answer = k.wait(&batch, 0);
+        failing.fail_index = std.math.maxInt(usize);
+        if (answer) |_| break else |err| try testing.expectEqual(error.OutOfMemory, err);
+        try k.wait(&batch, 0);
+        var saw_first = false;
+        var saw_last = false;
+        for (batch.events.items) |event| {
+            if (std.mem.eql(u8, event.path, first)) saw_first = true;
+            if (std.mem.eql(u8, event.path, last)) saw_last = true;
+        }
+        try testing.expect(saw_first and saw_last);
+    }
+    try testing.expect(fail_index > 0);
 }

@@ -813,3 +813,158 @@ const Held = struct {
         }
     }
 };
+
+// A fresh watcher for each failure index makes every allocation in its
+// first delivery fallible, including allocations after a reported prefix.
+test "allocation failure during delivery on polling never leaves a quiet retry" {
+    try deliveryFailure(.poll);
+}
+
+test "allocation failure during delivery on kqueue never leaves a quiet retry" {
+    try deliveryFailure(.kqueue);
+}
+
+test "allocation failure during delivery on FSEvents never leaves a quiet retry" {
+    try deliveryFailure(.fsevents);
+}
+
+test "allocation failure during delivery on inotify never leaves a quiet retry" {
+    try deliveryFailure(.inotify);
+}
+
+test "allocation failure during delivery on Windows never leaves a quiet retry" {
+    try deliveryFailure(.windows);
+}
+
+fn deliveryFailure(backend: lookout.Backend) !void {
+    if (!lookout.supported(backend)) return error.SkipZigTest;
+    const testing = std.testing;
+    for ([_]enum { create, rename, remove, modify, adopt }{ .create, .rename, .remove, .modify, .adopt }) |scenario| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var tmp = testing.tmpDir(.{ .iterate = true });
+            defer tmp.cleanup();
+            const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+            defer testing.allocator.free(root);
+            if (scenario != .create and scenario != .adopt) {
+                try tmp.dir.writeFile(testing.io, .{ .sub_path = "first", .data = "old" });
+                try tmp.dir.writeFile(testing.io, .{ .sub_path = "last", .data = "old" });
+            }
+            var failing = testing.FailingAllocator.init(testing.allocator, .{});
+            var watcher = try Watcher.init(failing.allocator(), testing.io, .{
+                .backend = backend,
+                .latency_ms = 0,
+                .poll_interval_ms = 1,
+            });
+            defer watcher.deinit();
+            const id = try watcher.add(root, .{ .recursive = true });
+            while ((try watcher.poll(0)).len != 0) {}
+            switch (scenario) {
+                .create, .modify => {
+                    try tmp.dir.writeFile(testing.io, .{ .sub_path = "first", .data = "one more" });
+                    try tmp.dir.writeFile(testing.io, .{ .sub_path = "last", .data = "two more" });
+                },
+                .rename => {
+                    try tmp.dir.rename("first", tmp.dir, "first-moved", testing.io);
+                    try tmp.dir.rename("last", tmp.dir, "last-moved", testing.io);
+                },
+                .remove => {
+                    try tmp.dir.deleteFile(testing.io, "first");
+                    try tmp.dir.deleteFile(testing.io, "last");
+                },
+                .adopt => {
+                    try tmp.dir.createDirPath(testing.io, "child/deeper");
+                    try tmp.dir.writeFile(testing.io, .{ .sub_path = "child/first", .data = "one" });
+                    try tmp.dir.writeFile(testing.io, .{ .sub_path = "child/deeper/last", .data = "two" });
+                },
+            }
+            failing.fail_index = failing.alloc_index + fail_index;
+            const answer = watcher.poll(timeout_ms);
+            failing.fail_index = std.math.maxInt(usize);
+            if (answer) |events| {
+                try testing.expect(events.len != 0);
+                break;
+            } else |err| try testing.expectEqual(error.OutOfMemory, err);
+
+            // A wake must not let a retry return before its loss notice.
+            watcher.wake();
+            var first = false;
+            var last = false;
+            var overflow = false;
+            for (try watcher.poll(0)) |event| {
+                try testing.expectEqual(id, event.id);
+                if (event.kind == .overflow) {
+                    try testing.expectEqualStrings(root, event.path);
+                    overflow = true;
+                }
+                if (std.mem.endsWith(u8, event.path, "first")) first = true;
+                if (std.mem.endsWith(u8, event.path, "last")) last = true;
+            }
+            // Already collected events alone cannot claim the delivery
+            // was complete when a later allocation lost its tail.
+            try testing.expect(overflow or (first and last));
+            // Finishing the retained delivery must also rearm the backend.
+            try tmp.dir.writeFile(testing.io, .{ .sub_path = "after", .data = "three" });
+            var saw_after = false;
+            var waited: u32 = 0;
+            while (!saw_after and waited < timeout_ms) : (waited += 200) {
+                for (try watcher.poll(200)) |event| {
+                    if (event.kind == .created and std.mem.endsWith(u8, event.path, "after")) saw_after = true;
+                }
+            }
+            try testing.expect(saw_after);
+        }
+        try testing.expect(fail_index > 0);
+    }
+}
+
+test "allocation failure during delivery keeps every root pending through failed recovery" {
+    const testing = std.testing;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        try tmp.dir.createDirPath(testing.io, "a");
+        try tmp.dir.createDirPath(testing.io, "b");
+        const a = try tmp.dir.realPathFileAlloc(testing.io, "a", testing.allocator);
+        defer testing.allocator.free(a);
+        const b = try tmp.dir.realPathFileAlloc(testing.io, "b", testing.allocator);
+        defer testing.allocator.free(b);
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        var watcher = try Watcher.init(failing.allocator(), testing.io, .{
+            .backend = .poll,
+            .debounce_ms = 60_000,
+            .latency_ms = 0,
+        });
+        defer watcher.deinit();
+        const first = try watcher.add(a, .{});
+        const last = try watcher.add(b, .{});
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "a/change", .data = "x" });
+        failing.fail_index = failing.alloc_index;
+        try testing.expectError(error.OutOfMemory, watcher.poll(0));
+        failing.fail_index = failing.alloc_index + fail_index;
+        watcher.wake();
+        const answer = watcher.poll(0);
+        failing.fail_index = std.math.maxInt(usize);
+        if (answer) |events| {
+            try expectRecoveredRoots(events, first, last);
+            break;
+        } else |err| try testing.expectEqual(error.OutOfMemory, err);
+        watcher.wake();
+        try expectRecoveredRoots(try watcher.poll(0), first, last);
+        watcher.remove(first);
+        try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    }
+    try testing.expect(fail_index > 0);
+}
+
+fn expectRecoveredRoots(events: []const lookout.Event, first: lookout.WatchId, last: lookout.WatchId) !void {
+    var saw_first = false;
+    var saw_last = false;
+    for (events) |event| {
+        try std.testing.expectEqual(Kind.overflow, event.kind);
+        if (event.id == first) saw_first = true;
+        if (event.id == last) saw_last = true;
+    }
+    try std.testing.expect(saw_first and saw_last);
+}

@@ -760,6 +760,9 @@ pub const Watcher = struct {
         target: Target,
         /// `AddOptions.recursive`.
         recursive: bool,
+        /// An allocation failure may have interrupted this watch's delivery.
+        /// Set without allocation and cleared only after overflow is recorded.
+        incomplete: bool = false,
     };
 
     /// One watch, as `watches` reports it.
@@ -1381,6 +1384,13 @@ pub const Watcher = struct {
     /// and is invalidated by the next call to `poll` or by `deinit`. An
     /// empty slice means the timeout expired with nothing to report.
     ///
+    /// **Allocation failure.** An `OutOfMemory` hands nothing out. Retry
+    /// `poll`: backends keep unread deliveries where possible, and the
+    /// retry reports `overflow` against every still-live watch root before
+    /// it can return successfully, even after a wake. Rescan those roots.
+    /// Recovery notices survive further allocation failures and bypass
+    /// settling and debouncing. Events already gathered remain available.
+    ///
     /// **Cancellation.** `poll` is a `std.Io` cancellation point on every
     /// backend: a cancellation requested before it is called, or while it
     /// waits, is `error.Canceled`. It is looked for on entry and each time
@@ -1406,7 +1416,16 @@ pub const Watcher = struct {
         if (w.handed_out) w.batch.reset(w.gpa);
         w.handed_out = false;
         try w.io.checkCancel();
-        const events = try w.gather(timeout_ms);
+        const events = w.gather(timeout_ms) catch |err| {
+            if (err == error.OutOfMemory) {
+                // A shared delivery can touch several roots, and a failed
+                // operation may already have changed backend bookkeeping.
+                // Conservatively include every live watch; no allocation
+                // or backend-owned path is needed to remember the loss.
+                for (w.table.values()) |*held| held.incomplete = true;
+            }
+            return err;
+        };
         w.handed_out = true;
         return events;
     }
@@ -1416,6 +1435,11 @@ pub const Watcher = struct {
         // Before anything blocks: a watch that came back half
         // registered says so at once rather than when the tree next
         // happens to change.
+        for (w.table.keys(), w.table.values()) |id, *held| {
+            if (!held.incomplete) continue;
+            try w.batch.recover(w.gpa, id, held.path, held.target);
+            held.incomplete = false;
+        }
         try w.batch.flush(w.gpa);
         const deadline: Deadline = .start(w.io, timeout_ms);
         if (w.woken.swap(false, .acquire)) return w.batch.events.items;

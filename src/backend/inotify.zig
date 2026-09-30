@@ -73,6 +73,10 @@ mask: u32,
 /// then is a path that moved out of the watch, which from inside the
 /// watch is a removal.
 pending_renames: std.AutoArrayHashMapUnmanaged(PendingKey, Pending),
+/// A read belongs to the backend until all its records are accounted for.
+read_buffer: [read_buffer_len]u8 align(@alignOf(linux.inotify_event)) = undefined,
+read_len: usize = 0,
+read_offset: usize = 0,
 
 /// What the caller asked for.
 const Watch = struct {
@@ -392,11 +396,10 @@ pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
     // out of `std.Io`'s reach.
     const protection = n.io.swapCancelProtection(.blocked);
     defer _ = n.io.swapCancelProtection(protection);
-    const result = n.collect(batch, timeout_ms);
+    try n.collect(batch, timeout_ms);
     // Whatever is still held when the wait is over never found its other
     // half, however many reads it waited through.
     try n.flushRenames(batch);
-    return result;
 }
 
 fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
@@ -404,6 +407,13 @@ fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
     const deadline: Deadline = .start(n.io, timeout_ms);
 
     while (true) {
+        if (n.read_len != 0) {
+            _ = try n.read(batch);
+            while (n.pending_renames.count() != 0) {
+                if (!try n.read(batch)) break;
+            }
+            if (batch.revision != before) return;
+        }
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still performs one non-blocking check. Returning early here
         // would make `poll(0)` report nothing, ever.
@@ -443,13 +453,16 @@ fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
 /// Reads one buffer of kernel events and turns them into lookout events.
 /// `false` when there was nothing to read.
 fn read(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!bool {
-    var buffer: [read_buffer_len]u8 align(@alignOf(linux.inotify_event)) = undefined;
-    const len = posix.read(n.ifd, &buffer) catch |err| switch (err) {
-        error.WouldBlock => return false,
-        else => return error.Unexpected,
-    };
-    if (len == 0) return false;
-    try n.handleRead(buffer[0..len], batch);
+    if (n.read_len == 0) {
+        n.read_len = posix.read(n.ifd, &n.read_buffer) catch |err| switch (err) {
+            error.WouldBlock => return false,
+            else => return error.Unexpected,
+        };
+        n.read_offset = 0;
+        if (n.read_len == 0) return false;
+    }
+    try n.consume(n.read_buffer[0..n.read_len], &n.read_offset, batch);
+    n.read_len = 0;
     return true;
 }
 
@@ -462,9 +475,17 @@ fn read(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!bool {
 /// made since: counted from their records and then taken in again by a
 /// re-read made before them, they would be counted twice.
 fn handleRead(n: *Inotify, bytes: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+    var offset: usize = 0;
+    try n.consume(bytes, &offset, batch);
+}
+
+fn consume(n: *Inotify, bytes: []const u8, offset: *usize, batch: *Batch) lookout.Watcher.PollError!void {
+    // Partial bookkeeping can no longer supply reliable entry counts.
+    errdefer n.budget.reread({}, everyDirectory);
     var lost = false;
     defer if (lost) n.budget.reread({}, everyDirectory);
     var it = records.iterate(bytes);
+    it.offset = offset.*;
     while (true) {
         // The kernel refuses a read smaller than the next record rather
         // than returning half of one, so a tail this cannot decode is
@@ -476,6 +497,7 @@ fn handleRead(n: *Inotify, bytes: []const u8, batch: *Batch) lookout.Watcher.Pol
         } orelse return;
         if (event.mask & linux.IN.Q_OVERFLOW != 0) lost = true;
         try n.handle(event, batch);
+        offset.* = it.offset;
     }
 }
 
@@ -641,24 +663,25 @@ fn pair(n: *Inotify, change: *const Change, batch: *Batch) lookout.Watcher.PollE
     }
     if (change.moved_to) {
         const key: PendingKey = .{ .watch = change.watch, .cookie = change.cookie };
-        const half = n.pending_renames.fetchSwapRemove(key) orelse return false;
-        defer n.gpa.free(half.value.path);
+        const half = n.pending_renames.get(key) orelse return false;
         const keeps_to = !n.excluded(change.watch, change.path);
-        const keeps_from = !n.excluded(change.watch, half.value.path);
+        const keeps_from = !n.excluded(change.watch, half.path);
         if (keeps_to and keeps_from) {
-            try batch.pushRename(n.gpa, change.watch, change.path, half.value.path, change.target());
+            try batch.pushRename(n.gpa, change.watch, change.path, half.path, change.target());
         } else if (keeps_to) {
             try batch.push(n.gpa, change.watch, change.path, .created, change.target());
         } else if (keeps_from) {
-            try batch.push(n.gpa, change.watch, half.value.path, .removed, change.target());
+            try batch.push(n.gpa, change.watch, half.path, .removed, change.target());
         }
         // The watches below a moved directory are still on the right
         // inodes but under the wrong names, so they are dropped and
         // taken again at the name the tree now has.
         if (change.is_dir) {
-            n.forgetSubtree(change.watch, half.value.path);
-            n.budget.forget(half.value.path);
+            n.forgetSubtree(change.watch, half.path);
+            n.budget.forget(half.path);
         }
+        _ = n.pending_renames.swapRemove(key);
+        n.gpa.free(half.path);
         return true;
     }
     return false;
@@ -737,8 +760,6 @@ fn flushRenames(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!void {
     while (n.pending_renames.count() != 0) {
         const key = n.pending_renames.keys()[0];
         const half = n.pending_renames.values()[0];
-        n.pending_renames.swapRemoveAt(0);
-        defer n.gpa.free(half.path);
         if (!n.excluded(key.watch, half.path)) try batch.push(
             n.gpa,
             key.watch,
@@ -750,6 +771,8 @@ fn flushRenames(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!void {
             n.forgetSubtree(key.watch, half.path);
             n.budget.forget(half.path);
         }
+        n.pending_renames.swapRemoveAt(0);
+        n.gpa.free(half.path);
     }
 }
 
