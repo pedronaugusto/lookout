@@ -1426,20 +1426,34 @@ pub const Watcher = struct {
             }
             return err;
         };
+        for (w.table.values()) |*held| held.incomplete = false;
         w.handed_out = true;
         return events;
     }
 
     /// `poll`, less the bookkeeping of what has been handed out.
     fn gather(w: *Watcher, timeout_ms: ?u32) PollError![]const Event {
+        // Report before a wake or an indefinite wait can return or block.
+        try w.recover();
+        _ = try w.gatherWindow(timeout_ms);
+        // Pending-watch reconciliation can discard ancestor events. The
+        // recovery obligation is the caller's root, and ends only when
+        // poll actually hands the notice out, never during reconciliation.
+        try w.recover();
+        return w.batch.events.items;
+    }
+
+    fn recover(w: *Watcher) Allocator.Error!void {
+        for (w.table.keys(), w.table.values()) |id, held| {
+            if (!held.incomplete) continue;
+            try w.batch.recover(w.gpa, id, held.path, held.target);
+        }
+    }
+
+    fn gatherWindow(w: *Watcher, timeout_ms: ?u32) PollError![]const Event {
         // Before anything blocks: a watch that came back half
         // registered says so at once rather than when the tree next
         // happens to change.
-        for (w.table.keys(), w.table.values()) |id, *held| {
-            if (!held.incomplete) continue;
-            try w.batch.recover(w.gpa, id, held.path, held.target);
-            held.incomplete = false;
-        }
         try w.batch.flush(w.gpa);
         const deadline: Deadline = .start(w.io, timeout_ms);
         if (w.woken.swap(false, .acquire)) return w.batch.events.items;

@@ -968,3 +968,29 @@ fn expectRecoveredRoots(events: []const lookout.Event, first: lookout.WatchId, l
     }
     try std.testing.expect(saw_first and saw_last);
 }
+
+test "recovery remains visible while a watch is waiting for its path" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const waiting = try std.fs.path.join(testing.allocator, &.{ root, "later" });
+    defer testing.allocator.free(waiting);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var watcher = try Watcher.init(failing.allocator(), testing.io, .{
+        .backend = .poll,
+        .latency_ms = 20,
+        .poll_interval_ms = 1,
+    });
+    defer watcher.deinit();
+    const id = try watcher.add(waiting, .{ .pending = true });
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, watcher.poll(0));
+    failing.fail_index = std.math.maxInt(usize);
+    const events = try watcher.poll(1);
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(id, events[0].id);
+    try testing.expectEqual(Kind.overflow, events[0].kind);
+    try testing.expectEqualStrings(waiting, events[0].path);
+}

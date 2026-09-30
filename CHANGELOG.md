@@ -25,6 +25,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Recovery notices remain pending until returned to the caller, including when reconciliation discards the ancestor events of a pending watch.
+
 - Kqueue owns a table of accepted registrations and retries missing nodes before waiting, so a failed registration cannot leave scanned files quietly unwatched.
 
 - Tree scans publish directory listings and file metadata after reporting succeeds, rolling back newly adopted nodes on failure so a retry sees the whole change.
