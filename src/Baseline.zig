@@ -204,7 +204,7 @@ const Scan = struct {
                 // has no parent to report it.
                 if (i != 0) continue;
                 if (!report) return err;
-                try s.record(gpa, b.root, .removed);
+                if (b.dirs.count() != 0) try s.record(gpa, b.root, .removed);
                 return;
             };
             defer dir.close(b.io);
@@ -515,6 +515,26 @@ test "a baseline whose root is gone says so" {
     try testing.expectEqual(@as(usize, 1), changes.len);
     try testing.expectEqualStrings(root, changes[0].path);
     try testing.expectEqual(Kind.removed, changes[0].kind);
+}
+
+test "a baseline reports its root removal only once" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "target");
+    const root = try tmp.dir.realPathFileAlloc(io, "target", gpa);
+    defer gpa.free(root);
+    var base = try Baseline.seed(gpa, io, root, .{});
+    defer base.deinit(gpa);
+    try tmp.dir.deleteTree(io, "target");
+    try testing.expectEqual(@as(usize, 1), (try base.diff(gpa)).len);
+    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+    try tmp.dir.createDirPath(io, "target");
+    _ = try base.diff(gpa);
+    try tmp.dir.deleteTree(io, "target");
+    try testing.expectEqual(@as(usize, 1), (try base.diff(gpa)).len);
+    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
 }
 
 test "seeding a file rather than a directory is refused" {

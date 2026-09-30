@@ -19,6 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A baseline reports a missing root once, until the root has been seen again.
+
 - Truncated directory scans retain remembered entries and subtrees until a complete listing can establish what changed.
 
 - Polling and kqueue tree scans retain registrations when listing or file metadata access fails instead of reporting removals.
