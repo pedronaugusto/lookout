@@ -603,6 +603,37 @@ pub fn remove(f: *FsEvents, id: WatchId) void {
     f.budget.release(entry.value.root, f, stillCounted);
     f.forgetWatch(id);
     f.destroy(entry.value);
+    // destroy waits for callbacks already running. Only then can the
+    // old stream's records be removed without another callback putting
+    // them back under the id a pending promotion will reuse.
+    if (f.pairing.held) |half| {
+        if (half.id == id) {
+            f.gpa.free(half.path);
+            f.pairing.held = null;
+        }
+    }
+    f.staging.shrinkRetainingCapacity(withoutStream(f.staging.items, id));
+    f.sink.lock.acquire();
+    defer f.sink.lock.release();
+    f.sink.len = withoutStream(f.sink.buffer[0..f.sink.len], id);
+}
+
+/// Compacts whole records written by Sink, without allocating or changing
+/// the order of other streams' records. Used under the sink lock as well
+/// as on the polling thread's retained delivery.
+fn withoutStream(bytes: []u8, id: WatchId) usize {
+    var it = records.iterate(bytes);
+    var kept: usize = 0;
+    while (true) {
+        const start = it.offset;
+        // Sink only appends complete records while holding its lock.
+        const record = (it.next() catch unreachable) orelse break;
+        if (record.id == id) continue;
+        const len = it.offset - start;
+        @memmove(bytes[kept..][0..len], bytes[start..it.offset]);
+        kept += len;
+    }
+    return kept;
 }
 
 /// Replaces the delivery filter without restarting the stream.
@@ -1467,6 +1498,46 @@ test "FSEvents refuses a watch whose initial names could not be remembered" {
             try testing.expectEqual(@as(usize, 0), f.budget.counts.count());
         }
     }
+}
+
+test "removing an FSEvents stream releases its unreported delivery state" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var f = try FsEvents.init(gpa, testing.io, .{});
+    defer f.deinit();
+    var batch = Batch.init(testing.io, .{});
+    defer batch.deinit(gpa);
+    const gone: WatchId = @enumFromInt(0);
+    const kept: WatchId = @enumFromInt(1);
+    try f.add(gone, root, .{}, &batch);
+    try f.add(kept, root, .{}, &batch);
+    // A stopped pending registration can be replaced under the same id.
+    // Its buffered records and rename half belong to the old stream.
+    f.sink.lock.acquire();
+    f.sink.append(gone, flag.item_created, 1, root);
+    f.sink.append(kept, flag.item_modified, 2, root);
+    f.sink.lock.release();
+    try f.staging.resize(gpa, 2 * records.encodedLen(root));
+    const first = records.encode(f.staging.items, gone, flag.item_created, 3, root);
+    _ = records.encode(f.staging.items[first..], kept, flag.item_modified, 4, root);
+    f.pairing.held = .{ .id = gone, .path = try gpa.dupe(u8, root), .flags = flag.item_renamed, .event = 5 };
+    f.remove(gone);
+    try testing.expectEqual(@as(?records.Half, null), f.pairing.held);
+    const held = try f.copyHeld(gpa);
+    defer gpa.free(held.bytes);
+    for ([_][]const u8{ held.bytes, f.staging.items }) |bytes| {
+        var it = records.iterate(bytes);
+        const record = (try it.next()).?;
+        try testing.expectEqual(kept, record.id);
+        try testing.expectEqual(@as(?Record, null), try it.next());
+    }
+    try f.add(gone, root, .{}, &batch);
+    try f.drain(&batch);
+    for (batch.events.items) |event| try testing.expect(event.id != gone);
 }
 
 test "FSEvents initialization preserves buffer allocator failure" {
