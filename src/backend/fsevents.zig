@@ -488,6 +488,23 @@ pub fn add(
     // One stream covers a whole tree, so there is no per-directory
     // registration here that could fail on its own.
     _ = batch;
+    try f.streams.ensureUnusedCapacity(f.gpa, 1);
+    const stream = try f.startStream(id, abs_path, options);
+    // The table owns the started stream and its initial state. If the
+    // baseline cannot be built, remove stops delivery before releasing
+    // the stream, its names, and counts no other watch needs.
+    f.streams.putAssumeCapacity(id, stream);
+    errdefer f.remove(id);
+    f.seedKnown(stream) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Unexpected,
+    };
+    trace.log("fsevents seeded watch={d} known={d}", .{ @intFromEnum(id), f.known.count() });
+}
+
+/// Creates and starts a stream, transferring ownership only on success.
+/// Seeding happens after start so changes during the walk stay queued.
+fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, options: lookout.AddOptions) lookout.Watcher.AddError!*Stream {
     const stat = try Io.Dir.cwd().statFile(f.io, abs_path, .{});
     const scope: Stream.Scope = if (stat.kind != .directory)
         .file
@@ -502,13 +519,6 @@ pub fn add(
         std.fs.path.dirname(abs_path) orelse abs_path
     else
         abs_path;
-
-    // Room for the stream before the stream exists, so that nothing
-    // between starting it and recording it can fail. What is left after
-    // the start is one error path, and it is the one where the stream was
-    // scheduled and never started -- which must be invalidated and
-    // released, and must not be stopped.
-    try f.streams.ensureUnusedCapacity(f.gpa, 1);
 
     const stream = try f.gpa.create(Stream);
     errdefer f.gpa.destroy(stream);
@@ -547,9 +557,7 @@ pub fn add(
         c.FSEventsGetCurrentEventId(),
     });
 
-    f.streams.putAssumeCapacity(id, stream);
-    f.seedKnown(stream) catch {};
-    trace.log("fsevents seeded watch={d} known={d}", .{ @intFromEnum(id), f.known.count() });
+    return stream;
 }
 
 /// Builds the CoreFoundation array FSEvents wants and creates the stream.
@@ -1427,6 +1435,38 @@ fn incomplete(f: *FsEvents, batch: *Batch, stream: *const Stream) Allocator.Erro
 
 test "FSEvents initialization preserves sink allocator failure" {
     try expectInitAllocationFailure(0);
+}
+
+test "FSEvents refuses a watch whose initial names could not be remembered" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "sub/deep");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "sub/deep/kept", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        var f = try FsEvents.init(gpa, testing.io, .{});
+        defer f.deinit();
+        f.gpa = failing.allocator();
+        f.budget.gpa = failing.allocator();
+        var batch = Batch.init(testing.io, .{});
+        defer batch.deinit(gpa);
+        if (f.add(@enumFromInt(0), root, .{ .recursive = true }, &batch)) |_| {
+            if (failing.has_induced_failure) std.debug.print("add succeeded after allocation {d} failed, with {d} remembered names\n", .{ fail_index, f.known.count() });
+            try testing.expectEqual(false, failing.has_induced_failure);
+            try testing.expectEqual(@as(usize, 4), f.known.count());
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(@as(usize, 0), f.streams.count());
+            try testing.expectEqual(@as(usize, 0), f.known.count());
+            try testing.expectEqual(@as(usize, 0), f.budget.counts.count());
+        }
+    }
 }
 
 test "FSEvents initialization preserves buffer allocator failure" {

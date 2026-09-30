@@ -27,6 +27,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- FSEvents refuses and releases a watch when allocating its initial remembered names fails, instead of accepting a partial baseline and reporting existing files as new.
+
 - Filter reconciliation registers newly admitted files in non-recursive kqueue watches and releases excluded file registrations even when their names could lead to an included descendant.
 
 - Pending promotion transfers its registered path to the watch table before reporting, so later allocation failure cannot free it twice.
