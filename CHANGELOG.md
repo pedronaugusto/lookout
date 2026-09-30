@@ -27,6 +27,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The held-event refilter test stages its input before polling, so runner pauses cannot promote it before inspection; failures print the backend, phase and delivery state.
+
 - Correct the baseline scope, polling registration count, recovery handout and minimum delivery-buffer descriptions.
 
 - Removing an FSEvents registration releases its queued records and held rename half after callbacks finish, so a pending promotion or failed-add retry cannot inherit the old stream's delivery.

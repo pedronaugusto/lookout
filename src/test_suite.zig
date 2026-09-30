@@ -948,6 +948,23 @@ test "writes after refilter are reported while a writer runs through the change"
     }
 }
 
+/// State belongs in the failure output even when error traces are disabled.
+fn dumpDelivery(f: *const Fixture, phase: []const u8) void {
+    std.debug.print("refilter backend={s} phase={s} root={s} stats={any}\n", .{
+        @tagName(f.watcher.backend()), phase, f.root, f.watcher.stats(),
+    });
+    for (f.watcher.batch.events.items) |event| {
+        std.debug.print("event id={d} kind={s} path={s} from={?s}\n", .{
+            @intFromEnum(event.id), @tagName(event.kind), event.path, event.from,
+        });
+    }
+    for (f.watcher.batch.held.keys(), f.watcher.batch.held.values()) |key, held| {
+        std.debug.print("held id={d} kind={s} path={s} from={?s} last_ns={d} size={?d}\n", .{
+            @intFromEnum(key.id), @tagName(held.kind), key.path, held.from, held.last_ns, held.size,
+        });
+    }
+}
+
 test "refilter drops held events that the new filter excludes" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
@@ -956,6 +973,8 @@ test "refilter drops held events that the new filter excludes" {
             .debounce_ms = 200,
         });
         defer f.deinit();
+        var phase: []const u8 = "setup";
+        errdefer dumpDelivery(&f, phase);
         try f.tmp.dir.createDirPath(std.testing.io, "old");
         try f.tmp.dir.createDirPath(std.testing.io, "new");
         try f.write("old/held.txt", "before");
@@ -969,23 +988,21 @@ test "refilter drops held events that the new filter excludes" {
         const new = try f.path("new/after.txt");
         defer std.testing.allocator.free(new);
         try f.overwrite("old/held.txt", "after!");
-        var waited: u32 = 0;
-        var held_old = false;
-        while (waited < timeout_ms and !held_old) : (waited += 1) {
-            for (try f.watcher.poll(0)) |event|
-                try std.testing.expect(!std.mem.eql(u8, event.path, old));
-            for (f.watcher.batch.held.keys()) |key| {
-                if (key.id == id and std.mem.eql(u8, key.path, old)) held_old = true;
-            }
-            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-        }
-        try std.testing.expect(held_old);
+        // Stage the state refilter owns. Observing a kernel event inside a
+        // live 200 ms window races a descheduled test thread against promote.
+        // An already due hold must also be discarded before the next poll.
+        phase = "stage old hold";
+        try f.watcher.batch.push(std.testing.allocator, id, old, .modified, .file);
+        const held = f.watcher.batch.held.getPtr(.{ .id = id, .path = old }).?;
+        held.last_ns -= 201 * std.time.ns_per_ms;
+        phase = "refilter";
         try f.watcher.refilter(id, .{ .ignore = &.{"old"} });
         for (f.watcher.batch.held.keys()) |key|
             try std.testing.expect(key.id != id or !lookout.path.within(excluded, key.path));
+        phase = "observe admitted write";
         try f.overwrite("new/after.txt", "after!");
         var saw = false;
-        waited = 0;
+        var waited: u32 = 0;
         while (waited < timeout_ms and !saw) : (waited += 200) {
             for (try f.watcher.poll(200)) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, old));
