@@ -1239,27 +1239,32 @@ pub const Watcher = struct {
                 break :target Target.unknown;
             break :target Target.of(stat.kind);
         };
-        const mirror = try w.gpa.dupe(u8, p.target);
-        errdefer w.gpa.free(mirror);
-        switch (w.impl) {
-            inline else => |*impl| impl.add(p.id, p.target, .{
-                .recursive = p.recursive,
-                .filter = p.filter,
-            }, &w.batch) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                // Gone again between the look and the registration, or
-                // not ours to open. Park it and wait.
-                else => {
-                    w.gpa.free(mirror);
-                    w.anchorPending(p);
-                    return false;
+        {
+            // This scope owns the mirror only until the backend and table
+            // take the registration. Reporting below may still fail, but
+            // then unregister or deinit owns its eventual release.
+            const mirror = try w.gpa.dupe(u8, p.target);
+            errdefer w.gpa.free(mirror);
+            switch (w.impl) {
+                inline else => |*impl| impl.add(p.id, p.target, .{
+                    .recursive = p.recursive,
+                    .filter = p.filter,
+                }, &w.batch) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // Gone again between the look and the registration, or
+                    // not ours to open. Park it and wait.
+                    else => {
+                        w.gpa.free(mirror);
+                        w.anchorPending(p);
+                        return false;
+                    },
                 },
-            },
+            }
+            if (w.table.getPtr(p.id)) |held| {
+                held.registered = mirror;
+                held.target = target;
+            } else w.gpa.free(mirror);
         }
-        if (w.table.getPtr(p.id)) |held| {
-            held.registered = mirror;
-            held.target = target;
-        } else w.gpa.free(mirror);
         try w.batch.pushDetail(w.gpa, p.id, p.target, .created, null, target);
         if (target == .directory) try w.reportMade(p);
         w.destroyPending(p);
@@ -1726,4 +1731,45 @@ test "the Apple default preserves paired renames" {
         },
         else => return error.SkipZigTest,
     }
+}
+
+test "a failed pending promotion keeps each registered path owned" {
+    const testing = std.testing;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+        defer testing.allocator.free(root);
+        const target = try std.fs.path.join(testing.allocator, &.{ root, "later" });
+        defer testing.allocator.free(target);
+        // Keep freed storage mapped so a duplicate release can be counted
+        // without dereferencing freed memory or crashing the test runner.
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var failing = testing.FailingAllocator.init(arena.allocator(), .{});
+        var failed = false;
+        {
+            var watcher = try Watcher.init(failing.allocator(), testing.io, .{ .backend = .poll });
+            defer watcher.deinit();
+            _ = try watcher.add(target, .{ .pending = true, .recursive = true });
+            try tmp.dir.createDirPath(testing.io, "later/child");
+            try tmp.dir.writeFile(testing.io, .{ .sub_path = "later/child/file", .data = "x" });
+            failing.fail_index = failing.alloc_index + fail_index;
+            const answer = watcher.promotePending(watcher.pending.items[0]);
+            failing.fail_index = std.math.maxInt(usize);
+            if (answer) |promoted| {
+                try testing.expect(promoted);
+                // promotePending destroys the object; its caller removes
+                // the list entry only after that successful return.
+                _ = watcher.pending.orderedRemove(0);
+            } else |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                failed = true;
+            }
+        }
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (!failed) break;
+    }
+    try testing.expect(fail_index > 0);
 }

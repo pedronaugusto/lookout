@@ -25,6 +25,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Pending promotion transfers its registered path to the watch table before reporting, so later allocation failure cannot free it twice.
+
 - Recovery notices remain pending until returned to the caller, including when reconciliation discards the ancestor events of a pending watch.
 
 - Kqueue owns a table of accepted registrations and retries missing nodes before waiting, so a failed registration cannot leave scanned files quietly unwatched.
