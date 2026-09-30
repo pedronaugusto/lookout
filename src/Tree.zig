@@ -570,25 +570,32 @@ fn adopt(
         for (frontier.items) |path| t.gpa.free(path);
         frontier.deinit(t.gpa);
     }
-    try frontier.append(t.gpa, try t.gpa.dupe(u8, root));
+    {
+        const owned = try t.gpa.dupe(u8, root);
+        errdefer t.gpa.free(owned);
+        try frontier.append(t.gpa, owned);
+    }
 
     var i: usize = 0;
     while (i < frontier.items.len) : (i += 1) {
         const current = frontier.items[i];
-        const owned = try t.gpa.dupe(u8, current);
-        const id = t.createDirectory(watch, owned, added) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            // Created and gone again, or not ours to open: reported
-            // through its parent, and as a hole in the watch when the
-            // reason is that it cannot be read rather than that it has
-            // gone.
-            else => {
-                if (err != error.FileNotFound) {
-                    try batch.trouble(t.gpa, watch, owned, .directory);
-                }
-                t.gpa.free(owned);
-                continue;
-            },
+        const id = registering: {
+            const owned = try t.gpa.dupe(u8, current);
+            errdefer t.gpa.free(owned);
+            break :registering t.createDirectory(watch, owned, added) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // Created and gone again, or not ours to open: reported
+                // through its parent, and as a hole in the watch when the
+                // reason is that it cannot be read rather than that it has
+                // gone.
+                else => {
+                    if (err != error.FileNotFound) {
+                        try batch.trouble(t.gpa, watch, owned, .directory);
+                    }
+                    t.gpa.free(owned);
+                    continue;
+                },
+            };
         };
 
         var j: usize = 0;
@@ -722,5 +729,48 @@ test "a failed tree registration releases every snapshot and path" {
             }
         }
         try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "a failed tree adoption releases every unregistered path" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try tmp.dir.createDirPath(testing.io, "child/deeper");
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const gpa = failing.allocator();
+        var succeeded = false;
+        {
+            var tree: Tree = .init(gpa, testing.io, 8, false);
+            defer tree.deinit();
+            defer {
+                const watch = tree.watches.fetchSwapRemove(@enumFromInt(0)).?.value;
+                testing.allocator.free(watch.root);
+                tree.watches.deinit(testing.allocator);
+                tree.watches = .empty;
+            }
+            // Adoption needs the watch policy, but not a parent node.
+            try tree.watches.put(testing.allocator, @enumFromInt(0), .{
+                .root = try testing.allocator.dupe(u8, root),
+                .target = .directory,
+                .recursive = true,
+                .filter = .none,
+            });
+            var added: std.ArrayList(NodeId) = .empty;
+            defer added.deinit(gpa);
+            var batch: Batch = .init(testing.io, .{});
+            defer batch.deinit(gpa);
+            if (tree.adopt(@enumFromInt(0), root, &batch, &added)) |_| {
+                succeeded = true;
+            } else |err| try testing.expectEqual(error.OutOfMemory, err);
+        }
+        // The watch's policy was allocated by the underlying allocator.
+        // Count only adoption's allocations, all of which are now released.
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (succeeded) break;
     }
 }
