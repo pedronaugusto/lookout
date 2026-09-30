@@ -247,8 +247,8 @@ pub fn pushDetail(
     // Anything else that happens to a path ends the question of whether
     // its contents have stopped changing: the name has been created,
     // removed or moved since.
+    try b.record(gpa, id, subject, kind, from, target, now);
     b.release(gpa, id, subject);
-    return b.record(gpa, id, subject, kind, from, target, now);
 }
 
 /// How large a file is now, or `null` when it cannot be asked. Read only
@@ -410,9 +410,10 @@ pub fn trouble(
 /// than when the tree next happens to change.
 pub fn flush(b: *Batch, gpa: Allocator) Allocator.Error!void {
     while (b.troubles.items.len != 0) {
-        const t = b.troubles.orderedRemove(0);
-        defer gpa.free(t.path);
+        const t = b.troubles.items[0];
         try b.push(gpa, t.id, t.path, .unwatched, t.target);
+        _ = b.troubles.orderedRemove(0);
+        gpa.free(t.path);
     }
 }
 
@@ -453,9 +454,6 @@ pub fn promote(b: *Batch, gpa: Allocator) Allocator.Error!void {
             }
         }
         const subject = b.held.keys()[i].path;
-        b.held.swapRemoveAt(i);
-        defer gpa.free(subject);
-        defer if (entry.from) |from| gpa.free(from);
         // The event is stamped with when the path first changed, not with
         // when the window closed: the caller wants to know when it
         // happened, not when lookout stopped waiting.
@@ -468,6 +466,9 @@ pub fn promote(b: *Batch, gpa: Allocator) Allocator.Error!void {
             entry.target,
             .{ .nanoseconds = entry.first_ns },
         );
+        b.held.swapRemoveAt(i);
+        gpa.free(subject);
+        if (entry.from) |from| gpa.free(from);
     }
 }
 
@@ -941,4 +942,62 @@ test "two spellings of one path are one event" {
 
     const merged: usize = if (path_cmp.folds_case) 1 else 2;
     try testing.expectEqual(merged, b.events.items.len);
+}
+
+test "a failed batch flush leaves trouble queued for the retry" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var b = testBatch(.{});
+    defer b.deinit(gpa);
+    try b.trouble(gpa, @enumFromInt(0), root, .directory);
+    var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, b.flush(failing.allocator()));
+    try testing.expectEqual(@as(usize, 1), b.troubles.items.len);
+    try b.flush(gpa);
+    try testing.expectEqual(@as(usize, 0), b.troubles.items.len);
+    try testing.expectEqual(@as(usize, 1), b.events.items.len);
+    try testing.expectEqual(Kind.unwatched, b.events.items[0].kind);
+    try testing.expectEqualStrings(root, b.events.items[0].path);
+}
+
+test "a failed batch promotion leaves the rename held for the retry" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var b = testBatch(.{ .debounce_ms = 1 });
+    defer b.deinit(gpa);
+    try b.pushRename(gpa, @enumFromInt(0), root, "before", .directory);
+    b.held.values()[0].last_ns -= std.time.ns_per_s;
+    var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, b.promote(failing.allocator()));
+    try testing.expectEqual(@as(usize, 1), b.held.count());
+    try b.promote(gpa);
+    try testing.expectEqual(@as(usize, 0), b.held.count());
+    try testing.expectEqual(@as(usize, 1), b.events.items.len);
+    try testing.expectEqual(Kind.renamed, b.events.items[0].kind);
+    try testing.expectEqualStrings(root, b.events.items[0].path);
+    try testing.expectEqualStrings("before", b.events.items[0].from.?);
+}
+
+test "a failed batch replacement leaves the settling event held" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var b = testBatch(.{ .settle_ms = 1 });
+    defer b.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try b.push(gpa, id, root, .modified, .directory);
+    var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, b.push(failing.allocator(), id, root, .created, .directory));
+    try testing.expectEqual(@as(usize, 1), b.held.count());
+    try b.push(gpa, id, root, .created, .directory);
+    try testing.expectEqual(@as(usize, 0), b.held.count());
+    try testing.expectEqual(Kind.created, b.events.items[0].kind);
 }

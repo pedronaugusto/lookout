@@ -47,6 +47,30 @@ test "public path helpers use watch path comparisons" {
     if (folds_case) try testing.expectEqualStrings("file", path.relative("/WATCH", "/watch/file").?);
 }
 
+test "failed overflow reporting leaves the lost watch queued for retry" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var watcher = try Watcher.init(gpa, testing.io, .{ .backend = .poll });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    try watcher.batch.dropped.put(gpa, id, {});
+    var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    {
+        watcher.gpa = failing.allocator();
+        defer watcher.gpa = gpa;
+        try testing.expectError(error.OutOfMemory, watcher.collect());
+        try testing.expect(watcher.batch.dropped.contains(id));
+    }
+    try watcher.collect();
+    try testing.expectEqual(@as(usize, 0), watcher.batch.dropped.count());
+    try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
+    try testing.expectEqual(Kind.overflow, watcher.batch.events.items[0].kind);
+}
+
 /// Which paths under a watch the caller wants. See `AddOptions.filter`.
 pub const Filter = @import("Filter.zig");
 
@@ -1464,11 +1488,14 @@ pub const Watcher = struct {
         try w.settlePending();
         while (w.batch.dropped.count() != 0) {
             const id = w.batch.dropped.keys()[0];
-            w.batch.dropped.swapRemoveAt(0);
             // The batch knows it had to stop holding names; only the
             // watcher knows which root to say so against.
-            const root = w.rootOf(id) orelse continue;
+            const root = w.rootOf(id) orelse {
+                w.batch.dropped.swapRemoveAt(0);
+                continue;
+            };
             try w.batch.push(w.gpa, id, root, .overflow, w.rootTarget(id));
+            w.batch.dropped.swapRemoveAt(0);
         }
     }
 
