@@ -189,13 +189,6 @@ pub fn fd(n: *const Inotify) ?posix.fd_t {
     return n.ifd;
 }
 
-/// Nothing to resume from: the kernel queue starts empty and remembers
-/// nothing from before the watch. See `lookout.tracksPosition`.
-pub fn position(n: *const Inotify) ?u64 {
-    _ = n;
-    return null;
-}
-
 /// How another thread pokes a blocked `wait`: the write end of the pipe
 /// it is also polling, which is fixed for the life of the watcher. See
 /// `lookout.Watcher.wake`.

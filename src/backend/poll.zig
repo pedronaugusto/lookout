@@ -66,13 +66,6 @@ pub fn fd(p: *const Poll) ?std.posix.fd_t {
     return null;
 }
 
-/// Nothing to resume from: a listing comparison has no sequence of its
-/// own to name a point in. See `lookout.tracksPosition`.
-pub fn position(p: *const Poll) ?u64 {
-    _ = p;
-    return null;
-}
-
 /// Nothing to poke: there is nothing to interrupt here, only a sleep to
 /// cut short, and `wait` reads the flag `lookout.Watcher.wake` sets
 /// between the slices it sleeps in. That flag lives in the watcher rather

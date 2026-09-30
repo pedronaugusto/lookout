@@ -3016,55 +3016,18 @@ test "a watch can be removed from inside a poll loop" {
     }
 }
 
-test "a position is a token a caller can write down and hand back" {
-    const start: lookout.Position = .{ .backend = .fsevents, .value = 1234567890 };
-    var storage: [lookout.Position.max_token_len]u8 = undefined;
-    const token = start.token(&storage);
-    const parsed = try lookout.Position.parse(token);
-    try std.testing.expectEqual(start.backend, parsed.backend);
-    try std.testing.expectEqual(start.value, parsed.value);
-
-    // A token is text, and text a program did not write is refused
-    // rather than guessed at.
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse(""));
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.fsevents"));
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("2.fsevents.1"));
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.nosuch.1"));
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.auto.1"));
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.fsevents.x"));
-}
-
-test "a watcher says where it has got to, exactly where it can" {
+test "a watcher offers checkpoints exactly where it can resume" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        const where = f.watcher.position();
-        // Asserted rather than accepted either way, so the predicate
-        // beside the option cannot go stale.
-        try std.testing.expectEqual(lookout.tracksPosition(backend), where != null);
-        if (where) |p| try std.testing.expectEqual(backend, p.backend);
+        var saved = try f.watcher.checkpoint(std.testing.allocator);
+        defer if (saved) |*checkpoint| checkpoint.deinit();
+        try std.testing.expectEqual(lookout.tracksCheckpoint(backend), saved != null);
     }
 }
 
-test "an FSEvents position does not pass an undrained event" {
-    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
-
-    var f = try Fixture.init(.fsevents);
-    defer f.deinit();
-    _ = try f.watcher.add(f.root, .{});
-    try f.settle();
-    const before = f.watcher.position().?.value;
-
-    try f.write("queued.txt", "one");
-    std.testing.io.sleep(.fromMilliseconds(200), .awake) catch {};
-    try std.testing.expectEqual(before, f.watcher.position().?.value);
-
-    try f.expectEvent("queued.txt", .created);
-    try std.testing.expect(f.watcher.position().?.value > before);
-}
-
 test "what changed while nothing was watching is reported on resuming" {
-    if (!lookout.tracksPosition(lookout.default_backend)) return error.SkipZigTest;
+    if (!lookout.tracksCheckpoint(lookout.default_backend)) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -3075,16 +3038,16 @@ test "what changed while nothing was watching is reported on resuming" {
     try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "one" });
     try tmp.dir.writeFile(io, .{ .sub_path = "gone.txt", .data = "one" });
 
-    var token: [lookout.Position.max_token_len]u8 = undefined;
-    var written: usize = 0;
+    var token: []u8 = undefined;
+    defer gpa.free(token);
     {
         var watcher: Watcher = try .init(gpa, io, .{});
         defer watcher.deinit();
         _ = try watcher.add(root, .{ .recursive = true });
         while ((try watcher.poll(200)).len != 0) {}
-        const where = watcher.position().?;
-        const text = where.token(&token);
-        written = text.len;
+        var where = (try watcher.checkpoint(gpa)).?;
+        defer where.deinit();
+        token = try where.token(gpa);
     }
 
     // Nothing is watching now, which is exactly when the interesting
@@ -3093,9 +3056,9 @@ test "what changed while nothing was watching is reported on resuming" {
     try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "one and two" });
     try tmp.dir.deleteFile(io, "gone.txt");
 
-    var watcher: Watcher = try .init(gpa, io, .{
-        .since = try lookout.Position.parse(token[0..written]),
-    });
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: Watcher = try .init(gpa, io, .{ .checkpoint = checkpoint });
     defer watcher.deinit();
     _ = try watcher.add(root, .{ .recursive = true });
 
@@ -3159,4 +3122,260 @@ test "an include list reports what it names and nothing else" {
         }
         try std.testing.expect(found);
     }
+}
+
+test "resuming retains a debounced change that poll has not handed out" {
+    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const wanted = try std.fs.path.join(gpa, &.{ root, "held.txt" });
+    defer gpa.free(wanted);
+    var saved: lookout.Checkpoint = undefined;
+    defer saved.deinit();
+    {
+        var watcher = try Watcher.init(gpa, io, .{ .backend = .fsevents, .debounce_ms = 200, .latency_ms = 0 });
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{});
+        try tmp.dir.writeFile(io, .{ .sub_path = "held.txt", .data = "one" });
+        // Read the backend without promoting: stage the pending delivery
+        // deterministically, independent of a pause in the test thread.
+        const deadline = @import("Deadline.zig").start(io, timeout_ms);
+        while (watcher.batch.held.count() == 0 and !deadline.expired()) {
+            try watcher.impl.fsevents.wait(&watcher.batch, 0);
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(watcher.batch.held.count() != 0);
+        saved = (try watcher.checkpoint(gpa)).?;
+    }
+    var resumed = try Watcher.init(gpa, io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
+    defer resumed.deinit();
+    _ = try resumed.add(root, .{});
+    var saw = false;
+    var waited: u32 = 0;
+    while (!saw and waited < timeout_ms) : (waited += 200) {
+        for (try resumed.poll(200)) |event| {
+            if (std.mem.eql(u8, event.path, wanted)) saw = true;
+        }
+    }
+    if (!saw) std.debug.print("resume skipped unhanded path={s} checkpoint={any}\n", .{ wanted, saved.state.value });
+    try std.testing.expect(saw);
+}
+
+test "checkpoints keep settling and rename changes beside handed deliveries" {
+    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]lookout.Options{ .{ .settle_ms = 200 }, .{ .debounce_ms = 200 } }) |holding| {
+        var f = try Fixture.initOptions(.{
+            .backend = .fsevents,
+            .latency_ms = 0,
+            .settle_ms = holding.settle_ms,
+            .debounce_ms = holding.debounce_ms,
+        });
+        defer f.deinit();
+        try f.write("held.txt", "one");
+        try f.write("from.txt", "one");
+        const id = try f.watcher.add(f.root, .{});
+        try f.settle();
+        const held = try f.path("held.txt");
+        defer gpa.free(held);
+        const from = try f.path("from.txt");
+        defer gpa.free(from);
+        const to = try f.path("to.txt");
+        defer gpa.free(to);
+        const handed = try f.path("handed.txt");
+        defer gpa.free(handed);
+
+        try f.watcher.batch.deferChange(gpa, id, handed, .overflow, null, .file);
+        const delivered = try f.watcher.poll(0);
+        try std.testing.expectEqual(@as(usize, 1), delivered.len);
+        // The next changes are unhanded even though a prior delivery
+        // remains borrowed by the caller. Staging avoids clock races.
+        try f.watcher.batch.push(gpa, id, held, .modified, .file);
+        if (holding.debounce_ms != 0) {
+            try f.watcher.batch.pushRename(gpa, id, to, from, .file);
+        } else {
+            const stream = f.watcher.impl.fsevents.streams.get(id).?;
+            f.watcher.impl.fsevents.pairing.held = .{
+                .id = id,
+                .path = try gpa.dupe(u8, from),
+                .flags = @import("backend/fsevents_records.zig").flag.item_renamed,
+                .event = stream.cursor,
+            };
+        }
+        var checkpoint = (try f.watcher.checkpoint(gpa)).?;
+        defer checkpoint.deinit();
+        const text = try checkpoint.token(gpa);
+        defer gpa.free(text);
+        var parsed = try lookout.Checkpoint.parse(gpa, text);
+        defer parsed.deinit();
+        // Changing holding options must not lose the pending changes.
+        var resumed = try Watcher.init(gpa, io, .{ .backend = .fsevents, .checkpoint = parsed, .latency_ms = 0 });
+        defer resumed.deinit();
+        const restored = try resumed.add(f.root, .{});
+        if (holding.settle_ms != 0) {
+            try std.testing.expectEqualStrings(from, resumed.impl.fsevents.pairing.held.?.path);
+            try resumed.impl.fsevents.wait(&resumed.batch, 0);
+        }
+        const events = try resumed.poll(0);
+        var saw_modified = false;
+        var saw_rename = false;
+        for (events) |event| {
+            try std.testing.expect(event.id == restored);
+            try std.testing.expect(!std.mem.eql(u8, event.path, handed));
+            if (std.mem.eql(u8, event.path, held) and event.kind == .modified) saw_modified = true;
+            if (std.mem.eql(u8, event.path, to) and event.kind == .renamed) {
+                try std.testing.expectEqualStrings(from, event.from.?);
+                saw_rename = true;
+            }
+        }
+        try std.testing.expect(saw_modified);
+        if (holding.debounce_ms != 0) {
+            try std.testing.expect(saw_rename);
+        } else {
+            // A raw half, unlike a completed rename, is restored to the
+            // pairing owner before waiting for any new native delivery.
+            // poll(0) resolves it; its path remains known on this tree.
+            try std.testing.expect(resumed.impl.fsevents.pairing.held == null);
+        }
+    }
+}
+
+test "a crash before checkpoint persistence replays the uncommitted delivery" {
+    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var f = try Fixture.initOptions(.{ .backend = .fsevents, .latency_ms = 0 });
+    defer f.deinit();
+    _ = try f.watcher.add(f.root, .{});
+    try f.settle();
+    var before = (try f.watcher.checkpoint(gpa)).?;
+    defer before.deinit();
+    try f.write("delivered.txt", "one");
+    try f.expectEvent("delivered.txt", .created);
+    var after = (try f.watcher.checkpoint(gpa)).?;
+    defer after.deinit();
+    const wanted = try f.path("delivered.txt");
+    defer gpa.free(wanted);
+    // The saved checkpoint is the commit boundary. Choosing the previous
+    // one models a crash after delivery but before processing/persistence.
+    for ([_]lookout.Checkpoint{ before, after }, [_]bool{ true, false }) |saved, should_replay| {
+        var resumed = try Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
+        defer resumed.deinit();
+        _ = try resumed.add(f.root, .{});
+        var saw = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms) : (waited += 200) {
+            for (try resumed.poll(200)) |event| {
+                if (std.mem.eql(u8, event.path, wanted)) saw = true;
+            }
+            if (saw and should_replay) break;
+        }
+        if (saw != should_replay) std.debug.print("checkpoint crash replay wanted={} saw={} path={s}\n", .{ should_replay, saw, wanted });
+        try std.testing.expectEqual(should_replay, saw);
+    }
+}
+
+test "checkpoint allocation failures leave the delivery and snapshot owned" {
+    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var f = try Fixture.init(.fsevents);
+    defer f.deinit();
+    const id = try f.watcher.add(f.root, .{});
+    try f.watcher.batch.deferChange(gpa, id, f.root, .renamed, f.root, .directory);
+    var failures: usize = 0;
+    while (true) : (failures += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = failures });
+        if (tryCheckpoint(&f.watcher, failing.allocator())) |*snapshot| {
+            var saved = snapshot.*;
+            saved.deinit();
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 1), f.watcher.batch.deferred.items.len);
+            try std.testing.expectEqualStrings(f.root, f.watcher.batch.deferred.items[0].from.?);
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+    }
+    try std.testing.expect(failures > 0);
+    var saved = (try f.watcher.checkpoint(gpa)).?;
+    defer saved.deinit();
+    // init copies all resume state. Sweeping its allocator also checks
+    // descriptors and dispatch queues are released after clone failures.
+    failures = 0;
+    while (true) : (failures += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = failures });
+        if (Watcher.init(failing.allocator(), std.testing.io, .{ .backend = .fsevents, .checkpoint = saved })) |value| {
+            var watcher = value;
+            watcher.deinit();
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+    }
+    try std.testing.expect(failures > 0);
+}
+
+fn tryCheckpoint(watcher: *const Watcher, gpa: std.mem.Allocator) !lookout.Checkpoint {
+    return (try watcher.checkpoint(gpa)).?;
+}
+
+test "checkpoint restoration rolls back a failed add and preserves prior slices" {
+    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var f = try Fixture.init(.fsevents);
+    defer f.deinit();
+    try f.tmp.dir.createDirPath(io, "later");
+    const later = try f.path("later");
+    defer gpa.free(later);
+    const id = try f.watcher.add(later, .{});
+    try f.watcher.batch.deferChange(gpa, id, later, .renamed, f.root, .directory);
+    var saved = (try f.watcher.checkpoint(gpa)).?;
+    defer saved.deinit();
+    var failures: usize = 0;
+    while (true) : (failures += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{});
+        var succeeded = false;
+        {
+            var resumed = try Watcher.init(failing.allocator(), io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
+            defer resumed.deinit();
+            const prior_id = try resumed.add(f.root, .{});
+            try resumed.batch.deferChange(failing.allocator(), prior_id, f.root, .overflow, null, .directory);
+            const prior = try resumed.poll(0);
+            try std.testing.expectEqual(@as(usize, 1), prior.len);
+            const borrowed = prior.ptr;
+            const borrowed_path = prior[0].path.ptr;
+            failing.fail_index = failing.alloc_index + failures;
+            const answer = resumed.add(later, .{});
+            failing.fail_index = std.math.maxInt(usize);
+            try std.testing.expectEqual(borrowed, resumed.batch.events.items.ptr);
+            try std.testing.expectEqual(borrowed_path, prior[0].path.ptr);
+            try std.testing.expectEqualStrings(f.root, prior[0].path);
+            if (answer) |_| {
+                var saw = false;
+                for (try resumed.poll(0)) |event| {
+                    if (std.mem.eql(u8, event.path, later) and event.kind == .renamed) {
+                        try std.testing.expectEqualStrings(f.root, event.from.?);
+                        saw = true;
+                    }
+                }
+                try std.testing.expect(saw);
+                succeeded = true;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expectEqual(@as(usize, 1), resumed.stats().watches);
+                try std.testing.expectEqual(@as(usize, 0), resumed.batch.deferred.items.len);
+                _ = try resumed.add(later, .{});
+                try std.testing.expectEqual(@as(usize, 1), resumed.batch.deferred.items.len);
+            }
+        }
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (succeeded) break;
+    }
+    try std.testing.expect(failures > 0);
 }

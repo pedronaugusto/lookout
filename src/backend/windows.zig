@@ -226,13 +226,6 @@ pub fn fd(w: *const Windows) ?std.posix.fd_t {
     return null;
 }
 
-/// Nothing to resume from: the change records start when the read does.
-/// See `lookout.tracksPosition`.
-pub fn position(w: *const Windows) ?u64 {
-    _ = w;
-    return null;
-}
-
 /// How another thread pokes a blocked `wait`: the completion port, which
 /// is fixed for the life of the watcher. See `lookout.Watcher.wake`.
 pub fn waker(w: *const Windows) Waker {

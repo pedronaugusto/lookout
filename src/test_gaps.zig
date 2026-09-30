@@ -547,10 +547,10 @@ test "a poll that expires before the replay begins is not the end of it" {
     // delivered live and numbered after the sentinel. With the catching
     // up already over, a path that is gone and that lookout has never
     // heard of is a path that came and went between two polls, and the
-    // deletion was dropped -- the half of `Options.since` a watcher
+    // deletion was dropped -- the half of `Options.checkpoint` a watcher
     // that only looks forward cannot report, and the reason the option
     // exists.
-    if (!lookout.tracksPosition(lookout.default_backend)) return error.SkipZigTest;
+    if (!lookout.tracksCheckpoint(lookout.default_backend)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
@@ -560,21 +560,23 @@ test "a poll that expires before the replay begins is not the end of it" {
     defer gpa.free(root);
     try tmp.dir.writeFile(io, .{ .sub_path = "gone.txt", .data = "one" });
 
-    var token: [lookout.Position.max_token_len]u8 = undefined;
-    var written: usize = 0;
+    var token: []u8 = undefined;
+    defer gpa.free(token);
     {
         var watcher: Watcher = try .init(gpa, io, .{});
         defer watcher.deinit();
         _ = try watcher.add(root, .{ .recursive = true });
         while ((try watcher.poll(200)).len != 0) {}
-        written = watcher.position().?.token(&token).len;
+        var checkpoint = (try watcher.checkpoint(gpa)).?;
+        defer checkpoint.deinit();
+        token = try checkpoint.token(gpa);
     }
 
     try tmp.dir.deleteFile(io, "gone.txt");
 
-    var watcher: Watcher = try .init(gpa, io, .{
-        .since = try lookout.Position.parse(token[0..written]),
-    });
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: Watcher = try .init(gpa, io, .{ .checkpoint = checkpoint });
     defer watcher.deinit();
     _ = try watcher.add(root, .{ .recursive = true });
 

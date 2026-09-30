@@ -69,15 +69,15 @@ linked anywhere else.
 | `Watcher.backend()` | Which backend this watcher resolved to. |
 | `Watcher.stats()` | What the watcher holds: watches, registrations the operating system is keeping, paths held back by a window, events the last `poll` returned. |
 | `Watcher.watches(gpa)` | Every watch, with its path, its recursion, and whether it is still waiting for its path to appear. |
-| `Watcher.position()` | Where this watcher has got to, for `Options.since` to resume from, or `null` where the backend keeps no log. |
+| `Watcher.checkpoint(gpa)` | An owned resume snapshot of handed and still-pending changes, or `null` without a persistent log or while a failed delivery needs retrying. |
 | `Event` | `{ id, path, kind, from, time, target }`. `path` is absolute, canonical, and spelled with the platform's separator; `from` is where a paired rename came from; `time` is when lookout first saw the path change in this window; `target` is whether it is a file or a directory. |
 | `Kind` | `created`, `modified`, `removed`, `renamed`, `attributes`, `closed`, `overflow`, `unwatched`. |
 | `Target` | `file`, `directory`, or `unknown` where the backend was not told and the path is already gone. |
-| `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `debounce_ms`, `report_closes`, `buffer_bytes`, `max_dir_entries`, `max_events`, `since`. |
+| `Options` | `backend`, `poll_interval_ms`, `latency_ms`, `settle_ms`, `debounce_ms`, `report_closes`, `buffer_bytes`, `max_dir_entries`, `max_events`, `checkpoint`. |
 | `AddOptions` | `recursive`, `filter`, `pending`. |
 | `Filter` | What a watch is about: `ignore`, patterns to leave out; `only`, patterns to keep and nothing else; `allow`, a predicate of the caller's; `context`, passed back to it. |
 | `Baseline` | What a tree looked like. `seed` it where the watch is taken, `diff` it on `Kind.overflow` for the changes the lost events would have carried. |
-| `Position` | Where a watcher had got to. `token` writes it as text, `parse` reads it back. |
+| `Checkpoint` | An owned resume snapshot. `token(gpa)` allocates text; `parse(gpa, text)` owns the decoded snapshot; `deinit()` releases it. |
 | `RootMove` | `renamed`, `removed`, or `silent` for nothing at all. |
 | `default_backend` | The backend `.auto` resolves to on this target. |
 | `folds_case` | Whether portable ASCII/Latin-1 case and composition folding is enabled, or paths are compared byte for byte. |
@@ -88,7 +88,7 @@ linked anywhere else.
 | `reportsRootMove(backend)` | Which of the three shapes a move of the watched path itself arrives as. |
 | `prunesIgnored(backend)` | Whether an excluded directory is left unregistered, or only has its events dropped. |
 | `reportsCloses(backend)` | Whether the backend is told that a file open for writing has been closed. |
-| `tracksPosition(backend)` | Whether it can say where it has got to, so `position` answers and `since` is worth setting. |
+| `tracksCheckpoint(backend)` | Whether it has a persistent log to resume from. |
 
 When ignore rules change, keep the watch id and pass the full replacement
 filter: `try watcher.refilter(id, .{ .ignore = new_patterns });`. Its
@@ -362,19 +362,35 @@ than it stores, so two paths differing only in case are taken for one.
 That is the same choice the platform's own tools make.
 
 **A tool that runs, exits and runs again has a gap it cannot see into.**
-`Watcher.position` closes it where the operating system keeps a log of
-what changed: the position is a short piece of text — `Position.token`
-writes it, `Position.parse` reads it back — and `Options.since` takes it
-back on the next run. What was created, changed and deleted meanwhile is
-reported, resolved against the tree as it is now.
+`Watcher.checkpoint(gpa)` copies where each watch has got to and what
+`poll` has not handed out yet. Its token carries a separate log cursor for
+each watch, the changes held for debounce or settling, and an unpaired
+rename half. A later delivery on one watch cannot skip an earlier change
+on another. Restoring resumes each cursor and puts pending changes back
+with their owner, including both names of a rename. Holding windows start
+again on resumption.
 
-lookout persists nothing. The token is the caller's to write down, and
-where it goes is the caller's business.
+`Checkpoint.token(gpa)` allocates text the caller can persist;
+`Checkpoint.parse(gpa, text)` reads it into an owned snapshot. Free the
+text with its allocator and call `Checkpoint.deinit` on each snapshot.
+`Options.checkpoint` borrows the snapshot during `init`, which copies it.
+Recreate the same watched paths, scopes and filters. Watched paths may be
+added in a different order; pending paths keep their identity when their
+registration moves from an ancestor to the requested path.
 
-Only FSEvents can answer, because only it is backed by a persistent
-per-host log rather than by a queue that starts empty.
-`tracksPosition` says so; the others return `null` from `position` and
-ignore `since` instead of pretending.
+Persist the checkpoint after processing the events returned by `poll`.
+Resuming from that snapshot restores unhanded changes and does not replay
+its completed delivery. A crash between delivery and persistence resumes
+from the previously saved snapshot and replays the uncommitted work.
+Exactly-once processing needs a transaction in the caller. lookout writes
+nothing itself. Tokens grow with the number of watches and pending paths;
+old scalar position tokens are refused because they cannot describe those
+paths. A failed poll must be retried before a new checkpoint is available.
+
+Only FSEvents can answer, because only it has a persistent per-host log.
+`tracksCheckpoint` says so; other backends return `null` and ignore the
+option. The system's log can be pruned or report loss, in which case the
+usual `overflow` and rescan rules apply. A token belongs to that host's log.
 [`examples/since.zig`](examples/since.zig) is the round trip.
 
 **`error.WatchLimitReached` is what `add` returns when the operating
@@ -419,16 +435,16 @@ whole mount instead of a watch per directory, which is the standard
 answer to "one kernel watch per directory does not scale", and it needs
 `CAP_SYS_ADMIN` — a privilege a library cannot assume a process has.
 
-**A backend is one file and one struct with ten methods**: `init`,
+**A backend is one file and one struct with nine methods**: `init`,
 `deinit`, `fd`, `registrationCount`, `add`, `remove`, `refilter`, `wait`,
-`waker` and `position`. `waker` hands `init` what another thread needs to end a
+and `waker`. `waker` hands `init` what another thread needs to end a
 blocked `wait` -- a descriptor, a handle, a pointer to state that never
 moves -- so `wake` never reads the backend the polling thread is
 writing. `Watcher.Impl` finds it structurally, so adding one is:
 write the file, add a tag to `Impl` for the right `os.tag`, add the tag
-to `Backend`, and add an arm to each of `pairsRenames`,
+to `Backend`, provide snapshot capture if its log can resume, and add an arm to each of `pairsRenames`,
 `reportsRootMove`, `reportsCloses`, `prunesIgnored` and
-`tracksPosition`. The compiler forces the last part, because every one
+`tracksCheckpoint`. The compiler forces the last part, because every one
 of those is an exhaustive switch with no `else`, and the suite then runs
 whole against the new backend with no edit.
 
@@ -450,7 +466,7 @@ for the bookkeeping a backend that recurses itself needs.
   `error.PathAlreadyWatched`, and on Linux two overlapping watches share
   one kernel watch where they meet. A pending watch is a watch of the
   path it waits for, not of the folder it is parked on.
-- **Nothing is persisted.** `Options.since` takes a token that is the
+- **Nothing is persisted.** `Options.checkpoint` takes a snapshot that is the
   caller's to store.
 - **Portable path folding covers ASCII and Latin-1 only.** On Apple
   platforms and Windows, case differences in other scripts still compare

@@ -25,6 +25,7 @@ const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
 const Batch = @This();
+const checkpoint_format = @import("checkpoint_format.zig");
 
 /// Read for the timestamps every event carries and the ones the holding
 /// rules compare.
@@ -51,11 +52,9 @@ held: std.ArrayHashMapUnmanaged(EventKey, Held, EventKeyArrayContext, true),
 /// The most events one window may hold, or zero for no ceiling. See
 /// `lookout.Options.max_events`.
 limit: usize,
-/// Paths lookout could not watch, noticed while `lookout.Watcher.add`
-/// was walking a tree rather than while a `poll` was waiting. They
-/// survive `reset` and are moved into the batch by `flush`, because
-/// `add` returns before there is any poll to carry them.
-troubles: std.ArrayList(Trouble),
+/// Changes queued during add: registration troubles and restored checkpoint
+/// changes. They survive reset and move into the next delivery in flush.
+deferred: std.ArrayList(Deferred),
 /// The watches whose events the ceiling has turned away, which
 /// `lookout.Watcher.poll` answers with `lookout.Kind.overflow` against
 /// their roots -- the batch knows it had to stop, and only the watcher
@@ -69,13 +68,14 @@ dropped: std.AutoArrayHashMapUnmanaged(WatchId, void),
 /// its own deadline and, with no timeout at all, forever.
 revision: u64,
 
-/// A change that has not been reported yet.
-/// A path that could not be registered, waiting to be reported.
-const Trouble = struct {
+/// A change produced before the next poll can take ownership of it.
+const Deferred = struct {
     id: WatchId,
     /// Absolute path, owned here.
     path: []u8,
     target: Target,
+    kind: Kind,
+    from: ?[]u8,
 };
 
 const Held = struct {
@@ -136,7 +136,7 @@ pub fn init(io: Io, options: lookout.Options) Batch {
         .index = .empty,
         .held = .empty,
         .limit = options.max_events,
-        .troubles = .empty,
+        .deferred = .empty,
         .dropped = .empty,
         .revision = 0,
     };
@@ -152,8 +152,11 @@ pub fn deinit(b: *Batch, gpa: Allocator) void {
         if (entry.from) |from| gpa.free(from);
     }
     b.held.deinit(gpa);
-    for (b.troubles.items) |t| gpa.free(t.path);
-    b.troubles.deinit(gpa);
+    for (b.deferred.items) |t| {
+        gpa.free(t.path);
+        if (t.from) |from| gpa.free(from);
+    }
+    b.deferred.deinit(gpa);
     b.dropped.deinit(gpa);
     b.* = undefined;
 }
@@ -282,12 +285,14 @@ pub fn discard(b: *Batch, gpa: Allocator, id: WatchId) void {
 pub fn discardFuture(b: *Batch, gpa: Allocator, id: WatchId) void {
     _ = b.dropped.swapRemove(id);
     var t: usize = 0;
-    while (t < b.troubles.items.len) {
-        if (b.troubles.items[t].id != id) {
+    while (t < b.deferred.items.len) {
+        if (b.deferred.items[t].id != id) {
             t += 1;
             continue;
         }
-        gpa.free(b.troubles.orderedRemove(t).path);
+        const removed = b.deferred.orderedRemove(t);
+        gpa.free(removed.path);
+        if (removed.from) |from| gpa.free(from);
     }
     var h: usize = 0;
     while (h < b.held.count()) {
@@ -315,11 +320,20 @@ pub fn refilter(
     handed_out: bool,
 ) void {
     var t: usize = 0;
-    while (t < b.troubles.items.len) {
-        const pending = b.troubles.items[t];
+    while (t < b.deferred.items.len) {
+        const pending = b.deferred.items[t];
         if (pending.id == id and filter.excludes(root, pending.path)) {
-            gpa.free(b.troubles.orderedRemove(t).path);
-        } else t += 1;
+            const removed = b.deferred.orderedRemove(t);
+            gpa.free(removed.path);
+            if (removed.from) |from| gpa.free(from);
+        } else {
+            if (pending.id == id and pending.kind == .renamed and pending.from != null and filter.excludes(root, pending.from.?)) {
+                gpa.free(pending.from.?);
+                b.deferred.items[t].from = null;
+                b.deferred.items[t].kind = .created;
+            }
+            t += 1;
+        }
     }
     var h: usize = 0;
     while (h < b.held.count()) {
@@ -404,23 +418,47 @@ pub fn trouble(
     subject: []const u8,
     target: Target,
 ) Allocator.Error!void {
+    try b.deferChange(gpa, id, subject, .unwatched, null, target);
+}
+
+/// Queues a change produced while add runs. It cannot join a slice the
+/// previous poll already handed out; flush transfers it after poll resets.
+pub fn deferChange(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) Allocator.Error!void {
     const owned = try gpa.dupe(u8, subject);
     errdefer gpa.free(owned);
-    try b.troubles.append(gpa, .{ .id = id, .path = owned, .target = target });
+    const owned_from = if (from) |source| try gpa.dupe(u8, source) else null;
+    errdefer if (owned_from) |source| gpa.free(source);
+    try b.deferred.append(gpa, .{ .id = id, .path = owned, .target = target, .kind = kind, .from = owned_from });
     b.revision += 1;
 }
 
-/// Moves everything `trouble` recorded into the batch. Called once at
-/// the start of every `lookout.Watcher.poll`, before anything blocks, so
-/// that a watch which came back half registered says so at once rather
-/// than when the tree next happens to change.
+/// Transfers deferred changes after poll has reset the previous delivery.
+/// A failed transfer keeps the source for retry.
 pub fn flush(b: *Batch, gpa: Allocator) Allocator.Error!void {
-    while (b.troubles.items.len != 0) {
-        const t = b.troubles.items[0];
-        try b.push(gpa, t.id, t.path, .unwatched, t.target);
-        _ = b.troubles.orderedRemove(0);
+    while (b.deferred.items.len != 0) {
+        const t = b.deferred.items[0];
+        try b.pushDetail(gpa, t.id, t.path, t.kind, t.from, t.target);
+        _ = b.deferred.orderedRemove(0);
         gpa.free(t.path);
+        if (t.from) |from| gpa.free(from);
     }
+}
+
+/// Borrows paths into a newly allocated list; Checkpoint copies them before
+/// the list is released. Batch alone decides what has not been handed out.
+pub fn capture(b: *const Batch, gpa: Allocator, id: WatchId, include_ready: bool) Allocator.Error![]checkpoint_format.Change {
+    var changes: std.ArrayList(checkpoint_format.Change) = .empty;
+    errdefer changes.deinit(gpa);
+    if (include_ready) for (b.events.items) |event| {
+        if (event.id == id) try changes.append(gpa, .{ .path = event.path, .kind = event.kind, .from = event.from, .target = event.target });
+    };
+    for (b.held.keys(), b.held.values()) |key, held| {
+        if (key.id == id) try changes.append(gpa, .{ .path = key.path, .kind = held.kind, .from = held.from, .target = held.target });
+    }
+    for (b.deferred.items) |change| {
+        if (change.id == id) try changes.append(gpa, .{ .path = change.path, .kind = change.kind, .from = change.from, .target = change.target });
+    }
+    return changes.toOwnedSlice(gpa);
 }
 
 /// Moves into the batch every path that has now been quiet for
@@ -1012,9 +1050,9 @@ test "a failed batch flush leaves trouble queued for the retry" {
     try b.trouble(gpa, @enumFromInt(0), root, .directory);
     var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, b.flush(failing.allocator()));
-    try testing.expectEqual(@as(usize, 1), b.troubles.items.len);
+    try testing.expectEqual(@as(usize, 1), b.deferred.items.len);
     try b.flush(gpa);
-    try testing.expectEqual(@as(usize, 0), b.troubles.items.len);
+    try testing.expectEqual(@as(usize, 0), b.deferred.items.len);
     try testing.expectEqual(@as(usize, 1), b.events.items.len);
     try testing.expectEqual(Kind.unwatched, b.events.items[0].kind);
     try testing.expectEqualStrings(root, b.events.items[0].path);

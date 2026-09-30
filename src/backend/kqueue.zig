@@ -130,13 +130,6 @@ pub fn fd(k: *const Kqueue) ?posix.fd_t {
     return k.kq;
 }
 
-/// Nothing to resume from: `EVFILT_VNODE` is a queue that starts empty
-/// rather than a log. See `lookout.tracksPosition`.
-pub fn position(k: *const Kqueue) ?u64 {
-    _ = k;
-    return null;
-}
-
 /// How another thread pokes a blocked `wait`: the kernel queue itself,
 /// which is fixed for the life of the watcher. See
 /// `lookout.Watcher.wake`.
