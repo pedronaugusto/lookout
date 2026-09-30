@@ -1338,45 +1338,38 @@ fn refreshKnown(
 /// Moves everything remembered under `old` to sit under `new`, which is
 /// what a directory rename does to a tree.
 fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.Error!void {
-    var moved: std.ArrayList([]u8) = .empty;
+    const Move = struct { before: []const u8, after: []u8 };
+    var moved: std.ArrayList(Move) = .empty;
+    var committed = false;
     defer {
-        for (moved.items) |p| f.gpa.free(p);
+        if (!committed) for (moved.items) |move| f.gpa.free(move.after);
         moved.deinit(f.gpa);
     }
 
-    var i: usize = 0;
-    while (i < f.known.count()) {
-        const key = f.known.keys()[i];
-        if (key.id != id) {
-            i += 1;
-            continue;
-        }
-        const rest = path_cmp.relative(old, key.path) orelse {
-            i += 1;
-            continue;
-        };
-        // Built before the key it points into is freed.
+    // Keep the remembered names available until every replacement path
+    // and the map capacity have been allocated. Publishing cannot fail.
+    for (f.known.keys()) |key| {
+        if (key.id != id) continue;
+        const rest = path_cmp.relative(old, key.path) orelse continue;
         const renamed = if (rest.len == 0)
             try f.gpa.dupe(u8, new)
         else
             try std.fs.path.join(f.gpa, &.{ new, rest });
         errdefer f.gpa.free(renamed);
-        try moved.append(f.gpa, renamed);
-        f.gpa.free(key.path);
-        f.known.swapRemoveAt(i);
+        try moved.append(f.gpa, .{ .before = key.path, .after = renamed });
     }
-
-    while (moved.items.len != 0) {
-        const p = moved.pop().?;
-        if (f.known.contains(.{ .id = id, .path = p })) {
-            f.gpa.free(p);
-            continue;
+    try f.known.ensureUnusedCapacity(f.gpa, moved.items.len);
+    for (moved.items) |move| {
+        _ = f.known.swapRemove(.{ .id = id, .path = move.before });
+        f.gpa.free(move.before);
+        const key: KnownKey = .{ .id = id, .path = move.after };
+        if (f.known.contains(key)) {
+            f.gpa.free(move.after);
+        } else {
+            f.known.putAssumeCapacity(key, {});
         }
-        f.known.put(f.gpa, .{ .id = id, .path = p }, {}) catch {
-            f.gpa.free(p);
-            return error.OutOfMemory;
-        };
     }
+    committed = true;
 }
 
 /// Walks a watch once, so that everything already there is known and the
@@ -1986,3 +1979,28 @@ fn expectHeldRenameFailure(comptime transfer: enum { resolve, replace, rejoin })
     try testing.expectEqual(lookout.Kind.removed, watcher.batch.events.items[0].kind);
 }
 
+test "a failed FSEvents rekey keeps every remembered name" {
+    const testing = std.testing;
+    const id: WatchId = @enumFromInt(0);
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var backend = try FsEvents.init(testing.allocator, testing.io, .{});
+        defer backend.deinit();
+        try backend.remember(id, "/old");
+        try backend.remember(id, "/old/child");
+        backend.gpa = failing.allocator();
+        defer backend.gpa = testing.allocator;
+        if (backend.rekey(id, "/old", "/new")) |_| {
+            try testing.expect(backend.known.contains(.{ .id = id, .path = "/new" }));
+            try testing.expect(backend.known.contains(.{ .id = id, .path = "/new/child" }));
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(@as(usize, 2), backend.known.count());
+            try testing.expect(backend.known.contains(.{ .id = id, .path = "/old" }));
+            try testing.expect(backend.known.contains(.{ .id = id, .path = "/old/child" }));
+            try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+    }
+}
