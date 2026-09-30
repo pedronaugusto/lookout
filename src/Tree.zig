@@ -356,7 +356,7 @@ pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeI
         added.clearRetainingCapacity();
     }
 
-    if (watch.recursive) {
+    if (watch.target == .directory) {
         var frontier: usize = 0;
         // The existing directory nodes are reconsidered, followed by the
         // nodes this pass opens. Their snapshots supply the first frontier.
@@ -370,7 +370,7 @@ pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeI
         while (frontier < dirs.items.len) : (frontier += 1) {
             const start = added.items.len;
             if (t.track_entries) try t.trackEntries(dirs.items[frontier], added);
-            try t.descend(dirs.items[frontier], added, batch);
+            if (watch.recursive) try t.descend(dirs.items[frontier], added, batch);
             for (added.items[start..]) |node_id| {
                 if ((t.nodes.get(node_id) orelse continue).role == .directory)
                     try dirs.append(t.gpa, node_id);
@@ -383,9 +383,15 @@ pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeI
     var i: usize = 0;
     while (i < t.nodes.count()) {
         const node = t.nodes.values()[i];
-        if (node.watch == id and !path_cmp.eql(node.path, watch.root) and
-            t.pruned(id, node.path))
-        {
+        if (node.watch != id or path_cmp.eql(node.path, watch.root)) {
+            i += 1;
+            continue;
+        }
+        const rejected = switch (node.role) {
+            .directory => t.pruned(id, node.path),
+            .file => t.excluded(id, node.path),
+        };
+        if (rejected) {
             t.destroy(&t.nodes.values()[i]);
             t.nodes.swapRemoveAt(i);
         } else i += 1;
@@ -856,4 +862,55 @@ test "a failed tree scan keeps file metadata until reporting succeeds" {
     try tree.rescanFile(id, &batch);
     try testing.expectEqual(@as(usize, 1), batch.events.items.len);
     try testing.expectEqual(lookout.Kind.modified, batch.events.items[0].kind);
+}
+
+test "refilter registers newly admitted files without recursion" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "old", .data = "x" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "new", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var tree = Tree.init(gpa, testing.io, 4096, true);
+    defer tree.deinit();
+    var batch = Batch.init(testing.io, .{});
+    defer batch.deinit(gpa);
+    var added: std.ArrayList(NodeId) = .empty;
+    defer added.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try tree.addWatch(id, root, .{ .filter = .{ .only = &.{"old"} } }, &added, &batch);
+    try testing.expectEqual(@as(usize, 2), tree.nodes.count());
+    added.clearRetainingCapacity();
+    try tree.refilter(id, .{ .only = &.{"new"} }, &added, &batch);
+    try testing.expectEqual(@as(usize, 1), added.items.len);
+    const node = tree.nodes.get(added.items[0]).?;
+    try testing.expectEqual(Node.Role.file, node.role);
+    try testing.expectEqualStrings("new", std.fs.path.basename(node.path));
+    try testing.expectEqual(@as(usize, 2), tree.nodes.count());
+}
+
+test "refilter releases files that only lead to an included path" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "prefix", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var tree = Tree.init(gpa, testing.io, 4096, true);
+    defer tree.deinit();
+    var batch = Batch.init(testing.io, .{});
+    defer batch.deinit(gpa);
+    var added: std.ArrayList(NodeId) = .empty;
+    defer added.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try tree.addWatch(id, root, .{}, &added, &batch);
+    try testing.expectEqual(@as(usize, 2), tree.nodes.count());
+    added.clearRetainingCapacity();
+    // A directory named prefix would lead to a match. A regular file
+    // cannot, so keeping its descriptor would only waste a registration.
+    try tree.refilter(id, .{ .only = &.{"prefix/inside"} }, &added, &batch);
+    try testing.expectEqual(@as(usize, 1), tree.nodes.count());
 }

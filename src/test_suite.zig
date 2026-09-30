@@ -769,6 +769,19 @@ test "refilter changes a live watch's admitted paths and registrations" {
     }
 }
 
+test "refilter reports writes to newly admitted files without recursion" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("admitted", "one");
+        const id = try f.watcher.add(f.root, .{ .filter = .{ .ignore = &.{"admitted"} } });
+        try f.settle();
+        try f.watcher.refilter(id, .none);
+        try f.overwrite("admitted", "two and three");
+        try f.expectEvent("admitted", .modified);
+    }
+}
+
 test "refilter seeds the entry budget of newly admitted directories" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{

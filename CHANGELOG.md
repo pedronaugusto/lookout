@@ -27,6 +27,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Filter reconciliation registers newly admitted files in non-recursive kqueue watches and releases excluded file registrations even when their names could lead to an included descendant.
+
 - Pending promotion transfers its registered path to the watch table before reporting, so later allocation failure cannot free it twice.
 
 - Recovery notices remain pending until returned to the caller, including when reconciliation discards the ancestor events of a pending watch.
