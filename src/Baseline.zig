@@ -162,6 +162,10 @@ fn scan(b: *Baseline, gpa: Allocator, report: bool) Error!void {
     while (i < frontier.items.len) : (i += 1) {
         const path = frontier.items[i];
         var dir = Io.Dir.openDirAbsolute(b.io, path, .{ .iterate = true }) catch |err| {
+            switch (err) {
+                error.FileNotFound, error.NotDir => {},
+                else => return err,
+            }
             // A subdirectory that has gone is reported by its parent's
             // own comparison, so there is nothing to say here. The root
             // has no parent to report it.
@@ -509,4 +513,36 @@ test "seeding a file rather than a directory is refused" {
     defer gpa.free(path);
 
     try testing.expectError(error.NotDir, Baseline.seed(gpa, io, path, .{}));
+}
+
+test "directory access failures are not removals" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "blocked/deep");
+    try tmp.dir.writeFile(io, .{ .sub_path = "blocked/deep/kept", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
+        inline for (.{ false, true }) |subtree| {
+            var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
+            defer base.deinit(gpa);
+            const before = base.dirs.count();
+            var vtable = io.vtable.*;
+            vtable.dirOpenDir = struct {
+                fn open(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+                    if (!subtree or std.mem.eql(u8, std.fs.path.basename(path), "blocked")) return failure;
+                    return testing.io.vtable.dirOpenDir(userdata, dir, path, options);
+                }
+            }.open;
+            base.io.vtable = &vtable;
+            try testing.expectError(failure, base.diff(gpa));
+            try testing.expectEqual(before, base.dirs.count());
+            try testing.expectEqual(@as(usize, 0), count(base.changes.items, .removed));
+            base.io = io;
+            try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+        }
+    }
 }

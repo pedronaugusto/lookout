@@ -19,6 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Baseline scans propagate directory access failures instead of reporting inaccessible paths as removed.
+
 - Windows: a name renamed over from a name the watch does not see --
   outside it, or excluded by its filter -- is `created` there, and
   `renamed` from a name it does see, as on `inotify` and FSEvents. So a
