@@ -31,6 +31,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An incomplete directory-budget reread keeps its prior names and reports uncertainty until a complete listing succeeds, instead of treating inaccessible entries as absent.
+
 - Batch and deadline arithmetic tests use a frozen clock, so a runner pause cannot expire their input between samples or cross the platform wait clamp.
 
 - FSEvents accepts replay completion as stream state before applying path scope, so a file watch can finish catching up when the sentinel names its parent.
