@@ -619,7 +619,11 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
         @intFromEnum(id), @tagName(scope), abs_path, stream_path,
     });
-    stream.ref = try createStream(stream, if (stream.persistent) volume.relative(stream_path) else stream_path, since, f.stream_latency);
+    // The cursor must be a durable device-log boundary, which may lag
+    // registration. A new live subscription still starts from now; only
+    // an explicit checkpoint asks the native stream to replay history.
+    const native_since = if (resumed != null) since else c.kFSEventStreamEventIdSinceNow;
+    stream.ref = try createStream(stream, if (stream.persistent) volume.relative(stream_path) else stream_path, native_since, f.stream_latency);
     // Invalidation is what unschedules a stream, and it requires one that
     // is scheduled, so this may only run after the line below it.
     errdefer {
@@ -2508,4 +2512,21 @@ test "a pending promotion rescans when its saved log identity is refused" {
     _ = try resumed.poll(0);
     try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
     try testing.expect(backend.streams.contains(id));
+}
+
+test "a fresh native stream asks only for future events" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    const stream = watcher.impl.fsevents.streams.get(id).?;
+    try testing.expectEqual(c.kFSEventStreamEventIdSinceNow, c.FSEventStreamGetLatestEventId(stream.ref));
+    // The saved cursor is a conservative device-log boundary; the live
+    // subscription must not replay records before this registration.
+    try testing.expect(stream.cursor != c.kFSEventStreamEventIdSinceNow);
 }

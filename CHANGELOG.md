@@ -35,6 +35,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fresh FSEvents registrations start from now while checkpoints retain a conservative device-log cursor, so old records are replayed only when resumption is requested.
+
 - Pending watches propagate checkpoint identity refusal from `add`; a refusal during later reconciliation reports overflow and starts fresh instead of retrying the rejected snapshot forever.
 
 - The stream-removal regression stops and joins native replay callbacks before constructing its exact synthetic delivery.
