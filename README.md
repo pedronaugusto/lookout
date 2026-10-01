@@ -505,10 +505,9 @@ ci/linux.sh             # the suite on Linux, in Docker, all four modes
 
 The unit suite counts complete deliveries and allocator bytes. Timeouts
 bound missing events and hangs; debounce tests check its minimum window.
-Speed claims live in `bench/src/speed_claims.zig`, outside the unit suite.
-Run `zig build speed-claims -Dquiet-machine=true` only on an exclusive quiet
-machine; `zig build check-speed-claims -Dquiet-machine=true` only compiles
-that harness. Shared hosted CI runs no speed claims.
+Speed claims live only on the [`bench` branch](https://github.com/pedronaugusto/lookout/tree/bench).
+Its quiet-machine harness runs separately from the unit suite. Shared
+hosted CI runs no speed claims.
 
 Four things are fuzzed, and all four are parsers: the run of
 `struct inotify_event` one read brings back, the

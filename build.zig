@@ -94,30 +94,6 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "Compile the lookout tests without running them");
     check_step.dependOn(&tests.step);
 
-    // Speed claims are opt-in and never a dependency of the unit suite.
-    // Compiling them does not run a benchmark on this shared machine.
-    const speed_step = b.step("speed-claims", "Check speed claims on a quiet machine");
-    const speed_check = b.step("check-speed-claims", "Compile the quiet-machine speed harness");
-    if (b.option(bool, "quiet-machine", "Acknowledge an exclusive quiet-machine speed run") orelse false) {
-        const speed_tests = b.addTest(.{
-            .name = "lookout-speed-claims",
-            .filters = &.{"quiet:"},
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/src/speed_claims.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = darwin,
-                .imports = &.{.{ .name = "lookout", .module = module }},
-            }),
-        });
-        speed_step.dependOn(&b.addRunArtifact(speed_tests).step);
-        speed_check.dependOn(&speed_tests.step);
-    } else {
-        const refusal = b.addFail("Speed claims require -Dquiet-machine=true; run them only on an exclusive quiet machine.");
-        speed_step.dependOn(&refusal.step);
-        speed_check.dependOn(&refusal.step);
-    }
-
     //=====================================================================
     // Examples
     //

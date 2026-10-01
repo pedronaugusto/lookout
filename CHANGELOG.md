@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Keep the quiet-machine speed harness and its build targets only on the `bench` branch.
+
 - Breaking: checkpoints require volume and FSEvents log identities and use per-device history; `add` returns `InvalidCheckpoint` for a changed identity or unavailable history, and mounted volumes must be watched separately.
 
 - Move wake, orphan-rename and cancellation speed limits out of the unit suite into an opt-in quiet-machine harness; unit tests count delivered changes and cancellation work instead, retaining their hang bounds.
