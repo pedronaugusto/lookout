@@ -32,6 +32,7 @@ pub const flag = struct {
     pub const user_dropped: u32 = 0x0000_0002;
     pub const kernel_dropped: u32 = 0x0000_0004;
     pub const history_done: u32 = 0x0000_0010;
+    pub const mount: u32 = 0x0000_0040;
     pub const root_changed: u32 = 0x0000_0020;
     pub const item_created: u32 = 0x0000_0100;
     pub const item_removed: u32 = 0x0000_0200;

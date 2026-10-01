@@ -545,8 +545,9 @@ pub const Options = struct {
     /// which copies what it keeps. Recreate the same watched paths, scopes
     /// and filters. Watches are matched by their canonical requested roots.
     /// add returns InvalidCheckpoint if the volume or its log has changed.
-    /// Each persistent stream follows one device; watch mounted volumes
-    /// separately.
+    /// Each persistent stream follows one device. Scopes crossing mounted
+    /// volumes keep live coverage but cannot produce checkpoints; watch
+    /// those volumes separately to retain resumable history.
     /// Pending changes are restored and new log records are resolved against
     /// the current tree. Backends without a persistent log ignore this.
     checkpoint: ?Checkpoint = null,

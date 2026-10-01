@@ -10,7 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Keep the quiet-machine speed harness and its build targets only on the `bench` branch.
 
-- Breaking: checkpoints require volume and FSEvents log identities and use per-device history; `add` returns `InvalidCheckpoint` for a changed identity or unavailable history, and mounted volumes must be watched separately.
+- Breaking: checkpoints require volume and FSEvents log identities and use per-device history; `add` returns `InvalidCheckpoint` for a changed identity or unavailable history, and mounted volumes need separate watches for resumable history.
 
 - Move wake, orphan-rename and cancellation speed limits out of the unit suite into an opt-in quiet-machine harness; unit tests count delivered changes and cancellation work instead, retaining their hang bounds.
 
@@ -34,6 +34,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   platform case folding and separator handling as lookout's watches.
 
 ### Fixed
+
+- Recursive FSEvents scopes crossing a mounted volume keep live coverage through a host stream, report the registration gap as overflow and withhold checkpoints that cannot describe every device.
 
 - Wake and task-shutdown unit tests count completed work and synchronize on readiness; their post-completion elapsed limits run only in the quiet-machine harness.
 

@@ -43,6 +43,13 @@ pub fn readIdentity(name: [*:0]const u8, device: i32) ?format.Identity {
     return .{ .volume = std.fmt.bytesToHex(volume.uuid, .lower), .log = std.fmt.bytesToHex(CFUUIDGetUUIDBytes(log).bytes, .lower) };
 }
 
+pub fn deviceOf(name: [*:0]const u8) ?i32 {
+    var attrs: AttrList = .{ .common = 0x2 }; // DEVID
+    var result: extern struct { len: u32, device: i32 } = undefined;
+    if (getattrlist(name, &attrs, &result, @sizeOf(@TypeOf(result)), 0) != 0) return null;
+    return result.device;
+}
+
 pub fn matches(a: format.Identity, b: format.Identity) bool {
     return std.mem.eql(u8, &a.volume, &b.volume) and std.mem.eql(u8, &a.log, &b.log);
 }

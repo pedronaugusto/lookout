@@ -389,8 +389,10 @@ retried before a new checkpoint is available.
 
 Only FSEvents can answer, through its persistent per-device logs.
 `tracksCheckpoint` says so; other backends return `null` and ignore the
-option. Each persistent stream follows one device; watch mounted volumes
-separately. Volumes without persistent history use live streams and return
+option. Each persistent stream follows one device. Recursive scopes crossing
+mounted volumes use live host streams and report `overflow` when switching;
+watch those volumes separately to keep resumable history. Scopes crossing
+devices and volumes without persistent history return
 `null` from `checkpoint`. Each saved watch names the volume UUID and its
 FSEvents log UUID, which survives device-number changes across reboots.
 `add` returns `error.InvalidCheckpoint` if either identity changed or history
