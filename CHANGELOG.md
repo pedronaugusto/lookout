@@ -31,6 +31,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Wake and task-shutdown unit tests count completed work and synchronize on readiness; their post-completion elapsed limits run only in the quiet-machine harness.
+
 - Native checkpoint regression tests select their backend at compile time, so the shared suite also compiles on targets without FSEvents.
 
 - An incomplete directory-budget reread keeps its prior names and reports uncertainty until a complete listing succeeds, instead of treating inaccessible entries as absent.

@@ -2678,8 +2678,10 @@ test "a watcher can be woken from another thread" {
 
         const Waker = struct {
             watcher: *Watcher,
+            calls: std.atomic.Value(usize) = .init(0),
             fn run(self: *@This()) void {
                 std.testing.io.sleep(.fromMilliseconds(100), .awake) catch {};
+                _ = self.calls.fetchAdd(1, .release);
                 self.watcher.wake();
             }
         };
@@ -2690,11 +2692,9 @@ test "a watcher can be woken from another thread" {
         // Nothing is going to happen to the tree, so without the wake
         // this blocks for as long as the caller is prepared to wait --
         // and with `null`, forever.
-        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
         const events = try f.watcher.poll(null);
-        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
         try std.testing.expectEqual(@as(usize, 0), events.len);
-        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+        try std.testing.expectEqual(@as(usize, 1), waker.calls.load(.acquire));
 
         // And the watcher still works afterwards.
         try f.write("a.txt", "one");
@@ -2831,9 +2831,11 @@ test "a polling task is stopped by a flag and a wake on every backend" {
             watcher: *Watcher,
             stopping: std.atomic.Value(bool) = .init(false),
             polls: usize = 0,
+            entered: std.atomic.Value(bool) = .init(false),
 
             fn run(self: *@This()) Watcher.PollError!void {
                 while (!self.stopping.load(.acquire)) {
+                    self.entered.store(true, .release);
                     _ = try self.watcher.poll(null);
                     self.polls += 1;
                 }
@@ -2843,14 +2845,19 @@ test "a polling task is stopped by a flag and a wake on every backend" {
         var future = std.testing.io.concurrent(Task.run, .{&task}) catch |err| switch (err) {
             error.ConcurrencyUnavailable => return error.SkipZigTest,
         };
-        std.testing.io.sleep(.fromMilliseconds(50), .awake) catch {};
-
-        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        // Bound a task that never starts. Readiness, rather than a sleep,
+        // puts stopping and wake after the task has entered its poll loop.
+        const deadline = @import("Deadline.zig").start(std.testing.io, timeout_ms);
+        while (!task.entered.load(.acquire) and !deadline.expired()) {
+            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+        }
+        const entered = task.entered.load(.acquire);
         task.stopping.store(true, .release);
         f.watcher.wake();
         try future.await(std.testing.io);
-        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
-        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+        if (!entered) std.debug.print("{s}: polling task never entered its loop\n", .{@tagName(backend)});
+        try std.testing.expect(entered);
+        try std.testing.expect(task.polls >= 1);
     }
 }
 

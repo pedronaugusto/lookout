@@ -211,3 +211,65 @@ test "quiet: a cancellation requested before poll is reported at once" {
         try std.testing.expect(elapsed.toMilliseconds() < timeout_ms / 2);
     }
 }
+
+test "quiet: a watcher can be woken from another thread" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{});
+
+        const Waker = struct {
+            watcher: *Watcher,
+            fn run(self: *@This()) void {
+                std.testing.io.sleep(.fromMilliseconds(100), .awake) catch {};
+                self.watcher.wake();
+            }
+        };
+        var waker: Waker = .{ .watcher = &f.watcher };
+        const thread = try std.Thread.spawn(.{}, Waker.run, .{&waker});
+        defer thread.join();
+
+        // Nothing is going to happen to the tree, so without the wake
+        // this blocks for as long as the caller is prepared to wait --
+        // and with `null`, forever.
+        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        const events = try f.watcher.poll(null);
+        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
+        try std.testing.expectEqual(@as(usize, 0), events.len);
+        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+    }
+}
+
+test "quiet: a polling task is stopped by a flag and a wake on every backend" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        _ = try f.watcher.add(f.root, .{});
+
+        // The recipe `Watcher.wake` gives, as written there.
+        const Task = struct {
+            watcher: *Watcher,
+            stopping: std.atomic.Value(bool) = .init(false),
+            polls: usize = 0,
+
+            fn run(self: *@This()) Watcher.PollError!void {
+                while (!self.stopping.load(.acquire)) {
+                    _ = try self.watcher.poll(null);
+                    self.polls += 1;
+                }
+            }
+        };
+        var task: Task = .{ .watcher = &f.watcher };
+        var future = std.testing.io.concurrent(Task.run, .{&task}) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return error.SkipZigTest,
+        };
+        std.testing.io.sleep(.fromMilliseconds(50), .awake) catch {};
+
+        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        task.stopping.store(true, .release);
+        f.watcher.wake();
+        try future.await(std.testing.io);
+        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
+        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+    }
+}
