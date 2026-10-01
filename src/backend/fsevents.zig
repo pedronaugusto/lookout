@@ -36,6 +36,7 @@ const posix = std.posix;
 
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
+const Volume = @import("fsevents_volume.zig");
 const checkpoint_format = @import("../checkpoint_format.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
@@ -74,7 +75,6 @@ budget: Budget,
 /// watch only after registration and restoration succeed.
 restarting: ?lookout.Checkpoint,
 resume_used: []bool,
-initial_cursor: u64,
 /// Every path each watch believes exists, seeded by walking the watch
 /// when it is added and kept current from what it reports. Path keys are
 /// owned here and compared the way the file system compares them.
@@ -221,6 +221,7 @@ const Stream = struct {
     id: WatchId,
     sink: *Sink,
     ref: c.FSEventStreamRef,
+    volume: Volume,
     /// The path the caller named, absolute and canonical.
     root: []u8,
     /// Which paths under the stream's own root this watch is about.
@@ -396,7 +397,6 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .budget = .init(gpa, io, options.max_dir_entries),
         .restarting = restarting,
         .resume_used = resume_used,
-        .initial_cursor = c.FSEventsGetCurrentEventId(),
         .known = .empty,
         .pairing = .{},
         .stream_latency = latencySeconds(options.latency_ms),
@@ -442,16 +442,20 @@ pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_
     defer watches.deinit(gpa);
     defer for (watches.items) |watch| gpa.free(watch.changes);
     for (roots) |root| {
+        const stream = f.streams.get(root.id) orelse return null;
+        const identity = stream.volume.identity orelse return null;
+        const name = try gpa.dupeZ(u8, stream.root);
+        defer gpa.free(name);
+        const current = Volume.readIdentity(name, stream.volume.device) orelse return null;
+        if (!Volume.matches(identity, current)) return null;
         const changes = try batch.capture(gpa, root.id, include_ready);
         errdefer gpa.free(changes);
-        const stream = f.streams.get(root.id);
         var half: ?checkpoint_format.Half = null;
         if (f.pairing.held) |held| {
             if (held.id == root.id) half = .{ .path = held.path, .flags = held.flags, .event = held.event };
         }
-        const saved = f.resumeIndex(root.path);
-        const cursor = if (stream) |st| st.cursor else if (saved) |index| f.restarting.?.state.value.watches[index].cursor else f.initial_cursor;
-        try watches.append(gpa, .{ .root = root.path, .recursive = root.recursive, .cursor = cursor, .changes = changes, .half = half });
+        const cursor = stream.cursor;
+        try watches.append(gpa, .{ .root = root.path, .recursive = root.recursive, .cursor = cursor, .identity = identity, .changes = changes, .half = half });
     }
     return .{ .state = try checkpoint_format.copy(gpa, .{ .version = 1, .backend = .fsevents, .watches = watches.items }) };
 }
@@ -564,8 +568,17 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     else
         abs_path;
 
+    var volume = try Volume.read(f.gpa, stream_path);
+    errdefer volume.deinit(f.gpa);
     const resumed = f.resumeIndex(requested);
-    const since = if (resumed) |index| f.restarting.?.state.value.watches[index].cursor else c.FSEventsGetCurrentEventId();
+    if (resumed) |index| {
+        const identity = volume.identity orelse return error.InvalidCheckpoint;
+        if (!Volume.matches(identity, f.restarting.?.state.value.watches[index].identity)) return error.InvalidCheckpoint;
+    }
+    const since = if (resumed) |index| f.restarting.?.state.value.watches[index].cursor else if (volume.identity != null)
+        c.FSEventsGetLastEventIdForDeviceBeforeTime(volume.device, c.CFAbsoluteTimeGetCurrent() + 978307200)
+    else
+        c.kFSEventStreamEventIdSinceNow;
     const stream = try f.gpa.create(Stream);
     errdefer f.gpa.destroy(stream);
     const root = try f.gpa.dupe(u8, abs_path);
@@ -576,6 +589,7 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
         .id = id,
         .sink = f.sink,
         .ref = undefined,
+        .volume = volume,
         .root = root,
         .scope = scope,
         .filter = filter,
@@ -589,7 +603,7 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
         @intFromEnum(id), @tagName(scope), abs_path, stream_path,
     });
-    stream.ref = try createStream(stream, stream_path, since, f.stream_latency);
+    stream.ref = try createStream(stream, if (volume.identity != null) volume.relative(stream_path) else stream_path, since, f.stream_latency);
     // Invalidation is what unschedules a stream, and it requires one that
     // is scheduled, so this may only run after the line below it.
     errdefer {
@@ -641,8 +655,10 @@ fn createStream(
         c.kFSEventStreamCreateFlagWatchRoot;
     // NoDefer makes the first event immediate; this latency controls how
     // long later events may be collected, matching lookout's own tail.
-    return c.FSEventStreamCreate(null, deliver, &context, paths, since, latency, flags) orelse
-        error.SystemResources;
+    return (if (stream.volume.identity != null)
+        c.FSEventStreamCreateRelativeToDevice(null, deliver, &context, stream.volume.device, paths, since, latency, flags)
+    else
+        c.FSEventStreamCreate(null, deliver, &context, paths, since, latency, flags)) orelse error.SystemResources;
 }
 
 /// Stops watching `id`.
@@ -751,6 +767,7 @@ fn destroy(f: *FsEvents, stream: *Stream) void {
     // synchronously on it returns only once everything accepted before it
     // has finished.
     c.dispatch_sync_f(f.queue, null, settled);
+    stream.volume.deinit(f.gpa);
     f.gpa.free(stream.root);
     stream.filter.deinit(f.gpa);
     f.gpa.destroy(stream);
@@ -780,7 +797,22 @@ fn deliver(
     stream.sink.lock.acquire();
     defer stream.sink.lock.release();
     stream.sink.deliveries += 1;
-    for (0..count) |i| stream.sink.append(stream.id, flags[i], ids[i], std.mem.span(list[i]));
+    for (0..count) |i| {
+        const subject = std.mem.span(list[i]);
+        if (stream.volume.identity != null) {
+            // The callback cannot allocate. Reserve and encode the two path
+            // pieces directly into the bounded sink under its existing lock.
+            const prefix = std.mem.trimEnd(u8, stream.volume.prefix, "/");
+            const tail = std.mem.trimStart(u8, subject, "/");
+            const length = prefix.len + 1 + tail.len;
+            if (stream.sink.len + records.header_len + length > stream.sink.buffer.len) {
+                stream.sink.overflowed = true;
+                stream.sink.dropped += 1;
+                continue;
+            }
+            stream.sink.len += records.encodeVolumePath(stream.sink.buffer[stream.sink.len..], stream.id, flags[i], ids[i], prefix, tail);
+        } else stream.sink.append(stream.id, flags[i], ids[i], subject);
+    }
     stream.sink.signal();
 }
 
@@ -1732,7 +1764,7 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
     var filled: usize = 0;
     defer for (paths[0..filled]) |path| gpa.free(std.mem.span(path));
     for (items) |item| {
-        paths[filled] = try gpa.dupeZ(u8, item.path);
+        paths[filled] = try gpa.dupeZ(u8, if (stream.volume.identity != null) stream.volume.relative(item.path) else item.path);
         flags[filled] = item.flags;
         ids[filled] = c.FSEventsGetCurrentEventId();
         filled += 1;
@@ -2079,6 +2111,9 @@ const c = struct {
     extern "c" fn FSEventStreamGetLatestEventId(stream: FSEventStreamRef) u64;
     extern "c" fn FSEventStreamGetDeviceBeingWatched(stream: FSEventStreamRef) i32;
     extern "c" fn FSEventsGetCurrentEventId() u64;
+    extern "c" fn FSEventsGetLastEventIdForDeviceBeforeTime(device: i32, time: f64) u64;
+    extern "c" fn CFAbsoluteTimeGetCurrent() f64;
+    extern "c" fn FSEventStreamCreateRelativeToDevice(allocator: CFAllocatorRef, callback: FSEventStreamCallback, context: ?*FSEventStreamContext, device: i32, paths: CFArrayRef, since: u64, latency: f64, flags: u32) ?FSEventStreamRef;
     extern "c" fn FSEventStreamStop(stream: FSEventStreamRef) void;
     extern "c" fn FSEventStreamInvalidate(stream: FSEventStreamRef) void;
     extern "c" fn FSEventStreamRelease(stream: FSEventStreamRef) void;
@@ -2271,4 +2306,53 @@ test "a file stream accepts the replay sentinel outside its event scope" {
     if (stream.replayed == null) std.debug.print("file replay sentinel discarded root={s} parent={s} scope={s}\n", .{ root, parent, @tagName(stream.scope) });
     try testing.expect(stream.replayed != null);
     try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+}
+
+test "a checkpoint refuses a different volume or FSEvents log before restoring changes" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    try testing.expectEqual(watcher.impl.fsevents.streams.get(id).?.volume.device, c.FSEventStreamGetDeviceBeingWatched(watcher.impl.fsevents.streams.get(id).?.ref));
+    try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
+    var saved = (try watcher.checkpoint(gpa)).?;
+    defer saved.deinit();
+    for ([_]bool{ true, false }) |volume| {
+        var changed = try checkpoint_format.copy(gpa, saved.state.value);
+        defer changed.deinit();
+        const watches = @constCast(changed.value.watches);
+        if (volume) watches[0].identity.volume[0] ^= 1 else watches[0].identity.log[0] ^= 1;
+        var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = .{ .state = changed } });
+        defer resumed.deinit();
+        try testing.expectError(error.InvalidCheckpoint, resumed.add(root, .{}));
+        try testing.expectEqual(@as(usize, 0), resumed.impl.fsevents.streams.count());
+        try testing.expectEqual(@as(usize, 0), resumed.batch.held.count());
+        try testing.expect(!resumed.impl.fsevents.resume_used[0]);
+    }
+}
+
+test "a checkpoint is unavailable without an unchanged persistent log" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    const stream = watcher.impl.fsevents.streams.get(id).?;
+    const original = stream.volume.identity;
+    defer stream.volume.identity = original;
+    try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
+    stream.volume.identity = null;
+    try testing.expectEqual(@as(?lookout.Checkpoint, null), try watcher.checkpoint(gpa));
+    stream.volume.identity = original;
+    stream.volume.identity.?.log[0] ^= 1;
+    try testing.expectEqual(@as(?lookout.Checkpoint, null), try watcher.checkpoint(gpa));
 }

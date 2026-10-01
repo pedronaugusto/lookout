@@ -14,9 +14,16 @@ pub const State = struct {
 pub const Watch = struct {
     root: []const u8,
     cursor: u64,
+    identity: Identity,
     recursive: bool,
     changes: []const Change = &.{},
     half: ?Half = null,
+};
+
+/// Stable volume identity and the identity of its current FSEvents log.
+pub const Identity = struct {
+    volume: [32]u8,
+    log: [32]u8,
 };
 
 pub const Change = struct {

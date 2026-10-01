@@ -544,6 +544,9 @@ pub const Options = struct {
     /// Resume from an earlier Watcher.checkpoint. Borrowed only by init,
     /// which copies what it keeps. Recreate the same watched paths, scopes
     /// and filters. Watches are matched by their canonical requested roots.
+    /// add returns InvalidCheckpoint if the volume or its log has changed.
+    /// Each persistent stream follows one device; watch mounted volumes
+    /// separately.
     /// Pending changes are restored and new log records are resolved against
     /// the current tree. Backends without a persistent log ignore this.
     checkpoint: ?Checkpoint = null,
@@ -800,6 +803,8 @@ pub const Watcher = struct {
     /// Errors `add` can return, on top of the file-system errors of
     /// resolving and opening the path.
     pub const AddError = error{
+        /// The checkpoint belongs to a different volume or FSEvents log.
+        InvalidCheckpoint,
         /// The kernel refused another watch: the per-process or
         /// system-wide limit on watches or descriptors is reached.
         WatchLimitReached,
@@ -1538,12 +1543,13 @@ pub const Watcher = struct {
     }
 
     /// Copies the boundary of what poll has handed out. The snapshot owns
-    /// each watch's log cursor and every drained change still waiting for
-    /// debounce or settling, so resuming restores those changes without
+    /// each watch's volume and log identity, cursor and drained changes
+    /// waiting for debounce or settling, so resuming restores those changes without
     /// replaying the delivery represented by this checkpoint.
     ///
     /// Call Checkpoint.deinit to free it. null means the backend has no
-    /// persistent log, or a failed delivery must first be retried by poll.
+    /// persistent log, a watched volume has no unchanged persistent log, or
+    /// a failed delivery must first be retried by poll.
     /// Persist the token after processing the returned events. A crash
     /// before persistence replays work since the previously saved snapshot;
     /// processing and persistence need a caller transaction for exactly once.

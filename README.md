@@ -364,8 +364,8 @@ That is the same choice the platform's own tools make.
 **A tool that runs, exits and runs again has a gap it cannot see into.**
 `Watcher.checkpoint(gpa)` copies where each watch has got to and what
 `poll` has not handed out yet. Its token carries a separate log cursor for
-each watch, the changes held for debounce or settling, and an unpaired
-rename half. A later delivery on one watch cannot skip an earlier change
+each watch and its volume and log identities, the changes held for debounce
+or settling, and an unpaired rename half. A later delivery on one watch cannot skip an earlier change
 on another. Restoring resumes each cursor and puts pending changes back
 with their owner, including both names of a rename. Holding windows start
 again on resumption.
@@ -384,13 +384,20 @@ its completed delivery. A crash between delivery and persistence resumes
 from the previously saved snapshot and replays the uncommitted work.
 Exactly-once processing needs a transaction in the caller. lookout writes
 nothing itself. Tokens grow with the number of watches and pending paths;
-old scalar position tokens are refused because they cannot describe those
-paths. A failed poll must be retried before a new checkpoint is available.
+tokens without volume and log identity are refused. A failed poll must be
+retried before a new checkpoint is available.
 
-Only FSEvents can answer, because only it has a persistent per-host log.
+Only FSEvents can answer, through its persistent per-device logs.
 `tracksCheckpoint` says so; other backends return `null` and ignore the
-option. The system's log can be pruned or report loss, in which case the
-usual `overflow` and rescan rules apply. A token belongs to that host's log.
+option. Each persistent stream follows one device; watch mounted volumes
+separately. Volumes without persistent history use live streams and return
+`null` from `checkpoint`. Each saved watch names the volume UUID and its
+FSEvents log UUID, which survives device-number changes across reboots.
+`add` returns `error.InvalidCheckpoint` if either identity changed or history
+is unavailable; discard that snapshot and rescan. The system's log can also
+be pruned or report loss, in which case the usual `overflow` and rescan rules
+apply. A changed log cannot produce another checkpoint until the watch is
+recreated.
 [`examples/since.zig`](examples/since.zig) is the round trip.
 
 **`error.WatchLimitReached` is what `add` returns when the operating

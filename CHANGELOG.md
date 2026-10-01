@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Breaking: checkpoints require volume and FSEvents log identities and use per-device history; `add` returns `InvalidCheckpoint` for a changed identity or unavailable history, and mounted volumes must be watched separately.
+
 - Move wake, orphan-rename and cancellation speed limits out of the unit suite into an opt-in quiet-machine harness; unit tests count delivered changes and cancellation work instead, retaining their hang bounds.
 
 - Breaking: replace `Watcher.position`, `Position`, `Options.since` and `tracksPosition` with owned `Watcher.checkpoint(gpa)`, `Checkpoint`, `Options.checkpoint` and `tracksCheckpoint`; tokens keep per-watch cursors and unhanded changes, and old scalar tokens are refused.

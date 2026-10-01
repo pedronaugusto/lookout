@@ -1,5 +1,5 @@
-//! An owned resume snapshot. Each watch keeps its own log cursor and the
-//! changes already read from that log but not handed out by poll.
+//! An owned resume snapshot. Each watch keeps its volume and log identity,
+//! its own log cursor and the changes already read from that log but not handed out by poll.
 
 const std = @import("std");
 const lookout = @import("lookout.zig");
@@ -23,8 +23,8 @@ pub fn token(p: Checkpoint, gpa: Allocator) Allocator.Error![]u8 {
 pub const ParseError = Allocator.Error || error{InvalidCheckpoint};
 
 /// Reads an owned snapshot. The input is borrowed only during this call.
-/// Old scalar position tokens cannot describe unhanded changes and are
-/// refused. Call deinit when the snapshot is no longer needed.
+/// Tokens without volume and log identity are refused. Call deinit when
+/// the snapshot is no longer needed.
 pub fn parse(gpa: Allocator, text: []const u8) ParseError!Checkpoint {
     return .{ .state = try format.parse(gpa, text) };
 }
@@ -37,6 +37,7 @@ test "checkpoint tokens own their paths and refuse unknown formats" {
         .root = root,
         .recursive = true,
         .cursor = 1234,
+        .identity = .{ .volume = .{'1'} ** 32, .log = .{'2'} ** 32 },
         .changes = &.{.{ .path = root, .kind = .modified, .target = .file }},
     }} }) };
     const text = try original.token(gpa);
@@ -49,4 +50,16 @@ test "checkpoint tokens own their paths and refuse unknown formats" {
     for ([_][]const u8{ "", "1.fsevents.1234", "{}", "{\"version\":2,\"backend\":\"fsevents\",\"watches\":[]}", "{\"version\":1,\"backend\":\"poll\",\"watches\":[]}" }) |bad| {
         try testing.expectError(error.InvalidCheckpoint, parse(gpa, bad));
     }
+}
+
+// A host cursor alone cannot identify the volume or its current log.
+test "checkpoint tokens require volume and log identity" {
+    const root = if (@import("builtin").os.tag == .windows) "C:\\watch" else "/watch";
+    const text = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":1,\"backend\":\"fsevents\",\"watches\":[{{\"root\":{f},\"recursive\":true,\"cursor\":1234}}]}}", .{std.json.fmt(root, .{})});
+    defer std.testing.allocator.free(text);
+    if (parse(std.testing.allocator, text)) |value| {
+        var accepted = value;
+        accepted.deinit();
+        return error.IdentityMissing;
+    } else |err| try std.testing.expectEqual(error.InvalidCheckpoint, err);
 }

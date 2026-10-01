@@ -111,12 +111,27 @@ pub fn encodedLen(path: []const u8) usize {
 /// bytes. Called from the system's delivery thread, so it allocates
 /// nothing and can fail in no way.
 pub fn encode(out: []u8, id: WatchId, flags: u32, event: u64, path: []const u8) usize {
-    std.mem.writeInt(u32, out[0..4], @intFromEnum(id), .little);
-    std.mem.writeInt(u32, out[4..8], flags, .little);
-    std.mem.writeInt(u32, out[8..12], @intCast(path.len), .little);
-    std.mem.writeInt(u64, out[12..20], event, .little);
+    encodeHeader(out, id, flags, event, path.len);
     @memcpy(out[header_len..][0..path.len], path);
     return encodedLen(path);
+}
+
+/// Encodes a volume-relative path with its absolute mount prefix. Both
+/// pieces are borrowed and the output is written once, without allocating.
+pub fn encodeVolumePath(out: []u8, id: WatchId, flags: u32, event: u64, prefix: []const u8, relative: []const u8) usize {
+    const length = prefix.len + 1 + relative.len;
+    encodeHeader(out, id, flags, event, length);
+    @memcpy(out[header_len..][0..prefix.len], prefix);
+    out[header_len + prefix.len] = '/';
+    @memcpy(out[header_len + prefix.len + 1 ..][0..relative.len], relative);
+    return header_len + length;
+}
+
+fn encodeHeader(out: []u8, id: WatchId, flags: u32, event: u64, length: usize) void {
+    std.mem.writeInt(u32, out[0..4], @intFromEnum(id), .little);
+    std.mem.writeInt(u32, out[4..8], flags, .little);
+    std.mem.writeInt(u32, out[8..12], @intCast(length), .little);
+    std.mem.writeInt(u64, out[12..20], event, .little);
 }
 
 /// Whether `a` and `b` are the two halves of one rename.
@@ -327,4 +342,23 @@ test "a half whose partner never comes is given back alone" {
     const taken = pairing.take(records, &used, fake).?;
     try testing.expectEqual(@as(?usize, null), taken.partner);
     try testing.expectEqualStrings("/a/old", taken.half.path);
+}
+
+test "volume-relative records retain their absolute namespace and event identity" {
+    var bytes: [256]u8 = undefined;
+    const id: WatchId = @enumFromInt(7);
+    for ([_]struct { prefix: []const u8, tail: []const u8, absolute: []const u8 }{
+        .{ .prefix = "", .tail = "Users/watch/file", .absolute = "/Users/watch/file" },
+        .{ .prefix = "/Volumes/Data", .tail = "watch/file", .absolute = "/Volumes/Data/watch/file" },
+        .{ .prefix = "/Volumes/Data", .tail = "", .absolute = "/Volumes/Data/" },
+    }) |case| {
+        const len = encodeVolumePath(&bytes, id, flag.item_modified, 42, case.prefix, case.tail);
+        var it = iterate(bytes[0..len]);
+        const record = (try it.next()).?;
+        try std.testing.expectEqualStrings(case.absolute, record.path);
+        try std.testing.expectEqual(id, record.id);
+        try std.testing.expectEqual(@as(u64, 42), record.event);
+        try std.testing.expectEqual(flag.item_modified, record.flags);
+        try std.testing.expectEqual(@as(?Record, null), try it.next());
+    }
 }
