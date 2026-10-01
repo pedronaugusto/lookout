@@ -35,6 +35,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The stream-removal regression stops and joins native replay callbacks before constructing its exact synthetic delivery.
+
 - Recursive FSEvents scopes crossing a mounted volume keep live coverage through a host stream, report the registration gap as overflow and withhold checkpoints that cannot describe every device.
 
 - Wake and task-shutdown unit tests count completed work and synchronize on readiness; their post-completion elapsed limits run only in the quiet-machine harness.

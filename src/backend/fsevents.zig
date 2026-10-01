@@ -1646,6 +1646,15 @@ test "removing an FSEvents stream releases its unreported delivery state" {
     const kept: WatchId = @enumFromInt(1);
     try f.add(gone, root, .{}, &batch);
     try f.add(kept, root, .{}, &batch);
+    // This test owns the two records below. Stop and join native replay
+    // callbacks before constructing that exact delivery.
+    c.FSEventStreamStop(f.streams.get(gone).?.ref);
+    c.FSEventStreamStop(f.streams.get(kept).?.ref);
+    c.dispatch_sync_f(f.queue, null, settled);
+    f.sink.lock.acquire();
+    f.sink.len = 0;
+    f.sink.overflowed = false;
+    f.sink.lock.release();
     // A stopped pending registration can be replaced under the same id.
     // Its buffered records and rename half belong to the old stream.
     f.sink.lock.acquire();
