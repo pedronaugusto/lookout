@@ -120,12 +120,18 @@ pub fn encode(out: []u8, id: WatchId, flags: u32, event: u64, path: []const u8) 
 /// Encodes a volume-relative path with its absolute mount prefix. Both
 /// pieces are borrowed and the output is written once, without allocating.
 pub fn encodeVolumePath(out: []u8, id: WatchId, flags: u32, event: u64, prefix: []const u8, relative: []const u8) usize {
-    const length = prefix.len + 1 + relative.len;
-    encodeHeader(out, id, flags, event, length);
+    const separator: usize = @intFromBool(relative.len != 0 or prefix.len == 0);
+    const length = encodedVolumePathLen(prefix, relative);
+    encodeHeader(out, id, flags, event, length - header_len);
     @memcpy(out[header_len..][0..prefix.len], prefix);
-    out[header_len + prefix.len] = '/';
-    @memcpy(out[header_len + prefix.len + 1 ..][0..relative.len], relative);
-    return header_len + length;
+    if (separator != 0) out[header_len + prefix.len] = '/';
+    @memcpy(out[header_len + prefix.len + separator ..][0..relative.len], relative);
+    return length;
+}
+
+/// The complete record length, including the separator only where needed.
+pub fn encodedVolumePathLen(prefix: []const u8, relative: []const u8) usize {
+    return header_len + prefix.len + relative.len + @intFromBool(relative.len != 0 or prefix.len == 0);
 }
 
 fn encodeHeader(out: []u8, id: WatchId, flags: u32, event: u64, length: usize) void {
@@ -351,7 +357,7 @@ test "volume-relative records retain their absolute namespace and event identity
     for ([_]struct { prefix: []const u8, tail: []const u8, absolute: []const u8 }{
         .{ .prefix = "", .tail = "Users/watch/file", .absolute = "/Users/watch/file" },
         .{ .prefix = "/Volumes/Data", .tail = "watch/file", .absolute = "/Volumes/Data/watch/file" },
-        .{ .prefix = "/Volumes/Data", .tail = "", .absolute = "/Volumes/Data/" },
+        .{ .prefix = "/Volumes/Data", .tail = "", .absolute = "/Volumes/Data" },
     }) |case| {
         const len = encodeVolumePath(&bytes, id, flag.item_modified, 42, case.prefix, case.tail);
         var it = iterate(bytes[0..len]);
@@ -361,5 +367,15 @@ test "volume-relative records retain their absolute namespace and event identity
         try std.testing.expectEqual(@as(u64, 42), record.event);
         try std.testing.expectEqual(flag.item_modified, record.flags);
         try std.testing.expectEqual(@as(?Record, null), try it.next());
+    }
+}
+
+test "volume-root records preserve the canonical root spelling" {
+    var bytes: [128]u8 = undefined;
+    const id: WatchId = @enumFromInt(0);
+    for ([_][]const u8{ "", "/Volumes/Data" }) |prefix| {
+        const len = encodeVolumePath(&bytes, id, flag.item_created, 1, prefix, "");
+        var it = iterate(bytes[0..len]);
+        try std.testing.expectEqualStrings(if (prefix.len == 0) "/" else prefix, (try it.next()).?.path);
     }
 }

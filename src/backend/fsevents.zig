@@ -839,8 +839,8 @@ fn deliver(
             // pieces directly into the bounded sink under its existing lock.
             const prefix = std.mem.trimEnd(u8, stream.volume.prefix, "/");
             const tail = std.mem.trimStart(u8, subject, "/");
-            const length = prefix.len + 1 + tail.len;
-            if (stream.sink.len + records.header_len + length > stream.sink.buffer.len) {
+            const length = records.encodedVolumePathLen(prefix, tail);
+            if (stream.sink.len + length > stream.sink.buffer.len) {
                 stream.sink.overflowed = true;
                 stream.sink.dropped += 1;
                 continue;
