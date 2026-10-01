@@ -159,6 +159,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Keep wake, rename and cancellation speed claims in an opt-in quiet-machine harness, available through `zig build speed-claims -Dquiet-machine=true`.
+
 - `LOOKOUT_TRACE` traces the Windows backend too: each record a read
   carries, and what was made of it.
 - `poll` is a `std.Io` cancellation point on every backend. It looks for a
