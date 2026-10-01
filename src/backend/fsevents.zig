@@ -471,6 +471,12 @@ fn resumeIndex(f: *const FsEvents, root: []const u8) ?usize {
     return null;
 }
 
+/// The requested root's checkpoint was refused during a pending watch's
+/// promotion. Its owner reports loss and recreates a fresh registration.
+pub fn discardCheckpoint(f: *FsEvents, root: []const u8) void {
+    if (f.resumeIndex(root)) |index| f.resume_used[index] = true;
+}
+
 /// A copy of what the delivery thread has handed over and no drain has
 /// taken yet, and whether `buffer_bytes` has already turned some of it
 /// away. Nothing is drained: a test that must know what the system has
@@ -2445,4 +2451,61 @@ test "a recursive mount keeps live coverage and refuses a single-device checkpoi
         }
     }
     try testing.expect(saw);
+}
+
+test "an absent pending root refuses a checkpoint from another volume" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    const absent = try std.fs.path.join(gpa, &.{ root, "absent" });
+    defer gpa.free(absent);
+    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    _ = try watcher.add(absent, .{ .pending = true });
+    var saved = (try watcher.checkpoint(gpa)).?;
+    defer saved.deinit();
+    @constCast(saved.state.value.watches)[0].identity.volume[0] ^= 1;
+    var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = saved });
+    defer resumed.deinit();
+    try testing.expectError(error.InvalidCheckpoint, resumed.add(absent, .{ .pending = true }));
+    try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
+    try testing.expectEqual(@as(usize, 0), resumed.table.count());
+    try testing.expectEqual(@as(usize, 0), resumed.impl.fsevents.streams.count());
+}
+
+test "a pending promotion rescans when its saved log identity is refused" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    const absent = try std.fs.path.join(gpa, &.{ root, "absent" });
+    defer gpa.free(absent);
+    var first = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    defer first.deinit();
+    _ = try first.add(absent, .{ .pending = true });
+    var saved = (try first.checkpoint(gpa)).?;
+    defer saved.deinit();
+    var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = saved });
+    defer resumed.deinit();
+    const id = try resumed.add(absent, .{ .pending = true });
+    const backend = &resumed.impl.fsevents;
+    // An anchor that had not consumed its snapshot encounters a different
+    // log when the requested path appears. Force that identity transition.
+    backend.resume_used[0] = false;
+    @constCast(backend.restarting.?.state.value.watches)[0].identity.log[0] ^= 1;
+    try tmp.dir.createDirPath(testing.io, "absent");
+    const events = try resumed.poll(0);
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(lookout.Kind.overflow, events[0].kind);
+    try testing.expectEqual(id, events[0].id);
+    try testing.expectEqualStrings(absent, events[0].path);
+    try testing.expect(backend.resume_used[0]);
+    _ = try resumed.poll(0);
+    try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
+    try testing.expect(backend.streams.contains(id));
 }

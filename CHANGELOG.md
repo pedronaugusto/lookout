@@ -35,6 +35,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Pending watches propagate checkpoint identity refusal from `add`; a refusal during later reconciliation reports overflow and starts fresh instead of retrying the rejected snapshot forever.
+
 - The stream-removal regression stops and joins native replay callbacks before constructing its exact synthetic delivery.
 
 - Recursive FSEvents scopes crossing a mounted volume keep live coverage through a host stream, report the registration gap as overflow and withhold checkpoints that cannot describe every device.

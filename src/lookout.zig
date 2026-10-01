@@ -1037,8 +1037,9 @@ pub const Watcher = struct {
             .filter = filter,
         };
         try w.pending.append(w.gpa, p);
+        errdefer _ = w.pending.pop();
+        try w.anchorPending(p);
         w.next_id += 1;
-        w.anchorPending(p);
         owns_target = false;
         return id;
     }
@@ -1093,7 +1094,7 @@ pub const Watcher = struct {
     /// another pending watch is parked on. The registration is this
     /// watch's own either way, under its own id and its own filter, so
     /// neither watch hears the other's events or loses its own.
-    fn anchorPending(w: *Watcher, p: *Pending) void {
+    fn anchorPending(w: *Watcher, p: *Pending) error{InvalidCheckpoint}!void {
         p.anchor = null;
         w.unregister(p.id);
         const present = w.existingPrefix(p.target) orelse return;
@@ -1102,12 +1103,29 @@ pub const Watcher = struct {
         const mirror = w.gpa.dupe(u8, present) catch return;
         w.addBackend(p.id, present, p.target, .{
             .filter = .{ .allow = Pending.onlyNext, .context = p },
-        }) catch {
+        }) catch |err| {
             w.gpa.free(mirror);
+            if (err == error.InvalidCheckpoint) return error.InvalidCheckpoint;
             return;
         };
         if (w.table.getPtr(p.id)) |held| held.registered = mirror else w.gpa.free(mirror);
         p.anchor = present;
+    }
+
+    /// Registration initiated by poll cannot return an add error. A
+    /// rejected checkpoint becomes explicit loss followed by a fresh watch.
+    fn reanchorPending(w: *Watcher, p: *Pending) PollError!void {
+        w.anchorPending(p) catch {
+            try w.resetCheckpoint(p);
+            w.anchorPending(p) catch unreachable;
+        };
+    }
+
+    fn resetCheckpoint(w: *Watcher, p: *Pending) Allocator.Error!void {
+        if (comptime @hasField(Impl, "fsevents")) {
+            if (w.impl == .fsevents) w.impl.fsevents.discardCheckpoint(p.target);
+        }
+        try w.batch.push(w.gpa, p.id, p.target, .overflow, .unknown);
     }
 
     /// Forgets what the backend was registered on for `id`, without
@@ -1148,7 +1166,7 @@ pub const Watcher = struct {
                 switch (w.impl) {
                     inline else => |*impl| impl.remove(p.id),
                 }
-                w.anchorPending(p);
+                try w.reanchorPending(p);
                 // What appeared between the look and the new registration
                 // has no event of its own — `mkdir -p` makes the next step
                 // and the path in one breath — so this one is looked at
@@ -1208,7 +1226,8 @@ pub const Watcher = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
                     w.gpa.free(mirror);
-                    w.anchorPending(p);
+                    if (err == error.InvalidCheckpoint) try w.resetCheckpoint(p);
+                    try w.reanchorPending(p);
                     return false;
                 },
             };
