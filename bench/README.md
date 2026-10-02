@@ -33,8 +33,8 @@ their speed ceilings; failure leaves a failed report with collected samples.
 The existing same-job tools remain Rust notify 8.2.0, notify-debouncer-full
 0.6.0 and Go fsnotify v1.9.0, pinned in their manifests and lockfiles. The debouncer uses a 10 ms window and a 2 ms tick. Event
 coalescing and rename pairing differ: delivered counts, files missed, pairing,
-unmatched renames and overflow stay visible next to time/CPU data. Setup must
-succeed in smoke. Missing burst/rename observations remain visible rather than
+unmatched renames and overflow stay visible next to time/CPU data. Writes/renames are checked on disk outside the measured region so a failed
+writer cannot look like watcher loss. Setup must succeed in smoke. Missing burst/rename observations remain visible rather than
 being silently treated as equivalent behavior. Parcel remains unavailable;
 no new comparison tool is added. Installed toolchains are recorded.
 

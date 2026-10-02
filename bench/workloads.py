@@ -1,4 +1,5 @@
 """The existing FSEvents comparison jobs and all-backend speed checks."""
+import json
 from quiet import HERE
 
 PACKAGE = 'lookout'
@@ -13,6 +14,7 @@ def run(p, bins):
     fsnotify = p.scratch / 'fsnotify-bench'
     p.command([p.tool('go'), 'build', '-p=1', '-mod=readonly', '-trimpath', '-ldflags=-s -w', '-o', fsnotify, '.'], cwd=HERE / 'src/go')
     p.command([p.tool('python'), 'src/generate_inputs.py', '--mode', 'smoke' if p.smoke else 'full'])
+    config = json.loads((p.scratch / 'inputs/config.json').read_text())
     rust = p.env['CARGO_TARGET_DIR'] + '/release/'
     tools = [('before', bins['before'] / 'lookout-bench'), ('after', bins['after'] / 'lookout-bench'),
              ('notify', rust + 'notify-raw-bench'), ('notify-debouncer-full', rust + 'notify-debounced-bench'),
@@ -26,7 +28,21 @@ def run(p, bins):
             if job != 'tree_setup':
                 p.command([p.tool('python'), 'src/prepare_run.py', roots[side], job, '--remove'])
         def validate(side, rows):
-            # Delivery differences stay visible. The setup itself must succeed.
+            # Check writes outside the measured region; delivery differences stay visible.
+            root = roots[side]
+            patterns = {'latency': ('latency-*.txt', config['latency_trials']),
+                        'rename': ('r*-new.txt', config['rename_count']),
+                        'idle': ('idle-*.txt', config['idle_seconds'] * config['idle_rate'])}
+            if job in patterns:
+                pattern, expected = patterns[job]
+                if sum(1 for _ in root.glob(pattern)) != expected:
+                    raise RuntimeError(f'{side}/{job}: writer did not complete')
+            if job == 'burst':
+                for count in config['burst_counts']:
+                    if sum(1 for _ in (root / f'burst-{count}').glob('f*.txt')) != count:
+                        raise RuntimeError(f'{side}/{job}: writer did not complete')
+            if job == 'rename' and any(root.glob('r*-old.txt')):
+                raise RuntimeError(f'{side}/{job}: old rename paths remain')
             if job == 'tree_setup' and not any(r['metric'] == 'setup_success' and r['value'] == 1 for r in rows):
                 raise RuntimeError(f'{side}: tree setup failed')
         sides = [(side, [exe, job, p.scratch / 'inputs',
