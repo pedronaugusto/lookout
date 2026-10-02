@@ -110,6 +110,9 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "lookout", .module = module }},
             }),
         });
+        const speed_options = b.addOptions();
+        speed_options.addOption(bool, "smoke", false);
+        speed_tests.root_module.addOptions("bench_options", speed_options);
         speed_step.dependOn(&b.addRunArtifact(speed_tests).step);
         speed_check.dependOn(&speed_tests.step);
     } else {

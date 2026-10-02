@@ -21,4 +21,18 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addOptions("bench_options", options);
     b.installArtifact(exe);
+    // Install without running: quiet.py chooses smoke or the timed pass.
+    const speed = b.addTest(.{
+        .name = "speed-claims",
+        .filters = &.{"quiet:"},
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/speed_claims.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = target.result.os.tag == .macos,
+            .imports = &.{.{ .name = "lookout", .module = lookout_dep.module("lookout") }},
+        }),
+    });
+    speed.root_module.addOptions("bench_options", options);
+    b.installArtifact(speed);
 }

@@ -4,6 +4,7 @@ const lookout = @import("lookout");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Watcher = lookout.Watcher;
+const smoke = @import("bench_options").smoke;
 
 const Config = struct {
     latency_gap_ms: u32,
@@ -206,7 +207,7 @@ fn burst(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, root: 
         var overflow = false;
         var last_us: ?i64 = null;
         var quiet: u32 = 0;
-        while (quiet < 2_000) {
+        while (quiet < (if (smoke) @as(u32, 200) else 2_000)) {
             const events = try watcher.poll(100);
             if (events.len == 0 and writer.done.load(.acquire)) {
                 quiet += 100;
@@ -289,7 +290,7 @@ fn renameWork(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, r
     var writer: RenameWriter = .{ .io = io, .dir = dir, .rows = rows.lines };
     const thread = try std.Thread.spawn(.{}, RenameWriter.run, .{&writer});
     var quiet: u32 = 0;
-    while (quiet < 2_000) {
+    while (quiet < (if (smoke) @as(u32, 200) else 2_000)) {
         const events = try watcher.poll(100);
         if (events.len == 0 and writer.done.load(.acquire)) {
             quiet += 100;
@@ -377,7 +378,7 @@ fn treeSetup(gpa: Allocator, io: Io, out: *std.Io.Writer, root: []const u8) !voi
     var samples: std.ArrayList(i64) = .empty;
     defer samples.deinit(gpa);
     var total_us: i64 = 0;
-    while (total_us < 200_000) {
+    while (samples.items.len == 0 or (!smoke and total_us < 200_000)) {
         var watcher = try makeWatcher(gpa, io);
         const started = now(io);
         _ = watcher.add(root, .{ .recursive = true }) catch |err| {

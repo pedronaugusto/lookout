@@ -9,3 +9,5 @@ results*.tsv
 results*.txt
 *.prof
 results*.tmp
+
+results/

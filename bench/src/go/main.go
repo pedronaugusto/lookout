@@ -410,7 +410,7 @@ func idle(input, root string) error {
 func treeSetup(root string) error {
 	var samples []int64
 	var measured time.Duration
-	for measured < 200*time.Millisecond {
+	for len(samples) == 0 || (os.Getenv("BENCH_SMOKE") != "1" && measured < 200*time.Millisecond) {
 		w, err := fsnotify.NewWatcher()
 		if err != nil {
 			return err

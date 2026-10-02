@@ -3,6 +3,7 @@
 const std = @import("std");
 const lookout = @import("lookout");
 const Watcher = lookout.Watcher;
+const smoke = @import("bench_options").smoke;
 
 /// Every backend this target was built with.
 const backends: []const lookout.Backend = all: {
@@ -74,8 +75,7 @@ fn pollOnce(self: anytype) Watcher.PollError![]const lookout.Event {
 /// The longest a backend may take to come back with a change that
 /// happened while `poll` was already blocked, in milliseconds.
 ///
-/// Measured: FSEvents 11.4 ms, `kqueue` 0.2 ms, polling one tick. The
-/// FSEvents floor is its own coalescing window and cannot be lowered.
+/// The threshold is checked only in a full quiet pass.
 fn wakeBudgetMs(backend: lookout.Backend, interval_ms: u32) u32 {
     return switch (backend) {
         .poll => interval_ms + 500,
@@ -86,7 +86,7 @@ fn wakeBudgetMs(backend: lookout.Backend, interval_ms: u32) u32 {
 test "quiet: a change that happens while poll is blocked comes back promptly" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const rounds = 5;
+    const rounds = if (smoke) 1 else 5;
     const interval_ms = 200;
 
     for (backends) |backend| {
@@ -149,7 +149,8 @@ test "quiet: a change that happens while poll is blocked comes back promptly" {
                 @tagName(backend), worst, budget,
             });
         }
-        try std.testing.expect(worst <= budget);
+        metric("blocked_change", backend, worst);
+        if (!smoke) try std.testing.expect(worst <= budget);
     }
 }
 
@@ -184,7 +185,8 @@ test "quiet: a file saved by a rename and then deleted is reported gone at once,
         }
         const waited_ms = @divTrunc(started.untilNow(std.testing.io).raw.nanoseconds, std.time.ns_per_ms);
         try std.testing.expect(seen);
-        try std.testing.expect(waited_ms < timeout_ms / 2);
+        metric("rename_then_delete", backend, waited_ms);
+        if (!smoke) try std.testing.expect(waited_ms < timeout_ms / 2);
     }
 }
 test "quiet: a cancellation requested before poll is reported at once" {
@@ -208,7 +210,8 @@ test "quiet: a cancellation requested before poll is reported at once" {
         const started: std.Io.Timestamp = .now(std.testing.io, .awake);
         try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
         const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
-        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms / 2);
+        metric("cancel_before_poll", backend, elapsed.toMilliseconds());
+        if (!smoke) try std.testing.expect(elapsed.toMilliseconds() < timeout_ms / 2);
     }
 }
 
@@ -236,7 +239,8 @@ test "quiet: a watcher can be woken from another thread" {
         const events = try f.watcher.poll(null);
         const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
         try std.testing.expectEqual(@as(usize, 0), events.len);
-        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+        metric("wake", backend, elapsed.toMilliseconds());
+        if (!smoke) try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
     }
 }
 
@@ -270,6 +274,11 @@ test "quiet: a polling task is stopped by a flag and a wake on every backend" {
         f.watcher.wake();
         try future.await(std.testing.io);
         const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
-        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+        metric("stop_by_flag", backend, elapsed.toMilliseconds());
+        if (!smoke) try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
     }
+}
+
+fn metric(job: []const u8, backend: lookout.Backend, milliseconds: anytype) void {
+    std.debug.print("lookout\t{s}_{s}\telapsed\t{d}\tms\n", .{ job, @tagName(backend), milliseconds });
 }

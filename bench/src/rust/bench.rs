@@ -454,7 +454,7 @@ fn idle(mode: Mode, input: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
 fn tree_setup(mode: Mode, root: &Path) -> Result<(), Box<dyn Error>> {
     let mut samples = Vec::new();
     let mut measured = Duration::ZERO;
-    while measured < Duration::from_millis(200) {
+    while samples.is_empty() || (!smoke() && measured < Duration::from_millis(200)) {
         let mut source = source(mode)?;
         let started = Instant::now();
         if let Err(error) = source.watch(root) {
@@ -478,3 +478,5 @@ fn tree_setup(mode: Mode, root: &Path) -> Result<(), Box<dyn Error>> {
     print_metric(mode.side(), "tree_setup", "setup_success", 1, "bool");
     Ok(())
 }
+
+fn smoke() -> bool { std::env::var("BENCH_SMOKE").as_deref() == Ok("1") }
