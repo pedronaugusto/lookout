@@ -17,7 +17,6 @@ const Io = std.Io;
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
 const Deadline = @import("../Deadline.zig");
-const Snapshot = @import("../Snapshot.zig");
 const Tree = @import("../Tree.zig");
 const Waker = @import("../Waker.zig");
 const Target = lookout.Target;
@@ -63,13 +62,6 @@ pub fn deinit(p: *Poll) void {
 /// cannot fold it into a wait loop of its own and must call
 /// `lookout.Watcher.poll`.
 pub fn fd(p: *const Poll) ?std.posix.fd_t {
-    _ = p;
-    return null;
-}
-
-/// Nothing to resume from: a listing comparison has no sequence of its
-/// own to name a point in. See `lookout.tracksPosition`.
-pub fn position(p: *const Poll) ?u64 {
     _ = p;
     return null;
 }
@@ -211,9 +203,11 @@ fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
         if (!p.hasNodes(id)) continue;
         _ = Io.Dir.cwd().statFile(p.io, watch.root, .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => {
+                const owned = try p.gpa.dupe(u8, watch.root);
+                errdefer p.gpa.free(owned);
                 try gone.append(p.gpa, .{
                     .id = id,
-                    .path = try p.gpa.dupe(u8, watch.root),
+                    .path = owned,
                     .target = watch.target,
                 });
                 continue;
@@ -234,4 +228,31 @@ fn hasNodes(p: *const Poll, id: WatchId) bool {
         if (node.watch == id) return true;
     }
     return false;
+}
+
+test "a failed polling removal allocation releases its staged path" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "gone", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, "gone", testing.allocator);
+    defer testing.allocator.free(root);
+    var poll = try Poll.init(testing.allocator, testing.io, .{});
+    defer poll.deinit();
+    var batch: Batch = .init(testing.io, .{});
+    defer batch.deinit(testing.allocator);
+    try poll.add(@enumFromInt(0), root, .{}, &batch);
+    try tmp.dir.deleteFile(testing.io, "gone");
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    poll.gpa = failing.allocator();
+    try testing.expectError(error.OutOfMemory, poll.checkRoots(&batch));
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+    try testing.expectEqual(@as(usize, 1), poll.registrationCount());
+    poll.gpa = testing.allocator;
+    try poll.checkRoots(&batch);
+    try testing.expectEqual(@as(usize, 1), batch.events.items.len);
+    try testing.expectEqual(lookout.Kind.removed, batch.events.items[0].kind);
+    try testing.expectEqual(@as(usize, 0), poll.registrationCount());
 }

@@ -72,7 +72,8 @@ pub fn deinit(s: *Snapshot, gpa: Allocator) void {
 ///
 /// At most `max_entries` entries are tracked. A directory with more sets
 /// `truncated`, which the caller reports as `Kind.overflow`, because
-/// changes past the limit cannot be seen.
+/// changes past the limit cannot be seen. Once entries are remembered,
+/// a truncated scan keeps them until a complete listing can be compared.
 ///
 /// On error the snapshot is left as it was, so a scan that fails halfway —
 /// the directory was deleted under it — does not turn the next successful
@@ -85,17 +86,58 @@ pub fn refresh(
     max_entries: usize,
     changes: *std.ArrayList(Change),
 ) RefreshError!void {
-    var next: std.StringArrayHashMapUnmanaged(Meta) = .empty;
-    var truncated = false;
-    errdefer {
-        for (next.keys()) |name| gpa.free(name);
+    var next = try s.prepare(gpa, io, dir, max_entries, changes);
+    s.accept(gpa, &next);
+}
+
+/// Prepares a listing and its changes without advancing the baseline.
+/// The caller owns the result until every change has been accounted for.
+pub fn prepare(s: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize, changes: *std.ArrayList(Change)) RefreshError!Snapshot {
+    var next = try readListing(gpa, io, dir, max_entries);
+    errdefer next.deinit(gpa);
+    try next.compare(s, gpa, changes);
+    return next;
+}
+
+/// Publishes a prepared listing without allocation. A truncated listing
+/// reports only what it read and keeps the last complete baseline.
+pub fn accept(s: *Snapshot, gpa: Allocator, next: *Snapshot) void {
+    if (next.truncated and s.entries.count() != 0) {
+        s.truncated = true;
         next.deinit(gpa);
+        return;
     }
+    s.deinit(gpa);
+    s.* = next.*;
+    next.* = undefined;
+}
+
+/// Reads a listing without advancing the snapshot it will be compared to.
+/// If it is truncated, keeps the remembered entries: an omitted name is
+/// not evidence of a removal. The caller owns the result.
+pub fn read(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize) RefreshError!Snapshot {
+    var next = try readListing(gpa, io, dir, max_entries);
+    errdefer next.deinit(gpa);
+    if (next.truncated and before.entries.count() != 0) {
+        next.deinit(gpa);
+        next = .{ .entries = .empty, .truncated = true };
+        for (before.entries.keys(), before.entries.values()) |name, meta| {
+            const owned = try gpa.dupe(u8, name);
+            errdefer gpa.free(owned);
+            try next.entries.put(gpa, owned, meta);
+        }
+    }
+    return next;
+}
+
+fn readListing(gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize) RefreshError!Snapshot {
+    var next: Snapshot = .empty;
+    errdefer next.deinit(gpa);
 
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        if (next.count() >= max_entries) {
-            truncated = true;
+        if (next.entries.count() >= max_entries) {
+            next.truncated = true;
             break;
         }
         // An entry can be gone between the listing and the stat; that is a
@@ -106,45 +148,43 @@ pub fn refresh(
         };
         const name = try gpa.dupe(u8, entry.name);
         errdefer gpa.free(name);
-        try next.put(gpa, name, .{
+        try next.entries.put(gpa, name, .{
             .size = stat.size,
             .mtime_ns = stat.mtime.nanoseconds,
             .ctime_ns = stat.ctime.nanoseconds,
             .file_kind = stat.kind,
         });
     }
+    return next;
+}
 
-    // Everything below only appends to `changes`, so a failure there leaves
-    // the caller with a prefix of the real changes and the old snapshot —
-    // the next scan re-derives the rest.
+/// Appends the differences without changing either listing. On error,
+/// nothing is appended and the caller can retry against the same pair.
+pub fn compare(s: *const Snapshot, before: *const Snapshot, gpa: Allocator, changes: *std.ArrayList(Change)) Allocator.Error!void {
     const start = changes.items.len;
     errdefer {
         for (changes.items[start..]) |change| gpa.free(change.name);
         changes.shrinkRetainingCapacity(start);
     }
 
-    for (next.keys(), next.values()) |name, meta| {
-        const before = s.entries.get(name) orelse {
+    for (s.entries.keys(), s.entries.values()) |name, meta| {
+        const old = before.entries.get(name) orelse {
             try append(changes, gpa, name, .created, meta.file_kind);
             continue;
         };
-        if (before.file_kind != meta.file_kind) {
+        if (old.file_kind != meta.file_kind) {
             try append(changes, gpa, name, .created, meta.file_kind);
-        } else if (before.size != meta.size or before.mtime_ns != meta.mtime_ns) {
+        } else if (old.size != meta.size or old.mtime_ns != meta.mtime_ns) {
             try append(changes, gpa, name, .modified, meta.file_kind);
-        } else if (before.ctime_ns != meta.ctime_ns) {
+        } else if (old.ctime_ns != meta.ctime_ns) {
             try append(changes, gpa, name, .attributes, meta.file_kind);
         }
     }
-    for (s.entries.keys(), s.entries.values()) |name, meta| {
-        if (next.contains(name)) continue;
+    if (s.truncated) return;
+    for (before.entries.keys(), before.entries.values()) |name, meta| {
+        if (s.entries.contains(name)) continue;
         try append(changes, gpa, name, .removed, meta.file_kind);
     }
-
-    for (s.entries.keys()) |name| gpa.free(name);
-    s.entries.deinit(gpa);
-    s.entries = next;
-    s.truncated = truncated;
 }
 
 fn append(
@@ -229,4 +269,29 @@ test "a directory over the limit is tracked up to it and marked truncated" {
     try snapshot.refresh(gpa, io, tmp.dir, 3, &changes);
     try std.testing.expect(snapshot.truncated);
     try std.testing.expectEqual(@as(usize, 3), changes.items.len);
+}
+
+test "a truncated refresh keeps the last listing for later comparison" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "one" });
+    var snapshot: Snapshot = .empty;
+    defer snapshot.deinit(gpa);
+    var changes: std.ArrayList(Change) = .empty;
+    defer {
+        freeChanges(gpa, &changes);
+        changes.deinit(gpa);
+    }
+    try snapshot.refresh(gpa, io, tmp.dir, 1, &changes);
+    freeChanges(gpa, &changes);
+    try snapshot.refresh(gpa, io, tmp.dir, 0, &changes);
+    try std.testing.expect(snapshot.truncated);
+    try std.testing.expectEqual(@as(usize, 0), changes.items.len);
+    try std.testing.expect(snapshot.entries.contains("kept"));
+    try tmp.dir.deleteFile(io, "kept");
+    try snapshot.refresh(gpa, io, tmp.dir, 1, &changes);
+    try std.testing.expectEqual(@as(usize, 1), changes.items.len);
+    try std.testing.expectEqual(Kind.removed, changes.items[0].kind);
 }

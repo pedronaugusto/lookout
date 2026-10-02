@@ -61,7 +61,11 @@ pub fn tree(
         for (frontier.items) |item| gpa.free(item);
         frontier.deinit(gpa);
     }
-    try frontier.append(gpa, try gpa.dupe(u8, root));
+    {
+        const owned = try gpa.dupe(u8, root);
+        errdefer gpa.free(owned);
+        try frontier.append(gpa, owned);
+    }
 
     var i: usize = 0;
     while (i < frontier.items.len) : (i += 1) {
@@ -156,4 +160,15 @@ test "a walk of an empty or unreadable tree visits nothing and does not fail" {
     defer gpa.free(absent);
     try tree(gpa, io, absent, &count, Count.visit);
     try testing.expectEqual(@as(usize, 0), count.seen);
+}
+
+test "a failed walk frontier allocation releases its root" {
+    const Visitor = struct {
+        fn visit(_: void, _: Entry) anyerror!Step {
+            return .over;
+        }
+    };
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    try testing.expectError(error.OutOfMemory, tree(failing.allocator(), testing.io, "/unused", {}, Visitor.visit));
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }

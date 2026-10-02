@@ -47,6 +47,30 @@ test "public path helpers use watch path comparisons" {
     if (folds_case) try testing.expectEqualStrings("file", path.relative("/WATCH", "/watch/file").?);
 }
 
+test "failed overflow reporting leaves the lost watch queued for retry" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var watcher = try Watcher.init(gpa, testing.io, .{ .backend = .poll });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    try watcher.batch.dropped.put(gpa, id, {});
+    var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    {
+        watcher.gpa = failing.allocator();
+        defer watcher.gpa = gpa;
+        try testing.expectError(error.OutOfMemory, watcher.collect());
+        try testing.expect(watcher.batch.dropped.contains(id));
+    }
+    try watcher.collect();
+    try testing.expectEqual(@as(usize, 0), watcher.batch.dropped.count());
+    try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
+    try testing.expectEqual(Kind.overflow, watcher.batch.events.items[0].kind);
+}
+
 /// Which paths under a watch the caller wants. See `AddOptions.filter`.
 pub const Filter = @import("Filter.zig");
 
@@ -83,9 +107,9 @@ pub const Backend = enum {
     /// through an I/O completion port. Recursive by flag, and renames
     /// arrive paired.
     windows,
-    /// Re-stat and re-list watched paths on a timer. Needs no kernel
-    /// support and holds no descriptor, at the cost of latency and of
-    /// walking every watched directory on every tick.
+    /// Re-stat and re-list watched paths on a timer. Needs no notification
+    /// queue, but holds a handle per watched directory, at the cost of
+    /// latency and of walking every watched directory on every tick.
     poll,
 };
 
@@ -242,69 +266,14 @@ const Poll = @import("backend/poll.zig");
 /// Where a watcher had got to, so that a later one can carry on from
 /// there.
 ///
-/// `Watcher.position` returns one and `Options.since` takes one. In
-/// between it is the caller's to keep: `token` writes it as text a
-/// program can print, store and hand back, and `parse` reads that back.
-/// lookout persists nothing.
-///
-/// A position belongs to the backend that issued it. FSEvents positions
-/// come from its per-host stream and can resume watched paths on any
-/// mounted volume; handing one to a different backend is ignored and the
-/// watch starts from now.
-pub const Position = struct {
-    /// Which mechanism issued it.
-    backend: Backend,
-    /// What that mechanism calls this point in its own sequence.
-    value: u64,
+/// An owned resume snapshot, including changes poll has not handed out.
+pub const Checkpoint = @import("Checkpoint.zig");
 
-    /// The longest a token can be, so a caller can size a buffer.
-    pub const max_token_len = 32;
-
-    /// Errors `parse` can return.
-    pub const ParseError = error{
-        /// The text is not a token this version of lookout wrote.
-        InvalidPosition,
-    };
-
-    /// Writes the position into `buffer` as text: a version, the
-    /// backend, and the value, separated by dots and holding no
-    /// character that a line, a NUL-separated list or a shell argument
-    /// would have to quote.
-    pub fn token(p: Position, buffer: *[max_token_len]u8) []const u8 {
-        return std.fmt.bufPrint(buffer, "1.{s}.{d}", .{ @tagName(p.backend), p.value }) catch
-            unreachable;
-    }
-
-    /// Reads back what `token` wrote.
-    pub fn parse(text: []const u8) ParseError!Position {
-        var parts = std.mem.splitScalar(u8, text, '.');
-        const version = parts.next() orelse return error.InvalidPosition;
-        if (!std.mem.eql(u8, version, "1")) return error.InvalidPosition;
-        const name = parts.next() orelse return error.InvalidPosition;
-        const digits = parts.next() orelse return error.InvalidPosition;
-        if (parts.next() != null) return error.InvalidPosition;
-        const backend = std.meta.stringToEnum(Backend, name) orelse
-            return error.InvalidPosition;
-        if (backend == .auto) return error.InvalidPosition;
-        return .{
-            .backend = backend,
-            .value = std.fmt.parseInt(u64, digits, 10) catch return error.InvalidPosition,
-        };
-    }
-};
-
-/// Whether `backend` can say where it has got to, so that
-/// `Watcher.position` returns something and `Options.since` is worth
-/// setting.
-///
-/// Only FSEvents can. It is the only one of the five backed by a
-/// persistent per-host log rather than by a queue that starts empty, so
-/// it is the only one that can be asked what happened before the watch
-/// existed. The others return `null` from `position` and ignore `since`
-/// rather than pretending.
-pub fn tracksPosition(backend: Backend) bool {
+/// Whether the backend has a persistent log that checkpoints can resume.
+/// Other backends return null from Watcher.checkpoint and ignore the option.
+pub fn tracksCheckpoint(backend: Backend) bool {
     return switch (backend) {
-        .auto => tracksPosition(default_backend),
+        .auto => tracksCheckpoint(default_backend),
         .fsevents => true,
         .kqueue, .inotify, .windows, .poll => false,
     };
@@ -331,6 +300,12 @@ pub const WatchId = enum(u32) { _ };
 /// `created` < `renamed` < `removed` < `overflow` < `unwatched`. A path
 /// created and then written inside one window reports `created`; a path
 /// written and then deleted reports `removed`.
+/// With `Options.debounce_ms`, ordinary changes report the kind seen last.
+/// `overflow` and `unwatched` bypass holding in every mode and keep the
+/// precedence above: neither can be replaced by an ordinary change, and
+/// `unwatched` wins when both loss notices name the same watch and path.
+/// A loss notice clears any held change on that path; later changes in
+/// the same batch cannot start another hold there.
 pub const Kind = enum {
     /// The path did not exist at the previous observation and does now.
     created,
@@ -507,19 +482,21 @@ pub const Options = struct {
     /// facts about a name rather than about contents, and are reported at
     /// once whatever this is set to.
     settle_ms: u32 = 0,
-    /// How long a path must be quiet before it is reported at all. Zero,
+    /// How long an ordinary change must be quiet before it is reported. Zero,
     /// the default, is off.
     ///
     /// This is the third and strongest of the three windows, and it
     /// answers a different question from the other two. `latency_ms`
     /// merges what arrives together and reports the most significant kind
     /// seen; `settle_ms` waits for a file's contents to stop changing.
-    /// `debounce_ms` holds *every* kind until the path has been quiet for
+    /// `debounce_ms` holds every ordinary kind until the path has been quiet for
     /// the window and then reports it once, carrying the kind seen
     /// **last** rather than the most significant one. A file created and
     /// then deleted inside one window is one `removed`; a file deleted
     /// and then recreated is one `created`, which coalescing cannot say
     /// because `removed` outranks `created`.
+    /// `overflow` and `unwatched` are immediate and retain their precedence
+    /// over ordinary changes; see `Kind`.
     ///
     /// That is what a caller rebuilding from the end state wants, and it
     /// is why it supersedes both of the others: a non-zero `debounce_ms`
@@ -564,24 +541,16 @@ pub const Options = struct {
     /// The other three backends are told what changed by the kernel or
     /// find it by listing, and ignore this.
     buffer_bytes: usize = 0,
-    /// Where to resume from: a `Position` an earlier watcher returned,
-    /// so that changes made while nothing was watching are reported
-    /// rather than missed.
-    ///
-    /// Only `fsevents` can answer this, because only it keeps a persistent
-    /// per-host log that can be replayed; `tracksPosition` says so, and a
-    /// backend that cannot ignores this. A position from another backend
-    /// is ignored too.
-    ///
-    /// A replayed change is reported against the tree as it is now: a
-    /// file created while nothing was watching and still there arrives
-    /// as `Kind.modified` rather than `Kind.created`, because what the
-    /// caller is being told is that the path is not what it was. What
-    /// lookout will not do is invent a history it cannot check.
-    ///
-    /// lookout persists nothing itself. The token is the caller's to
-    /// write down and hand back.
-    since: ?Position = null,
+    /// Resume from an earlier Watcher.checkpoint. Borrowed only by init,
+    /// which copies what it keeps. Recreate the same watched paths, scopes
+    /// and filters. Watches are matched by their canonical requested roots.
+    /// add returns InvalidCheckpoint if the volume or its log has changed.
+    /// Each persistent stream follows one device. Scopes crossing mounted
+    /// volumes keep live coverage but cannot produce checkpoints; watch
+    /// those volumes separately to retain resumable history.
+    /// Pending changes are restored and new log records are resolved against
+    /// the current tree. Backends without a persistent log ignore this.
+    checkpoint: ?Checkpoint = null,
     /// The most events one `poll` will hold, past which it stops
     /// collecting names and says `Kind.overflow` against the watch roots
     /// that lost them. Zero means no ceiling at all.
@@ -736,6 +705,9 @@ pub const Watcher = struct {
         target: Target,
         /// `AddOptions.recursive`.
         recursive: bool,
+        /// An allocation failure may have interrupted this watch's delivery.
+        /// Set without allocation and cleared only after its notice is handed out.
+        incomplete: bool = false,
     };
 
     /// One watch, as `watches` reports it.
@@ -811,9 +783,10 @@ pub const Watcher = struct {
         },
     };
 
-    /// Errors `init` can return. No allocation happens here -- a watcher
-    /// that holds no watches holds no memory -- so this is only what
-    /// creating the kernel queue can fail with.
+    /// Errors `init` can return when creating the backend's resources.
+    /// FSEvents also allocates its delivery sink and `Options.buffer_bytes`
+    /// buffer here, even with no watches. Allocator failures are
+    /// `OutOfMemory`. Other backends allocate as watches are added.
     pub const InitError = error{
         /// `Options.backend` names a backend this target was not built
         /// with. See `supported`.
@@ -822,13 +795,17 @@ pub const Watcher = struct {
         SystemFdQuotaExceeded,
         /// This process may not open another descriptor.
         ProcessFdQuotaExceeded,
-        /// The kernel could not allocate for the notification queue.
+        /// The system could not create the notification queue.
         SystemResources,
+        /// The allocator could not create the FSEvents delivery sink or buffer.
+        OutOfMemory,
     } || UnexpectedError;
 
     /// Errors `add` can return, on top of the file-system errors of
     /// resolving and opening the path.
     pub const AddError = error{
+        /// The checkpoint belongs to a different volume or FSEvents log.
+        InvalidCheckpoint,
         /// The kernel refused another watch: the per-process or
         /// system-wide limit on watches or descriptors is reached.
         WatchLimitReached,
@@ -876,10 +853,12 @@ pub const Watcher = struct {
                 break :impl @unionInit(Impl, name, try @FieldType(Impl, name).init(gpa, io, options));
             },
         };
+        var kept_options = options;
+        kept_options.checkpoint = null; // Only the resuming backend owns the copy.
         return .{
             .gpa = gpa,
             .io = io,
-            .options = options,
+            .options = kept_options,
             .batch = .init(io, options),
             .next_id = 0,
             .impl = impl,
@@ -957,9 +936,7 @@ pub const Watcher = struct {
         const mirror = try w.gpa.dupe(u8, abs);
         errdefer w.gpa.free(mirror);
         try w.table.ensureUnusedCapacity(w.gpa, 1);
-        switch (w.impl) {
-            inline else => |*impl| try impl.add(id, abs, options, &w.batch),
-        }
+        try w.addBackend(id, abs, abs, options);
         w.table.putAssumeCapacity(id, .{
             .path = owned,
             .registered = mirror,
@@ -968,6 +945,17 @@ pub const Watcher = struct {
         });
         w.next_id += 1;
         return id;
+    }
+
+    /// Backend registrations may live on an ancestor; resume identity is
+    /// always the caller's root, owned by Watcher.
+    fn addBackend(w: *Watcher, id: WatchId, physical: []const u8, requested: []const u8, options: AddOptions) AddError!void {
+        if (comptime @hasField(Impl, "fsevents")) {
+            if (w.impl == .fsevents) return w.impl.fsevents.addFor(id, physical, requested, options, &w.batch);
+        }
+        switch (w.impl) {
+            inline else => |*impl| try impl.add(id, physical, options, &w.batch),
+        }
     }
 
     /// Whether some watch already watches `abs` itself, or waits for it.
@@ -1049,8 +1037,9 @@ pub const Watcher = struct {
             .filter = filter,
         };
         try w.pending.append(w.gpa, p);
+        errdefer _ = w.pending.pop();
+        try w.anchorPending(p);
         w.next_id += 1;
-        w.anchorPending(p);
         owns_target = false;
         return id;
     }
@@ -1105,23 +1094,38 @@ pub const Watcher = struct {
     /// another pending watch is parked on. The registration is this
     /// watch's own either way, under its own id and its own filter, so
     /// neither watch hears the other's events or loses its own.
-    fn anchorPending(w: *Watcher, p: *Pending) void {
+    fn anchorPending(w: *Watcher, p: *Pending) error{InvalidCheckpoint}!void {
         p.anchor = null;
         w.unregister(p.id);
         const present = w.existingPrefix(p.target) orelse return;
         if (present.len == p.target.len) return;
         p.next = p.target[0..nextStep(p.target, present.len)];
         const mirror = w.gpa.dupe(u8, present) catch return;
-        switch (w.impl) {
-            inline else => |*impl| impl.add(p.id, present, .{
-                .filter = .{ .allow = Pending.onlyNext, .context = p },
-            }, &w.batch) catch {
-                w.gpa.free(mirror);
-                return;
-            },
-        }
+        w.addBackend(p.id, present, p.target, .{
+            .filter = .{ .allow = Pending.onlyNext, .context = p },
+        }) catch |err| {
+            w.gpa.free(mirror);
+            if (err == error.InvalidCheckpoint) return error.InvalidCheckpoint;
+            return;
+        };
         if (w.table.getPtr(p.id)) |held| held.registered = mirror else w.gpa.free(mirror);
         p.anchor = present;
+    }
+
+    /// Registration initiated by poll cannot return an add error. A
+    /// rejected checkpoint becomes explicit loss followed by a fresh watch.
+    fn reanchorPending(w: *Watcher, p: *Pending) PollError!void {
+        w.anchorPending(p) catch {
+            try w.resetCheckpoint(p);
+            w.anchorPending(p) catch unreachable;
+        };
+    }
+
+    fn resetCheckpoint(w: *Watcher, p: *Pending) Allocator.Error!void {
+        if (comptime @hasField(Impl, "fsevents")) {
+            if (w.impl == .fsevents) w.impl.fsevents.discardCheckpoint(p.target);
+        }
+        try w.batch.push(w.gpa, p.id, p.target, .overflow, .unknown);
     }
 
     /// Forgets what the backend was registered on for `id`, without
@@ -1162,7 +1166,7 @@ pub const Watcher = struct {
                 switch (w.impl) {
                     inline else => |*impl| impl.remove(p.id),
                 }
-                w.anchorPending(p);
+                try w.reanchorPending(p);
                 // What appeared between the look and the new registration
                 // has no event of its own — `mkdir -p` makes the next step
                 // and the path in one breath — so this one is looked at
@@ -1209,27 +1213,29 @@ pub const Watcher = struct {
                 break :target Target.unknown;
             break :target Target.of(stat.kind);
         };
-        const mirror = try w.gpa.dupe(u8, p.target);
-        errdefer w.gpa.free(mirror);
-        switch (w.impl) {
-            inline else => |*impl| impl.add(p.id, p.target, .{
+        {
+            // This scope owns the mirror only until the backend and table
+            // take the registration. Reporting below may still fail, but
+            // then unregister or deinit owns its eventual release.
+            const mirror = try w.gpa.dupe(u8, p.target);
+            errdefer w.gpa.free(mirror);
+            w.addBackend(p.id, p.target, p.target, .{
                 .recursive = p.recursive,
                 .filter = p.filter,
-            }, &w.batch) catch |err| switch (err) {
+            }) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                // Gone again between the look and the registration, or
-                // not ours to open. Park it and wait.
                 else => {
                     w.gpa.free(mirror);
-                    w.anchorPending(p);
+                    if (err == error.InvalidCheckpoint) try w.resetCheckpoint(p);
+                    try w.reanchorPending(p);
                     return false;
                 },
-            },
+            };
+            if (w.table.getPtr(p.id)) |held| {
+                held.registered = mirror;
+                held.target = target;
+            } else w.gpa.free(mirror);
         }
-        if (w.table.getPtr(p.id)) |held| {
-            held.registered = mirror;
-            held.target = target;
-        } else w.gpa.free(mirror);
         try w.batch.pushDetail(w.gpa, p.id, p.target, .created, null, target);
         if (target == .directory) try w.reportMade(p);
         w.destroyPending(p);
@@ -1349,10 +1355,20 @@ pub const Watcher = struct {
     /// batch arrives, collection continues for `Options.latency_ms` more
     /// so that a burst on one path becomes one event; a `timeout_ms` of
     /// `0` skips that wait.
+    /// `overflow` and `unwatched` bypass settling and debouncing and remain
+    /// in the batch until handed out, even if later ordinary changes name
+    /// the same path. See `Kind` for precedence.
     ///
     /// The returned slice, and every path in it, is owned by the watcher
     /// and is invalidated by the next call to `poll` or by `deinit`. An
     /// empty slice means the timeout expired with nothing to report.
+    ///
+    /// **Allocation failure.** An `OutOfMemory` hands nothing out. Retry
+    /// `poll`: backends keep unread deliveries where possible, and the
+    /// retry reports `overflow` against every still-live watch root before
+    /// it can return successfully, even after a wake. Rescan those roots.
+    /// Recovery notices survive further allocation failures and bypass
+    /// settling and debouncing. Events already gathered remain available.
     ///
     /// **Cancellation.** `poll` is a `std.Io` cancellation point on every
     /// backend: a cancellation requested before it is called, or while it
@@ -1379,13 +1395,41 @@ pub const Watcher = struct {
         if (w.handed_out) w.batch.reset(w.gpa);
         w.handed_out = false;
         try w.io.checkCancel();
-        const events = try w.gather(timeout_ms);
+        const events = w.gather(timeout_ms) catch |err| {
+            if (err == error.OutOfMemory) {
+                // A shared delivery can touch several roots, and a failed
+                // operation may already have changed backend bookkeeping.
+                // Conservatively include every live watch; no allocation
+                // or backend-owned path is needed to remember the loss.
+                for (w.table.values()) |*held| held.incomplete = true;
+            }
+            return err;
+        };
+        for (w.table.values()) |*held| held.incomplete = false;
         w.handed_out = true;
         return events;
     }
 
     /// `poll`, less the bookkeeping of what has been handed out.
     fn gather(w: *Watcher, timeout_ms: ?u32) PollError![]const Event {
+        // Report before a wake or an indefinite wait can return or block.
+        try w.recover();
+        _ = try w.gatherWindow(timeout_ms);
+        // Pending-watch reconciliation can discard ancestor events. The
+        // recovery obligation is the caller's root, and ends only when
+        // poll actually hands the notice out, never during reconciliation.
+        try w.recover();
+        return w.batch.events.items;
+    }
+
+    fn recover(w: *Watcher) Allocator.Error!void {
+        for (w.table.keys(), w.table.values()) |id, held| {
+            if (!held.incomplete) continue;
+            try w.batch.push(w.gpa, id, held.path, .overflow, held.target);
+        }
+    }
+
+    fn gatherWindow(w: *Watcher, timeout_ms: ?u32) PollError![]const Event {
         // Before anything blocks: a watch that came back half
         // registered says so at once rather than when the tree next
         // happens to change.
@@ -1462,11 +1506,14 @@ pub const Watcher = struct {
         try w.settlePending();
         while (w.batch.dropped.count() != 0) {
             const id = w.batch.dropped.keys()[0];
-            w.batch.dropped.swapRemoveAt(0);
             // The batch knows it had to stop holding names; only the
             // watcher knows which root to say so against.
-            const root = w.rootOf(id) orelse continue;
+            const root = w.rootOf(id) orelse {
+                w.batch.dropped.swapRemoveAt(0);
+                continue;
+            };
             try w.batch.push(w.gpa, id, root, .overflow, w.rootTarget(id));
+            w.batch.dropped.swapRemoveAt(0);
         }
     }
 
@@ -1515,14 +1562,28 @@ pub const Watcher = struct {
         w.waker.wake();
     }
 
-    /// Where this watcher has got to, for `Options.since` to resume
-    /// from later, or `null` on a backend that cannot say. See
-    /// `tracksPosition` and `Position`.
-    pub fn position(w: *const Watcher) ?Position {
-        const value = switch (w.impl) {
-            inline else => |*impl| impl.position(),
-        } orelse return null;
-        return .{ .backend = w.backend(), .value = value };
+    /// Copies the boundary of what poll has handed out. The snapshot owns
+    /// each watch's volume and log identity, cursor and drained changes
+    /// waiting for debounce or settling, so resuming restores those changes without
+    /// replaying the delivery represented by this checkpoint.
+    ///
+    /// Call Checkpoint.deinit to free it. null means the backend has no
+    /// persistent log, a watched volume has no unchanged persistent log, or
+    /// a failed delivery must first be retried by poll.
+    /// Persist the token after processing the returned events. A crash
+    /// before persistence replays work since the previously saved snapshot;
+    /// processing and persistence need a caller transaction for exactly once.
+    pub fn checkpoint(w: *const Watcher, gpa: Allocator) Allocator.Error!?Checkpoint {
+        if (w.batch.dropped.count() != 0) return null;
+        for (w.table.values()) |held| if (held.incomplete) return null;
+        if (comptime @hasField(Impl, "fsevents")) {
+            if (w.impl == .fsevents) {
+                const roots = try w.watches(gpa);
+                defer gpa.free(roots);
+                return w.impl.fsevents.capture(gpa, &w.batch, !w.handed_out, roots);
+            }
+        }
+        return null;
     }
 
     /// Every watch this watcher holds, in the order they were added.
@@ -1557,8 +1618,8 @@ pub const Watcher = struct {
         /// Paths the operating system has been told about on this
         /// watcher's behalf: one per kernel watch on `inotify`, one per
         /// open descriptor on `kqueue`, one per stream on `fsevents`, one
-        /// per directory handle on `windows`, and one per directory
-        /// listed on `poll`.
+        /// per directory handle on `windows`, and one per path scanned
+        /// on `poll`.
         ///
         /// This is the number that runs into the limits — the per-user
         /// cap on `inotify` watches, the per-process cap on descriptors —
@@ -1629,9 +1690,11 @@ test {
     _ = @import("buffer.zig");
     _ = @import("path.zig");
     _ = @import("walk.zig");
+    // Held-event transfers use no Windows calls and are tested on every host.
+    _ = @import("backend/windows.zig");
     _ = @import("trace.zig");
     _ = @import("test_suite.zig");
-    _ = @import("test_bench.zig");
+    _ = @import("test_resources.zig");
     _ = @import("test_gaps.zig");
     _ = @import("test_fuzz.zig");
     // The backends this target was built with, each of which carries
@@ -1656,4 +1719,45 @@ test "the Apple default preserves paired renames" {
         },
         else => return error.SkipZigTest,
     }
+}
+
+test "a failed pending promotion keeps each registered path owned" {
+    const testing = std.testing;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+        defer testing.allocator.free(root);
+        const target = try std.fs.path.join(testing.allocator, &.{ root, "later" });
+        defer testing.allocator.free(target);
+        // Keep freed storage mapped so a duplicate release can be counted
+        // without dereferencing freed memory or crashing the test runner.
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var failing = testing.FailingAllocator.init(arena.allocator(), .{});
+        var failed = false;
+        {
+            var watcher = try Watcher.init(failing.allocator(), testing.io, .{ .backend = .poll });
+            defer watcher.deinit();
+            _ = try watcher.add(target, .{ .pending = true, .recursive = true });
+            try tmp.dir.createDirPath(testing.io, "later/child");
+            try tmp.dir.writeFile(testing.io, .{ .sub_path = "later/child/file", .data = "x" });
+            failing.fail_index = failing.alloc_index + fail_index;
+            const answer = watcher.promotePending(watcher.pending.items[0]);
+            failing.fail_index = std.math.maxInt(usize);
+            if (answer) |promoted| {
+                try testing.expect(promoted);
+                // promotePending destroys the object; its caller removes
+                // the list entry only after that successful return.
+                _ = watcher.pending.orderedRemove(0);
+            } else |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                failed = true;
+            }
+        }
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (!failed) break;
+    }
+    try testing.expect(fail_index > 0);
 }

@@ -247,7 +247,10 @@ fn createDirectory(t: *Tree, watch: WatchId, path: []u8, added: *std.ArrayList(N
         .snapshot = .empty,
         .meta = undefined,
     });
-    errdefer _ = t.nodes.swapRemove(id);
+    errdefer {
+        t.nodes.getPtr(id).?.snapshot.deinit(t.gpa);
+        _ = t.nodes.swapRemove(id);
+    }
     t.next_node += 1;
 
     // The listing taken here is the baseline: the caller asked to be told
@@ -262,7 +265,15 @@ fn createDirectory(t: *Tree, watch: WatchId, path: []u8, added: *std.ArrayList(N
     const node = t.nodes.getPtr(id).?;
     try node.snapshot.refresh(t.gpa, t.io, dir, t.max_dir_entries, &baseline);
 
+    const start = added.items.len;
     try added.append(t.gpa, id);
+    errdefer {
+        // This scope still owns the directory's handle and snapshot, and
+        // its caller still owns the path. Child nodes have already taken
+        // theirs, so roll them back before releasing this directory.
+        t.rollback(added, start + 1);
+        added.shrinkRetainingCapacity(start);
+    }
     if (t.track_entries) try t.trackEntries(id, added);
     return id;
 }
@@ -345,7 +356,7 @@ pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeI
         added.clearRetainingCapacity();
     }
 
-    if (watch.recursive) {
+    if (watch.target == .directory) {
         var frontier: usize = 0;
         // The existing directory nodes are reconsidered, followed by the
         // nodes this pass opens. Their snapshots supply the first frontier.
@@ -359,7 +370,7 @@ pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeI
         while (frontier < dirs.items.len) : (frontier += 1) {
             const start = added.items.len;
             if (t.track_entries) try t.trackEntries(dirs.items[frontier], added);
-            try t.descend(dirs.items[frontier], added, batch);
+            if (watch.recursive) try t.descend(dirs.items[frontier], added, batch);
             for (added.items[start..]) |node_id| {
                 if ((t.nodes.get(node_id) orelse continue).role == .directory)
                     try dirs.append(t.gpa, node_id);
@@ -372,9 +383,15 @@ pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeI
     var i: usize = 0;
     while (i < t.nodes.count()) {
         const node = t.nodes.values()[i];
-        if (node.watch == id and !path_cmp.eql(node.path, watch.root) and
-            t.pruned(id, node.path))
-        {
+        if (node.watch != id or path_cmp.eql(node.path, watch.root)) {
+            i += 1;
+            continue;
+        }
+        const rejected = switch (node.role) {
+            .directory => t.pruned(id, node.path),
+            .file => t.excluded(id, node.path),
+        };
+        if (rejected) {
             t.destroy(&t.nodes.values()[i]);
             t.nodes.swapRemoveAt(i);
         } else i += 1;
@@ -462,6 +479,8 @@ fn pruned(t: *const Tree, id: WatchId, subject: []const u8) bool {
 ///
 /// A node whose directory has disappeared is dropped along with everything
 /// below it, and reported as `lookout.Kind.removed`.
+/// The baseline advances only after reporting and adoption succeed.
+/// Failure releases newly adopted nodes and leaves the listing retryable.
 pub fn rescanDirectory(
     t: *Tree,
     id: NodeId,
@@ -475,20 +494,26 @@ pub fn rescanDirectory(
 
     Snapshot.freeChanges(t.gpa, &t.changes);
     defer Snapshot.freeChanges(t.gpa, &t.changes);
-    node.snapshot.refresh(t.gpa, t.io, node.dir, t.max_dir_entries, &t.changes) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
+    var next = node.snapshot.prepare(t.gpa, t.io, node.dir, t.max_dir_entries, &t.changes) catch |err| switch (err) {
         // The directory is gone, or is no longer a directory. Report it and
         // stop watching what is below it.
-        else => {
+        error.FileNotFound, error.NotDir => {
             const gone = try t.gpa.dupe(u8, node.path);
             defer t.gpa.free(gone);
             try batch.push(t.gpa, watch, gone, .removed, .directory);
             t.removeSubtree(watch, gone);
             return;
         },
+        else => return err,
     };
 
-    if (t.nodes.getPtr(id).?.snapshot.truncated) {
+    errdefer next.deinit(t.gpa);
+    const start = added.items.len;
+    // A retry must adopt the whole newly discovered subtree, rather than
+    // treating partially created nodes as a baseline it never reported.
+    errdefer t.rollback(added, start);
+
+    if (next.truncated) {
         try batch.push(t.gpa, watch, t.watchRoot(watch), .overflow, t.watchRootTarget(watch));
     }
 
@@ -516,7 +541,7 @@ pub fn rescanDirectory(
             if (!t.track_entries) continue;
             switch (change.kind) {
                 .created => {
-                    const meta = (t.nodes.getPtr(id) orelse return).snapshot.entries.get(change.name) orelse continue;
+                    const meta = next.entries.get(change.name) orelse continue;
                     const owned = try t.gpa.dupe(u8, child);
                     errdefer t.gpa.free(owned);
                     _ = try t.createFile(watch, owned, meta, added);
@@ -533,6 +558,7 @@ pub fn rescanDirectory(
             else => {},
         }
     }
+    t.nodes.getPtr(id).?.snapshot.accept(t.gpa, &next);
 }
 
 /// Registers a directory that has appeared under a recursive watch, and
@@ -559,25 +585,32 @@ fn adopt(
         for (frontier.items) |path| t.gpa.free(path);
         frontier.deinit(t.gpa);
     }
-    try frontier.append(t.gpa, try t.gpa.dupe(u8, root));
+    {
+        const owned = try t.gpa.dupe(u8, root);
+        errdefer t.gpa.free(owned);
+        try frontier.append(t.gpa, owned);
+    }
 
     var i: usize = 0;
     while (i < frontier.items.len) : (i += 1) {
         const current = frontier.items[i];
-        const owned = try t.gpa.dupe(u8, current);
-        const id = t.createDirectory(watch, owned, added) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            // Created and gone again, or not ours to open: reported
-            // through its parent, and as a hole in the watch when the
-            // reason is that it cannot be read rather than that it has
-            // gone.
-            else => {
-                if (err != error.FileNotFound) {
-                    try batch.trouble(t.gpa, watch, owned, .directory);
-                }
-                t.gpa.free(owned);
-                continue;
-            },
+        const id = registering: {
+            const owned = try t.gpa.dupe(u8, current);
+            errdefer t.gpa.free(owned);
+            break :registering t.createDirectory(watch, owned, added) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // Created and gone again, or not ours to open: reported
+                // through its parent, and as a hole in the watch when the
+                // reason is that it cannot be read rather than that it has
+                // gone.
+                else => {
+                    if (err != error.FileNotFound) {
+                        try batch.trouble(t.gpa, watch, owned, .directory);
+                    }
+                    t.gpa.free(owned);
+                    continue;
+                },
+            };
         };
 
         var j: usize = 0;
@@ -613,15 +646,18 @@ pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {
     const node = t.nodes.getPtr(id) orelse return;
     if (node.role != .file) return;
 
-    const stat = Io.Dir.cwd().statFile(t.io, node.path, .{ .follow_symlinks = false }) catch {
-        const gone = try t.gpa.dupe(u8, node.path);
-        defer t.gpa.free(gone);
-        try batch.push(t.gpa, node.watch, gone, .removed, .file);
-        t.removeSubtree(node.watch, gone);
-        return;
+    const stat = Io.Dir.cwd().statFile(t.io, node.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => {
+            const gone = try t.gpa.dupe(u8, node.path);
+            defer t.gpa.free(gone);
+            try batch.push(t.gpa, node.watch, gone, .removed, .file);
+            t.removeSubtree(node.watch, gone);
+            return;
+        },
+        else => return err,
     };
     const before = node.meta;
-    node.meta = .{
+    const next: Snapshot.Meta = .{
         .size = stat.size,
         .mtime_ns = stat.mtime.nanoseconds,
         .ctime_ns = stat.ctime.nanoseconds,
@@ -632,4 +668,249 @@ pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {
     } else if (before.ctime_ns != stat.ctime.nanoseconds) {
         try batch.push(t.gpa, node.watch, node.path, .attributes, .of(stat.kind));
     }
+    node.meta = next;
+}
+
+test "tree access failures keep registrations and report no removals" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const file = try std.fs.path.join(gpa, &.{ root, "kept" });
+    defer gpa.free(file);
+
+    inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
+        var tree: Tree = .init(gpa, io, 4096, false);
+        defer tree.deinit();
+        var batch: Batch = .init(io, .{});
+        defer batch.deinit(gpa);
+        var added: std.ArrayList(NodeId) = .empty;
+        defer added.deinit(gpa);
+        try tree.addWatch(@enumFromInt(0), root, .{}, &added, &batch);
+        const directory_id = added.items[0];
+        try tree.addWatch(@enumFromInt(1), file, .{}, &added, &batch);
+        const file_id = added.items[1];
+
+        var vtable = io.vtable.*;
+        vtable.dirRead = struct {
+            fn read(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
+                return failure;
+            }
+        }.read;
+        vtable.dirStatFile = struct {
+            fn stat(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
+                return failure;
+            }
+        }.stat;
+        tree.io.vtable = &vtable;
+        try testing.expectError(failure, tree.rescanDirectory(directory_id, &batch, &added));
+        try testing.expectError(failure, tree.rescanFile(file_id, &batch));
+        try testing.expectEqual(@as(usize, 2), tree.nodes.count());
+        try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+        tree.io = io;
+        try tree.rescanDirectory(directory_id, &batch, &added);
+        try tree.rescanFile(file_id, &batch);
+        try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+    }
+}
+
+test "a failed tree registration releases every snapshot and path" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry", .data = "x" });
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const gpa = failing.allocator();
+        {
+            var tree: Tree = .init(gpa, std.testing.io, 8, true);
+            defer tree.deinit();
+            var added: std.ArrayList(NodeId) = .empty;
+            defer added.deinit(gpa);
+            var batch: Batch = .init(std.testing.io, .{});
+            defer batch.deinit(gpa);
+            if (tree.addWatch(@enumFromInt(0), root, .{}, &added, &batch)) |_| {
+                break;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expectEqual(@as(usize, 0), tree.nodes.count());
+                try std.testing.expectEqual(@as(usize, 0), tree.watches.count());
+                try std.testing.expectEqual(@as(usize, 0), added.items.len);
+            }
+        }
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "a failed tree adoption releases every unregistered path" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try tmp.dir.createDirPath(testing.io, "child/deeper");
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const gpa = failing.allocator();
+        var succeeded = false;
+        {
+            var tree: Tree = .init(gpa, testing.io, 8, false);
+            defer tree.deinit();
+            defer {
+                const watch = tree.watches.fetchSwapRemove(@enumFromInt(0)).?.value;
+                testing.allocator.free(watch.root);
+                tree.watches.deinit(testing.allocator);
+                tree.watches = .empty;
+            }
+            // Adoption needs the watch policy, but not a parent node.
+            try tree.watches.put(testing.allocator, @enumFromInt(0), .{
+                .root = try testing.allocator.dupe(u8, root),
+                .target = .directory,
+                .recursive = true,
+                .filter = .none,
+            });
+            var added: std.ArrayList(NodeId) = .empty;
+            defer added.deinit(gpa);
+            var batch: Batch = .init(testing.io, .{});
+            defer batch.deinit(gpa);
+            if (tree.adopt(@enumFromInt(0), root, &batch, &added)) |_| {
+                succeeded = true;
+            } else |err| try testing.expectEqual(error.OutOfMemory, err);
+        }
+        // The watch's policy was allocated by the underlying allocator.
+        // Count only adoption's allocations, all of which are now released.
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (succeeded) break;
+    }
+}
+
+test "a failed tree scan keeps its directory baseline and retries adoption" {
+    const testing = std.testing;
+    for ([_]bool{ false, true }) |track_entries| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var tmp = testing.tmpDir(.{ .iterate = true });
+            defer tmp.cleanup();
+            const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+            defer testing.allocator.free(root);
+            var failing = testing.FailingAllocator.init(testing.allocator, .{});
+            var tree = Tree.init(failing.allocator(), testing.io, 64, track_entries);
+            defer tree.deinit();
+            var batch = Batch.init(testing.io, .{});
+            defer batch.deinit(failing.allocator());
+            var added: std.ArrayList(NodeId) = .empty;
+            defer added.deinit(failing.allocator());
+            try tree.addWatch(@enumFromInt(0), root, .{ .recursive = true }, &added, &batch);
+            const parent = added.items[0];
+            added.clearRetainingCapacity();
+            try tmp.dir.createDirPath(testing.io, "child/deeper");
+            try tmp.dir.writeFile(testing.io, .{ .sub_path = "child/first", .data = "one" });
+            try tmp.dir.writeFile(testing.io, .{ .sub_path = "child/deeper/last", .data = "two" });
+            failing.fail_index = failing.alloc_index + fail_index;
+            const answer = tree.rescanDirectory(parent, &batch, &added);
+            failing.fail_index = std.math.maxInt(usize);
+            if (answer) |_| break else |err| try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(@as(usize, 0), tree.nodes.get(parent).?.snapshot.entries.count());
+            try testing.expectEqual(@as(usize, 1), tree.nodes.count());
+            try testing.expectEqual(@as(usize, 0), added.items.len);
+            try tree.rescanDirectory(parent, &batch, &added);
+            try testing.expectEqual(@as(usize, if (track_entries) 5 else 3), tree.nodes.count());
+            var first = false;
+            var last = false;
+            for (batch.events.items) |event| {
+                if (std.mem.endsWith(u8, event.path, "first")) first = true;
+                if (std.mem.endsWith(u8, event.path, "last")) last = true;
+            }
+            try testing.expect(first and last);
+            batch.reset(failing.allocator());
+            try tree.rescanDirectory(parent, &batch, &added);
+            try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+        }
+        try testing.expect(fail_index > 0);
+    }
+}
+
+test "a failed tree scan keeps file metadata until reporting succeeds" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "file", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, "file", testing.allocator);
+    defer testing.allocator.free(root);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var tree = Tree.init(failing.allocator(), testing.io, 64, false);
+    defer tree.deinit();
+    var batch = Batch.init(testing.io, .{});
+    defer batch.deinit(failing.allocator());
+    var added: std.ArrayList(NodeId) = .empty;
+    defer added.deinit(failing.allocator());
+    try tree.addWatch(@enumFromInt(0), root, .{}, &added, &batch);
+    const id = added.items[0];
+    const before = tree.nodes.get(id).?.meta;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "file", .data = "changed size" });
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, tree.rescanFile(id, &batch));
+    try testing.expectEqualDeep(before, tree.nodes.get(id).?.meta);
+    failing.fail_index = std.math.maxInt(usize);
+    try tree.rescanFile(id, &batch);
+    try testing.expectEqual(@as(usize, 1), batch.events.items.len);
+    try testing.expectEqual(lookout.Kind.modified, batch.events.items[0].kind);
+}
+
+test "refilter registers newly admitted files without recursion" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "old", .data = "x" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "new", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var tree = Tree.init(gpa, testing.io, 4096, true);
+    defer tree.deinit();
+    var batch = Batch.init(testing.io, .{});
+    defer batch.deinit(gpa);
+    var added: std.ArrayList(NodeId) = .empty;
+    defer added.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try tree.addWatch(id, root, .{ .filter = .{ .only = &.{"old"} } }, &added, &batch);
+    try testing.expectEqual(@as(usize, 2), tree.nodes.count());
+    added.clearRetainingCapacity();
+    try tree.refilter(id, .{ .only = &.{"new"} }, &added, &batch);
+    try testing.expectEqual(@as(usize, 1), added.items.len);
+    const node = tree.nodes.get(added.items[0]).?;
+    try testing.expectEqual(Node.Role.file, node.role);
+    try testing.expectEqualStrings("new", std.fs.path.basename(node.path));
+    try testing.expectEqual(@as(usize, 2), tree.nodes.count());
+}
+
+test "refilter releases files that only lead to an included path" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "prefix", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var tree = Tree.init(gpa, testing.io, 4096, true);
+    defer tree.deinit();
+    var batch = Batch.init(testing.io, .{});
+    defer batch.deinit(gpa);
+    var added: std.ArrayList(NodeId) = .empty;
+    defer added.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try tree.addWatch(id, root, .{}, &added, &batch);
+    try testing.expectEqual(@as(usize, 2), tree.nodes.count());
+    added.clearRetainingCapacity();
+    // A directory named prefix would lead to a match. A regular file
+    // cannot, so keeping its descriptor would only waste a registration.
+    try tree.refilter(id, .{ .only = &.{"prefix/inside"} }, &added, &batch);
+    try testing.expectEqual(@as(usize, 1), tree.nodes.count());
 }

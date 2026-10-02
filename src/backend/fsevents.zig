@@ -1,12 +1,12 @@
 //! The Apple backend: FSEvents.
 //!
-//! FSEvents is the only mechanism here that recurses in the kernel. A
+//! FSEvents and `ReadDirectoryChangesW` recurse in the kernel. A
 //! whole tree costs one stream and no descriptors, where `kqueue` costs
 //! one descriptor per directory and per file; it names the entry that
 //! changed, where `kqueue` says only that a directory moved; it pairs
 //! the two halves of a rename; and it is the only one of the five that
 //! can say what happened before the watch existed, which is
-//! `lookout.Options.since`. That is why it, and not `kqueue`, is
+//! `lookout.Options.checkpoint`. That is why it, and not `kqueue`, is
 //! `lookout.default_backend` on Apple targets.
 //!
 //! What it costs in exchange:
@@ -36,6 +36,8 @@ const posix = std.posix;
 
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
+const Volume = @import("fsevents_volume.zig");
+const checkpoint_format = @import("../checkpoint_format.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
@@ -63,14 +65,16 @@ sink: *Sink,
 streams: std.AutoArrayHashMapUnmanaged(WatchId, *Stream),
 /// Scratch the drain copies the sink into, reused between polls.
 staging: std.ArrayList(u8),
+/// The staging delivery's loss flag stays with its bytes until reporting
+/// succeeds, including a delivery containing only an overflow notice.
+staging_overflowed: bool = false,
 /// How many entries each watched directory holds, against
 /// `lookout.Options.max_dir_entries`.
 budget: Budget,
-/// Where every stream is started from: `since_now`, or the event id a
-/// caller kept from an earlier watcher. See `lookout.Options.since`.
-since: u64,
-/// Greatest FSEvents id this watcher has successfully drained.
-last_drained: u64,
+/// Owned restarting state, copied at init. Each stream consumes its matching
+/// watch only after registration and restoration succeed.
+restarting: ?lookout.Checkpoint,
+resume_used: []bool,
 /// Every path each watch believes exists, seeded by walking the watch
 /// when it is added and kept current from what it reports. Path keys are
 /// owned here and compared the way the file system compares them.
@@ -217,6 +221,9 @@ const Stream = struct {
     id: WatchId,
     sink: *Sink,
     ref: c.FSEventStreamRef,
+    volume: Volume,
+    /// False for host streams covering scopes with more than one device.
+    persistent: bool,
     /// The path the caller named, absolute and canonical.
     root: []u8,
     /// Which paths under the stream's own root this watch is about.
@@ -228,8 +235,11 @@ const Stream = struct {
     /// directory out, so here the filter drops the events rather than
     /// saving the work -- see `lookout.prunesIgnored`.
     filter: Filter,
-    /// Whether this stream was started from a position rather than from
-    /// now, which `lookout.Options.since` asked for. See `catchingUp`.
+    /// Greatest record id fully reported into Batch for this stream.
+    cursor: u64,
+    resume_index: ?usize,
+    /// Whether this stream was started from a checkpoint rather than from
+    /// now, which `lookout.Options.checkpoint` asked for. See `catchingUp`.
     resumed: bool,
     /// When `HistoryDone` arrived, or `null` while the system is still
     /// reading its log. See `catchingUp`.
@@ -251,7 +261,7 @@ const Stream = struct {
     };
 
     /// Whether this stream is still catching up on what happened
-    /// before it existed, which `lookout.Options.since` asked for.
+    /// before it existed, which `lookout.Options.checkpoint` asked for.
     ///
     /// It changes what a path that is not there means. In the ordinary
     /// way, a path FSEvents names that is gone and that lookout has
@@ -352,10 +362,9 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         if (std.c.fcntl(end, c.F_SETFL, flags | c.O_NONBLOCK) < 0) return error.Unexpected;
     }
 
-    const sink = gpa.create(Sink) catch return error.SystemResources;
+    const sink = try gpa.create(Sink);
     errdefer gpa.destroy(sink);
-    const bytes = gpa.alloc(u8, buffer.clamp(options.buffer_bytes, bounds)) catch
-        return error.SystemResources;
+    const bytes = try gpa.alloc(u8, buffer.clamp(options.buffer_bytes, bounds));
     errdefer gpa.free(bytes);
     sink.* = .{
         .lock = .{},
@@ -372,7 +381,14 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
     const queue = c.dispatch_queue_create("dev.lookout.fsevents", null) orelse
         return error.SystemResources;
 
-    const since = sinceOf(options.since);
+    errdefer c.dispatch_release(queue);
+    var restarting: ?lookout.Checkpoint = if (options.checkpoint) |checkpoint|
+        .{ .state = try checkpoint_format.copy(gpa, checkpoint.state.value) }
+    else
+        null;
+    errdefer if (restarting) |*checkpoint| checkpoint.deinit();
+    const resume_used = try gpa.alloc(bool, if (restarting) |checkpoint| checkpoint.state.value.watches.len else 0);
+    @memset(resume_used, false);
     return .{
         .gpa = gpa,
         .io = io,
@@ -381,11 +397,8 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         .streams = .empty,
         .staging = .empty,
         .budget = .init(gpa, io, options.max_dir_entries),
-        .since = since,
-        .last_drained = if (since == c.kFSEventStreamEventIdSinceNow)
-            c.FSEventsGetCurrentEventId()
-        else
-            since,
+        .restarting = restarting,
+        .resume_used = resume_used,
         .known = .empty,
         .pairing = .{},
         .stream_latency = latencySeconds(options.latency_ms),
@@ -396,20 +409,14 @@ fn latencySeconds(milliseconds: u32) f64 {
     return @as(f64, @floatFromInt(milliseconds)) / std.time.ms_per_s;
 }
 
-/// What to start every stream from. A position from another backend is
-/// not this backend's to read, and is the same as no position at all.
-fn sinceOf(asked: ?lookout.Position) u64 {
-    const p = asked orelse return c.kFSEventStreamEventIdSinceNow;
-    if (p.backend != .fsevents) return c.kFSEventStreamEventIdSinceNow;
-    return p.value;
-}
-
 /// Stops every stream, waits for the delivery thread to be done with
 /// them, and closes the pipe.
 pub fn deinit(f: *FsEvents) void {
     for (f.streams.values()) |stream| f.destroy(stream);
     f.streams.deinit(f.gpa);
     f.staging.deinit(f.gpa);
+    if (f.restarting) |*checkpoint| checkpoint.deinit();
+    f.gpa.free(f.resume_used);
     f.budget.deinit();
     for (f.known.keys()) |key| f.gpa.free(key.path);
     f.known.deinit(f.gpa);
@@ -428,10 +435,46 @@ pub fn fd(f: *const FsEvents) ?posix.fd_t {
     return f.sink.wake_r;
 }
 
-/// The greatest event id this watcher has drained, which
-/// `lookout.Options.since` takes back. See `lookout.Watcher.position`.
-pub fn position(f: *const FsEvents) ?u64 {
-    return f.last_drained;
+/// Copies only polling-thread state. Callback bytes are still in the log
+/// beyond each stream's cursor and need no snapshot copy. A retained failed
+/// drain has not committed its cursor and must be retried first.
+pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_ready: bool, roots: []const lookout.Watcher.WatchInfo) Allocator.Error!?lookout.Checkpoint {
+    if (f.staging.items.len != 0 or f.staging_overflowed) return null;
+    var watches: std.ArrayList(checkpoint_format.Watch) = .empty;
+    defer watches.deinit(gpa);
+    defer for (watches.items) |watch| gpa.free(watch.changes);
+    for (roots) |root| {
+        const stream = f.streams.get(root.id) orelse return null;
+        if (!stream.persistent) return null;
+        const identity = stream.volume.identity orelse return null;
+        const name = try gpa.dupeZ(u8, stream.root);
+        defer gpa.free(name);
+        const current = Volume.readIdentity(name, stream.volume.device) orelse return null;
+        if (!Volume.matches(identity, current)) return null;
+        const changes = try batch.capture(gpa, root.id, include_ready);
+        errdefer gpa.free(changes);
+        var half: ?checkpoint_format.Half = null;
+        if (f.pairing.held) |held| {
+            if (held.id == root.id) half = .{ .path = held.path, .flags = held.flags, .event = held.event };
+        }
+        const cursor = stream.cursor;
+        try watches.append(gpa, .{ .root = root.path, .recursive = root.recursive, .cursor = cursor, .identity = identity, .changes = changes, .half = half });
+    }
+    return .{ .state = try checkpoint_format.copy(gpa, .{ .version = 1, .backend = .fsevents, .watches = watches.items }) };
+}
+
+fn resumeIndex(f: *const FsEvents, root: []const u8) ?usize {
+    const checkpoint = f.restarting orelse return null;
+    for (checkpoint.state.value.watches, 0..) |watch, i| {
+        if (!f.resume_used[i] and path_cmp.eql(root, watch.root)) return i;
+    }
+    return null;
+}
+
+/// The requested root's checkpoint was refused during a pending watch's
+/// promotion. Its owner reports loss and recreates a fresh registration.
+pub fn discardCheckpoint(f: *FsEvents, root: []const u8) void {
+    if (f.resumeIndex(root)) |index| f.resume_used[index] = true;
 }
 
 /// A copy of what the delivery thread has handed over and no drain has
@@ -483,9 +526,48 @@ pub fn add(
     options: lookout.AddOptions,
     batch: *Batch,
 ) lookout.Watcher.AddError!void {
-    // One stream covers a whole tree, so there is no per-directory
-    // registration here that could fail on its own.
-    _ = batch;
+    return f.addFor(id, abs_path, abs_path, options, batch);
+}
+
+/// The caller's root identifies a resume watch even when its registration
+/// is parked on an ancestor while that root is absent.
+pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: lookout.AddOptions, batch: *Batch) lookout.Watcher.AddError!void {
+    try f.streams.ensureUnusedCapacity(f.gpa, 1);
+    var stream = try f.startStream(id, abs_path, requested, options, false);
+    // The table owns the started stream and its initial state. If the
+    // baseline cannot be built, remove stops delivery before releasing
+    // the stream, its names, and counts no other watch needs.
+    f.streams.putAssumeCapacity(id, stream);
+    errdefer f.remove(id);
+    errdefer batch.discard(f.gpa, id);
+    const cross_device = f.seedKnown(stream) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Unexpected,
+    };
+    if (cross_device) {
+        if (stream.resume_index != null) return error.InvalidCheckpoint;
+        try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
+        try f.useLiveStream(id);
+        stream = f.streams.get(id).?;
+    }
+    if (stream.resume_index) |index| {
+        const saved = f.restarting.?.state.value.watches[index];
+        for (saved.changes) |change| {
+            try batch.deferChange(f.gpa, id, change.path, change.kind, change.from, change.target);
+        }
+        if (saved.half) |half| {
+            try f.resolveHeld(batch);
+            const owned = try f.gpa.dupe(u8, half.path);
+            f.pairing.held = .{ .id = id, .path = owned, .flags = half.flags, .event = half.event };
+        }
+        f.resume_used[index] = true;
+    }
+    trace.log("fsevents seeded watch={d} known={d}", .{ @intFromEnum(id), f.known.count() });
+}
+
+/// Creates and starts a stream, transferring ownership only on success.
+/// Seeding happens after start so changes during the walk stay queued.
+fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: lookout.AddOptions, force_live: bool) lookout.Watcher.AddError!*Stream {
     const stat = try Io.Dir.cwd().statFile(f.io, abs_path, .{});
     const scope: Stream.Scope = if (stat.kind != .directory)
         .file
@@ -501,13 +583,17 @@ pub fn add(
     else
         abs_path;
 
-    // Room for the stream before the stream exists, so that nothing
-    // between starting it and recording it can fail. What is left after
-    // the start is one error path, and it is the one where the stream was
-    // scheduled and never started -- which must be invalidated and
-    // released, and must not be stopped.
-    try f.streams.ensureUnusedCapacity(f.gpa, 1);
-
+    var volume = try Volume.read(f.gpa, stream_path);
+    errdefer volume.deinit(f.gpa);
+    const resumed = if (force_live) null else f.resumeIndex(requested);
+    if (resumed) |index| {
+        const identity = volume.identity orelse return error.InvalidCheckpoint;
+        if (!Volume.matches(identity, f.restarting.?.state.value.watches[index].identity)) return error.InvalidCheckpoint;
+    }
+    const since = if (resumed) |index| f.restarting.?.state.value.watches[index].cursor else if (!force_live and volume.identity != null)
+        c.FSEventsGetLastEventIdForDeviceBeforeTime(volume.device, c.CFAbsoluteTimeGetCurrent() + 978307200)
+    else
+        c.kFSEventStreamEventIdSinceNow;
     const stream = try f.gpa.create(Stream);
     errdefer f.gpa.destroy(stream);
     const root = try f.gpa.dupe(u8, abs_path);
@@ -518,10 +604,14 @@ pub fn add(
         .id = id,
         .sink = f.sink,
         .ref = undefined,
+        .volume = volume,
+        .persistent = !force_live and volume.identity != null,
         .root = root,
         .scope = scope,
         .filter = filter,
-        .resumed = f.since != c.kFSEventStreamEventIdSinceNow,
+        .cursor = since,
+        .resume_index = resumed,
+        .resumed = resumed != null,
         .replayed = null,
     };
     stream.published.store(true, .release);
@@ -529,7 +619,11 @@ pub fn add(
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
         @intFromEnum(id), @tagName(scope), abs_path, stream_path,
     });
-    stream.ref = try createStream(stream, stream_path, f.since, f.stream_latency);
+    // The cursor must be a durable device-log boundary, which may lag
+    // registration. A new live subscription still starts from now; only
+    // an explicit checkpoint asks the native stream to replay history.
+    const native_since = if (resumed != null) since else c.kFSEventStreamEventIdSinceNow;
+    stream.ref = try createStream(stream, if (stream.persistent) volume.relative(stream_path) else stream_path, native_since, f.stream_latency);
     // Invalidation is what unschedules a stream, and it requires one that
     // is scheduled, so this may only run after the line below it.
     errdefer {
@@ -539,15 +633,13 @@ pub fn add(
     c.FSEventStreamSetDispatchQueue(stream.ref, f.queue);
     if (c.FSEventStreamStart(stream.ref) == 0) return error.WatchLimitReached;
     trace.log("fsevents started watch={d} since={d} latency={d} streams={d} latest={d} dev={d} now={d}", .{
-        @intFromEnum(id),                            f.since,
+        @intFromEnum(id),                            since,
         f.stream_latency,                            f.streams.count() + 1,
         c.FSEventStreamGetLatestEventId(stream.ref), c.FSEventStreamGetDeviceBeingWatched(stream.ref),
         c.FSEventsGetCurrentEventId(),
     });
 
-    f.streams.putAssumeCapacity(id, stream);
-    f.seedKnown(stream) catch {};
-    trace.log("fsevents seeded watch={d} known={d}", .{ @intFromEnum(id), f.known.count() });
+    return stream;
 }
 
 /// Builds the CoreFoundation array FSEvents wants and creates the stream.
@@ -583,8 +675,21 @@ fn createStream(
         c.kFSEventStreamCreateFlagWatchRoot;
     // NoDefer makes the first event immediate; this latency controls how
     // long later events may be collected, matching lookout's own tail.
-    return c.FSEventStreamCreate(null, deliver, &context, paths, since, latency, flags) orelse
-        error.SystemResources;
+    return (if (stream.persistent)
+        c.FSEventStreamCreateRelativeToDevice(null, deliver, &context, stream.volume.device, paths, since, latency, flags)
+    else
+        c.FSEventStreamCreate(null, deliver, &context, paths, since, latency, flags)) orelse error.SystemResources;
+}
+
+/// A tree crossing a mount needs the host's live namespace. A host cursor
+/// cannot be persisted safely. The caller reports the registration gap as
+/// loss in its own delivery phase; checkpoints stay unavailable for this watch.
+fn useLiveStream(f: *FsEvents, id: WatchId) lookout.Watcher.AddError!void {
+    const old = f.streams.get(id).?;
+    if (!old.persistent) return;
+    const next = try f.startStream(id, old.root, old.root, .{ .recursive = old.scope == .tree, .filter = old.filter }, true);
+    f.streams.getPtr(id).?.* = next;
+    f.destroy(old);
 }
 
 /// Stops watching `id`.
@@ -593,11 +698,42 @@ pub fn remove(f: *FsEvents, id: WatchId) void {
     f.budget.release(entry.value.root, f, stillCounted);
     f.forgetWatch(id);
     f.destroy(entry.value);
+    // destroy waits for callbacks already running. Only then can the
+    // old stream's records be removed without another callback putting
+    // them back under the id a pending promotion will reuse.
+    if (f.pairing.held) |half| {
+        if (half.id == id) {
+            f.gpa.free(half.path);
+            f.pairing.held = null;
+        }
+    }
+    f.staging.shrinkRetainingCapacity(withoutStream(f.staging.items, id));
+    f.sink.lock.acquire();
+    defer f.sink.lock.release();
+    f.sink.len = withoutStream(f.sink.buffer[0..f.sink.len], id);
 }
 
-/// Replaces the delivery filter without restarting the stream.
+/// Compacts whole records written by Sink, without allocating or changing
+/// the order of other streams' records. Used under the sink lock as well
+/// as on the polling thread's retained delivery.
+fn withoutStream(bytes: []u8, id: WatchId) usize {
+    var it = records.iterate(bytes);
+    var kept: usize = 0;
+    while (true) {
+        const start = it.offset;
+        // Sink only appends complete records while holding its lock.
+        const record = (it.next() catch unreachable) orelse break;
+        if (record.id == id) continue;
+        const len = it.offset - start;
+        @memmove(bytes[kept..][0..len], bytes[start..it.offset]);
+        kept += len;
+    }
+    return kept;
+}
+
+/// Replaces the delivery filter, retaining the stream unless newly reached
+/// mounts require the host namespace.
 pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) lookout.Watcher.RefilterError!void {
-    _ = batch;
     const stream = f.streams.get(id) orelse return error.UnknownWatch;
     const replacement = try next.dupe(f.gpa);
     var previous = stream.filter;
@@ -606,7 +742,7 @@ pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) 
         stream.filter.deinit(f.gpa);
         stream.filter = previous;
     }
-    f.seedKnown(stream) catch |err| switch (err) {
+    const cross_device = f.seedKnown(stream) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
@@ -628,6 +764,10 @@ pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) 
         }
     };
     f.budget.reread(NewlyReached{ .stream = stream, .old = previous }, NewlyReached.includes);
+    if (cross_device) {
+        try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
+        try f.useLiveStream(id);
+    }
     previous.deinit(f.gpa);
 }
 
@@ -662,6 +802,7 @@ fn destroy(f: *FsEvents, stream: *Stream) void {
     // synchronously on it returns only once everything accepted before it
     // has finished.
     c.dispatch_sync_f(f.queue, null, settled);
+    stream.volume.deinit(f.gpa);
     f.gpa.free(stream.root);
     stream.filter.deinit(f.gpa);
     f.gpa.destroy(stream);
@@ -691,7 +832,22 @@ fn deliver(
     stream.sink.lock.acquire();
     defer stream.sink.lock.release();
     stream.sink.deliveries += 1;
-    for (0..count) |i| stream.sink.append(stream.id, flags[i], ids[i], std.mem.span(list[i]));
+    for (0..count) |i| {
+        const subject = std.mem.span(list[i]);
+        if (stream.persistent) {
+            // The callback cannot allocate. Reserve and encode the two path
+            // pieces directly into the bounded sink under its existing lock.
+            const prefix = std.mem.trimEnd(u8, stream.volume.prefix, "/");
+            const tail = std.mem.trimStart(u8, subject, "/");
+            const length = records.encodedVolumePathLen(prefix, tail);
+            if (stream.sink.len + length > stream.sink.buffer.len) {
+                stream.sink.overflowed = true;
+                stream.sink.dropped += 1;
+                continue;
+            }
+            stream.sink.len += records.encodeVolumePath(stream.sink.buffer[stream.sink.len..], stream.id, flags[i], ids[i], prefix, tail);
+        } else stream.sink.append(stream.id, flags[i], ids[i], subject);
+    }
     stream.sink.signal();
 }
 
@@ -704,11 +860,10 @@ pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollE
     // `std.Io`'s reach.
     const protection = f.io.swapCancelProtection(.blocked);
     defer _ = f.io.swapCancelProtection(protection);
-    const result = f.collect(batch, timeout_ms);
+    try f.collect(batch, timeout_ms);
     // Whatever is still held when the wait is over never found its
     // partner, however many deliveries it waited through.
     try f.resolveHeld(batch);
-    return result;
 }
 
 fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
@@ -758,27 +913,27 @@ fn readable(f: *FsEvents, timeout: i32) bool {
 /// Takes everything the delivery thread has left and turns it into
 /// events.
 fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
-    f.staging.clearRetainingCapacity();
-    var overflowed = false;
+    // A failed drain keeps its bytes. Replaying can repeat bookkeeping,
+    // which Watcher.poll covers with its conservative recovery notice.
+    errdefer f.budget.reread({}, everyDirectory);
+    var overflowed = f.staging_overflowed;
     var deliveries: usize = 0;
     var dropped: usize = 0;
-    {
+    if (f.staging.items.len == 0 and !f.staging_overflowed) {
         f.sink.lock.acquire();
         defer f.sink.lock.release();
         overflowed = f.sink.overflowed;
-        f.sink.overflowed = false;
         deliveries = f.sink.deliveries;
         dropped = f.sink.dropped;
-        f.sink.deliveries = 0;
-        f.sink.dropped = 0;
         f.staging.appendSlice(f.gpa, f.sink.buffer[0..f.sink.len]) catch {
-            // The buffer stays where it is: a drain that cannot allocate
-            // reports the loss and tries again next time rather than
-            // throwing the delivery away.
-            f.sink.overflowed = overflowed;
+            // Nothing has left the sink, including its loss notice.
             return error.OutOfMemory;
         };
         f.sink.len = 0;
+        f.sink.overflowed = false;
+        f.sink.deliveries = 0;
+        f.sink.dropped = 0;
+        f.staging_overflowed = overflowed;
     }
     if (trace.enabled() and (deliveries != 0 or f.staging.items.len != 0)) {
         trace.log("fsevents drain deliveries={d} bytes={d} dropped={d} overflowed={}", .{
@@ -833,7 +988,9 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
         if (used[i]) continue;
         try f.report(batch, delivered.items, used, i, &losses);
     }
-    for (delivered.items) |record| f.last_drained = @max(f.last_drained, record.event);
+    for (delivered.items) |record| {
+        if (f.streams.get(record.id)) |stream| stream.cursor = @max(stream.cursor, record.event);
+    }
 
     // What was lost is in no count, so the counts it touched are read
     // again from disk -- see `Budget.reread`. Once the delivery is done
@@ -846,6 +1003,21 @@ fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
     } else if (losses.items.len != 0) {
         f.budget.reread(Losses{ .f = f, .items = losses.items }, Losses.stale);
     }
+    // Mount records belong to the old stream, as do loss pointers above.
+    // Replace it only after the delivery and budget rereads finish.
+    for (delivered.items) |record| {
+        if (record.flags & flag.mount == 0) continue;
+        const stream = f.streams.get(record.id) orelse continue;
+        if (stream.scope != .tree or !stream.concerns(record.path)) continue;
+        if (!stream.persistent) continue;
+        try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
+        f.useLiveStream(record.id) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Unexpected,
+        };
+    }
+    f.staging.clearRetainingCapacity();
+    f.staging_overflowed = false;
 }
 
 /// One place the system said it lost track, for one watch.
@@ -879,12 +1051,22 @@ fn everyDirectory(_: void, _: []const u8) bool {
 /// or gives up on it.
 fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) lookout.Watcher.PollError!void {
     const taken = f.pairing.take(delivered, used, Asking{ .f = f }) orelse return;
-    defer f.gpa.free(taken.half.path);
+    errdefer {
+        f.pairing.held = taken.half;
+        if (taken.partner) |at| used[at] = false;
+    }
+    try f.reportTaken(batch, delivered, taken);
+    f.gpa.free(taken.half.path);
+}
+
+/// The pairing owns the half until reporting it and its partner succeeds.
+fn reportTaken(f: *FsEvents, batch: *Batch, delivered: []const Record, taken: records.Pairing.Taken) lookout.Watcher.PollError!void {
     const at = taken.partner orelse return f.reportHalf(batch, taken.half);
     const stream = f.streams.get(taken.half.id) orelse return f.reportHalf(batch, taken.half);
 
     const partner = delivered[at];
-    if (f.exists(partner.path)) {
+    const there = f.exists(partner.path) orelse return f.incomplete(batch, stream);
+    if (there) {
         try f.joined(batch, stream, partner.path, taken.half.path, partner.target());
     } else {
         try f.joined(batch, stream, taken.half.path, partner.path, partner.target());
@@ -910,7 +1092,7 @@ const Asking = struct {
         return stream.wants(subject);
     }
 
-    pub fn exists(a: Asking, subject: []const u8) bool {
+    pub fn exists(a: Asking, subject: []const u8) ?bool {
         return a.f.exists(subject);
     }
 };
@@ -940,12 +1122,8 @@ fn report(
         try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
         try losses.append(f.gpa, .{ .stream = stream, .at = record.path });
     }
-    if (!stream.wants(record.path)) {
-        trace.log("fsevents drop out-of-scope root={s} path={s}", .{ stream.root, record.path });
-        return;
-    }
     // The marker that the system has finished reading its log back to
-    // the position `lookout.Options.since` named. Nothing happened to a
+    // the position `lookout.Options.checkpoint` named. Nothing happened to a
     // path, so there is nothing to report; it is declared and swallowed
     // rather than left to look like a change to the watch root. What it
     // is kept for is `Stream.catchingUp`, which measures the tail that
@@ -953,6 +1131,10 @@ fn report(
     if (record.flags & flag.history_done != 0) {
         if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
         trace.log("fsevents history done root={s}", .{stream.root});
+        return;
+    }
+    if (!stream.wants(record.path)) {
+        trace.log("fsevents drop out-of-scope root={s} path={s}", .{ stream.root, record.path });
         return;
     }
     // The watched path itself moved or vanished. FSEvents reports both
@@ -978,7 +1160,8 @@ fn report(
         if (records.partnerOf(record, delivered, used, at + 1, Asking{ .f = f })) |partner_at| {
             used[partner_at] = true;
             const partner = delivered[partner_at];
-            if (f.exists(partner.path)) {
+            const there = f.exists(partner.path) orelse return f.incomplete(batch, stream);
+            if (there) {
                 try f.joined(batch, stream, partner.path, record.path, partner.target());
             } else {
                 try f.joined(batch, stream, record.path, partner.path, record.target());
@@ -1035,7 +1218,7 @@ fn reportPlain(
     // ambiguous cases: accumulated removal flags and an unknown path
     // whose flags do not say it was created.
     const there = if (needsExistenceCheck(record.flags, seen))
-        f.exists(record.path)
+        f.exists(record.path) orelse return f.incomplete(batch, stream)
     else
         true;
 
@@ -1226,24 +1409,24 @@ fn hold(f: *FsEvents, batch: *Batch, record: Record) lookout.Watcher.PollError!v
     // the next delivery is read, and a dupe that fails must leave what
     // is already held where it was.
     const owned = try f.gpa.dupe(u8, record.path);
+    errdefer f.gpa.free(owned);
+    try f.resolveHeld(batch);
     trace.log("fsevents hold renamed path={s}", .{record.path});
-    const stale = f.pairing.carry(.{
+    f.pairing.held = .{
         .id = record.id,
         .path = owned,
         .flags = record.flags,
         .event = record.event,
-    }) orelse return;
-    defer f.gpa.free(stale.path);
-    try f.reportHalf(batch, stale);
+    };
 }
 
 /// Gives up on a half that never found its partner, at the end of the
 /// whole wait rather than at the end of one delivery.
 fn resolveHeld(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
     const half = f.pairing.held orelse return;
-    f.pairing.held = null;
-    defer f.gpa.free(half.path);
     try f.reportHalf(batch, half);
+    f.pairing.held = null;
+    f.gpa.free(half.path);
 }
 
 /// Reports a half that never found its partner: the path was renamed
@@ -1328,45 +1511,38 @@ fn refreshKnown(
 /// Moves everything remembered under `old` to sit under `new`, which is
 /// what a directory rename does to a tree.
 fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.Error!void {
-    var moved: std.ArrayList([]u8) = .empty;
+    const Move = struct { before: []const u8, after: []u8 };
+    var moved: std.ArrayList(Move) = .empty;
+    var committed = false;
     defer {
-        for (moved.items) |p| f.gpa.free(p);
+        if (!committed) for (moved.items) |move| f.gpa.free(move.after);
         moved.deinit(f.gpa);
     }
 
-    var i: usize = 0;
-    while (i < f.known.count()) {
-        const key = f.known.keys()[i];
-        if (key.id != id) {
-            i += 1;
-            continue;
-        }
-        const rest = path_cmp.relative(old, key.path) orelse {
-            i += 1;
-            continue;
-        };
-        // Built before the key it points into is freed.
+    // Keep the remembered names available until every replacement path
+    // and the map capacity have been allocated. Publishing cannot fail.
+    for (f.known.keys()) |key| {
+        if (key.id != id) continue;
+        const rest = path_cmp.relative(old, key.path) orelse continue;
         const renamed = if (rest.len == 0)
             try f.gpa.dupe(u8, new)
         else
             try std.fs.path.join(f.gpa, &.{ new, rest });
         errdefer f.gpa.free(renamed);
-        try moved.append(f.gpa, renamed);
-        f.gpa.free(key.path);
-        f.known.swapRemoveAt(i);
+        try moved.append(f.gpa, .{ .before = key.path, .after = renamed });
     }
-
-    while (moved.items.len != 0) {
-        const p = moved.pop().?;
-        if (f.known.contains(.{ .id = id, .path = p })) {
-            f.gpa.free(p);
-            continue;
+    try f.known.ensureUnusedCapacity(f.gpa, moved.items.len);
+    for (moved.items) |move| {
+        _ = f.known.swapRemove(.{ .id = id, .path = move.before });
+        f.gpa.free(move.before);
+        const key: KnownKey = .{ .id = id, .path = move.after };
+        if (f.known.contains(key)) {
+            f.gpa.free(move.after);
+        } else {
+            f.known.putAssumeCapacity(key, {});
         }
-        f.known.put(f.gpa, .{ .id = id, .path = p }, {}) catch {
-            f.gpa.free(p);
-            return error.OutOfMemory;
-        };
     }
+    committed = true;
 }
 
 /// Walks a watch once, so that everything already there is known and the
@@ -1374,13 +1550,13 @@ fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.
 ///
 /// Listing only: no descriptor is kept, which is the difference between
 /// this and what the `kqueue` backend has to do.
-fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
+fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
     // The root itself, before anything below it: FSEvents names the
     // watched path as readily as it names an entry, and a path the
     // backend has never heard of is a path it reports as created. This
     // is the whole of the seeding for a watch on a single file.
-    if (f.exists(stream.root)) try f.remember(stream.id, stream.root);
-    if (stream.scope == .file) return;
+    if (f.exists(stream.root) orelse return error.Unexpected) try f.remember(stream.id, stream.root);
+    if (stream.scope == .file) return false;
     try f.budget.begin(stream.root);
     defer f.budget.end();
     trace.log("fsevents seed walk root={s}", .{stream.root});
@@ -1388,6 +1564,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
     const Seeding = struct {
         f: *FsEvents,
         stream: *const Stream,
+        cross_device: bool = false,
 
         fn visit(s: *@This(), entry: walk.Entry) anyerror!walk.Step {
             try s.f.budget.found(entry.dir, entry.name);
@@ -1396,6 +1573,15 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
                 trace.log("fsevents seed filtered {s}", .{entry.path});
                 return .over;
             }
+            if (entry.kind == .directory and s.stream.scope == .tree) {
+                const name = try s.f.gpa.dupeZ(u8, entry.path);
+                defer s.f.gpa.free(name);
+                const device = Volume.deviceOf(name) orelse {
+                    s.cross_device = true;
+                    return .over;
+                };
+                if (device != s.stream.volume.device) s.cross_device = true;
+            }
             trace.log("fsevents seed remembered {s}", .{entry.path});
             try s.f.remember(s.stream.id, entry.path);
             return if (s.stream.scope == .tree) .into else .over;
@@ -1403,11 +1589,159 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !void {
     };
     var seeding: Seeding = .{ .f = f, .stream = stream };
     try walk.tree(f.gpa, f.io, stream.root, &seeding, Seeding.visit);
+    return seeding.cross_device;
 }
 
-fn exists(f: *const FsEvents, subject: []const u8) bool {
-    _ = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch return false;
+/// Unknown is distinct from absent: it cannot decide a rename or removal.
+fn exists(f: *const FsEvents, subject: []const u8) ?bool {
+    _ = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return false,
+        else => return null,
+    };
     return true;
+}
+
+fn incomplete(f: *FsEvents, batch: *Batch, stream: *const Stream) Allocator.Error!void {
+    try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
+}
+
+test "FSEvents initialization preserves sink allocator failure" {
+    try expectInitAllocationFailure(0);
+}
+
+test "FSEvents refuses a watch whose initial names could not be remembered" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "sub/deep");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "sub/deep/kept", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        var f = try FsEvents.init(gpa, testing.io, .{});
+        defer f.deinit();
+        f.gpa = failing.allocator();
+        f.budget.gpa = failing.allocator();
+        var batch = Batch.init(testing.io, .{});
+        defer batch.deinit(gpa);
+        if (f.add(@enumFromInt(0), root, .{ .recursive = true }, &batch)) |_| {
+            if (failing.has_induced_failure) std.debug.print("add succeeded after allocation {d} failed, with {d} remembered names\n", .{ fail_index, f.known.count() });
+            try testing.expectEqual(false, failing.has_induced_failure);
+            try testing.expectEqual(@as(usize, 4), f.known.count());
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(@as(usize, 0), f.streams.count());
+            try testing.expectEqual(@as(usize, 0), f.known.count());
+            try testing.expectEqual(@as(usize, 0), f.budget.counts.count());
+        }
+    }
+}
+
+test "removing an FSEvents stream releases its unreported delivery state" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var f = try FsEvents.init(gpa, testing.io, .{});
+    defer f.deinit();
+    var batch = Batch.init(testing.io, .{});
+    defer batch.deinit(gpa);
+    const gone: WatchId = @enumFromInt(0);
+    const kept: WatchId = @enumFromInt(1);
+    try f.add(gone, root, .{}, &batch);
+    try f.add(kept, root, .{}, &batch);
+    // This test owns the two records below. Stop and join native replay
+    // callbacks before constructing that exact delivery.
+    c.FSEventStreamStop(f.streams.get(gone).?.ref);
+    c.FSEventStreamStop(f.streams.get(kept).?.ref);
+    c.dispatch_sync_f(f.queue, null, settled);
+    f.sink.lock.acquire();
+    f.sink.len = 0;
+    f.sink.overflowed = false;
+    f.sink.lock.release();
+    // A stopped pending registration can be replaced under the same id.
+    // Its buffered records and rename half belong to the old stream.
+    f.sink.lock.acquire();
+    f.sink.append(gone, flag.item_created, 1, root);
+    f.sink.append(kept, flag.item_modified, 2, root);
+    f.sink.lock.release();
+    try f.staging.resize(gpa, 2 * records.encodedLen(root));
+    const first = records.encode(f.staging.items, gone, flag.item_created, 3, root);
+    _ = records.encode(f.staging.items[first..], kept, flag.item_modified, 4, root);
+    f.pairing.held = .{ .id = gone, .path = try gpa.dupe(u8, root), .flags = flag.item_renamed, .event = 5 };
+    f.remove(gone);
+    try testing.expectEqual(@as(?records.Half, null), f.pairing.held);
+    const held = try f.copyHeld(gpa);
+    defer gpa.free(held.bytes);
+    for ([_][]const u8{ held.bytes, f.staging.items }) |bytes| {
+        var it = records.iterate(bytes);
+        const record = (try it.next()).?;
+        try testing.expectEqual(kept, record.id);
+        try testing.expectEqual(@as(?Record, null), try it.next());
+    }
+    try f.add(gone, root, .{}, &batch);
+    try f.drain(&batch);
+    for (batch.events.items) |event| try testing.expect(event.id != gone);
+}
+
+test "FSEvents initialization preserves buffer allocator failure" {
+    try expectInitAllocationFailure(1);
+}
+
+fn expectInitAllocationFailure(fail_index: usize) !void {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+    try std.testing.expectError(error.OutOfMemory, lookout.Watcher.init(
+        failing.allocator(),
+        std.testing.io,
+        .{ .backend = .fsevents },
+    ));
+}
+
+test "FSEvents access failures preserve known paths and report an incomplete answer" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const kept = try std.fs.path.join(gpa, &.{ root, "kept" });
+    defer gpa.free(kept);
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    const f = &watcher.impl.fsevents;
+    const stream = f.streams.get(id).?;
+    inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
+        var vtable = io.vtable.*;
+        vtable.dirStatFile = struct {
+            fn stat(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
+                if (std.mem.eql(u8, std.fs.path.basename(path), "kept")) return failure;
+                return testing.io.vtable.dirStatFile(userdata, dir, path, options);
+            }
+        }.stat;
+        f.io.vtable = &vtable;
+        try testing.expect(!records.pairs(
+            .{ .id = id, .path = kept, .flags = flag.item_renamed, .event = 0 },
+            .{ .id = id, .path = root, .flags = flag.item_renamed, .event = 0 },
+            Asking{ .f = f },
+        ));
+        try f.reportPlain(&watcher.batch, .{ .id = id, .path = kept, .flags = flag.item_removed, .event = 0 }, stream);
+        try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
+        try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
+        try testing.expectEqualStrings(root, watcher.batch.events.items[0].path);
+        try testing.expect(f.known.contains(.{ .id = id, .path = kept }));
+        f.io = io;
+        watcher.batch.reset(gpa);
+    }
 }
 
 /// Keeps the entry budget of the directory a change happened in, and
@@ -1498,7 +1832,7 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
     var filled: usize = 0;
     defer for (paths[0..filled]) |path| gpa.free(std.mem.span(path));
     for (items) |item| {
-        paths[filled] = try gpa.dupeZ(u8, item.path);
+        paths[filled] = try gpa.dupeZ(u8, if (stream.persistent) stream.volume.relative(item.path) else item.path);
         flags[filled] = item.flags;
         ids[filled] = c.FSEventsGetCurrentEventId();
         filled += 1;
@@ -1845,6 +2179,9 @@ const c = struct {
     extern "c" fn FSEventStreamGetLatestEventId(stream: FSEventStreamRef) u64;
     extern "c" fn FSEventStreamGetDeviceBeingWatched(stream: FSEventStreamRef) i32;
     extern "c" fn FSEventsGetCurrentEventId() u64;
+    extern "c" fn FSEventsGetLastEventIdForDeviceBeforeTime(device: i32, time: f64) u64;
+    extern "c" fn CFAbsoluteTimeGetCurrent() f64;
+    extern "c" fn FSEventStreamCreateRelativeToDevice(allocator: CFAllocatorRef, callback: FSEventStreamCallback, context: ?*FSEventStreamContext, device: i32, paths: CFArrayRef, since: u64, latency: f64, flags: u32) ?FSEventStreamRef;
     extern "c" fn FSEventStreamStop(stream: FSEventStreamRef) void;
     extern "c" fn FSEventStreamInvalidate(stream: FSEventStreamRef) void;
     extern "c" fn FSEventStreamRelease(stream: FSEventStreamRef) void;
@@ -1857,3 +2194,339 @@ const c = struct {
         work: *const fn (?*anyopaque) callconv(.c) void,
     ) void;
 };
+
+test "a failed FSEvents held rename transfer keeps its path" {
+    try expectHeldRenameFailure(.resolve);
+}
+
+test "a failed FSEvents held rename replacement keeps its path" {
+    try expectHeldRenameFailure(.replace);
+}
+
+test "a failed FSEvents held rename rejoin keeps its path" {
+    try expectHeldRenameFailure(.rejoin);
+}
+
+fn expectHeldRenameFailure(comptime transfer: enum { resolve, replace, rejoin }) !void {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "old", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const old = try std.fs.path.join(testing.allocator, &.{ root, "old" });
+    defer testing.allocator.free(old);
+    var watcher = try lookout.Watcher.init(testing.allocator, testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    const backend = &watcher.impl.fsevents;
+    try tmp.dir.deleteFile(testing.io, "old");
+    const record: Record = .{ .id = id, .path = old, .flags = flag.item_renamed, .event = 1 };
+    try backend.hold(&watcher.batch, record);
+    const original = backend.pairing.held.?.path.ptr;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = if (transfer == .replace) 1 else 0 });
+    backend.gpa = failing.allocator();
+    defer backend.gpa = testing.allocator;
+    var used = [_]bool{};
+    const result = switch (transfer) {
+        .resolve => backend.resolveHeld(&watcher.batch),
+        .replace => backend.hold(&watcher.batch, record),
+        .rejoin => backend.rejoin(&watcher.batch, &.{}, &used),
+    };
+    try testing.expectError(error.OutOfMemory, result);
+    try testing.expect(backend.pairing.held != null);
+    try testing.expectEqual(original, backend.pairing.held.?.path.ptr);
+    try testing.expectEqualStrings(old, backend.pairing.held.?.path);
+    // With replacement, equality by contents is not enough: the original
+    // allocation must still be held and the incoming copy released.
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    backend.gpa = testing.allocator;
+    try backend.resolveHeld(&watcher.batch);
+    try testing.expect(backend.pairing.held == null);
+    try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
+    try testing.expectEqual(lookout.Kind.removed, watcher.batch.events.items[0].kind);
+}
+
+test "a failed FSEvents rekey keeps every remembered name" {
+    const testing = std.testing;
+    const id: WatchId = @enumFromInt(0);
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var backend = try FsEvents.init(testing.allocator, testing.io, .{});
+        defer backend.deinit();
+        try backend.remember(id, "/old");
+        try backend.remember(id, "/old/child");
+        backend.gpa = failing.allocator();
+        defer backend.gpa = testing.allocator;
+        if (backend.rekey(id, "/old", "/new")) |_| {
+            try testing.expect(backend.known.contains(.{ .id = id, .path = "/new" }));
+            try testing.expect(backend.known.contains(.{ .id = id, .path = "/new/child" }));
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(@as(usize, 2), backend.known.count());
+            try testing.expect(backend.known.contains(.{ .id = id, .path = "/old" }));
+            try testing.expect(backend.known.contains(.{ .id = id, .path = "/old/child" }));
+            try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+    }
+}
+
+test "allocation failure during delivery retains FSEvents bytes and position" {
+    const testing = std.testing;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+        defer testing.allocator.free(root);
+        const first = try std.fs.path.join(testing.allocator, &.{ root, "first" });
+        defer testing.allocator.free(first);
+        const last = try std.fs.path.join(testing.allocator, &.{ root, "last" });
+        defer testing.allocator.free(last);
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        var f = try FsEvents.init(failing.allocator(), testing.io, .{ .latency_ms = 0 });
+        defer f.deinit();
+        var batch = Batch.init(testing.io, .{});
+        defer batch.deinit(failing.allocator());
+        const id: WatchId = @enumFromInt(0);
+        try f.add(id, root, .{}, &batch);
+        // No disk changes after registration: only this synthetic delivery.
+        try synthesize(testing.allocator, f.streams.get(id).?, &.{
+            .{ .path = first, .flags = flag.item_created },
+            .{ .path = last, .flags = flag.item_created },
+        });
+        const before = f.streams.get(id).?.cursor;
+        failing.fail_index = failing.alloc_index + fail_index;
+        const answer = f.drain(&batch);
+        failing.fail_index = std.math.maxInt(usize);
+        if (answer) |_| break else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(before, f.streams.get(id).?.cursor);
+        }
+        try f.drain(&batch);
+        var saw_first = false;
+        var saw_last = false;
+        for (batch.events.items) |event| {
+            if (std.mem.eql(u8, event.path, first)) saw_first = true;
+            if (std.mem.eql(u8, event.path, last)) saw_last = true;
+        }
+        try testing.expect(saw_first and saw_last);
+    }
+    try testing.expect(fail_index > 0);
+}
+
+test "checkpoints preserve independent cursors and unread stream records" {
+    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    try tmp.dir.createDirPath(std.testing.io, "first");
+    try tmp.dir.createDirPath(std.testing.io, "second");
+    const first = try tmp.dir.realPathFileAlloc(std.testing.io, "first", gpa);
+    defer gpa.free(first);
+    const second = try tmp.dir.realPathFileAlloc(std.testing.io, "second", gpa);
+    defer gpa.free(second);
+    const a = try watcher.add(first, .{});
+    const b = try watcher.add(second, .{});
+    const backend = &watcher.impl.fsevents;
+    backend.streams.get(a).?.cursor = 101;
+    backend.streams.get(b).?.cursor = 202;
+    // Unread callbacks cannot affect either saved cursor.
+    backend.sink.lock.acquire();
+    backend.sink.append(a, flag.item_modified, 303, first);
+    backend.sink.lock.release();
+    var checkpoint = (try watcher.checkpoint(gpa)).?;
+    defer checkpoint.deinit();
+    try std.testing.expectEqual(@as(u64, 101), checkpoint.state.value.watches[0].cursor);
+    try std.testing.expectEqual(@as(u64, 202), checkpoint.state.value.watches[1].cursor);
+    var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = checkpoint });
+    defer resumed.deinit();
+    // Registration order does not determine which cursor belongs to it.
+    const rb = try resumed.add(second, .{});
+    const ra = try resumed.add(first, .{});
+    try std.testing.expectEqual(@as(u64, 101), resumed.impl.fsevents.streams.get(ra).?.cursor);
+    try std.testing.expectEqual(@as(u64, 202), resumed.impl.fsevents.streams.get(rb).?.cursor);
+}
+
+test "a file stream accepts the replay sentinel outside its event scope" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "file", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, "file", gpa);
+    defer gpa.free(root);
+    const parent = std.fs.path.dirname(root).?;
+    var backend = try FsEvents.init(gpa, testing.io, .{});
+    defer backend.deinit();
+    var batch = Batch.init(testing.io, .{});
+    defer batch.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try backend.add(id, root, .{}, &batch);
+    const stream = backend.streams.get(id).?;
+    stream.resumed = true;
+    try synthesize(gpa, stream, &.{.{ .path = parent, .flags = flag.history_done }});
+    try backend.drain(&batch);
+    if (stream.replayed == null) std.debug.print("file replay sentinel discarded root={s} parent={s} scope={s}\n", .{ root, parent, @tagName(stream.scope) });
+    try testing.expect(stream.replayed != null);
+    try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+}
+
+test "a checkpoint refuses a different volume or FSEvents log before restoring changes" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    try testing.expectEqual(watcher.impl.fsevents.streams.get(id).?.volume.device, c.FSEventStreamGetDeviceBeingWatched(watcher.impl.fsevents.streams.get(id).?.ref));
+    try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
+    var saved = (try watcher.checkpoint(gpa)).?;
+    defer saved.deinit();
+    for ([_]bool{ true, false }) |volume| {
+        var changed = try checkpoint_format.copy(gpa, saved.state.value);
+        defer changed.deinit();
+        const watches = @constCast(changed.value.watches);
+        if (volume) watches[0].identity.volume[0] ^= 1 else watches[0].identity.log[0] ^= 1;
+        var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = .{ .state = changed } });
+        defer resumed.deinit();
+        try testing.expectError(error.InvalidCheckpoint, resumed.add(root, .{}));
+        try testing.expectEqual(@as(usize, 0), resumed.impl.fsevents.streams.count());
+        try testing.expectEqual(@as(usize, 0), resumed.batch.held.count());
+        try testing.expect(!resumed.impl.fsevents.resume_used[0]);
+    }
+}
+
+test "a checkpoint is unavailable without an unchanged persistent log" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    const stream = watcher.impl.fsevents.streams.get(id).?;
+    const original = stream.volume.identity;
+    defer stream.volume.identity = original;
+    try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
+    stream.volume.identity = null;
+    try testing.expectEqual(@as(?lookout.Checkpoint, null), try watcher.checkpoint(gpa));
+    stream.volume.identity = original;
+    stream.volume.identity.?.log[0] ^= 1;
+    try testing.expectEqual(@as(?lookout.Checkpoint, null), try watcher.checkpoint(gpa));
+}
+
+test "a recursive mount keeps live coverage and refuses a single-device checkpoint" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .latency_ms = 0 });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true });
+    const backend = &watcher.impl.fsevents;
+    try synthesize(gpa, backend.streams.get(id).?, &.{.{ .path = root, .flags = 0x40 }});
+    try backend.drain(&watcher.batch);
+    try testing.expectEqual(@as(i32, 0), c.FSEventStreamGetDeviceBeingWatched(backend.streams.get(id).?.ref));
+    try testing.expectEqual(@as(?lookout.Checkpoint, null), try watcher.checkpoint(gpa));
+    try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
+    try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
+    try testing.expectEqualStrings(root, watcher.batch.events.items[0].path);
+    _ = try watcher.poll(0);
+    const wanted = try std.fs.path.join(gpa, &.{ root, "live" });
+    defer gpa.free(wanted);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "live", .data = "x" });
+    var saw = false;
+    var waited: u32 = 0;
+    while (waited < 10_000 and !saw) : (waited += 200) {
+        for (try watcher.poll(200)) |event| {
+            if (std.mem.eql(u8, event.path, wanted) and event.kind == .created) saw = true;
+        }
+    }
+    try testing.expect(saw);
+}
+
+test "an absent pending root refuses a checkpoint from another volume" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    const absent = try std.fs.path.join(gpa, &.{ root, "absent" });
+    defer gpa.free(absent);
+    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    _ = try watcher.add(absent, .{ .pending = true });
+    var saved = (try watcher.checkpoint(gpa)).?;
+    defer saved.deinit();
+    @constCast(saved.state.value.watches)[0].identity.volume[0] ^= 1;
+    var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = saved });
+    defer resumed.deinit();
+    try testing.expectError(error.InvalidCheckpoint, resumed.add(absent, .{ .pending = true }));
+    try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
+    try testing.expectEqual(@as(usize, 0), resumed.table.count());
+    try testing.expectEqual(@as(usize, 0), resumed.impl.fsevents.streams.count());
+}
+
+test "a pending promotion rescans when its saved log identity is refused" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    const absent = try std.fs.path.join(gpa, &.{ root, "absent" });
+    defer gpa.free(absent);
+    var first = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    defer first.deinit();
+    _ = try first.add(absent, .{ .pending = true });
+    var saved = (try first.checkpoint(gpa)).?;
+    defer saved.deinit();
+    var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = saved });
+    defer resumed.deinit();
+    const id = try resumed.add(absent, .{ .pending = true });
+    const backend = &resumed.impl.fsevents;
+    // An anchor that had not consumed its snapshot encounters a different
+    // log when the requested path appears. Force that identity transition.
+    backend.resume_used[0] = false;
+    @constCast(backend.restarting.?.state.value.watches)[0].identity.log[0] ^= 1;
+    try tmp.dir.createDirPath(testing.io, "absent");
+    const events = try resumed.poll(0);
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(lookout.Kind.overflow, events[0].kind);
+    try testing.expectEqual(id, events[0].id);
+    try testing.expectEqualStrings(absent, events[0].path);
+    try testing.expect(backend.resume_used[0]);
+    _ = try resumed.poll(0);
+    try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
+    try testing.expect(backend.streams.contains(id));
+}
+
+test "a fresh native stream asks only for future events" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    const stream = watcher.impl.fsevents.streams.get(id).?;
+    try testing.expectEqual(c.kFSEventStreamEventIdSinceNow, c.FSEventStreamGetLatestEventId(stream.ref));
+    // The saved cursor is a conservative device-log boundary; the live
+    // subscription must not replay records before this registration.
+    try testing.expect(stream.cursor != c.kFSEventStreamEventIdSinceNow);
+}

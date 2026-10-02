@@ -17,58 +17,69 @@ env:
   ZIG_VERSION: 0.16.0
 
 jobs:
-  # The full suite on every host that can run it. The suite itself runs
-  # once per backend the host has, so a macOS runner exercises FSEvents,
-  # kqueue and polling, a Linux runner inotify and polling, and a Windows
-  # runner ReadDirectoryChangesW and polling -- which is the whole
-  # backend surface, executed.
+  # Debug catches safety faults; ReleaseSafe checks optimized code and timing on each host.
+  # Every host still runs all its backends, with safety checks in both modes.
+  # The full test target already builds and runs the examples.
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, ${{ matrix.optimize }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        optimize: [Debug, ReleaseSafe]
+        include:
+          # One unchecked run catches optimizer-dependent behaviour; the other hosts have ReleaseSafe.
+          - os: ubuntu-latest
+            optimize: ReleaseFast
     steps:
       - uses: actions/checkout@v4
-
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+      - name: Test — ${{ matrix.optimize }}
+        run: zig build test -Doptimize=${{ matrix.optimize }}
 
+  # ReleaseSmall must build; its unchecked tests add no distinct assertion to ReleaseFast.
+  small:
+    name: compile (ReleaseSmall)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: zig build -Doptimize=ReleaseSmall
+
+  # The watcher receives changes on another thread; ThreadSanitizer checks the handoff.
+  # Linux has a working runtime here; Debug is the detector's most complete instrumentation.
+  sanitizer:
+    name: ThreadSanitizer (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: zig build test -Dthread-sanitizer -Doptimize=Debug --test-timeout 120s
+
+  # Formatting and source-policy checks read the same files on every host; once is enough.
+  source:
+    name: source checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - name: Formatting
         run: zig fmt --check build.zig build.zig.zon src examples
-
       - name: Casts out of the type system carry their reason
         run: python3 ci/casts.py
-
-      - name: Test -- Debug
-        run: zig build test -Doptimize=Debug
-
-      - name: Test -- ReleaseSafe
-        run: zig build test -Doptimize=ReleaseSafe
-
-      - name: Test -- ReleaseFast
-        run: zig build test -Doptimize=ReleaseFast
-
-      - name: Test -- ReleaseSmall
-        run: zig build test -Doptimize=ReleaseSmall
-
-      # The suite under ThreadSanitizer. A watcher is handed its changes on a
-      # thread the platform owns and reads them on the caller's, and a race at
-      # that crossing is a claim a detector can check and a reader cannot.
-      # Debug, because that is the mode the detector instruments most
-      # completely. Linux only: Windows has no runtime for it, and on the hosted
-      # macOS runner the instrumented suite is killed by a segfault before its
-      # first test reports, while the same suite passes under ThreadSanitizer on
-      # a Mac, where it is run before a release.
-      - name: Test -- ThreadSanitizer
-        if: runner.os == 'Linux'
-        run: zig build test -Dthread-sanitizer -Doptimize=Debug --test-timeout 120s
-
-      - name: Examples
-        run: zig build examples
 
   # Compile-only coverage of the targets the suite cannot execute on --
   # and of the ones it can, under the other libc. The default step

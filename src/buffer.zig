@@ -18,8 +18,8 @@ const std = @import("std");
 /// The ends of the range a backend will pass on, and what it uses when
 /// the caller asks for nothing.
 pub const Bounds = struct {
-    /// The smallest size, which must still hold one record with the
-    /// longest name the platform allows.
+    /// The smallest size the backend accepts. A record larger than the
+    /// buffer can still cost an overflow notice and a rescan.
     min: usize,
     /// The largest size, past which the request is a mistake rather than
     /// a refusal.

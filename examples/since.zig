@@ -1,12 +1,12 @@
 //! Stop watching, let the tree change, and be told what was missed.
 //!
 //! A tool that runs, exits and runs again has a gap it cannot see into.
-//! `Watcher.position` closes it where the operating system keeps a log
-//! of what changed: the position is a short piece of text the program
-//! writes down, and `Options.since` takes it back.
+//! `Watcher.checkpoint` closes it where the operating system keeps a log
+//! of what changed: the checkpoint is an owned snapshot the program
+//! writes down, and `Options.checkpoint` takes it back.
 //!
 //! `zig build examples` builds AND runs this. On a target whose backend
-//! cannot answer -- `tracksPosition` says which -- it prints that and
+//! cannot answer -- `tracksCheckpoint` says which -- it prints that and
 //! stops, because a program that pretends to resume is worse than one
 //! that says it cannot.
 
@@ -28,9 +28,9 @@ pub fn main() !void {
     const dir_path = try scratch.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(dir_path);
 
-    if (!lookout.tracksPosition(lookout.default_backend)) {
+    if (!lookout.tracksCheckpoint(lookout.default_backend)) {
         std.debug.print(
-            "{s} keeps no log to resume from, so there is no position to take\n",
+            "{s} keeps no log to resume from, so there is no checkpoint to take\n",
             .{@tagName(lookout.default_backend)},
         );
         return;
@@ -38,8 +38,8 @@ pub fn main() !void {
 
     // The first run. It watches, does its work, and writes down where
     // it got to before it stops.
-    var token: [lookout.Position.max_token_len]u8 = undefined;
-    var written: usize = 0;
+    var token: []u8 = undefined;
+    defer gpa.free(token);
     {
         var watcher: lookout.Watcher = try .init(gpa, io, .{});
         defer watcher.deinit();
@@ -49,9 +49,10 @@ pub fn main() !void {
             std.debug.print("first run: {s} {s}\n", .{ @tagName(event.kind), event.path });
         }
 
-        const where = watcher.position().?;
-        written = where.token(&token).len;
-        std.debug.print("position: {s}\n", .{token[0..written]});
+        var checkpoint = (try watcher.checkpoint(gpa)).?;
+        defer checkpoint.deinit();
+        token = try checkpoint.token(gpa);
+        std.debug.print("checkpoint: {s}\n", .{token});
     }
 
     // Nothing is watching now, which is when the interesting changes
@@ -60,8 +61,9 @@ pub fn main() !void {
     try scratch.deleteFile(io, "seen.txt");
 
     // The second run hands the token back.
-    const resumed = try lookout.Position.parse(token[0..written]);
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .since = resumed });
+    var resumed = try lookout.Checkpoint.parse(gpa, token);
+    defer resumed.deinit();
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .checkpoint = resumed });
     defer watcher.deinit();
     _ = try watcher.add(dir_path, .{ .recursive = true });
 

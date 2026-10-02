@@ -30,13 +30,18 @@ max: usize,
 /// name: a set, so that a creation reported twice, or a removal of a
 /// name never counted, moves nothing. Keys and names owned here, compared
 /// as the file system compares them.
-counts: path.Set(Names),
+counts: path.Set(Remembered),
 /// The directories the walk under way started counting, and so the only
 /// ones whose entries it adds. Keys borrowed from `counts`. See `begin`.
 walking: path.Set(void),
 
 /// One directory's entries, by name.
 pub const Names = path.Set(void);
+
+const Remembered = struct {
+    names: Names = .empty,
+    complete: bool = true,
+};
 
 /// What happened to a directory's entry count.
 pub const Move = enum { appeared, vanished, unchanged };
@@ -46,8 +51,8 @@ pub fn init(gpa: Allocator, io: Io, max: usize) Budget {
 }
 
 pub fn deinit(b: *Budget) void {
-    for (b.counts.keys(), b.counts.values()) |key, *names| {
-        freeNames(b.gpa, names);
+    for (b.counts.keys(), b.counts.values()) |key, *remembered| {
+        freeNames(b.gpa, &remembered.names);
         b.gpa.free(key);
     }
     b.counts.deinit(b.gpa);
@@ -58,7 +63,7 @@ pub fn deinit(b: *Budget) void {
 /// How many entries `dir` is counted as holding, when it is counted.
 pub fn count(b: *const Budget, dir: []const u8) ?usize {
     const names = b.counts.getPtr(dir) orelse return null;
-    return names.count();
+    return names.names.count();
 }
 
 /// Counts what `dir` holds now, so that a directory that is already too
@@ -67,18 +72,30 @@ pub fn count(b: *const Budget, dir: []const u8) ?usize {
 ///
 /// A directory already counted is read again and its count replaced, as
 /// `begin` counts it again from a walk: what another watch left may be
-/// only what it heard.
+/// only what it heard. A failed read retains the old names as uncertain.
 pub fn seed(b: *Budget, dir: []const u8) Allocator.Error!void {
-    var names = try namesIn(b.gpa, b.io, dir);
+    var names = namesIn(b.gpa, b.io, dir) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Incomplete => {
+            if (b.counts.getPtr(dir)) |remembered| {
+                remembered.complete = false;
+                return;
+            }
+            const owned = try b.gpa.dupe(u8, dir);
+            errdefer b.gpa.free(owned);
+            try b.counts.put(b.gpa, owned, .{ .complete = false });
+            return;
+        },
+    };
     errdefer freeNames(b.gpa, &names);
-    if (b.counts.getPtr(dir)) |counted| {
-        freeNames(b.gpa, counted);
-        counted.* = names;
+    if (b.counts.getPtr(dir)) |remembered| {
+        freeNames(b.gpa, &remembered.names);
+        remembered.* = .{ .names = names };
         return;
     }
     const owned = try b.gpa.dupe(u8, dir);
     errdefer b.gpa.free(owned);
-    try b.counts.put(b.gpa, owned, names);
+    try b.counts.put(b.gpa, owned, .{ .names = names });
 }
 
 /// Starts accounting for a directory a tree walk is about to list.
@@ -93,14 +110,15 @@ pub fn seed(b: *Budget, dir: []const u8) Allocator.Error!void {
 pub fn begin(b: *Budget, dir: []const u8) Allocator.Error!void {
     try b.walking.ensureUnusedCapacity(b.gpa, 1);
     if (b.counts.getEntry(dir)) |counted| {
-        for (counted.value_ptr.keys()) |name| b.gpa.free(name);
-        counted.value_ptr.clearRetainingCapacity();
+        for (counted.value_ptr.names.keys()) |name| b.gpa.free(name);
+        counted.value_ptr.names.clearRetainingCapacity();
+        counted.value_ptr.complete = true;
         b.walking.putAssumeCapacity(counted.key_ptr.*, {});
         return;
     }
     const owned = try b.gpa.dupe(u8, dir);
     errdefer b.gpa.free(owned);
-    try b.counts.put(b.gpa, owned, .empty);
+    try b.counts.put(b.gpa, owned, .{});
     b.walking.putAssumeCapacity(owned, {});
 }
 
@@ -108,7 +126,7 @@ pub fn begin(b: *Budget, dir: []const u8) Allocator.Error!void {
 pub fn found(b: *Budget, dir: []const u8, name: []const u8) Allocator.Error!void {
     if (!b.walking.contains(dir)) return;
     const names = b.counts.getPtr(dir) orelse return;
-    try addName(b.gpa, names, name);
+    try addName(b.gpa, &names.names, name);
 }
 
 /// Closes the walk `begin` opened: what it counted is the count now.
@@ -128,24 +146,37 @@ pub fn end(b: *Budget) void {
 /// it, which lets every other change there go by, leaves the count as
 /// true as any other.
 pub fn note(b: *Budget, dir: []const u8, name: []const u8, move: Move) Allocator.Error!bool {
-    const gop = try b.counts.getOrPut(b.gpa, dir);
-    if (!gop.found_existing) {
-        const owned = b.gpa.dupe(u8, dir) catch |err| {
-            _ = b.counts.swapRemove(dir);
-            return err;
-        };
-        gop.key_ptr.* = owned;
-        gop.value_ptr.* = namesIn(b.gpa, b.io, dir) catch |err| {
-            b.gpa.free(owned);
-            _ = b.counts.swapRemove(dir);
-            return err;
-        };
-    } else switch (move) {
-        .appeared => try addName(b.gpa, gop.value_ptr, name),
-        .vanished => if (gop.value_ptr.fetchSwapRemove(name)) |kv| b.gpa.free(kv.key),
-        .unchanged => {},
+    if (b.counts.getPtr(dir)) |remembered| {
+        if (!remembered.complete) {
+            const fresh = namesIn(b.gpa, b.io, dir) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Incomplete => return true,
+            };
+            freeNames(b.gpa, &remembered.names);
+            remembered.* = .{ .names = fresh };
+            // The scan already includes this change.
+            return fresh.count() > b.max;
+        }
+        const names = &remembered.names;
+        switch (move) {
+            .appeared => try addName(b.gpa, names, name),
+            .vanished => if (names.fetchSwapRemove(name)) |kv| b.gpa.free(kv.key),
+            .unchanged => {},
+        }
+        return names.count() > b.max;
     }
-    return gop.value_ptr.count() > b.max;
+
+    // Publish only a complete listing. Until the map takes it, this scope
+    // owns both the directory key and every entry name.
+    var names = namesIn(b.gpa, b.io, dir) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Incomplete => return true,
+    };
+    errdefer freeNames(b.gpa, &names);
+    const owned = try b.gpa.dupe(u8, dir);
+    errdefer b.gpa.free(owned);
+    try b.counts.put(b.gpa, owned, .{ .names = names });
+    return names.count() > b.max;
 }
 
 /// Drops `dir` and every directory under it, for a subtree that has gone.
@@ -188,7 +219,7 @@ pub fn release(
 fn dropAt(b: *Budget, i: usize) void {
     const key = b.counts.keys()[i];
     _ = b.walking.swapRemove(key);
-    freeNames(b.gpa, &b.counts.values()[i]);
+    freeNames(b.gpa, &b.counts.values()[i].names);
     b.gpa.free(key);
     b.counts.swapRemoveAt(i);
 }
@@ -198,7 +229,8 @@ fn dropAt(b: *Budget, i: usize) void {
 /// place (a NUL is in no real name). A directory not counted is left
 /// alone.
 pub fn misread(b: *Budget, dir: []const u8, forget_real: bool, made_up: usize) Allocator.Error!void {
-    const names = b.counts.getPtr(dir) orelse return;
+    const remembered = b.counts.getPtr(dir) orelse return;
+    const names = &remembered.names;
     var i: usize = 0;
     while (i < names.count()) {
         const name = names.keys()[i];
@@ -220,17 +252,22 @@ pub fn misread(b: *Budget, dir: []const u8, forget_real: bool, made_up: usize) A
 /// the directory holds. Reading the directory again is the one way back
 /// to what it holds. A change made after the loss and before this read,
 /// and read after it, finds its name already there, or already gone, and
-/// moves nothing. Out of memory, a directory keeps the entries it had.
+/// moves nothing. A failed read keeps the entries it had and marks them
+/// uncertain; the next change retries the read and reports overflow
+/// until a complete listing establishes the budget again.
 pub fn reread(
     b: *Budget,
     context: anytype,
     comptime stale: fn (@TypeOf(context), []const u8) bool,
 ) void {
-    for (b.counts.keys(), b.counts.values()) |dir, *names| {
+    for (b.counts.keys(), b.counts.values()) |dir, *remembered| {
         if (!stale(context, dir)) continue;
-        var fresh = namesIn(b.gpa, b.io, dir) catch continue;
-        freeNames(b.gpa, names);
-        names.* = fresh.move();
+        const fresh = namesIn(b.gpa, b.io, dir) catch {
+            remembered.complete = false;
+            continue;
+        };
+        freeNames(b.gpa, &remembered.names);
+        remembered.* = .{ .names = fresh };
     }
 }
 
@@ -309,16 +346,14 @@ fn rank(id: anytype) u64 {
     };
 }
 
-/// The names `dir_path` holds, or none when it is not a directory or
-/// cannot be read. An unreadable directory is a budget of nothing rather
-/// than a failed `add`.
-fn namesIn(gpa: Allocator, io: Io, dir_path: []const u8) Allocator.Error!Names {
+/// A complete directory listing. A partial read owns no published count.
+fn namesIn(gpa: Allocator, io: Io, dir_path: []const u8) (Allocator.Error || error{Incomplete})!Names {
     var names: Names = .empty;
     errdefer freeNames(gpa, &names);
-    var dir = Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return names;
+    var dir = Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return error.Incomplete;
     defer dir.close(io);
     var it = dir.iterate();
-    while (it.next(io) catch null) |entry| try addName(gpa, &names, entry.name);
+    while (it.next(io) catch return error.Incomplete) |entry| try addName(gpa, &names, entry.name);
     return names;
 }
 
@@ -337,6 +372,32 @@ fn freeNames(gpa: Allocator, names: *Names) void {
 }
 
 const testing = std.testing;
+
+test "a failed first budget count leaves no directory for the retry" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "entry", .data = "x" });
+
+    // Exercise the map, directory path, listing and entry-name allocations.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var budget: Budget = .init(failing.allocator(), testing.io, 8);
+        defer budget.deinit();
+        if (budget.note(root, "entry", .appeared)) |_| {
+            try testing.expectEqual(@as(usize, 1), budget.count(root).?);
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(@as(usize, 0), budget.counts.count());
+            failing.fail_index = std.math.maxInt(usize);
+            try testing.expect(!try budget.note(root, "entry", .appeared));
+            try testing.expectEqual(@as(usize, 1), budget.count(root).?);
+        }
+    }
+}
 
 test "a directory is counted once and then kept current" {
     const gpa = testing.allocator;
@@ -680,4 +741,37 @@ test "a name reported twice is one entry, and one never counted goes without tak
     try testing.expect(!try b.note(root, "c", .vanished));
     try testing.expect(!try b.note(root, "c", .vanished));
     try testing.expectEqual(@as(usize, 2), b.count(root).?);
+}
+
+test "a failed budget reread keeps its names and reports uncertainty until complete" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "one", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "two", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var budget: Budget = .init(gpa, io, 2);
+    defer budget.deinit();
+    try budget.seed(root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "three", .data = "x" });
+    var vtable = io.vtable.*;
+    vtable.dirRead = struct {
+        fn read(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
+            return error.AccessDenied;
+        }
+    }.read;
+    budget.io = .{ .userdata = io.userdata, .vtable = &vtable };
+    budget.reread({}, struct {
+        fn stale(_: void, _: []const u8) bool {
+            return true;
+        }
+    }.stale);
+    try testing.expectEqual(@as(usize, 2), budget.count(root).?);
+    try testing.expect(try budget.note(root, "three", .unchanged));
+    try testing.expectEqual(@as(usize, 2), budget.count(root).?);
+    budget.io = io;
+    try testing.expect(try budget.note(root, "three", .appeared));
+    try testing.expectEqual(@as(usize, 3), budget.count(root).?);
 }

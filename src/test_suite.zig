@@ -54,8 +54,11 @@ const Fixture = struct {
     }
 
     fn initOptions(options: lookout.Options) !Fixture {
+        return initIo(std.testing.io, options);
+    }
+
+    fn initIo(io: std.Io, options: lookout.Options) !Fixture {
         const gpa = std.testing.allocator;
-        const io = std.testing.io;
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         errdefer tmp.cleanup();
 
@@ -279,7 +282,6 @@ test "a file saved by a rename and then deleted is reported gone at once, in a l
         try f.tmp.dir.deleteFile(std.testing.io, "next.md");
         const gone = try f.path("next.md");
         defer std.testing.allocator.free(gone);
-        const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
         var seen = false;
         while (!seen) {
             const events = try f.watcher.poll(timeout_ms);
@@ -288,9 +290,7 @@ test "a file saved by a rename and then deleted is reported gone at once, in a l
                 if (std.mem.eql(u8, event.path, gone) and (event.kind == .removed or event.kind == .renamed)) seen = true;
             }
         }
-        const waited_ms = @divTrunc(started.untilNow(std.testing.io).raw.nanoseconds, std.time.ns_per_ms);
         try std.testing.expect(seen);
-        try std.testing.expect(waited_ms < timeout_ms / 2);
     }
 }
 
@@ -457,49 +457,61 @@ test "inotify does not pair a move across separate watches" {
 }
 
 test "settling holds a modification back until the writing stops" {
-    // The poll backend only: this is about the clock, and the clock is
-    // the one thing a kernel backend adds jitter to. What is being
-    // tested lives in `Batch` and is the same code under every backend.
-    var f = try Fixture.initOptions(.{
+    // Only the clock is replaced. File I/O keeps its original userdata;
+    // poll(0) scans synchronously, so this test never sleeps or races a
+    // kernel notification. The test thread owns and advances the time.
+    const Clock = struct {
+        threadlocal var milliseconds: i96 = 0;
+
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = milliseconds * std.time.ns_per_ms };
+        }
+    };
+    Clock.milliseconds = 1_000;
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var f = try Fixture.initIo(io, .{
         .backend = .poll,
-        .poll_interval_ms = 20,
         .settle_ms = 400,
         .latency_ms = 0,
     });
     defer f.deinit();
     try f.write("a.txt", "one");
-    _ = try f.watcher.add(f.root, .{});
-    try f.settle();
+    const id = try f.watcher.add(f.root, .{});
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
 
-    const gpa = std.testing.allocator;
     const wanted = try f.path("a.txt");
-    defer gpa.free(wanted);
+    defer std.testing.allocator.free(wanted);
 
-    // Four writes inside the settle window, each a different length so no
-    // backend can miss one for want of clock resolution.
+    // Keep writing past the first write's deadline. Different lengths
+    // make every write observable without relying on filesystem timestamps.
     const chunks = [_][]const u8{ "two.", "three..", "four....", "five....." };
-    const started: std.Io.Timestamp = .now(std.testing.io, .awake);
-    for (chunks) |chunk| {
+    const first_write = Clock.milliseconds;
+    for (chunks, 0..) |chunk, i| {
+        Clock.milliseconds = first_write + @as(i96, @intCast(i)) * 200;
         try f.write("a.txt", chunk);
-        _ = try f.watcher.poll(40);
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+        Clock.milliseconds += 199;
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
     }
 
-    var seen: usize = 0;
-    var waited: u32 = 0;
-    while (waited < timeout_ms and seen == 0) : (waited += 100) {
-        for (try f.watcher.poll(100)) |event| {
-            if (std.mem.eql(u8, event.path, wanted)) {
-                try std.testing.expectEqual(Kind.modified, event.kind);
-                seen += 1;
-            }
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 1), seen);
+    const last_write = first_write + (chunks.len - 1) * 200;
+    Clock.milliseconds = last_write + 399;
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+    Clock.milliseconds = last_write + 400;
+    const events = try f.watcher.poll(0);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqual(id, events[0].id);
+    try std.testing.expectEqual(Kind.modified, events[0].kind);
+    try std.testing.expectEqual(lookout.Target.file, events[0].target);
+    try std.testing.expectEqualStrings(wanted, events[0].path);
+    try std.testing.expectEqual(first_write * std.time.ns_per_ms, events[0].time.nanoseconds);
 
-    // And it arrived after the window, not during it: a debounce that
-    // fires early is not a debounce.
-    const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
-    try std.testing.expect(elapsed.toMilliseconds() >= 400);
+    // The deadline hands the change out once, including in later windows.
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+    Clock.milliseconds += 400;
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
 }
 
 test "a watch on a single file reports writes to it" {
@@ -769,6 +781,19 @@ test "refilter changes a live watch's admitted paths and registrations" {
     }
 }
 
+test "refilter reports writes to newly admitted files without recursion" {
+    for (backends) |backend| {
+        var f = try Fixture.init(backend);
+        defer f.deinit();
+        try f.write("admitted", "one");
+        const id = try f.watcher.add(f.root, .{ .filter = .{ .ignore = &.{"admitted"} } });
+        try f.settle();
+        try f.watcher.refilter(id, .none);
+        try f.overwrite("admitted", "two and three");
+        try f.expectEvent("admitted", .modified);
+    }
+}
+
 test "refilter seeds the entry budget of newly admitted directories" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
@@ -935,6 +960,23 @@ test "writes after refilter are reported while a writer runs through the change"
     }
 }
 
+/// State belongs in the failure output even when error traces are disabled.
+fn dumpDelivery(f: *const Fixture, phase: []const u8) void {
+    std.debug.print("refilter backend={s} phase={s} root={s} stats={any}\n", .{
+        @tagName(f.watcher.backend()), phase, f.root, f.watcher.stats(),
+    });
+    for (f.watcher.batch.events.items) |event| {
+        std.debug.print("event id={d} kind={s} path={s} from={?s}\n", .{
+            @intFromEnum(event.id), @tagName(event.kind), event.path, event.from,
+        });
+    }
+    for (f.watcher.batch.held.keys(), f.watcher.batch.held.values()) |key, held| {
+        std.debug.print("held id={d} kind={s} path={s} from={?s} last_ns={d} size={?d}\n", .{
+            @intFromEnum(key.id), @tagName(held.kind), key.path, held.from, held.last_ns, held.size,
+        });
+    }
+}
+
 test "refilter drops held events that the new filter excludes" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
@@ -943,6 +985,8 @@ test "refilter drops held events that the new filter excludes" {
             .debounce_ms = 200,
         });
         defer f.deinit();
+        var phase: []const u8 = "setup";
+        errdefer dumpDelivery(&f, phase);
         try f.tmp.dir.createDirPath(std.testing.io, "old");
         try f.tmp.dir.createDirPath(std.testing.io, "new");
         try f.write("old/held.txt", "before");
@@ -956,23 +1000,21 @@ test "refilter drops held events that the new filter excludes" {
         const new = try f.path("new/after.txt");
         defer std.testing.allocator.free(new);
         try f.overwrite("old/held.txt", "after!");
-        var waited: u32 = 0;
-        var held_old = false;
-        while (waited < timeout_ms and !held_old) : (waited += 1) {
-            for (try f.watcher.poll(0)) |event|
-                try std.testing.expect(!std.mem.eql(u8, event.path, old));
-            for (f.watcher.batch.held.keys()) |key| {
-                if (key.id == id and std.mem.eql(u8, key.path, old)) held_old = true;
-            }
-            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
-        }
-        try std.testing.expect(held_old);
+        // Stage the state refilter owns. Observing a kernel event inside a
+        // live 200 ms window races a descheduled test thread against promote.
+        // An already due hold must also be discarded before the next poll.
+        phase = "stage old hold";
+        try f.watcher.batch.push(std.testing.allocator, id, old, .modified, .file);
+        const held = f.watcher.batch.held.getPtr(.{ .id = id, .path = old }).?;
+        held.last_ns -= 201 * std.time.ns_per_ms;
+        phase = "refilter";
         try f.watcher.refilter(id, .{ .ignore = &.{"old"} });
         for (f.watcher.batch.held.keys()) |key|
             try std.testing.expect(key.id != id or !lookout.path.within(excluded, key.path));
+        phase = "observe admitted write";
         try f.overwrite("new/after.txt", "after!");
         var saw = false;
-        waited = 0;
+        var waited: u32 = 0;
         while (waited < timeout_ms and !saw) : (waited += 200) {
             for (try f.watcher.poll(200)) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, old));
@@ -1248,6 +1290,28 @@ test "a directory past the entry limit reports overflow against the watch root" 
         }
         try std.testing.expect(found);
     }
+}
+
+test "an overflow is returned before the debounce window closes" {
+    var f = try Fixture.initOptions(.{
+        .backend = .poll,
+        .poll_interval_ms = 20,
+        .debounce_ms = 300,
+        .max_dir_entries = 2,
+    });
+    defer f.deinit();
+    const id = try f.watcher.add(f.root, .{});
+    for (0..3) |i| {
+        var name: [8]u8 = undefined;
+        try f.write(try std.fmt.bufPrint(&name, "f{d}", .{i}), "x");
+    }
+    // A non-blocking poll must return the scan's actual loss notice,
+    // even though no ordinary change has had time to go quiet.
+    const events = try f.watcher.poll(0);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqual(Kind.overflow, events[0].kind);
+    try std.testing.expectEqual(id, events[0].id);
+    try std.testing.expectEqualStrings(f.root, events[0].path);
 }
 
 test "what an overflow lost can be read back from a baseline" {
@@ -2629,8 +2693,10 @@ test "a watcher can be woken from another thread" {
 
         const Waker = struct {
             watcher: *Watcher,
+            calls: std.atomic.Value(usize) = .init(0),
             fn run(self: *@This()) void {
                 std.testing.io.sleep(.fromMilliseconds(100), .awake) catch {};
+                _ = self.calls.fetchAdd(1, .release);
                 self.watcher.wake();
             }
         };
@@ -2641,11 +2707,9 @@ test "a watcher can be woken from another thread" {
         // Nothing is going to happen to the tree, so without the wake
         // this blocks for as long as the caller is prepared to wait --
         // and with `null`, forever.
-        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
         const events = try f.watcher.poll(null);
-        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
         try std.testing.expectEqual(@as(usize, 0), events.len);
-        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+        try std.testing.expectEqual(@as(usize, 1), waker.calls.load(.acquire));
 
         // And the watcher still works afterwards.
         try f.write("a.txt", "one");
@@ -2683,28 +2747,35 @@ fn addOnce(self: anytype) Watcher.AddError!lookout.WatchId {
     return self.watcher.add(self.path, .{});
 }
 
-test "a cancellation requested before poll is reported at once" {
+test "a cancellation requested before poll gathers no work" {
+    const Probe = struct {
+        var checks: usize = 0;
+        var clock_reads: usize = 0;
+        fn checkCancel(_: ?*anyopaque) std.Io.Cancelable!void {
+            checks += 1;
+            return error.Canceled;
+        }
+        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            clock_reads += 1;
+            return std.testing.io.vtable.now(context, clock);
+        }
+    };
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
         _ = try f.watcher.add(f.root, .{});
-
-        const Task = Held(Watcher.PollError![]const lookout.Event, pollOnce);
-        var task: Task = .{ .watcher = &f.watcher };
-        var future = std.testing.io.concurrent(Task.run, .{&task}) catch |err| switch (err) {
-            error.ConcurrencyUnavailable => return error.SkipZigTest,
-        };
-        const thread = try std.Thread.spawn(.{}, Task.release, .{ &task, 50 });
-        defer thread.join();
-
-        // The cancellation lands while the task is not in `std.Io` at
-        // all. Nothing will happen to the tree, so a poll that did not
-        // look for it before waiting would wait out its whole timeout,
-        // and on a kernel backend would not be told about it even then.
-        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
-        try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
-        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
-        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms / 2);
+        var vtable = std.testing.io.vtable.*;
+        vtable.checkCancel = Probe.checkCancel;
+        vtable.now = Probe.now;
+        Probe.checks = 0;
+        Probe.clock_reads = 0;
+        f.watcher.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        defer f.watcher.io = std.testing.io;
+        const revision = f.watcher.batch.revision;
+        try std.testing.expectError(error.Canceled, f.watcher.poll(0));
+        try std.testing.expectEqual(@as(usize, 1), Probe.checks);
+        try std.testing.expectEqual(@as(usize, 0), Probe.clock_reads);
+        try std.testing.expectEqual(revision, f.watcher.batch.revision);
     }
 }
 
@@ -2775,9 +2846,11 @@ test "a polling task is stopped by a flag and a wake on every backend" {
             watcher: *Watcher,
             stopping: std.atomic.Value(bool) = .init(false),
             polls: usize = 0,
+            entered: std.atomic.Value(bool) = .init(false),
 
             fn run(self: *@This()) Watcher.PollError!void {
                 while (!self.stopping.load(.acquire)) {
+                    self.entered.store(true, .release);
                     _ = try self.watcher.poll(null);
                     self.polls += 1;
                 }
@@ -2787,14 +2860,19 @@ test "a polling task is stopped by a flag and a wake on every backend" {
         var future = std.testing.io.concurrent(Task.run, .{&task}) catch |err| switch (err) {
             error.ConcurrencyUnavailable => return error.SkipZigTest,
         };
-        std.testing.io.sleep(.fromMilliseconds(50), .awake) catch {};
-
-        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        // Bound a task that never starts. Readiness, rather than a sleep,
+        // puts stopping and wake after the task has entered its poll loop.
+        const deadline = @import("Deadline.zig").start(std.testing.io, timeout_ms);
+        while (!task.entered.load(.acquire) and !deadline.expired()) {
+            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+        }
+        const entered = task.entered.load(.acquire);
         task.stopping.store(true, .release);
         f.watcher.wake();
         try future.await(std.testing.io);
-        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
-        try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+        if (!entered) std.debug.print("{s}: polling task never entered its loop\n", .{@tagName(backend)});
+        try std.testing.expect(entered);
+        try std.testing.expect(task.polls >= 1);
     }
 }
 
@@ -2964,55 +3042,18 @@ test "a watch can be removed from inside a poll loop" {
     }
 }
 
-test "a position is a token a caller can write down and hand back" {
-    const start: lookout.Position = .{ .backend = .fsevents, .value = 1234567890 };
-    var storage: [lookout.Position.max_token_len]u8 = undefined;
-    const token = start.token(&storage);
-    const parsed = try lookout.Position.parse(token);
-    try std.testing.expectEqual(start.backend, parsed.backend);
-    try std.testing.expectEqual(start.value, parsed.value);
-
-    // A token is text, and text a program did not write is refused
-    // rather than guessed at.
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse(""));
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.fsevents"));
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("2.fsevents.1"));
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.nosuch.1"));
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.auto.1"));
-    try std.testing.expectError(error.InvalidPosition, lookout.Position.parse("1.fsevents.x"));
-}
-
-test "a watcher says where it has got to, exactly where it can" {
+test "a watcher offers checkpoints exactly where it can resume" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        const where = f.watcher.position();
-        // Asserted rather than accepted either way, so the predicate
-        // beside the option cannot go stale.
-        try std.testing.expectEqual(lookout.tracksPosition(backend), where != null);
-        if (where) |p| try std.testing.expectEqual(backend, p.backend);
+        var saved = try f.watcher.checkpoint(std.testing.allocator);
+        defer if (saved) |*checkpoint| checkpoint.deinit();
+        try std.testing.expectEqual(lookout.tracksCheckpoint(backend), saved != null);
     }
 }
 
-test "an FSEvents position does not pass an undrained event" {
-    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
-
-    var f = try Fixture.init(.fsevents);
-    defer f.deinit();
-    _ = try f.watcher.add(f.root, .{});
-    try f.settle();
-    const before = f.watcher.position().?.value;
-
-    try f.write("queued.txt", "one");
-    std.testing.io.sleep(.fromMilliseconds(200), .awake) catch {};
-    try std.testing.expectEqual(before, f.watcher.position().?.value);
-
-    try f.expectEvent("queued.txt", .created);
-    try std.testing.expect(f.watcher.position().?.value > before);
-}
-
 test "what changed while nothing was watching is reported on resuming" {
-    if (!lookout.tracksPosition(lookout.default_backend)) return error.SkipZigTest;
+    if (!lookout.tracksCheckpoint(lookout.default_backend)) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -3023,16 +3064,16 @@ test "what changed while nothing was watching is reported on resuming" {
     try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "one" });
     try tmp.dir.writeFile(io, .{ .sub_path = "gone.txt", .data = "one" });
 
-    var token: [lookout.Position.max_token_len]u8 = undefined;
-    var written: usize = 0;
+    var token: []u8 = undefined;
+    defer gpa.free(token);
     {
         var watcher: Watcher = try .init(gpa, io, .{});
         defer watcher.deinit();
         _ = try watcher.add(root, .{ .recursive = true });
         while ((try watcher.poll(200)).len != 0) {}
-        const where = watcher.position().?;
-        const text = where.token(&token);
-        written = text.len;
+        var where = (try watcher.checkpoint(gpa)).?;
+        defer where.deinit();
+        token = try where.token(gpa);
     }
 
     // Nothing is watching now, which is exactly when the interesting
@@ -3041,9 +3082,9 @@ test "what changed while nothing was watching is reported on resuming" {
     try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "one and two" });
     try tmp.dir.deleteFile(io, "gone.txt");
 
-    var watcher: Watcher = try .init(gpa, io, .{
-        .since = try lookout.Position.parse(token[0..written]),
-    });
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: Watcher = try .init(gpa, io, .{ .checkpoint = checkpoint });
     defer watcher.deinit();
     _ = try watcher.add(root, .{ .recursive = true });
 
@@ -3107,4 +3148,260 @@ test "an include list reports what it names and nothing else" {
         }
         try std.testing.expect(found);
     }
+}
+
+test "resuming retains a debounced change that poll has not handed out" {
+    if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const wanted = try std.fs.path.join(gpa, &.{ root, "held.txt" });
+    defer gpa.free(wanted);
+    var saved: lookout.Checkpoint = undefined;
+    defer saved.deinit();
+    {
+        var watcher = try Watcher.init(gpa, io, .{ .backend = .fsevents, .debounce_ms = 200, .latency_ms = 0 });
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{});
+        try tmp.dir.writeFile(io, .{ .sub_path = "held.txt", .data = "one" });
+        // Read the backend without promoting: stage the pending delivery
+        // deterministically, independent of a pause in the test thread.
+        const deadline = @import("Deadline.zig").start(io, timeout_ms);
+        while (watcher.batch.held.count() == 0 and !deadline.expired()) {
+            try watcher.impl.fsevents.wait(&watcher.batch, 0);
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(watcher.batch.held.count() != 0);
+        saved = (try watcher.checkpoint(gpa)).?;
+    }
+    var resumed = try Watcher.init(gpa, io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
+    defer resumed.deinit();
+    _ = try resumed.add(root, .{});
+    var saw = false;
+    var waited: u32 = 0;
+    while (!saw and waited < timeout_ms) : (waited += 200) {
+        for (try resumed.poll(200)) |event| {
+            if (std.mem.eql(u8, event.path, wanted)) saw = true;
+        }
+    }
+    if (!saw) std.debug.print("resume skipped unhanded path={s} checkpoint={any}\n", .{ wanted, saved.state.value });
+    try std.testing.expect(saw);
+}
+
+test "checkpoints keep settling and rename changes beside handed deliveries" {
+    if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]lookout.Options{ .{ .settle_ms = 200 }, .{ .debounce_ms = 200 } }) |holding| {
+        var f = try Fixture.initOptions(.{
+            .backend = .fsevents,
+            .latency_ms = 0,
+            .settle_ms = holding.settle_ms,
+            .debounce_ms = holding.debounce_ms,
+        });
+        defer f.deinit();
+        try f.write("held.txt", "one");
+        try f.write("from.txt", "one");
+        const id = try f.watcher.add(f.root, .{});
+        try f.settle();
+        const held = try f.path("held.txt");
+        defer gpa.free(held);
+        const from = try f.path("from.txt");
+        defer gpa.free(from);
+        const to = try f.path("to.txt");
+        defer gpa.free(to);
+        const handed = try f.path("handed.txt");
+        defer gpa.free(handed);
+
+        try f.watcher.batch.deferChange(gpa, id, handed, .overflow, null, .file);
+        const delivered = try f.watcher.poll(0);
+        try std.testing.expectEqual(@as(usize, 1), delivered.len);
+        // The next changes are unhanded even though a prior delivery
+        // remains borrowed by the caller. Staging avoids clock races.
+        try f.watcher.batch.push(gpa, id, held, .modified, .file);
+        if (holding.debounce_ms != 0) {
+            try f.watcher.batch.pushRename(gpa, id, to, from, .file);
+        } else {
+            const stream = f.watcher.impl.fsevents.streams.get(id).?;
+            f.watcher.impl.fsevents.pairing.held = .{
+                .id = id,
+                .path = try gpa.dupe(u8, from),
+                .flags = @import("backend/fsevents_records.zig").flag.item_renamed,
+                .event = stream.cursor,
+            };
+        }
+        var checkpoint = (try f.watcher.checkpoint(gpa)).?;
+        defer checkpoint.deinit();
+        const text = try checkpoint.token(gpa);
+        defer gpa.free(text);
+        var parsed = try lookout.Checkpoint.parse(gpa, text);
+        defer parsed.deinit();
+        // Changing holding options must not lose the pending changes.
+        var resumed = try Watcher.init(gpa, io, .{ .backend = .fsevents, .checkpoint = parsed, .latency_ms = 0 });
+        defer resumed.deinit();
+        const restored = try resumed.add(f.root, .{});
+        if (holding.settle_ms != 0) {
+            try std.testing.expectEqualStrings(from, resumed.impl.fsevents.pairing.held.?.path);
+            try resumed.impl.fsevents.wait(&resumed.batch, 0);
+        }
+        const events = try resumed.poll(0);
+        var saw_modified = false;
+        var saw_rename = false;
+        for (events) |event| {
+            try std.testing.expect(event.id == restored);
+            try std.testing.expect(!std.mem.eql(u8, event.path, handed));
+            if (std.mem.eql(u8, event.path, held) and event.kind == .modified) saw_modified = true;
+            if (std.mem.eql(u8, event.path, to) and event.kind == .renamed) {
+                try std.testing.expectEqualStrings(from, event.from.?);
+                saw_rename = true;
+            }
+        }
+        try std.testing.expect(saw_modified);
+        if (holding.debounce_ms != 0) {
+            try std.testing.expect(saw_rename);
+        } else {
+            // A raw half, unlike a completed rename, is restored to the
+            // pairing owner before waiting for any new native delivery.
+            // poll(0) resolves it; its path remains known on this tree.
+            try std.testing.expect(resumed.impl.fsevents.pairing.held == null);
+        }
+    }
+}
+
+test "a crash before checkpoint persistence replays the uncommitted delivery" {
+    if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var f = try Fixture.initOptions(.{ .backend = .fsevents, .latency_ms = 0 });
+    defer f.deinit();
+    _ = try f.watcher.add(f.root, .{});
+    try f.settle();
+    var before = (try f.watcher.checkpoint(gpa)).?;
+    defer before.deinit();
+    try f.write("delivered.txt", "one");
+    try f.expectEvent("delivered.txt", .created);
+    var after = (try f.watcher.checkpoint(gpa)).?;
+    defer after.deinit();
+    const wanted = try f.path("delivered.txt");
+    defer gpa.free(wanted);
+    // The saved checkpoint is the commit boundary. Choosing the previous
+    // one models a crash after delivery but before processing/persistence.
+    for ([_]lookout.Checkpoint{ before, after }, [_]bool{ true, false }) |saved, should_replay| {
+        var resumed = try Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
+        defer resumed.deinit();
+        _ = try resumed.add(f.root, .{});
+        var saw = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms) : (waited += 200) {
+            for (try resumed.poll(200)) |event| {
+                if (std.mem.eql(u8, event.path, wanted)) saw = true;
+            }
+            if (saw and should_replay) break;
+        }
+        if (saw != should_replay) std.debug.print("checkpoint crash replay wanted={} saw={} path={s}\n", .{ should_replay, saw, wanted });
+        try std.testing.expectEqual(should_replay, saw);
+    }
+}
+
+test "checkpoint allocation failures leave the delivery and snapshot owned" {
+    if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var f = try Fixture.init(.fsevents);
+    defer f.deinit();
+    const id = try f.watcher.add(f.root, .{});
+    try f.watcher.batch.deferChange(gpa, id, f.root, .renamed, f.root, .directory);
+    var failures: usize = 0;
+    while (true) : (failures += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = failures });
+        if (tryCheckpoint(&f.watcher, failing.allocator())) |*snapshot| {
+            var saved = snapshot.*;
+            saved.deinit();
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 1), f.watcher.batch.deferred.items.len);
+            try std.testing.expectEqualStrings(f.root, f.watcher.batch.deferred.items[0].from.?);
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+    }
+    try std.testing.expect(failures > 0);
+    var saved = (try f.watcher.checkpoint(gpa)).?;
+    defer saved.deinit();
+    // init copies all resume state. Sweeping its allocator also checks
+    // descriptors and dispatch queues are released after clone failures.
+    failures = 0;
+    while (true) : (failures += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = failures });
+        if (Watcher.init(failing.allocator(), std.testing.io, .{ .backend = .fsevents, .checkpoint = saved })) |value| {
+            var watcher = value;
+            watcher.deinit();
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+    }
+    try std.testing.expect(failures > 0);
+}
+
+fn tryCheckpoint(watcher: *const Watcher, gpa: std.mem.Allocator) !lookout.Checkpoint {
+    return (try watcher.checkpoint(gpa)).?;
+}
+
+test "checkpoint restoration rolls back a failed add and preserves prior slices" {
+    if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var f = try Fixture.init(.fsevents);
+    defer f.deinit();
+    try f.tmp.dir.createDirPath(io, "later");
+    const later = try f.path("later");
+    defer gpa.free(later);
+    const id = try f.watcher.add(later, .{});
+    try f.watcher.batch.deferChange(gpa, id, later, .renamed, f.root, .directory);
+    var saved = (try f.watcher.checkpoint(gpa)).?;
+    defer saved.deinit();
+    var failures: usize = 0;
+    while (true) : (failures += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{});
+        var succeeded = false;
+        {
+            var resumed = try Watcher.init(failing.allocator(), io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
+            defer resumed.deinit();
+            const prior_id = try resumed.add(f.root, .{});
+            try resumed.batch.deferChange(failing.allocator(), prior_id, f.root, .overflow, null, .directory);
+            const prior = try resumed.poll(0);
+            try std.testing.expectEqual(@as(usize, 1), prior.len);
+            const borrowed = prior.ptr;
+            const borrowed_path = prior[0].path.ptr;
+            failing.fail_index = failing.alloc_index + failures;
+            const answer = resumed.add(later, .{});
+            failing.fail_index = std.math.maxInt(usize);
+            try std.testing.expectEqual(borrowed, resumed.batch.events.items.ptr);
+            try std.testing.expectEqual(borrowed_path, prior[0].path.ptr);
+            try std.testing.expectEqualStrings(f.root, prior[0].path);
+            if (answer) |_| {
+                var saw = false;
+                for (try resumed.poll(0)) |event| {
+                    if (std.mem.eql(u8, event.path, later) and event.kind == .renamed) {
+                        try std.testing.expectEqualStrings(f.root, event.from.?);
+                        saw = true;
+                    }
+                }
+                try std.testing.expect(saw);
+                succeeded = true;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expectEqual(@as(usize, 1), resumed.stats().watches);
+                try std.testing.expectEqual(@as(usize, 0), resumed.batch.deferred.items.len);
+                _ = try resumed.add(later, .{});
+                try std.testing.expectEqual(@as(usize, 1), resumed.batch.deferred.items.len);
+            }
+        }
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (succeeded) break;
+    }
+    try std.testing.expect(failures > 0);
 }

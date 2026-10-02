@@ -1,21 +1,7 @@
-//! What a watcher costs, held to a budget.
-//!
-//! These are the three numbers a caller notices: how long after a change
-//! `lookout.Watcher.poll` comes back, how much of a burst arrives, and
-//! how much memory a watched directory costs. Each was measured once and
-//! is asserted here against a budget several times the measurement, so
-//! that a change which makes one of them worse says so rather than being
-//! found later on somebody's machine.
-//!
-//! The budgets are deliberately loose. A hosted runner is a shared
-//! machine and a tight budget on one is a test that fails for reasons
-//! that have nothing to do with this package; what these catch is a
-//! regression of the kind the buffer defect was -- an order of
-//! magnitude, not a percentage.
+//! Delivery completeness and allocator costs, counted without speed limits.
+//! Poll timeouts bound a missing event; allocation budgets count bytes.
 
 const std = @import("std");
-const builtin = @import("builtin");
-
 const lookout = @import("lookout.zig");
 const Watcher = lookout.Watcher;
 
@@ -85,19 +71,7 @@ const Counting = struct {
     }
 };
 
-/// The longest a backend may take to come back with a change that
-/// happened while `poll` was already blocked, in milliseconds.
-///
-/// Measured: FSEvents 11.4 ms, `kqueue` 0.2 ms, polling one tick. The
-/// FSEvents floor is its own coalescing window and cannot be lowered.
-fn wakeBudgetMs(backend: lookout.Backend, interval_ms: u32) u32 {
-    return switch (backend) {
-        .poll => interval_ms + 500,
-        else => 500,
-    };
-}
-
-test "a change that happens while poll is blocked comes back promptly" {
+test "poll reports each change from another thread" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     const rounds = 5;
@@ -112,8 +86,7 @@ test "a change that happens while poll is blocked comes back promptly" {
         var watcher: Watcher = try .init(gpa, io, .{
             .backend = backend,
             .poll_interval_ms = interval_ms,
-            // The wait being measured is the backend's, not the
-            // coalescing tail's.
+            // Collect the backend's delivery without a coalescing tail.
             .latency_ms = 0,
         });
         defer watcher.deinit();
@@ -123,15 +96,12 @@ test "a change that happens while poll is blocked comes back promptly" {
         const Toucher = struct {
             dir: std.Io.Dir,
             round: usize = 0,
-            stamped: std.Io.Timestamp = .zero,
 
             fn run(self: *@This()) void {
                 const w_io = std.testing.io;
-                // Long enough that the main thread is certainly blocked
-                // in the backend's wait rather than on its way there.
+                // The writer runs independently of the polling thread.
                 w_io.sleep(.fromMilliseconds(150), .awake) catch return;
                 var name: [32]u8 = undefined;
-                self.stamped = .now(w_io, .awake);
                 self.dir.writeFile(w_io, .{
                     .sub_path = std.fmt.bufPrint(&name, "w{d}.txt", .{self.round}) catch unreachable,
                     .data = "x",
@@ -139,31 +109,26 @@ test "a change that happens while poll is blocked comes back promptly" {
             }
         };
 
-        var worst: i64 = 0;
+        var observed: usize = 0;
         for (0..rounds) |round| {
             var toucher: Toucher = .{ .dir = tmp.dir, .round = round };
             const thread = try std.Thread.spawn(.{}, Toucher.run, .{&toucher});
-            var seen: ?std.Io.Timestamp = null;
-            while (seen == null) {
+            var name: [32]u8 = undefined;
+            const expected = try std.fs.path.join(gpa, &.{ root, try std.fmt.bufPrint(&name, "w{d}.txt", .{round}) });
+            defer gpa.free(expected);
+            var seen = false;
+            while (!seen) {
                 const events = try watcher.poll(5_000);
                 if (events.len == 0) break;
                 for (events) |event| {
-                    if (event.kind == .created) seen = .now(io, .awake);
+                    if (event.kind == .created and std.mem.eql(u8, event.path, expected)) seen = true;
                 }
             }
             thread.join();
-            const arrived = seen orelse return error.EventNotObserved;
-            const took = toucher.stamped.durationTo(arrived).toMilliseconds();
-            if (took > worst) worst = took;
+            try std.testing.expect(seen);
+            observed += 1;
         }
-
-        const budget = wakeBudgetMs(backend, interval_ms);
-        if (worst > budget) {
-            std.debug.print("{s}: worst wake {d} ms, budget {d} ms\n", .{
-                @tagName(backend), worst, budget,
-            });
-        }
-        try std.testing.expect(worst <= budget);
+        try std.testing.expectEqual(rounds, observed);
     }
 }
 

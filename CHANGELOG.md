@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The settling test checks every interim batch and the exact deadline after the last write through a controlled clock.
+
+- Keep the quiet-machine speed harness and its build targets only on the `bench` branch.
+
+- Breaking: checkpoints require volume and FSEvents log identities and use per-device history; `add` returns `InvalidCheckpoint` for a changed identity or unavailable history, and mounted volumes need separate watches for resumable history.
+
+- Move wake, orphan-rename and cancellation speed limits out of the unit suite into an opt-in quiet-machine harness; unit tests count delivered changes and cancellation work instead, retaining their hang bounds.
+
+- Breaking: replace `Watcher.position`, `Position`, `Options.since` and `tracksPosition` with owned `Watcher.checkpoint(gpa)`, `Checkpoint`, `Options.checkpoint` and `tracksCheckpoint`; tokens keep per-watch cursors and unhanded changes, and old scalar tokens are refused.
+
+- Breaking: `overflow` and `unwatched` bypass debounce and settling, clear held changes on the same watch and path, and retain their precedence until delivery: ordinary changes < overflow < unwatched.
+
+- Breaking: after `poll` returns `OutOfMemory`, retrying reports `overflow` for every still-live watch root; unread kernel deliveries remain pending where possible, and recovery survives repeated allocation failures and wakeups.
+
+- Breaking: `Watcher.InitError` includes `OutOfMemory`; FSEvents preserves sink and buffer allocator failures instead of reporting `SystemResources`.
+
 ### Added
 
 - `Watcher.refilter(id, filter)` changes a live watch's filter without
@@ -18,6 +36,80 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   platform case folding and separator handling as lookout's watches.
 
 ### Fixed
+
+- Device-relative FSEvents records naming a volume root retain its canonical spelling, so the root cannot acquire a second remembered name with a trailing separator.
+
+- Fresh FSEvents registrations start from now while checkpoints retain a conservative device-log cursor, so old records are replayed only when resumption is requested.
+
+- Pending watches propagate checkpoint identity refusal from `add`; a refusal during later reconciliation reports overflow and starts fresh instead of retrying the rejected snapshot forever.
+
+- The stream-removal regression stops and joins native replay callbacks before constructing its exact synthetic delivery.
+
+- Recursive FSEvents scopes crossing a mounted volume keep live coverage through a host stream, report the registration gap as overflow and withhold checkpoints that cannot describe every device.
+
+- Wake and task-shutdown unit tests count completed work and synchronize on readiness; their post-completion elapsed limits run only in the quiet-machine harness.
+
+- Native checkpoint regression tests select their backend at compile time, so the shared suite also compiles on targets without FSEvents.
+
+- An incomplete directory-budget reread keeps its prior names and reports uncertainty until a complete listing succeeds, instead of treating inaccessible entries as absent.
+
+- Batch and deadline arithmetic tests use a frozen clock, so a runner pause cannot expire their input between samples or cross the platform wait clamp.
+
+- FSEvents accepts replay completion as stream state before applying path scope, so a file watch can finish catching up when the sentinel names its parent.
+
+- A paired rename releases the source path's settling or debounce hold after recording the destination, so the old name cannot later report a stale modification.
+
+- The held-event refilter test stages its input before polling, so runner pauses cannot promote it before inspection; failures print the backend, phase and delivery state.
+
+- Correct the baseline scope, polling registration count, recovery handout and minimum delivery-buffer descriptions.
+
+- Removing an FSEvents registration releases its queued records and held rename half after callbacks finish, so a pending promotion or failed-add retry cannot inherit the old stream's delivery.
+
+- FSEvents refuses and releases a watch when allocating its initial remembered names fails, instead of accepting a partial baseline and reporting existing files as new.
+
+- Filter reconciliation registers newly admitted files in non-recursive kqueue watches and releases excluded file registrations even when their names could lead to an included descendant.
+
+- Pending promotion transfers its registered path to the watch table before reporting, so later allocation failure cannot free it twice.
+
+- Recovery notices remain pending until returned to the caller, including when reconciliation discards the ancestor events of a pending watch.
+
+- Kqueue owns a table of accepted registrations and retries missing nodes before waiting, so a failed registration cannot leave scanned files quietly unwatched.
+
+- Tree scans publish directory listings and file metadata after reporting succeeds, rolling back newly adopted nodes on failure so a retry sees the whole change.
+
+- FSEvents moves remembered subtree names together only after every replacement path and map slot is ready.
+
+- FSEvents retains a held rename and its pairing when reporting, replacement or rejoining fails.
+
+- Tree adoption releases frontier and directory paths that failed registration has not taken.
+
+- Windows retains held removals and rename paths until their batch transfer succeeds, so allocation failures leave them retryable.
+
+- Polling releases a staged removal path when its removal list cannot grow, retaining the registration for retry.
+
+- Failed tree registration releases its directory snapshot and any file nodes created before the failure.
+
+- A tree walk releases its root path when allocating the initial frontier fails.
+
+- A failed first budget count publishes no directory or partial listing, so cleanup and retry remain valid.
+
+- Document polling's open directory handles, both backends that recurse in the kernel, and baseline retry and truncation behavior.
+
+- Queued unwatched events, held changes and overflow notices remain pending until their transfer into the batch succeeds.
+
+- FSEvents reports overflow when a path's existence cannot be checked, retaining known paths and refusing ambiguous rename pairs.
+
+- A baseline reports a missing root once, until the root has been seen again.
+
+- Truncated directory scans retain remembered entries and subtrees until a complete listing can establish what changed.
+
+- Polling and kqueue tree scans retain registrations when listing or file metadata access fails instead of reporting removals.
+
+- Document the FSEvents sink and buffer allocated at initialization and their allocator failures.
+
+- Baseline diffs commit listings and returned paths together, so failed traversal or allocation leaves every change available to a retry.
+
+- Baseline scans propagate directory access failures instead of reporting inaccessible paths as removed.
 
 - Windows: a name renamed over from a name the watch does not see --
   outside it, or excluded by its filter -- is `created` there, and

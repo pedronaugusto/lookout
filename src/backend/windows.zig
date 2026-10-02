@@ -62,9 +62,9 @@ buffer_len: usize,
 
 /// What `lookout.Options.buffer_bytes` may ask for here.
 ///
-/// The floor is a few times the largest single record -- twelve bytes and
-/// a name of up to 32767 UTF-16 units -- so that one change can always be
-/// reported. The ceiling is a size past which the call is a bad idea
+/// The floor is 4 KiB; a record with a long relative name can exceed it
+/// and require an overflow notice and a rescan. The ceiling is a size
+/// past which the call is a bad idea
 /// rather than a refusal: the buffer is non-paged pool while a read is
 /// outstanding, one per watch. The default is what a network share will
 /// take, which is the one size that works everywhere.
@@ -142,6 +142,11 @@ const Watch = struct {
     /// once, to `share_buffer_len`, if the size asked for is refused.
     accepted_len: usize,
     retiring_next: ?*Watch,
+    /// Taking a packet off the port does not release its buffer. Keep it
+    /// until reporting and posting the next read have both succeeded.
+    completion: ?Completion = null,
+    reported: bool = false,
+    cursor: ?records.Iterator = null,
 
     /// The target of a path this watch has just lost. A watch on a file
     /// only ever reports its root, whose type it remembers; a watch on a
@@ -217,13 +222,6 @@ pub fn deinit(w: *Windows) void {
 /// can take, so a Windows program drives the watcher by calling
 /// `lookout.Watcher.poll`.
 pub fn fd(w: *const Windows) ?std.posix.fd_t {
-    _ = w;
-    return null;
-}
-
-/// Nothing to resume from: the change records start when the read does.
-/// See `lookout.tracksPosition`.
-pub fn position(w: *const Windows) ?u64 {
     _ = w;
     return null;
 }
@@ -374,6 +372,12 @@ pub fn remove(w: *Windows, id: WatchId) void {
     w.budget.release(watch.root, w, stillCounted);
     _ = c.CancelIoEx(watch.handle, &watch.overlapped);
     _ = c.CloseHandle(watch.handle);
+    // A retained completion has already ended the kernel's ownership.
+    // No packet remains to retire this watch on a later wait.
+    if (watch.completion != null) {
+        w.free(watch);
+        return;
+    }
     // The buffer outlives the handle until the cancelled read's
     // completion has been taken off the port.
     watch.retiring_next = w.retiring;
@@ -419,13 +423,12 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
     // out of `std.Io`'s reach.
     const protection = w.io.swapCancelProtection(.blocked);
     defer _ = w.io.swapCancelProtection(protection);
-    const result = w.collect(batch, timeout_ms);
+    try w.collect(batch, timeout_ms);
     // Whatever is still held when the wait is over never found its other
     // half: the path moved somewhere this watch cannot see it. A removal
     // is resolved first, being the older of the two.
     try w.resolveRemovals(batch);
     try w.flushRenames(batch);
-    return result;
 }
 
 /// Reports every held old name whose new name never came as a removal.
@@ -434,10 +437,10 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
 fn flushRenames(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
     for (w.watches.values()) |watch| {
         const old = watch.pending_rename orelse continue;
+        if (wants(watch, old))
+            try batch.push(w.gpa, watch.id, old, .removed, watch.goneTarget());
         watch.pending_rename = null;
-        defer w.gpa.free(old);
-        if (!wants(watch, old)) continue;
-        try batch.push(w.gpa, watch.id, old, .removed, watch.goneTarget());
+        w.gpa.free(old);
     }
 }
 
@@ -497,77 +500,89 @@ const Taken = enum {
 
 /// Takes one completion off the port, waiting up to `timeout`, and turns
 /// it into events.
+const Completion = struct {
+    transferred: u32,
+    failure: ?u32,
+};
+
 fn take(w: *Windows, batch: *Batch, timeout: u32) lookout.Watcher.PollError!Taken {
+    // A completion already taken is ready even if the port is quiet.
+    for (w.watches.values()) |watch| {
+        if (watch.completion != null) {
+            try w.complete(watch, batch);
+            return .taken;
+        }
+    }
     var transferred: u32 = 0;
     var key: usize = 0;
     var overlapped: ?*c.OVERLAPPED = null;
     const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, timeout);
-    if (ok == 0) {
-        if (overlapped == null) {
-            if (c.GetLastError() != c.WAIT_TIMEOUT) return error.Unexpected;
-            return .quiet;
-        }
-        if (key == wake_key) return .woken;
-        const failed: WatchId = @enumFromInt(@as(u32, @truncate(key)));
-        const err = c.GetLastError();
-        const watch = w.live(failed, overlapped) orelse {
-            // The completion of a read cancelled by `remove`. Its
-            // buffer has been waiting for exactly this.
-            w.retire(overlapped);
-            return .taken;
-        };
-        try w.resolveRemoval(watch, batch);
-        if (err == c.ERROR_NOTIFY_ENUM_DIR) {
-            // The kernel's other way of saying the buffer overflowed:
-            // more change than it could hold, so re-read the tree.
-            // The handle is still good, so the watch is re-armed.
-            try batch.push(w.gpa, failed, watch.root, .overflow, .directory);
-            w.lost(watch);
-            try w.rearm(watch, batch);
-            return .taken;
-        }
-        // Anything else means the directory the handle is on is gone:
-        // deleted, or on a volume that went away. The handle was
-        // opened with FILE_SHARE_DELETE precisely so that this can
-        // happen, and a watched path that no longer exists is a
-        // removal like any other.
-        try batch.push(w.gpa, failed, watch.root, .removed, .directory);
-        w.discard(failed);
-        return .taken;
+    const failure: ?u32 = if (ok == 0) c.GetLastError() else null;
+    if (overlapped == null and ok == 0) {
+        if (failure.? != c.WAIT_TIMEOUT) return error.Unexpected;
+        return .quiet;
     }
-
     if (key == wake_key) return .woken;
     const id: WatchId = @enumFromInt(@as(u32, @truncate(key)));
     const watch = w.live(id, overlapped) orelse {
         w.retire(overlapped);
         return .taken;
     };
-    if (watch.only == null) switch (w.rootState(watch)) {
-        .stands => {},
-        .gone => {
-            try w.resolveRemoval(watch, batch);
-            try batch.push(w.gpa, id, watch.root, .removed, .directory);
-            w.discard(id);
-            return .taken;
-        },
-        .moved, .unknown => {
-            try w.resolveRemoval(watch, batch);
-            try batch.push(w.gpa, id, watch.root, .unwatched, .directory);
-            w.discard(id);
-            return .taken;
-        },
-    };
-    if (transferred == 0) {
-        // The kernel had more change than it could hold between two
-        // reads and says so by transferring nothing.
-        try w.resolveRemoval(watch, batch);
-        try batch.push(w.gpa, id, watch.root, .overflow, .directory);
-        w.lost(watch);
-    } else {
-        try w.report(watch, transferred, batch);
-    }
-    try w.rearm(watch, batch);
+    watch.completion = .{ .transferred = transferred, .failure = failure };
+    try w.complete(watch, batch);
     return .taken;
+}
+
+/// Finishes a retained completion before its buffer can be overwritten.
+fn complete(w: *Windows, watch: *Watch, batch: *Batch) lookout.Watcher.PollError!void {
+    const completion = watch.completion.?;
+    const id = watch.id;
+    if (!watch.reported) {
+        if (completion.failure) |err| {
+            try w.resolveRemoval(watch, batch);
+            if (err != c.ERROR_NOTIFY_ENUM_DIR) {
+                try batch.push(w.gpa, id, watch.root, .removed, .directory);
+                w.discard(id);
+                return;
+            }
+            try batch.push(w.gpa, id, watch.root, .overflow, .directory);
+            w.lost(watch);
+        } else {
+            if (watch.only == null) switch (w.rootState(watch)) {
+                .stands => {},
+                .gone => {
+                    try w.resolveRemoval(watch, batch);
+                    try batch.push(w.gpa, id, watch.root, .removed, .directory);
+                    w.discard(id);
+                    return;
+                },
+                .moved, .unknown => {
+                    try w.resolveRemoval(watch, batch);
+                    try batch.push(w.gpa, id, watch.root, .unwatched, .directory);
+                    w.discard(id);
+                    return;
+                },
+            };
+            if (completion.transferred == 0) {
+                try w.resolveRemoval(watch, batch);
+                try batch.push(w.gpa, id, watch.root, .overflow, .directory);
+                w.lost(watch);
+            } else {
+                w.report(watch, completion.transferred, batch) catch |err| {
+                    w.lost(watch);
+                    return err;
+                };
+            }
+        }
+        watch.reported = true;
+    }
+    // rearm may discard the watch; keep no reference to it afterwards.
+    const armed = try w.rearm(watch, batch);
+    if (armed) {
+        watch.completion = null;
+        watch.reported = false;
+        watch.cursor = null;
+    }
 }
 
 /// Whether a watch holds a removal for its next read to decide.
@@ -587,10 +602,10 @@ fn resolveRemovals(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
 /// Reports `watch`'s held removal, if it holds one.
 fn resolveRemoval(w: *Windows, watch: *Watch, batch: *Batch) lookout.Watcher.PollError!void {
     const gone = watch.held_removal orelse return;
-    defer w.gpa.free(gone);
-    watch.held_removal = null;
     trace.log("windows push removed held path={s}", .{gone});
     try batch.push(w.gpa, watch.id, gone, .removed, watch.goneTarget());
+    watch.held_removal = null;
+    w.gpa.free(gone);
 }
 
 const RootState = enum { stands, moved, gone, unknown };
@@ -629,17 +644,19 @@ fn lost(w: *Windows, watch: *const Watch) void {
 /// That used to be swallowed, which left the caller with a live watch id
 /// over a tree that had gone quiet; now the watch is dropped and the
 /// root is reported as `lookout.Kind.unwatched`, which is what it is.
-fn rearm(w: *Windows, watch: *Watch, batch: *Batch) lookout.Watcher.PollError!void {
+fn rearm(w: *Windows, watch: *Watch, batch: *Batch) lookout.Watcher.PollError!bool {
     w.arm(watch) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             const root = try w.gpa.dupe(u8, watch.root);
             defer w.gpa.free(root);
             const id = watch.id;
-            w.discard(id);
             try batch.push(w.gpa, id, root, .unwatched, .directory);
+            w.discard(id);
+            return false;
         },
     };
+    return true;
 }
 
 /// Drops a watch whose directory is gone. The read that failed is the
@@ -688,23 +705,27 @@ fn retire(w: *Windows, overlapped: ?*c.OVERLAPPED) void {
 fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.Watcher.PollError!void {
     const dir = watch.dir();
 
-    var it = records.iterate(watch.buffer[0..transferred]);
-    if (watch.held_removal) |gone| {
-        // The last read ended on this removal; this one says whether a
-        // move onto the name came next.
-        const replaced = switch (records.arrival(it)) {
-            .moved => |record| try w.sameName(record, dir, gone),
-            .none, .unsaid => false,
-        };
-        if (replaced) {
-            trace.log("windows drop replaced held path={s}", .{gone});
-            watch.held_removal = null;
-            w.gpa.free(gone);
-        } else {
-            try w.resolveRemoval(watch, batch);
+    if (watch.cursor == null) {
+        const it = records.iterate(watch.buffer[0..transferred]);
+        if (watch.held_removal) |gone| {
+            // The last read ended on this removal; this one says whether a
+            // move onto the name came next.
+            const replaced = switch (records.arrival(it)) {
+                .moved => |record| try w.sameName(record, dir, gone),
+                .none, .unsaid => false,
+            };
+            if (replaced) {
+                trace.log("windows drop replaced held path={s}", .{gone});
+                watch.held_removal = null;
+                w.gpa.free(gone);
+            } else {
+                try w.resolveRemoval(watch, batch);
+            }
         }
+        watch.cursor = it;
     }
     while (true) {
+        var it = watch.cursor.?;
         // A chain this cannot follow is a read that cannot be accounted
         // for: what is left of it is lost, and `lookout.Kind.overflow`
         // is what lookout says when it has lost something and cannot
@@ -740,6 +761,7 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
                 try w.reportOne(watch, record.action, path, batch);
             },
         }
+        watch.cursor = it;
     }
 }
 
@@ -832,8 +854,11 @@ fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, ba
         return;
     }
     const from = watch.pending_rename;
-    watch.pending_rename = null;
-    defer if (from) |old| w.gpa.free(old);
+    var transferred = false;
+    defer if (transferred) {
+        watch.pending_rename = null;
+        if (from) |old| w.gpa.free(old);
+    };
     const keeps_from = if (from) |old| wants(watch, old) else false;
     // The new name is where the entry is now, so it can be asked what the
     // entry is, whichever name is reported.
@@ -843,6 +868,7 @@ fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, ba
             const gone = if (target != .unknown) target else watch.goneTarget();
             try batch.push(w.gpa, watch.id, from.?, .removed, gone);
         }
+        transferred = true;
         return;
     }
     watch.noteRoot(target);
@@ -854,6 +880,7 @@ fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, ba
         try batch.push(w.gpa, watch.id, subject, .created, target);
     }
     try w.recount(watch, subject, .appeared, batch);
+    transferred = true;
 }
 
 /// What the path is now, for the actions that leave it there to be
@@ -937,6 +964,7 @@ const Change = struct {
 };
 
 test "a read that completes with nothing is an overflow, and the watch reads on" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
     // ReadDirectoryChangesW: "If the number of changes exceeds the
     // buffer size, the entire contents of the buffer are discarded, the
     // lpBytesReturned parameter contains zero". Through a completion
@@ -1010,6 +1038,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
 }
 
 test "a lost read reads the entry counts again, so the budget holds after it" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
     // Three creations, read and counted; then the count set back to what
     // it would have been had the kernel discarded them, which is what a
     // read it could not hold does ("the entire contents of the buffer
@@ -1189,3 +1218,93 @@ const c = struct {
         lpCompletionRoutine: ?OVERLAPPED_COMPLETION_ROUTINE,
     ) callconv(.winapi) BOOL;
 };
+
+test "a failed Windows removal transfer keeps its held path" {
+    try expectHeldTransferFailure(.removal);
+}
+
+test "a failed Windows rename flush keeps its held path" {
+    try expectHeldTransferFailure(.flush);
+}
+
+test "a failed Windows rename pair transfer keeps its held path" {
+    try expectHeldTransferFailure(.pair);
+}
+
+fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !void {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const old_path = try std.fs.path.join(testing.allocator, &.{ root, "old" });
+    defer testing.allocator.free(old_path);
+    const new_path = try std.fs.path.join(testing.allocator, &.{ root, "new" });
+    defer testing.allocator.free(new_path);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    // Only the state used by these platform-independent transfers is live.
+    var backend: Windows = undefined;
+    backend.gpa = failing.allocator();
+    backend.io = testing.io;
+    backend.watches = .empty;
+    defer backend.watches.deinit(testing.allocator);
+    backend.budget = .init(testing.allocator, testing.io, 8);
+    defer backend.budget.deinit();
+    var watch: Watch = undefined;
+    watch.id = @enumFromInt(0);
+    watch.root = root;
+    watch.only = null;
+    watch.filter = .none;
+    watch.root_target = .directory;
+    watch.recursive = false;
+    watch.held_removal = null;
+    watch.pending_rename = null;
+    defer if (watch.held_removal) |held| testing.allocator.free(held);
+    defer if (watch.pending_rename) |held| testing.allocator.free(held);
+    try backend.watches.put(testing.allocator, watch.id, &watch);
+    var batch: Batch = .init(testing.io, .{});
+    defer batch.deinit(testing.allocator);
+    const held = try testing.allocator.dupe(u8, old_path);
+    if (transfer == .removal) watch.held_removal = held else watch.pending_rename = held;
+
+    const result = switch (transfer) {
+        .removal => backend.resolveRemoval(&watch, &batch),
+        .flush => backend.flushRenames(&batch),
+        .pair => backend.reportRename(&watch, c.FILE_ACTION_RENAMED_NEW_NAME, new_path, &batch),
+    };
+    try testing.expectError(error.OutOfMemory, result);
+    const kept = if (transfer == .removal) watch.held_removal else watch.pending_rename;
+    try testing.expect(kept != null);
+    try testing.expectEqualStrings(old_path, kept.?);
+    try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+    backend.gpa = testing.allocator;
+    switch (transfer) {
+        .removal => try backend.resolveRemoval(&watch, &batch),
+        .flush => try backend.flushRenames(&batch),
+        .pair => try backend.reportRename(&watch, c.FILE_ACTION_RENAMED_NEW_NAME, new_path, &batch),
+    }
+    try testing.expectEqual(@as(usize, 1), batch.events.items.len);
+    try testing.expectEqual(if (transfer == .pair) lookout.Kind.renamed else .removed, batch.events.items[0].kind);
+    try testing.expect(watch.held_removal == null and watch.pending_rename == null);
+}
+
+test "allocation failure during delivery releases a removed Windows completion" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var watcher = try lookout.Watcher.init(failing.allocator(), testing.io, .{ .backend = .windows });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "change", .data = "x" });
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, watcher.poll(10_000));
+    failing.fail_index = std.math.maxInt(usize);
+    // The packet has been taken and no replacement read is outstanding.
+    // Removing it has no later completion to wait for before freeing it.
+    watcher.remove(id);
+    try testing.expect(watcher.impl.windows.retiring == null);
+}
