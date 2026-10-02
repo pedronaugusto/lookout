@@ -3,7 +3,7 @@
 //! `lookout.Kind.overflow` says that the watcher's record of a tree is
 //! incomplete and the tree has to be read again. It does not say what was
 //! missed, because nothing underneath it knows: the kernel queue
-//! overflowed, or a directory went past `lookout.Options.max_dir_entries`,
+//! overflowed, or a directory went past `@import("options.zig").Options.max_dir_entries`,
 //! and either way the names are gone.
 //!
 //! A caller that seeds one of these when it takes the watch can ask
@@ -20,7 +20,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const lookout = @import("lookout.zig");
+const lookout = @import("types.zig");
 const Filter = @import("Filter.zig");
 const Snapshot = @import("Snapshot.zig");
 const Kind = lookout.Kind;
@@ -62,7 +62,7 @@ pub const Options = struct {
     /// into the diff, meaning the same thing there as it does in an
     /// event: this part of the answer is incomplete.
     max_dir_entries: usize = 4096,
-    /// What to leave out, on the same terms as `lookout.AddOptions.filter`.
+    /// What to leave out, on the same terms as `@import("options.zig").AddOptions.filter`.
     /// The patterns are copied by `seed`.
     filter: Filter = .none,
 };

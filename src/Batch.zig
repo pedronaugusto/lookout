@@ -7,8 +7,8 @@
 //! which is what turns a burst of writes on one file into one `modified`.
 //!
 //! Two options hold a path back rather than recording it at once.
-//! `lookout.Options.settle_ms` holds `modified` until the file has
-//! stopped changing; `lookout.Options.debounce_ms` holds ordinary changes
+//! `@import("options.zig").Options.settle_ms` holds `modified` until the file has
+//! stopped changing; `@import("options.zig").Options.debounce_ms` holds ordinary changes
 //! until the path has been quiet, and then reports the kind seen last.
 //! Loss notices are recorded at once and outrank ordinary changes in
 //! every mode: `overflow` < `unwatched`. See `promote`.
@@ -17,7 +17,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const lookout = @import("lookout.zig");
+const lookout = @import("types.zig");
 const path_cmp = @import("path.zig");
 const Event = lookout.Event;
 const Kind = lookout.Kind;
@@ -33,8 +33,8 @@ io: Io,
 /// How long a held path must be quiet before it is reported, in
 /// nanoseconds. Zero means nothing is ever held.
 hold_ns: i96,
-/// Whether every ordinary kind is held (`lookout.Options.debounce_ms`) or only
-/// `modified` (`lookout.Options.settle_ms`).
+/// Whether every ordinary kind is held (`@import("options.zig").Options.debounce_ms`) or only
+/// `modified` (`@import("options.zig").Options.settle_ms`).
 hold_all: bool,
 /// The events of the current window, in the order their paths were first
 /// touched. Every `path` and every `from` is owned by this batch.
@@ -50,7 +50,7 @@ index: std.HashMapUnmanaged(EventKey, u32, EventKeyContext, std.hash_map.default
 /// and so is each `Held.from`.
 held: std.ArrayHashMapUnmanaged(EventKey, Held, EventKeyArrayContext, true),
 /// The most events one window may hold, or zero for no ceiling. See
-/// `lookout.Options.max_events`.
+/// `@import("options.zig").Options.max_events`.
 limit: usize,
 /// Changes queued during add: registration troubles and restored checkpoint
 /// changes. They survive reset and move into the next delivery in flush.
@@ -63,7 +63,7 @@ dropped: std.AutoArrayHashMapUnmanaged(WatchId, void),
 /// Counts every push, whether it produced an event or was held back.
 ///
 /// A backend waits until the batch has changed, not until it has grown:
-/// under `lookout.Options.debounce_ms` a push produces no event for a
+/// under `@import("options.zig").Options.debounce_ms` a push produces no event for a
 /// while, and a backend watching `events.items.len` would sleep through
 /// its own deadline and, with no timeout at all, forever.
 revision: u64,
@@ -125,7 +125,7 @@ const EventKeyArrayContext = struct {
 ///
 /// `debounce_ms` supersedes `settle_ms`: it already holds every ordinary kind
 /// until the path is quiet, which is the stronger of the two rules.
-pub fn init(io: Io, options: lookout.Options) Batch {
+pub fn init(io: Io, options: @import("options.zig").Options) Batch {
     const debouncing = options.debounce_ms > 0;
     const hold_ms: u32 = if (debouncing) options.debounce_ms else options.settle_ms;
     return .{
@@ -476,7 +476,7 @@ pub fn capture(b: *const Batch, gpa: Allocator, id: WatchId, include_ready: bool
 /// The quiet window on its own is a guess about a writer nobody can see,
 /// and a kernel that coalesces several writes into one notification can
 /// leave the window closing over a file that is still being written --
-/// which is the one thing `lookout.Options.settle_ms` exists to prevent.
+/// which is the one thing `@import("options.zig").Options.settle_ms` exists to prevent.
 /// So the file is measured as well as timed: one `stat` at the moment
 /// the window closes, and a file larger than it was when the window
 /// started is still being written, so the window starts again.
@@ -779,7 +779,7 @@ test "a name event settles the question of the contents" {
 test "loss notices bypass holding and displace held changes" {
     const gpa = testing.allocator;
     const id: WatchId = @enumFromInt(0);
-    for ([_]lookout.Options{
+    for ([_]@import("options.zig").Options{
         .{ .debounce_ms = 50, .max_events = 1 },
         .{ .settle_ms = 50, .max_events = 1 },
     }) |options| {

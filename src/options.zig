@@ -1,0 +1,210 @@
+//! Watch configuration above checkpoint storage and event contracts.
+const Filter = @import("Filter.zig");
+const Checkpoint = @import("Checkpoint.zig");
+const types = @import("types.zig");
+const Backend = types.Backend;
+
+/// How a `Watcher` behaves, fixed for its lifetime.
+pub const Options = struct {
+    /// Which mechanism to use. See `Backend`, `default_backend` and
+    /// `supported`.
+    backend: Backend = .auto,
+    /// How long the `poll` backend waits between scans. Ignored by every
+    /// other backend. Zero is clamped to one millisecond so a quiet
+    /// indefinite poll still blocks instead of scanning in a busy loop.
+    poll_interval_ms: u32 = 500,
+    /// How long `Watcher.poll` keeps collecting after the first event of a
+    /// batch arrives. Everything that lands on one path inside that window
+    /// becomes a single `Event`, so a program is not woken once per write
+    /// of a file being saved. Zero disables the wait and reports whatever
+    /// is already queued. FSEvents uses the same window for its stream and
+    /// requests delivery of the first event without waiting for the rest
+    /// of the window. Zero asks the system for no additional delay; on
+    /// macOS the measured system-delivery floor is still roughly ten
+    /// milliseconds.
+    latency_ms: u32 = 50,
+    /// How long a file must stop changing before its `Kind.modified` is
+    /// reported. Zero, the default, reports it as soon as it is seen.
+    ///
+    /// `latency_ms` merges the writes that arrive together; this waits
+    /// for the writing to be over. A build system copying a large file
+    /// produces `modified` the moment it starts, which is the wrong
+    /// moment to read it; with `settle_ms` the event arrives once the
+    /// file has been still for that long.
+    ///
+    /// It delays only `modified`. A creation, a removal and a rename are
+    /// facts about a name rather than about contents, and are reported at
+    /// once whatever this is set to.
+    settle_ms: u32 = 0,
+    /// How long an ordinary change must be quiet before it is reported. Zero,
+    /// the default, is off.
+    ///
+    /// This is the third and strongest of the three windows, and it
+    /// answers a different question from the other two. `latency_ms`
+    /// merges what arrives together and reports the most significant kind
+    /// seen; `settle_ms` waits for a file's contents to stop changing.
+    /// `debounce_ms` holds every ordinary kind until the path has been quiet for
+    /// the window and then reports it once, carrying the kind seen
+    /// **last** rather than the most significant one. A file created and
+    /// then deleted inside one window is one `removed`; a file deleted
+    /// and then recreated is one `created`, which coalescing cannot say
+    /// because `removed` outranks `created`.
+    /// `overflow` and `unwatched` are immediate and retain their precedence
+    /// over ordinary changes; see `Kind`.
+    ///
+    /// That is what a caller rebuilding from the end state wants, and it
+    /// is why it supersedes both of the others: a non-zero `debounce_ms`
+    /// takes over from `settle_ms`, and `poll` returns as soon as a
+    /// window closes rather than collecting for `latency_ms` more.
+    debounce_ms: u32 = 0,
+    /// Report `Kind.closed` when a file that was open for writing is
+    /// closed. Off by default.
+    ///
+    /// Only `inotify` is told this, and `reportsCloses` says so; asking
+    /// for it on a backend that cannot tell costs nothing and changes
+    /// nothing. Where it can, the kernel is asked for `IN_CLOSE_WRITE`
+    /// as well, and a path that was written and then closed inside one
+    /// coalescing window reports `closed` rather than `modified` --
+    /// which is the point, and is also why this is a choice rather than
+    /// the default: a program that only wants to know a path changed
+    /// should not have to learn a second kind meaning the same thing.
+    report_closes: bool = false,
+    /// How much change may accumulate between two polls, in bytes, on
+    /// the backends that are handed a buffer and find the changes in it.
+    /// Zero, the default, is each backend's own.
+    ///
+    /// On `windows` this is the buffer `ReadDirectoryChangesW` writes
+    /// its records into, one per watch. Its default is 64 KiB, which is
+    /// what a network share will take -- Windows refuses a larger one
+    /// there, and lookout falls back to it by itself if a larger one is
+    /// refused. Sizes are held between 4 KiB and 16 MiB.
+    ///
+    /// On `fsevents` this is the buffer the system's delivery thread
+    /// copies into, one per watcher, which is what lets that thread do a
+    /// bounded `memcpy` and nothing else. Its default is 4 MiB, enough
+    /// to hold a burst of ten thousand paths without losing one. Sizes
+    /// are held between 4 KiB and 64 MiB.
+    ///
+    /// When the buffer does fill, the changes that did not fit are lost
+    /// and `Kind.overflow` says so against the watch root. A watch on a
+    /// busy tree that is polled infrequently wants more; the memory is
+    /// held for the life of the watcher, and on Windows it is non-paged
+    /// pool for as long as a read is outstanding, so a large one on many
+    /// watches is a real cost.
+    ///
+    /// The other three backends are told what changed by the kernel or
+    /// find it by listing, and ignore this.
+    buffer_bytes: usize = 0,
+    /// Resume from an earlier Watcher.checkpoint. Borrowed only by init,
+    /// which copies what it keeps. Recreate the same watched paths, scopes
+    /// and filters. Watches are matched by their canonical requested roots.
+    /// add returns InvalidCheckpoint if the volume or its log has changed.
+    /// Each persistent stream follows one device. Scopes crossing mounted
+    /// volumes keep live coverage but cannot produce checkpoints; watch
+    /// those volumes separately to retain resumable history.
+    /// Pending changes are restored and new log records are resolved against
+    /// the current tree. Backends without a persistent log ignore this.
+    checkpoint: ?Checkpoint = null,
+    /// The most events one `poll` will hold, past which it stops
+    /// collecting names and says `Kind.overflow` against the watch roots
+    /// that lost them. Zero means no ceiling at all.
+    ///
+    /// A watcher holds one event and one path per changed path until the
+    /// next `poll`, so a process writing a million files faster than the
+    /// caller polls made the library grow without bound. The default is
+    /// high enough that no ordinary burst reaches it and low enough to
+    /// be a ceiling.
+    max_events: usize = 100_000,
+    /// The largest number of entries lookout will account for in one
+    /// watched directory. A directory holding more reports
+    /// `Kind.overflow` against its watch root, which means: this one is
+    /// past the budget you set, rescan it yourself.
+    ///
+    /// The backends reach that answer differently and it is deliberate
+    /// that they all reach it. `kqueue` and `poll` name an entry by
+    /// comparing directory listings, so past the limit they genuinely
+    /// cannot see a change. `inotify` is told every name by the kernel
+    /// and keeps reporting them, and counts entries only so that the
+    /// signal a caller handles is the same one on every platform.
+    ///
+    /// It is the budget of a directory a watch reports the entries of:
+    /// a watched directory, and every directory below it for a recursive
+    /// watch. A watch on a file has none. It is about one entry, and no
+    /// backend tells it when the folder the file is in is past the
+    /// budget -- Windows and FSEvents read that folder to see the file,
+    /// but are told nothing about its other entries through that watch.
+    max_dir_entries: usize = 4096,
+};
+
+/// How one watch behaves, fixed for its lifetime.
+pub const AddOptions = struct {
+    /// Also watch every directory below this one, and every directory
+    /// created below it afterwards.
+    ///
+    /// Recursion is not a kernel feature on either `kqueue` or `inotify`:
+    /// lookout walks the tree at `add` time and registers each directory
+    /// individually, then registers newly created directories as it sees
+    /// them. Three consequences are worth knowing:
+    ///
+    /// * A deep tree costs one descriptor (`kqueue`) or one kernel watch
+    ///   (`inotify`) per directory, against a per-process limit.
+    /// * A directory created and populated faster than lookout can register
+    ///   it can lose the events for the files inside. lookout scans each
+    ///   directory immediately after registering it and reports whatever
+    ///   it finds as `created`, which closes the race for files that still
+    ///   exist, not for files already gone again.
+    /// * Symbolic links are not followed, so a link into a watched tree
+    ///   does not silently widen it.
+    recursive: bool = false,
+    /// What of this path the watch is about. The default excludes
+    /// nothing.
+    ///
+    /// A filter is applied where lookout recurses, so on `inotify`,
+    /// `kqueue` and `poll` an excluded directory is never registered and
+    /// its tree costs nothing at all. FSEvents and
+    /// `ReadDirectoryChangesW` recurse in the kernel, which cannot be
+    /// told about a filter, so there the excluded events are dropped and
+    /// the kernel does the work regardless -- `prunesIgnored` is how a
+    /// program asks which it is getting.
+    ///
+    /// An excluded path is treated exactly as a path outside the watch,
+    /// including as one half of a rename: see `pairsRenames`.
+    ///
+    /// The patterns are copied by `Watcher.add`; `Filter.context` is
+    /// not, and whatever it points at must outlive the watch.
+    filter: Filter = .none,
+    /// Accept a path that is not there yet, instead of failing the `add`
+    /// with `error.FileNotFound`.
+    ///
+    /// The watch is put on the nearest existing ancestor, narrowed to the
+    /// single entry that leads to the path asked for, and steps down as
+    /// the path appears. When the path itself appears the watch is
+    /// promoted to the real one -- recursion, filter and all -- and the
+    /// appearance is reported as `Kind.created` against it, with whatever
+    /// the directory already holds by then that the watch would report.
+    /// A tool
+    /// watching a directory its own first run creates no longer has to
+    /// poll for it.
+    ///
+    /// The id comes back from `add` immediately and is the id every event
+    /// carries, before and after the promotion. Nothing that happens to
+    /// the ancestor while the watch waits is reported: it is not what the
+    /// caller asked about.
+    ///
+    /// The ancestor is not taken by the wait. A watch of that same folder
+    /// added before or after is a watch of its own and succeeds, rather
+    /// than failing with `error.PathAlreadyWatched`; each reports what it
+    /// is about, and the parked watch still promotes when its path
+    /// appears. Several pending watches may wait in one folder.
+    ///
+    /// The path it waits for is taken, though, from the `add` on: a
+    /// second `add` of that path, pending or not, is
+    /// `error.PathAlreadyWatched`, before the path appears and after,
+    /// exactly as for a watch taken on a path that was there. So the
+    /// answer does not depend on whether a `poll` has promoted it yet.
+    /// A path that turns out to be one another watch already has -- a
+    /// symbolic link on the way to it that leads there -- is not
+    /// watched twice either: the watch is not promoted, and says
+    /// `Kind.unwatched` against its path.
+    pending: bool = false,
+};

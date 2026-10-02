@@ -2,7 +2,7 @@
 //! its own log cursor and the changes already read from that log but not handed out by poll.
 
 const std = @import("std");
-const lookout = @import("lookout.zig");
+const lookout = @import("types.zig");
 const Checkpoint = @This();
 const Allocator = std.mem.Allocator;
 const format = @import("checkpoint_format.zig");

@@ -89,41 +89,14 @@ pub const Baseline = @import("Baseline.zig");
 ///
 /// Which of these this target was built with is `supported`; which one
 /// `auto` picks is `default_backend`. `poll` is built everywhere.
-pub const Backend = enum {
-    /// Pick `default_backend`.
-    auto,
-    /// Apple's FSEvents. Recursive in the kernel, so a tree costs no
-    /// descriptor per directory, and renames arrive paired. Its system
-    /// delivery has a measured roughly ten-millisecond floor even when
-    /// `Options.latency_ms` is zero.
-    fsevents,
-    /// BSD `kqueue` with the `EVFILT_VNODE` filter. One descriptor is held
-    /// open per watched file and per watched directory.
-    kqueue,
-    /// Linux `inotify`. One kernel watch descriptor is held per watched
-    /// file and per watched directory, and renames arrive paired.
-    inotify,
-    /// Windows `ReadDirectoryChangesW` with overlapped reads drained
-    /// through an I/O completion port. Recursive by flag, and renames
-    /// arrive paired.
-    windows,
-    /// Re-stat and re-list watched paths on a timer. Needs no notification
-    /// queue, but holds a handle per watched directory, at the cost of
-    /// latency and of walking every watched directory on every tick.
-    poll,
-};
+pub const Backend = @import("types.zig").Backend;
 
 /// Whether this target was built with `backend`.
 ///
 /// Asking `Watcher.init` for one that was not fails with
 /// `error.BackendUnavailable` rather than failing to compile, so a
 /// program may ask and fall back at run time; this is how it asks first.
-pub fn supported(backend: Backend) bool {
-    return switch (backend) {
-        .auto => true,
-        inline else => |tag| @hasField(Watcher.Impl, @tagName(tag)),
-    };
-}
+pub const supported = @import("types.zig").supported;
 
 /// Whether `backend` pairs a rename, reporting one `Kind.renamed` event
 /// carrying `Event.from`, or cannot and reports `Kind.removed` on the old
@@ -141,30 +114,11 @@ pub fn supported(backend: Backend) bool {
 /// writing an excluded temporary name and renaming it over a watched one
 /// is `created` at the watched name, and an event never names an
 /// excluded path, as `Event.path` or as `Event.from`.
-pub fn pairsRenames(backend: Backend) bool {
-    return switch (backend) {
-        .auto => pairsRenames(default_backend),
-        .fsevents, .inotify, .windows => true,
-        .kqueue, .poll => false,
-    };
-}
+pub const pairsRenames = @import("types.zig").pairsRenames;
 
 /// What a backend reports when the watched path itself is moved. See
 /// `reportsRootMove`.
-pub const RootMove = enum {
-    /// `Kind.renamed` against the watch root: the backend watches the
-    /// object and is told that it moved.
-    renamed,
-    /// `Kind.removed` against the watch root: the backend watches the
-    /// name, and a move and a deletion leave the same absence behind.
-    removed,
-    /// Nothing at all. The backend holds the object open through a
-    /// handle the move does not disturb, and the move itself is a change
-    /// in a directory it was not asked to watch, so there is nothing to
-    /// deliver and the watch keeps running on the object under its new
-    /// name.
-    silent,
-};
+pub const RootMove = @import("types.zig").RootMove;
 
 /// How `backend` reports the watched path itself being moved.
 ///
@@ -184,14 +138,7 @@ pub const RootMove = enum {
 /// The answer is absolute: a backend gives the shape named here and
 /// never one of the other two, so a caller may switch on it without a
 /// fallback arm.
-pub fn reportsRootMove(backend: Backend) RootMove {
-    return switch (backend) {
-        .auto => reportsRootMove(default_backend),
-        .kqueue, .inotify => .renamed,
-        .fsevents, .poll => .removed,
-        .windows => .silent,
-    };
-}
+pub const reportsRootMove = @import("types.zig").reportsRootMove;
 
 /// Whether `backend` is told that a file open for writing has been
 /// closed, and can report `Kind.closed`.
@@ -206,13 +153,7 @@ pub fn reportsRootMove(backend: Backend) RootMove {
 /// four backends out of five is worse than no kind at all. A program
 /// that wants the end of a write everywhere uses `Options.settle_ms`,
 /// which estimates it from a quiet window and works on all five.
-pub fn reportsCloses(backend: Backend) bool {
-    return switch (backend) {
-        .auto => reportsCloses(default_backend),
-        .inotify => true,
-        .fsevents, .kqueue, .windows, .poll => false,
-    };
-}
+pub const reportsCloses = @import("types.zig").reportsCloses;
 
 /// Whether `backend` can leave an excluded directory unregistered, or
 /// only drop the events coming out of it.
@@ -228,13 +169,7 @@ pub fn reportsCloses(backend: Backend) bool {
 ///
 /// A program that filters to save resources rather than noise wants this
 /// answer; one that filters to save itself the events does not care.
-pub fn prunesIgnored(backend: Backend) bool {
-    return switch (backend) {
-        .auto => prunesIgnored(default_backend),
-        .inotify, .kqueue, .poll => true,
-        .fsevents, .windows => false,
-    };
-}
+pub const prunesIgnored = @import("types.zig").prunesIgnored;
 
 /// The backend `Backend.auto` resolves to on this target: the kernel one
 /// where there is a kernel one, and `poll` where there is not.
@@ -244,20 +179,7 @@ pub fn prunesIgnored(backend: Backend) bool {
 /// renames. `kqueue` remains explicitly selectable when lower latency on
 /// a small tree matters more than either property; it reports a rename as
 /// a removal and a creation.
-pub const default_backend: Backend = switch (builtin.os.tag) {
-    .driverkit,
-    .ios,
-    .maccatalyst,
-    .macos,
-    .tvos,
-    .visionos,
-    .watchos,
-    => .fsevents,
-    .dragonfly, .freebsd, .netbsd, .openbsd => .kqueue,
-    .linux => .inotify,
-    .windows => .windows,
-    else => .poll,
-};
+pub const default_backend = @import("types.zig").default_backend;
 
 /// The backend every target has. Named here rather than inside `Impl`
 /// because every one of that union's shapes has it.
@@ -271,13 +193,7 @@ pub const Checkpoint = @import("Checkpoint.zig");
 
 /// Whether the backend has a persistent log that checkpoints can resume.
 /// Other backends return null from Watcher.checkpoint and ignore the option.
-pub fn tracksCheckpoint(backend: Backend) bool {
-    return switch (backend) {
-        .auto => tracksCheckpoint(default_backend),
-        .fsevents => true,
-        .kqueue, .inotify, .windows, .poll => false,
-    };
-}
+pub const tracksCheckpoint = @import("types.zig").tracksCheckpoint;
 
 /// Identifies one watch within one `Watcher`.
 ///
@@ -291,7 +207,7 @@ pub fn tracksCheckpoint(backend: Backend) bool {
 /// id the caller already holds. A backend that keeps state past a
 /// `remove` -- a buffer the kernel may still be writing into, say --
 /// therefore cannot key that state on the id alone.
-pub const WatchId = enum(u32) { _ };
+pub const WatchId = @import("types.zig").WatchId;
 
 /// What happened to a path.
 ///
@@ -306,354 +222,19 @@ pub const WatchId = enum(u32) { _ };
 /// `unwatched` wins when both loss notices name the same watch and path.
 /// A loss notice clears any held change on that path; later changes in
 /// the same batch cannot start another hold there.
-pub const Kind = enum {
-    /// The path did not exist at the previous observation and does now.
-    created,
-    /// The contents of the path changed: a different size, a different
-    /// modification time, or a write reported by the kernel.
-    modified,
-    /// The path no longer exists. A rename of an entry inside a watched
-    /// directory is reported this way only where the operating system
-    /// cannot pair the two halves; where it can, one `renamed` carrying
-    /// `Event.from` is reported instead, and `pairsRenames` says which
-    /// of the two this backend does.
-    ///
-    /// When the path is a watch's own root, that watch stops there: a
-    /// path is watched, not a name, and the name is now empty. The id
-    /// stays valid and `Watcher.remove` still releases it.
-    removed,
-    /// A path was renamed. `Event.path` is where it is now and
-    /// `Event.from` is where it was, on the backends `pairsRenames` is
-    /// true for.
-    ///
-    /// Against a watch's own root it means something else and carries no
-    /// `from`: the watched path itself was moved, so the watch no longer
-    /// stands for the name it was added under and stops, exactly as for
-    /// a `removed` root. Which backends say that, and what the others
-    /// say instead, is `reportsRootMove`.
-    renamed,
-    /// Metadata other than the contents changed — permissions, ownership,
-    /// link count, or the status-change time.
-    attributes,
-    /// A file that was open for writing has been closed: the writing is
-    /// over, said by the operating system rather than inferred from a
-    /// quiet window. It is the answer `Options.settle_ms` estimates.
-    ///
-    /// Only `inotify` is told this, so it is off unless
-    /// `Options.report_closes` asks for it, and `reportsCloses` says
-    /// whether this backend can ever produce one. A program that turns
-    /// it on where it is not reported gets no `closed` events and the
-    /// writes it would have reported still arrive as `modified`; nothing
-    /// is lost, and nothing pretends.
-    ///
-    /// It outranks `modified` when both land on one path in a window,
-    /// because a write that has finished is the more useful statement of
-    /// the two. Set `Options.latency_ms` to zero to see each as it
-    /// arrives instead.
-    closed,
-    /// Changes were lost and the caller should rescan the watch itself.
-    /// Emitted when the kernel event queue overflowed, or when a watched
-    /// directory holds more entries than `Options.max_dir_entries`. The
-    /// `path` is the watch root, not an entry inside it.
-    ///
-    /// What was lost is not knowable from here -- the names are gone --
-    /// but it is knowable from the tree. `Baseline`, seeded where the
-    /// watch was taken, answers it: its `diff` returns the creations,
-    /// changes and removals that the events would have carried.
-    overflow,
-    /// lookout is no longer watching this path, and nothing that happens
-    /// to it or below it will be reported. The watch itself is still
-    /// alive and its other paths still report; this one is a hole in it.
-    ///
-    /// It is what a registration the operating system refused looks like
-    /// from the outside: a subdirectory of a recursive watch that could
-    /// not be opened or that the per-user watch limit had no room for,
-    /// or on Windows a read that could not be posted again. Each of
-    /// those used to be swallowed, which left a subtree silently quiet
-    /// with no error and no event -- the worst thing a watcher can be.
-    ///
-    /// Like `overflow` it is not an error, and it outranks it: an
-    /// `overflow` says look again, and this says looking again is the
-    /// only way you will ever hear about this path. A caller that wants
-    /// the path back adds a watch on it.
-    unwatched,
-};
+pub const Kind = @import("types.zig").Kind;
 
 /// What an event's path is, where the backend knows.
-pub const Target = enum {
-    /// A regular file, a symbolic link, or anything else that is not a
-    /// directory.
-    file,
-    /// A directory.
-    directory,
-    /// The backend was not told and the path can no longer be asked:
-    /// it is gone by the time the event is read. `Kind.removed` of an
-    /// entry inside a watched directory on `windows` is the one that
-    /// lands here; a watched path itself is remembered from when the
-    /// watch was added.
-    unknown,
-
-    /// What a listing or a `stat` found, as a target.
-    pub fn of(kind: Io.File.Kind) Target {
-        return if (kind == .directory) .directory else .file;
-    }
-};
+pub const Target = @import("types.zig").Target;
 
 /// One thing that happened to one path during one `Watcher.poll` window.
-pub const Event = struct {
-    /// The watch this path belongs to, as returned by `Watcher.add`.
-    id: WatchId,
-    /// Absolute, canonical path of the affected file or directory —
-    /// including for an entry inside a watched directory, which is the
-    /// watch root joined with the entry name. Owned by the `Watcher` and
-    /// valid until the next call to `Watcher.poll` or `Watcher.deinit`.
-    ///
-    /// Spelled with the platform's own separator throughout: `/` on
-    /// POSIX, `\` on Windows, including the part below the watch root.
-    /// A program comparing an event against a path of its own builds it
-    /// the same way — `std.fs.path.join` — rather than by pasting `/`
-    /// between components.
-    ///
-    /// For `Kind.renamed` this is where the path is now.
-    path: []const u8,
-    /// What happened.
-    kind: Kind,
-    /// Where a renamed path was before, when the operating system paired
-    /// the two halves of the rename. `null` for every other kind, and for
-    /// `Kind.renamed` on a backend that cannot pair -- see `pairsRenames`
-    /// -- and when the watched path itself was renamed, which has no
-    /// second half to pair with.
-    ///
-    /// Always a path the watch is about. A rename from a name outside the
-    /// watch, or from one its filter excludes, is `Kind.created` at the
-    /// new name and carries no `from`; see `pairsRenames`.
-    ///
-    /// Owned by the `Watcher` on the same terms as `path`.
-    from: ?[]const u8 = null,
-    /// When lookout first saw this path change in this window, read from
-    /// the `Io` the watcher was created with on the `awake` clock. It is
-    /// comparable with the caller's own `std.Io.Timestamp.now(io, .awake)`
-    /// and is not a wall clock.
-    ///
-    /// Coalescing merges several changes into one event, and this is the
-    /// first of them rather than the last: the caller wants to know when
-    /// the path started changing, not when lookout stopped collecting.
-    time: Io.Timestamp = .zero,
-    /// Whether the path is a file or a directory.
-    ///
-    /// After a `Kind.removed` the path cannot be stat-ed to find out, so
-    /// a caller keeping a model of the tree needs to be told. Every
-    /// backend is told by the operating system, except that
-    /// `ReadDirectoryChangesW` says nothing about an entry that is
-    /// already gone; that one is `unknown`. A watched path itself is
-    /// always known, on every backend, from when the watch was added.
-    target: Target = .unknown,
-};
+pub const Event = @import("types.zig").Event;
 
 /// How a `Watcher` behaves, fixed for its lifetime.
-pub const Options = struct {
-    /// Which mechanism to use. See `Backend`, `default_backend` and
-    /// `supported`.
-    backend: Backend = .auto,
-    /// How long the `poll` backend waits between scans. Ignored by every
-    /// other backend. Zero is clamped to one millisecond so a quiet
-    /// indefinite poll still blocks instead of scanning in a busy loop.
-    poll_interval_ms: u32 = 500,
-    /// How long `Watcher.poll` keeps collecting after the first event of a
-    /// batch arrives. Everything that lands on one path inside that window
-    /// becomes a single `Event`, so a program is not woken once per write
-    /// of a file being saved. Zero disables the wait and reports whatever
-    /// is already queued. FSEvents uses the same window for its stream and
-    /// requests delivery of the first event without waiting for the rest
-    /// of the window. Zero asks the system for no additional delay; on
-    /// macOS the measured system-delivery floor is still roughly ten
-    /// milliseconds.
-    latency_ms: u32 = 50,
-    /// How long a file must stop changing before its `Kind.modified` is
-    /// reported. Zero, the default, reports it as soon as it is seen.
-    ///
-    /// `latency_ms` merges the writes that arrive together; this waits
-    /// for the writing to be over. A build system copying a large file
-    /// produces `modified` the moment it starts, which is the wrong
-    /// moment to read it; with `settle_ms` the event arrives once the
-    /// file has been still for that long.
-    ///
-    /// It delays only `modified`. A creation, a removal and a rename are
-    /// facts about a name rather than about contents, and are reported at
-    /// once whatever this is set to.
-    settle_ms: u32 = 0,
-    /// How long an ordinary change must be quiet before it is reported. Zero,
-    /// the default, is off.
-    ///
-    /// This is the third and strongest of the three windows, and it
-    /// answers a different question from the other two. `latency_ms`
-    /// merges what arrives together and reports the most significant kind
-    /// seen; `settle_ms` waits for a file's contents to stop changing.
-    /// `debounce_ms` holds every ordinary kind until the path has been quiet for
-    /// the window and then reports it once, carrying the kind seen
-    /// **last** rather than the most significant one. A file created and
-    /// then deleted inside one window is one `removed`; a file deleted
-    /// and then recreated is one `created`, which coalescing cannot say
-    /// because `removed` outranks `created`.
-    /// `overflow` and `unwatched` are immediate and retain their precedence
-    /// over ordinary changes; see `Kind`.
-    ///
-    /// That is what a caller rebuilding from the end state wants, and it
-    /// is why it supersedes both of the others: a non-zero `debounce_ms`
-    /// takes over from `settle_ms`, and `poll` returns as soon as a
-    /// window closes rather than collecting for `latency_ms` more.
-    debounce_ms: u32 = 0,
-    /// Report `Kind.closed` when a file that was open for writing is
-    /// closed. Off by default.
-    ///
-    /// Only `inotify` is told this, and `reportsCloses` says so; asking
-    /// for it on a backend that cannot tell costs nothing and changes
-    /// nothing. Where it can, the kernel is asked for `IN_CLOSE_WRITE`
-    /// as well, and a path that was written and then closed inside one
-    /// coalescing window reports `closed` rather than `modified` --
-    /// which is the point, and is also why this is a choice rather than
-    /// the default: a program that only wants to know a path changed
-    /// should not have to learn a second kind meaning the same thing.
-    report_closes: bool = false,
-    /// How much change may accumulate between two polls, in bytes, on
-    /// the backends that are handed a buffer and find the changes in it.
-    /// Zero, the default, is each backend's own.
-    ///
-    /// On `windows` this is the buffer `ReadDirectoryChangesW` writes
-    /// its records into, one per watch. Its default is 64 KiB, which is
-    /// what a network share will take -- Windows refuses a larger one
-    /// there, and lookout falls back to it by itself if a larger one is
-    /// refused. Sizes are held between 4 KiB and 16 MiB.
-    ///
-    /// On `fsevents` this is the buffer the system's delivery thread
-    /// copies into, one per watcher, which is what lets that thread do a
-    /// bounded `memcpy` and nothing else. Its default is 4 MiB, enough
-    /// to hold a burst of ten thousand paths without losing one. Sizes
-    /// are held between 4 KiB and 64 MiB.
-    ///
-    /// When the buffer does fill, the changes that did not fit are lost
-    /// and `Kind.overflow` says so against the watch root. A watch on a
-    /// busy tree that is polled infrequently wants more; the memory is
-    /// held for the life of the watcher, and on Windows it is non-paged
-    /// pool for as long as a read is outstanding, so a large one on many
-    /// watches is a real cost.
-    ///
-    /// The other three backends are told what changed by the kernel or
-    /// find it by listing, and ignore this.
-    buffer_bytes: usize = 0,
-    /// Resume from an earlier Watcher.checkpoint. Borrowed only by init,
-    /// which copies what it keeps. Recreate the same watched paths, scopes
-    /// and filters. Watches are matched by their canonical requested roots.
-    /// add returns InvalidCheckpoint if the volume or its log has changed.
-    /// Each persistent stream follows one device. Scopes crossing mounted
-    /// volumes keep live coverage but cannot produce checkpoints; watch
-    /// those volumes separately to retain resumable history.
-    /// Pending changes are restored and new log records are resolved against
-    /// the current tree. Backends without a persistent log ignore this.
-    checkpoint: ?Checkpoint = null,
-    /// The most events one `poll` will hold, past which it stops
-    /// collecting names and says `Kind.overflow` against the watch roots
-    /// that lost them. Zero means no ceiling at all.
-    ///
-    /// A watcher holds one event and one path per changed path until the
-    /// next `poll`, so a process writing a million files faster than the
-    /// caller polls made the library grow without bound. The default is
-    /// high enough that no ordinary burst reaches it and low enough to
-    /// be a ceiling.
-    max_events: usize = 100_000,
-    /// The largest number of entries lookout will account for in one
-    /// watched directory. A directory holding more reports
-    /// `Kind.overflow` against its watch root, which means: this one is
-    /// past the budget you set, rescan it yourself.
-    ///
-    /// The backends reach that answer differently and it is deliberate
-    /// that they all reach it. `kqueue` and `poll` name an entry by
-    /// comparing directory listings, so past the limit they genuinely
-    /// cannot see a change. `inotify` is told every name by the kernel
-    /// and keeps reporting them, and counts entries only so that the
-    /// signal a caller handles is the same one on every platform.
-    ///
-    /// It is the budget of a directory a watch reports the entries of:
-    /// a watched directory, and every directory below it for a recursive
-    /// watch. A watch on a file has none. It is about one entry, and no
-    /// backend tells it when the folder the file is in is past the
-    /// budget -- Windows and FSEvents read that folder to see the file,
-    /// but are told nothing about its other entries through that watch.
-    max_dir_entries: usize = 4096,
-};
+pub const Options = @import("options.zig").Options;
 
 /// How one watch behaves, fixed for its lifetime.
-pub const AddOptions = struct {
-    /// Also watch every directory below this one, and every directory
-    /// created below it afterwards.
-    ///
-    /// Recursion is not a kernel feature on either `kqueue` or `inotify`:
-    /// lookout walks the tree at `add` time and registers each directory
-    /// individually, then registers newly created directories as it sees
-    /// them. Three consequences are worth knowing:
-    ///
-    /// * A deep tree costs one descriptor (`kqueue`) or one kernel watch
-    ///   (`inotify`) per directory, against a per-process limit.
-    /// * A directory created and populated faster than lookout can register
-    ///   it can lose the events for the files inside. lookout scans each
-    ///   directory immediately after registering it and reports whatever
-    ///   it finds as `created`, which closes the race for files that still
-    ///   exist, not for files already gone again.
-    /// * Symbolic links are not followed, so a link into a watched tree
-    ///   does not silently widen it.
-    recursive: bool = false,
-    /// What of this path the watch is about. The default excludes
-    /// nothing.
-    ///
-    /// A filter is applied where lookout recurses, so on `inotify`,
-    /// `kqueue` and `poll` an excluded directory is never registered and
-    /// its tree costs nothing at all. FSEvents and
-    /// `ReadDirectoryChangesW` recurse in the kernel, which cannot be
-    /// told about a filter, so there the excluded events are dropped and
-    /// the kernel does the work regardless -- `prunesIgnored` is how a
-    /// program asks which it is getting.
-    ///
-    /// An excluded path is treated exactly as a path outside the watch,
-    /// including as one half of a rename: see `pairsRenames`.
-    ///
-    /// The patterns are copied by `Watcher.add`; `Filter.context` is
-    /// not, and whatever it points at must outlive the watch.
-    filter: Filter = .none,
-    /// Accept a path that is not there yet, instead of failing the `add`
-    /// with `error.FileNotFound`.
-    ///
-    /// The watch is put on the nearest existing ancestor, narrowed to the
-    /// single entry that leads to the path asked for, and steps down as
-    /// the path appears. When the path itself appears the watch is
-    /// promoted to the real one -- recursion, filter and all -- and the
-    /// appearance is reported as `Kind.created` against it, with whatever
-    /// the directory already holds by then that the watch would report.
-    /// A tool
-    /// watching a directory its own first run creates no longer has to
-    /// poll for it.
-    ///
-    /// The id comes back from `add` immediately and is the id every event
-    /// carries, before and after the promotion. Nothing that happens to
-    /// the ancestor while the watch waits is reported: it is not what the
-    /// caller asked about.
-    ///
-    /// The ancestor is not taken by the wait. A watch of that same folder
-    /// added before or after is a watch of its own and succeeds, rather
-    /// than failing with `error.PathAlreadyWatched`; each reports what it
-    /// is about, and the parked watch still promotes when its path
-    /// appears. Several pending watches may wait in one folder.
-    ///
-    /// The path it waits for is taken, though, from the `add` on: a
-    /// second `add` of that path, pending or not, is
-    /// `error.PathAlreadyWatched`, before the path appears and after,
-    /// exactly as for a watch taken on a path that was there. So the
-    /// answer does not depend on whether a `poll` has promoted it yet.
-    /// A path that turns out to be one another watch already has -- a
-    /// symbolic link on the way to it that leads there -- is not
-    /// watched twice either: the watch is not promoted, and says
-    /// `Kind.unwatched` against its path.
-    pending: bool = false,
-};
+pub const AddOptions = @import("options.zig").AddOptions;
 
 /// A set of watches and the events they have produced.
 ///
@@ -711,18 +292,7 @@ pub const Watcher = struct {
     };
 
     /// One watch, as `watches` reports it.
-    pub const WatchInfo = struct {
-        /// The id `add` returned.
-        id: WatchId,
-        /// The path the caller asked for. Owned by the watcher and valid
-        /// until the next `add`, `remove` or `deinit`.
-        path: []const u8,
-        /// `AddOptions.recursive`.
-        recursive: bool,
-        /// Whether the path is still not there, so the watch is parked
-        /// on an ancestor. See `AddOptions.pending`.
-        waiting: bool,
-    };
+    pub const WatchInfo = @import("watch_contract.zig").WatchInfo;
 
     /// A watch waiting for its path to appear.
     ///
@@ -787,34 +357,14 @@ pub const Watcher = struct {
     /// FSEvents also allocates its delivery sink and `Options.buffer_bytes`
     /// buffer here, even with no watches. Allocator failures are
     /// `OutOfMemory`. Other backends allocate as watches are added.
-    pub const InitError = error{
-        /// `Options.backend` names a backend this target was not built
-        /// with. See `supported`.
-        BackendUnavailable,
-        /// The system-wide descriptor table is full.
-        SystemFdQuotaExceeded,
-        /// This process may not open another descriptor.
-        ProcessFdQuotaExceeded,
-        /// The system could not create the notification queue.
-        SystemResources,
-        /// The allocator could not create the FSEvents delivery sink or buffer.
-        OutOfMemory,
-    } || UnexpectedError;
+    pub const InitError = @import("watch_contract.zig").InitError;
 
     /// Errors `add` can return, on top of the file-system errors of
     /// resolving and opening the path.
-    pub const AddError = error{
-        /// The checkpoint belongs to a different volume or FSEvents log.
-        InvalidCheckpoint,
-        /// The kernel refused another watch: the per-process or
-        /// system-wide limit on watches or descriptors is reached.
-        WatchLimitReached,
-        /// This watcher already watches that path. See `add`.
-        PathAlreadyWatched,
-    } || Tree.AddError || UnexpectedError;
+    pub const AddError = @import("watch_contract.zig").AddError;
 
     /// Errors changing a live watch's filter.
-    pub const RefilterError = AddError || error{UnknownWatch};
+    pub const RefilterError = @import("watch_contract.zig").RefilterError;
 
     /// Errors `poll` can return, on top of the file-system errors of
     /// re-reading watched directories.
@@ -826,12 +376,12 @@ pub const Watcher = struct {
     /// backend would be a set per value of `Options.backend` — and every
     /// backend re-reads directories through `std.Io`, whose file-system
     /// errors carry `error.Canceled` anyway.
-    pub const PollError = Tree.ScanError || Io.Cancelable || UnexpectedError;
+    pub const PollError = @import("watch_contract.zig").PollError;
 
     /// A system call failed with a code lookout does not model. This is
     /// the escape hatch every backend shares, so that an error set is a
     /// promise about the whole API rather than about one platform.
-    pub const UnexpectedError = error{Unexpected};
+    pub const UnexpectedError = @import("watch_contract.zig").UnexpectedError;
 
     /// Creates a watcher that holds no watches.
     ///
@@ -1693,10 +1243,6 @@ test {
     // Held-event transfers use no Windows calls and are tested on every host.
     _ = @import("backend/windows.zig");
     _ = @import("trace.zig");
-    _ = @import("test_suite.zig");
-    _ = @import("test_resources.zig");
-    _ = @import("test_gaps.zig");
-    _ = @import("test_fuzz.zig");
     // The backends this target was built with, each of which carries
     // tests of its own. They are found when the backend is analysed,
     // which the suite causes and a filtered run does not, so they are

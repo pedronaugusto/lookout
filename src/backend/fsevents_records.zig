@@ -15,7 +15,7 @@
 
 const std = @import("std");
 
-const lookout = @import("../lookout.zig");
+const lookout = @import("../types.zig");
 const path_cmp = @import("../path.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;

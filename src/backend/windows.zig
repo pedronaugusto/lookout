@@ -29,7 +29,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const windows = std.os.windows;
 
-const lookout = @import("../lookout.zig");
+const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
@@ -54,13 +54,13 @@ watches: std.AutoArrayHashMapUnmanaged(WatchId, *Watch),
 /// for want of an allocation while overlapped I/O still references it.
 retiring: ?*Watch,
 /// How many entries each watched directory holds, against
-/// `lookout.Options.max_dir_entries`.
+/// `@import("../options.zig").Options.max_dir_entries`.
 budget: Budget,
-/// `lookout.Options.buffer_bytes`, clamped and rounded to what
+/// `@import("../options.zig").Options.buffer_bytes`, clamped and rounded to what
 /// `ReadDirectoryChangesW` will take. See `bounds`.
 buffer_len: usize,
 
-/// What `lookout.Options.buffer_bytes` may ask for here.
+/// What `@import("../options.zig").Options.buffer_bytes` may ask for here.
 ///
 /// The floor is 4 KiB; a record with a long relative name can exceed it
 /// and require an overflow notice and a rescan. The ceiling is a size
@@ -109,7 +109,7 @@ const Watch = struct {
     /// cannot be asked what it was; this is the answer kept from before.
     root_target: Target,
     recursive: bool,
-    /// `lookout.AddOptions.filter`, copied.
+    /// `@import("../options.zig").AddOptions.filter`, copied.
     ///
     /// `ReadDirectoryChangesW` recurses in the kernel and cannot be told
     /// to leave a directory out, so here the filter drops the events
@@ -185,7 +185,7 @@ const Watch = struct {
 };
 
 /// Creates the completion port.
-pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!Windows {
+pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) @import("../watch_contract.zig").InitError!Windows {
     const port = c.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 0) orelse
         return error.SystemResources;
     return .{
@@ -251,9 +251,9 @@ pub fn add(
     w: *Windows,
     id: WatchId,
     abs_path: []const u8,
-    options: lookout.AddOptions,
+    options: @import("../options.zig").AddOptions,
     batch: *Batch,
-) lookout.Watcher.AddError!void {
+) @import("../watch_contract.zig").AddError!void {
     _ = batch;
     const stat = try Io.Dir.cwd().statFile(w.io, abs_path, .{});
     const is_dir = stat.kind == .directory;
@@ -304,7 +304,7 @@ pub fn add(
 }
 
 /// Opens a directory for overlapped change notification.
-fn open(gpa: Allocator, path: []const u8) lookout.Watcher.AddError!windows.HANDLE {
+fn open(gpa: Allocator, path: []const u8) @import("../watch_contract.zig").AddError!windows.HANDLE {
     const wide = std.unicode.wtf8ToWtf16LeAllocZ(gpa, path) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidWtf8 => return error.BadPathName,
@@ -335,7 +335,7 @@ fn open(gpa: Allocator, path: []const u8) lookout.Watcher.AddError!windows.HANDL
 /// Posts the outstanding read for a watch. Every completion re-posts,
 /// because a change that arrives while no read is outstanding is a change
 /// the kernel has to buffer.
-fn arm(w: *Windows, watch: *Watch) lookout.Watcher.AddError!void {
+fn arm(w: *Windows, watch: *Watch) @import("../watch_contract.zig").AddError!void {
     watch.overlapped = std.mem.zeroes(c.OVERLAPPED);
     const filter: u32 = c.FILE_NOTIFY_CHANGE_FILE_NAME | c.FILE_NOTIFY_CHANGE_DIR_NAME |
         c.FILE_NOTIFY_CHANGE_ATTRIBUTES | c.FILE_NOTIFY_CHANGE_SIZE |
@@ -385,7 +385,7 @@ pub fn remove(w: *Windows, id: WatchId) void {
 }
 
 /// Replaces the delivery filter; the kernel's recursive read stays armed.
-pub fn refilter(w: *Windows, id: WatchId, next: lookout.Filter, batch: *Batch) lookout.Watcher.RefilterError!void {
+pub fn refilter(w: *Windows, id: WatchId, next: lookout.Filter, batch: *Batch) @import("../watch_contract.zig").RefilterError!void {
     _ = batch;
     const watch = w.watches.get(id) orelse return error.UnknownWatch;
     const replacement = try next.dupe(w.gpa);
@@ -416,7 +416,7 @@ fn free(w: *Windows, watch: *Watch) void {
 
 /// Waits on the completion port until a read produces something `batch`
 /// did not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
     // A completion is taken off the port by the call that waits for it,
     // and the read it completes is re-armed before the next, so nothing
     // in here is a place to stop: see `Watcher.poll`. The wait itself is
@@ -434,7 +434,7 @@ pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
 /// Reports every held old name whose new name never came as a removal.
 /// An old name the watch does not want was held only so that its new
 /// name could be told apart from a rename in, and is not reported.
-fn flushRenames(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
+fn flushRenames(w: *Windows, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     for (w.watches.values()) |watch| {
         const old = watch.pending_rename orelse continue;
         if (wants(watch, old))
@@ -444,7 +444,7 @@ fn flushRenames(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
     }
 }
 
-fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
     const before = batch.revision;
     const deadline: Deadline = .start(w.io, timeout_ms);
 
@@ -505,7 +505,7 @@ const Completion = struct {
     failure: ?u32,
 };
 
-fn take(w: *Windows, batch: *Batch, timeout: u32) lookout.Watcher.PollError!Taken {
+fn take(w: *Windows, batch: *Batch, timeout: u32) @import("../watch_contract.zig").PollError!Taken {
     // A completion already taken is ready even if the port is quiet.
     for (w.watches.values()) |watch| {
         if (watch.completion != null) {
@@ -534,7 +534,7 @@ fn take(w: *Windows, batch: *Batch, timeout: u32) lookout.Watcher.PollError!Take
 }
 
 /// Finishes a retained completion before its buffer can be overwritten.
-fn complete(w: *Windows, watch: *Watch, batch: *Batch) lookout.Watcher.PollError!void {
+fn complete(w: *Windows, watch: *Watch, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     const completion = watch.completion.?;
     const id = watch.id;
     if (!watch.reported) {
@@ -595,12 +595,12 @@ fn holdsRemoval(w: *const Windows) bool {
 
 /// Reports every held removal as the removal it is: no move onto its
 /// name came.
-fn resolveRemovals(w: *Windows, batch: *Batch) lookout.Watcher.PollError!void {
+fn resolveRemovals(w: *Windows, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     for (w.watches.values()) |watch| try w.resolveRemoval(watch, batch);
 }
 
 /// Reports `watch`'s held removal, if it holds one.
-fn resolveRemoval(w: *Windows, watch: *Watch, batch: *Batch) lookout.Watcher.PollError!void {
+fn resolveRemoval(w: *Windows, watch: *Watch, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     const gone = watch.held_removal orelse return;
     trace.log("windows push removed held path={s}", .{gone});
     try batch.push(w.gpa, watch.id, gone, .removed, watch.goneTarget());
@@ -644,7 +644,7 @@ fn lost(w: *Windows, watch: *const Watch) void {
 /// That used to be swallowed, which left the caller with a live watch id
 /// over a tree that had gone quiet; now the watch is dropped and the
 /// root is reported as `lookout.Kind.unwatched`, which is what it is.
-fn rearm(w: *Windows, watch: *Watch, batch: *Batch) lookout.Watcher.PollError!bool {
+fn rearm(w: *Windows, watch: *Watch, batch: *Batch) @import("../watch_contract.zig").PollError!bool {
     w.arm(watch) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -702,7 +702,7 @@ fn retire(w: *Windows, overlapped: ?*c.OVERLAPPED) void {
 }
 
 /// Turns one completed read into events.
-fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.Watcher.PollError!void {
+fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     const dir = watch.dir();
 
     if (watch.cursor == null) {
@@ -786,7 +786,7 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) lookout.W
 /// `created`, which says the name holds an entry it did not before.
 ///
 /// Either way the entry that was at `path` left, so the count moves now.
-fn reportRemoval(w: *Windows, watch: *Watch, rest: records.Iterator, dir: []const u8, path: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+fn reportRemoval(w: *Windows, watch: *Watch, rest: records.Iterator, dir: []const u8, path: []const u8, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     switch (records.arrival(rest)) {
         .moved => |record| if (try w.sameName(record, dir, path)) {
             trace.log("windows drop replaced path={s}", .{path});
@@ -842,7 +842,7 @@ fn wants(watch: *const Watch, subject: []const u8) bool {
 /// `created` there, as a rename in from outside would be; only the old
 /// one wanted is `removed` there, as a rename out would be; neither is
 /// nothing.
-fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     const wanted = wants(watch, subject);
     if (action == c.FILE_ACTION_RENAMED_OLD_NAME) {
         // Copied before the one it replaces is freed, so a copy that
@@ -894,7 +894,7 @@ fn targetOf(w: *const Windows, subject: []const u8) Target {
     return .of(stat.kind);
 }
 
-fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     var move: Budget.Move = .unchanged;
     switch (action) {
         c.FILE_ACTION_ADDED => {
@@ -936,7 +936,7 @@ fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch
 /// and counting each copy reached the budget at half the folder's size.
 /// One copy counts, chosen by `Budget.counter`, and when that takes the
 /// directory past the budget every watch the change reached is told.
-fn recount(w: *Windows, watch: *Watch, subject: []const u8, move: Budget.Move, batch: *Batch) lookout.Watcher.PollError!void {
+fn recount(w: *Windows, watch: *Watch, subject: []const u8, move: Budget.Move, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     const change: Change = .{
         .dir = std.fs.path.dirname(subject) orelse return,
         .subject = subject,
@@ -962,153 +962,6 @@ const Change = struct {
         return reach.covers(change.dir) and wants(watch, change.subject);
     }
 };
-
-test "a read that completes with nothing is an overflow, and the watch reads on" {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
-    // ReadDirectoryChangesW: "If the number of changes exceeds the
-    // buffer size, the entire contents of the buffer are discarded, the
-    // lpBytesReturned parameter contains zero". Through a completion
-    // port that is a packet that transferred nothing, and
-    // PostQueuedCompletionStatus can post one in the kernel's place --
-    // "Posts an I/O completion packet to an I/O completion port", with
-    // the byte count and the OVERLAPPED the caller gives it, dequeued by
-    // GetQueuedCompletionStatus like any other. It is the one overflow
-    // signal a test can make: a burst the kernel cannot hold between
-    // two reads is not something a test can order.
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    const io = testing.io;
-
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(root);
-
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .windows });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    while ((try watcher.poll(200)).len != 0) {}
-    const w = &watcher.impl.windows;
-    const watch = w.watches.get(id).?;
-
-    // The read that is outstanding is taken back first -- cancelled,
-    // and its completion taken off the port -- so that the packet
-    // posted below stands in for it rather than beside it: a watch
-    // re-armed while a read is still pending would have two reads on
-    // one buffer, which is not a state the kernel ever puts it in.
-    _ = c.CancelIoEx(watch.handle, &watch.overlapped);
-    {
-        var transferred: u32 = 0;
-        var key: usize = 0;
-        var overlapped: ?*c.OVERLAPPED = null;
-        while (true) {
-            const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, 10_000);
-            if (ok == 0 and overlapped == null) return error.TestUnexpectedResult;
-            if (overlapped == &watch.overlapped) break;
-        }
-    }
-    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, @intFromEnum(id), &watch.overlapped) != 0);
-
-    var overflows: usize = 0;
-    var waited: u32 = 0;
-    while (waited < 10_000 and overflows == 0) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind != .overflow) continue;
-            try testing.expectEqual(id, event.id);
-            try testing.expectEqualStrings(root, event.path);
-            try testing.expectEqual(Target.directory, event.target);
-            overflows += 1;
-        }
-    }
-    try testing.expectEqual(@as(usize, 1), overflows);
-
-    // Re-armed: the watch is still held, and the next change is read.
-    try testing.expect(w.watches.contains(id));
-    try tmp.dir.writeFile(io, .{ .sub_path = "after.txt", .data = "x" });
-    const after = try std.fs.path.join(gpa, &.{ root, "after.txt" });
-    defer gpa.free(after);
-    var found = false;
-    waited = 0;
-    while (waited < 10_000 and !found) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
-        }
-    }
-    try testing.expect(found);
-}
-
-test "a lost read reads the entry counts again, so the budget holds after it" {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
-    // Three creations, read and counted; then the count set back to what
-    // it would have been had the kernel discarded them, which is what a
-    // read it could not hold does ("the entire contents of the buffer
-    // are discarded"). The completion that says so is posted by hand,
-    // as above. A count that is not read again stays three short for as
-    // long as the watch lasts.
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    const io = testing.io;
-
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(root);
-
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .windows, .max_dir_entries = 3 });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    while ((try watcher.poll(200)).len != 0) {}
-    const w = &watcher.impl.windows;
-    const watch = w.watches.get(id).?;
-
-    for ([_][]const u8{ "a", "b", "c" }) |name| {
-        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
-    }
-    var created: usize = 0;
-    var waited: u32 = 0;
-    while (waited < 10_000 and created < 3) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind == .created) created += 1;
-        }
-    }
-    try testing.expectEqual(@as(usize, 3), created);
-    try w.budget.misread(root, true, 0);
-
-    _ = c.CancelIoEx(watch.handle, &watch.overlapped);
-    {
-        var transferred: u32 = 0;
-        var key: usize = 0;
-        var overlapped: ?*c.OVERLAPPED = null;
-        while (true) {
-            const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, 10_000);
-            if (ok == 0 and overlapped == null) return error.TestUnexpectedResult;
-            if (overlapped == &watch.overlapped) break;
-        }
-    }
-    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, @intFromEnum(id), &watch.overlapped) != 0);
-
-    var overflowed = false;
-    waited = 0;
-    while (waited < 10_000 and !overflowed) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind == .overflow) overflowed = true;
-        }
-    }
-    try testing.expect(overflowed);
-    // Three entries: at the budget, as the folder is.
-    try testing.expectEqual(@as(usize, 3), w.budget.count(root).?);
-
-    // So the fourth is past it, and the watch is told.
-    try tmp.dir.writeFile(io, .{ .sub_path = "d", .data = "x" });
-    overflowed = false;
-    waited = 0;
-    while (waited < 10_000 and !overflowed) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
-        }
-    }
-    try testing.expect(overflowed);
-}
 
 /// The Win32 surface lookout uses, declared against `std.os.windows`'
 /// types.
@@ -1288,23 +1141,20 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     try testing.expect(watch.held_removal == null and watch.pending_rename == null);
 }
 
-test "allocation failure during delivery releases a removed Windows completion" {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
-    const testing = std.testing;
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
-    defer testing.allocator.free(root);
-    var failing = testing.FailingAllocator.init(testing.allocator, .{});
-    var watcher = try lookout.Watcher.init(failing.allocator(), testing.io, .{ .backend = .windows });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "change", .data = "x" });
-    failing.fail_index = failing.alloc_index;
-    try testing.expectError(error.OutOfMemory, watcher.poll(10_000));
-    failing.fail_index = std.math.maxInt(usize);
-    // The packet has been taken and no replacement read is outstanding.
-    // Removing it has no later completion to wait for before freeing it.
-    watcher.remove(id);
-    try testing.expect(watcher.impl.windows.retiring == null);
-}
+// Integration fixtures use the adapter’s own callback and native declarations.
+pub const test_access = if (@import("builtin").is_test) struct {
+    pub const free = freeFixture;
+    pub const c = cAccess;
+    pub const wants = wantsFixture;
+} else struct {};
+const windowsC = c;
+const wantsFixture = wants;
+
+const cAccess = struct {
+    pub const CancelIoEx = c.CancelIoEx;
+    pub const GetQueuedCompletionStatus = c.GetQueuedCompletionStatus;
+    pub const OVERLAPPED = c.OVERLAPPED;
+    pub const PostQueuedCompletionStatus = c.PostQueuedCompletionStatus;
+};
+
+const freeFixture = free;

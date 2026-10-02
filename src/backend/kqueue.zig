@@ -23,7 +23,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
 
-const lookout = @import("../lookout.zig");
+const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Deadline = @import("../Deadline.zig");
 const Tree = @import("../Tree.zig");
@@ -81,7 +81,7 @@ const file_open_flags: posix.O = switch (builtin.os.tag) {
 };
 
 /// Creates the kernel queue.
-pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!Kqueue {
+pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) @import("../watch_contract.zig").InitError!Kqueue {
     const rc = std.c.kqueue();
     if (rc < 0) return switch (posix.errno(rc)) {
         .MFILE => error.ProcessFdQuotaExceeded,
@@ -161,9 +161,9 @@ pub fn add(
     k: *Kqueue,
     id: WatchId,
     abs_path: []const u8,
-    options: lookout.AddOptions,
+    options: @import("../options.zig").AddOptions,
     batch: *Batch,
-) lookout.Watcher.AddError!void {
+) @import("../watch_contract.zig").AddError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(k.gpa);
     // A watch the kernel only half accepted is worse than none: it would
@@ -181,7 +181,7 @@ pub fn remove(k: *Kqueue, id: WatchId) void {
 }
 
 /// Reconciles descriptors with a live watch's new filter.
-pub fn refilter(k: *Kqueue, id: WatchId, filter: lookout.Filter, batch: *Batch) lookout.Watcher.RefilterError!void {
+pub fn refilter(k: *Kqueue, id: WatchId, filter: lookout.Filter, batch: *Batch) @import("../watch_contract.zig").RefilterError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(k.gpa);
     try k.tree.refilter(id, filter, &added, batch);
@@ -191,7 +191,7 @@ pub fn refilter(k: *Kqueue, id: WatchId, filter: lookout.Filter, batch: *Batch) 
 
 /// Waits on the kernel queue until it reports something `batch` did not
 /// already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
     // `kevent` both waits and takes the events off the queue, so once it
     // has returned, what it returned is recorded before anything stops:
     // see `Watcher.poll`. The wait itself is out of `std.Io`'s reach.
@@ -230,7 +230,7 @@ pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
     }
 }
 
-fn drain(k: *Kqueue, batch: *Batch) lookout.Watcher.PollError!bool {
+fn drain(k: *Kqueue, batch: *Batch) @import("../watch_contract.zig").PollError!bool {
     var woken = false;
     while (k.delivery_at < k.delivery_len) : (k.delivery_at += 1) {
         const event = k.delivery[k.delivery_at];
@@ -246,7 +246,7 @@ fn drain(k: *Kqueue, batch: *Batch) lookout.Watcher.PollError!bool {
 }
 
 /// Turns one kernel event into lookout events.
-fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollError!void {
+fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     const node_id: Tree.NodeId = @enumFromInt(event.udata);
     const node = k.tree.nodes.get(node_id) orelse return;
     const flags = event.fflags;
@@ -307,7 +307,7 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) lookout.Watcher.PollEr
 }
 
 /// Tells the kernel about newly created nodes.
-fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) lookout.Watcher.AddError!void {
+fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) @import("../watch_contract.zig").AddError!void {
     errdefer k.retry_registration = true;
     for (ids) |id| {
         if (k.registrations.contains(id)) continue;
@@ -369,7 +369,7 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) lookout.Watcher
 /// Reconciles an interrupted registration pass without depending on the
 /// caller's temporary list of newly created nodes. Only failures need
 /// this full traversal; ordinary waits still do work per kernel event.
-fn retryRegistrations(k: *Kqueue, batch: *Batch) lookout.Watcher.PollError!void {
+fn retryRegistrations(k: *Kqueue, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     k.closeOrphanedRegistrations();
     var i: usize = 0;
     while (i < k.tree.nodes.count()) {
@@ -402,7 +402,7 @@ fn closeOrphanedRegistrations(k: *Kqueue) void {
 
 /// Maps the POSIX open errors onto the error set `lookout.Watcher.add`
 /// publishes, which is the same on every backend.
-fn translateOpen(err: posix.OpenError) lookout.Watcher.AddError {
+fn translateOpen(err: posix.OpenError) @import("../watch_contract.zig").AddError {
     return switch (err) {
         error.FileNotFound => error.FileNotFound,
         error.NotDir => error.NotDir,
