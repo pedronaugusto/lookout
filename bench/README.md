@@ -12,17 +12,10 @@ speed checks use one round and retain functional assertions while skipping
 speed thresholds. Reports retain delivery/rename/setup counts and booleans,
 with no timing or CPU-time values. A successful smoke supports no speed claim.
 
-By default A is the last first-parent main commit before **2026-09-30 00:00:00
-+0100**, and B is current local main. The explicit time and offset enforce the
-midnight boundary (Git's date-only `--before=2026-09-30` can inherit the current
-time of day). `--before REV --after REV` selects other immutable snapshots.
-Each job runs A, B, then its existing same-job tools, repeating that order.
-Full mode retains three passes for latency/burst/idle and five for rename/setup;
-`BENCH_RUNS` overrides these. Each watcher invocation warms itself up with an
-observed event. Inputs are shared, mutable watch roots are separate and reset
-for every invocation. All samples remain visible; summaries use medians.
-Lookout's workload APIs required no adaptation. The final API's changed stream
-start/cursor behavior is exercised by those same calls.
+`revisions.json` fixes A at `6af22d4a5bb94956c6fa52fb07f4c40aec4c55db` and B at
+`b9249a0e345acf268ad23c902f9458b446f3cb4a`. A retains the original
+**2026-09-30 00:00:00 +01:00** cutoff. `--before REV --after REV` selects other
+immutable snapshots; refresh the pins when main advances.
 
 Jobs are single-file latency, 10,000/100,000-file bursts, 1,000 renames, idle and
 100-writes/second CPU time, recursive setup over 50,000 files, and existing
@@ -53,3 +46,7 @@ This is a planning estimate, not a measurement from this preparation. Have at
 least 3 GiB free for scratch and caches. `ZIG`, `GO`, `CARGO`, `PYTHON` and standard
 tool cache environment variables select installed tools/caches. The specialized
 `run.sh` remains; `quiet.sh` is the complete pass entry point.
+
+Standalone `zig build -Doptimize=Debug` compiles the pinned after harness
+without running it. Snapshot builds pass `-Dsnapshot=true` to compile the
+archived local revision instead; quiet runs retain ReleaseFast.

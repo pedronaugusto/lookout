@@ -61,6 +61,7 @@ class Pass:
     def zig(self, directory: Path):
         print(f'Building {directory.relative_to(self.scratch)}', flush=True)
         self.command([self.tool('zig'), 'build', '-j1', '-Doptimize=ReleaseFast',
+                      *(['-Dsnapshot=true'] if directory.name == 'bench' else []),
                       f'-Dsmoke={str(self.smoke).lower()}', '--prefix', directory / 'out',
                       '--cache-dir', directory / 'cache'], cwd=directory)
         return directory / 'out' / 'bin'
@@ -256,9 +257,9 @@ def main():
     parser.add_argument('--before', help='override the pre-pass main revision')
     parser.add_argument('--after', help='override current main')
     args = parser.parse_args()
-    before = git('rev-parse', f'{args.before}^{{commit}}') if args.before else git(
-        'log', '--first-parent', 'main', f'--before={CUTOFF}', '-1', '--format=%H')
-    after = git('rev-parse', f'{args.after or "main"}^{{commit}}')
+    pins = json.loads((HERE / 'revisions.json').read_text())
+    before = git('rev-parse', f'{args.before or pins["before"]}^{{commit}}')
+    after = git('rev-parse', f'{args.after or pins["after"]}^{{commit}}')
     if not before:
         parser.error('no main revision before cutoff')
     if not args.after:

@@ -5,6 +5,10 @@
     .fingerprint = 0x8f614f8ea3b59ff6,
     .dependencies = .{
         .lookout = .{ .path = ".." },
+        .after = .{
+            .url = "https://github.com/pedronaugusto/lookout/archive/b9249a0e345acf268ad23c902f9458b446f3cb4a.tar.gz",
+            .hash = "lookout-0.3.0-EbT0_1R6DQBDM8mf08bClmoKjIkHmIX5ZHpF5HTltqt-",
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

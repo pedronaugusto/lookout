@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(bool, "smoke", b.option(bool, "smoke", "Run one tiny iteration") orelse false);
     const optimize = b.standardOptimizeOption(.{});
-    const lookout_dep = b.dependency("lookout", .{
+    const lookout_dep = b.dependency(if (b.option(bool, "snapshot", "Build the archived local revision") orelse false) "lookout" else "after", .{
         .target = target,
         .optimize = optimize,
     });
