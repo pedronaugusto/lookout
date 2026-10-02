@@ -152,10 +152,15 @@ fn print_metric(
 }
 
 fn warm_up(source: &mut dyn EventSource, root: &Path) -> Result<(), Box<dyn Error>> {
+    // A write made as the watch starts can precede the event stream (FSEvents
+    // drops what happens before its stream runs), so write again until one
+    // arrives. Warm-up is not measured.
     let wanted = root.join(".warmup");
-    fs::write(&wanted, b"x")?;
     let deadline = Instant::now() + Duration::from_secs(5);
+    let mut written = 0u32;
     while Instant::now() < deadline {
+        fs::write(&wanted, written.to_string())?;
+        written += 1;
         if source
             .receive(RECEIVE_SLICE)
             .iter()

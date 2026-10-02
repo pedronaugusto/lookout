@@ -119,12 +119,14 @@ func receive(w *fsnotify.Watcher, timeout time.Duration) (*fsnotify.Event, error
 }
 
 func warmup(w *fsnotify.Watcher, root string) error {
+	// A write made as the watch starts can precede the event stream, so write
+	// again until one arrives. Warm-up is not measured.
 	wanted := filepath.Join(root, ".warmup")
-	if err := os.WriteFile(wanted, []byte("x"), 0o644); err != nil {
-		return err
-	}
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	for written := 0; time.Now().Before(deadline); written++ {
+		if err := os.WriteFile(wanted, []byte(strconv.Itoa(written)), 0o644); err != nil {
+			return err
+		}
 		event, err := receive(w, 100*time.Millisecond)
 		if err != nil {
 			return err
@@ -352,7 +354,9 @@ func renameWork(input, root string) error {
 }
 
 func cpuMicros() int64 {
-    if os.Getenv("BENCH_SMOKE") == "1" { return 0 }
+	if os.Getenv("BENCH_SMOKE") == "1" {
+		return 0
+	}
 	var usage syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
 		panic(err)
@@ -436,10 +440,14 @@ func treeSetup(root string) error {
 }
 
 func benchmarkNow() time.Time {
-    if os.Getenv("BENCH_SMOKE") == "1" { return time.Time{} }
-    return time.Now()
+	if os.Getenv("BENCH_SMOKE") == "1" {
+		return time.Time{}
+	}
+	return time.Now()
 }
 func benchmarkSince(start time.Time) time.Duration {
-    if os.Getenv("BENCH_SMOKE") == "1" { return time.Nanosecond }
-    return time.Since(start)
+	if os.Getenv("BENCH_SMOKE") == "1" {
+		return time.Nanosecond
+	}
+	return time.Since(start)
 }
