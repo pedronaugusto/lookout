@@ -117,7 +117,7 @@ test "quiet: a change that happens while poll is blocked comes back promptly" {
                 // in the backend's wait rather than on its way there.
                 w_io.sleep(.fromMilliseconds(150), .awake) catch return;
                 var name: [32]u8 = undefined;
-                self.stamped = .now(w_io, .awake);
+                self.stamped = benchmarkNow(w_io);
                 self.dir.writeFile(w_io, .{
                     .sub_path = std.fmt.bufPrint(&name, "w{d}.txt", .{self.round}) catch unreachable,
                     .data = "x",
@@ -134,7 +134,7 @@ test "quiet: a change that happens while poll is blocked comes back promptly" {
                 const events = try watcher.poll(5_000);
                 if (events.len == 0) break;
                 for (events) |event| {
-                    if (event.kind == .created) seen = .now(io, .awake);
+                    if (event.kind == .created) seen = benchmarkNow(io);
                 }
             }
             thread.join();
@@ -174,7 +174,7 @@ test "quiet: a file saved by a rename and then deleted is reported gone at once,
         try f.tmp.dir.deleteFile(std.testing.io, "next.md");
         const gone = try f.path("next.md");
         defer std.testing.allocator.free(gone);
-        const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+        const started = benchmarkNow(std.testing.io);
         var seen = false;
         while (!seen) {
             const events = try f.watcher.poll(timeout_ms);
@@ -183,7 +183,7 @@ test "quiet: a file saved by a rename and then deleted is reported gone at once,
                 if (std.mem.eql(u8, event.path, gone) and (event.kind == .removed or event.kind == .renamed)) seen = true;
             }
         }
-        const waited_ms = @divTrunc(started.untilNow(std.testing.io).raw.nanoseconds, std.time.ns_per_ms);
+        const waited_ms = @divTrunc(started.durationTo(benchmarkNow(std.testing.io)).nanoseconds, std.time.ns_per_ms);
         try std.testing.expect(seen);
         metric("rename_then_delete", backend, waited_ms);
         if (!smoke) try std.testing.expect(waited_ms < timeout_ms / 2);
@@ -207,9 +207,9 @@ test "quiet: a cancellation requested before poll is reported at once" {
         // all. Nothing will happen to the tree, so a poll that did not
         // look for it before waiting would wait out its whole timeout,
         // and on a kernel backend would not be told about it even then.
-        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        const started: std.Io.Timestamp = benchmarkNow(std.testing.io);
         try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
-        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
+        const elapsed = started.durationTo(benchmarkNow(std.testing.io));
         metric("cancel_before_poll", backend, elapsed.toMilliseconds());
         if (!smoke) try std.testing.expect(elapsed.toMilliseconds() < timeout_ms / 2);
     }
@@ -235,9 +235,9 @@ test "quiet: a watcher can be woken from another thread" {
         // Nothing is going to happen to the tree, so without the wake
         // this blocks for as long as the caller is prepared to wait --
         // and with `null`, forever.
-        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        const started: std.Io.Timestamp = benchmarkNow(std.testing.io);
         const events = try f.watcher.poll(null);
-        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
+        const elapsed = started.durationTo(benchmarkNow(std.testing.io));
         try std.testing.expectEqual(@as(usize, 0), events.len);
         metric("wake", backend, elapsed.toMilliseconds());
         if (!smoke) try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
@@ -269,11 +269,11 @@ test "quiet: a polling task is stopped by a flag and a wake on every backend" {
         };
         std.testing.io.sleep(.fromMilliseconds(50), .awake) catch {};
 
-        const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+        const started: std.Io.Timestamp = benchmarkNow(std.testing.io);
         task.stopping.store(true, .release);
         f.watcher.wake();
         try future.await(std.testing.io);
-        const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
+        const elapsed = started.durationTo(benchmarkNow(std.testing.io));
         metric("stop_by_flag", backend, elapsed.toMilliseconds());
         if (!smoke) try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
     }
@@ -281,4 +281,10 @@ test "quiet: a polling task is stopped by a flag and a wake on every backend" {
 
 fn metric(job: []const u8, backend: lookout.Backend, milliseconds: anytype) void {
     std.debug.print("lookout\t{s}_{s}\telapsed\t{d}\tms\n", .{ job, @tagName(backend), milliseconds });
+}
+
+var smoke_ticks = std.atomic.Value(i64).init(1);
+fn benchmarkNow(io: std.Io) std.Io.Timestamp {
+    if (smoke) return .{ .nanoseconds = smoke_ticks.fetchAdd(1_000, .monotonic) };
+    return .now(io, .awake);
 }

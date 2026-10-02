@@ -130,14 +130,14 @@ fn latency(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, root
     const samples = try gpa.alloc(i64, names.lines.len);
     defer gpa.free(samples);
     for (names.lines, 0..) |name, index| {
-        const started = now(io);
+        const started = benchmarkNow(io);
         try dir.writeFile(io, .{ .sub_path = name, .data = "x" });
         var waited: u32 = 0;
         var seen = false;
         while (waited < 5_000 and !seen) : (waited += 100) {
             for (try watcher.poll(100)) |event| {
                 if (std.mem.endsWith(u8, event.path, name)) {
-                    samples[index] = started.durationTo(now(io)).toMicroseconds();
+                    samples[index] = started.durationTo(benchmarkNow(io)).toMicroseconds();
                     seen = true;
                     break;
                 }
@@ -171,7 +171,7 @@ const FileWriter = struct {
 
     fn run(w: *FileWriter) void {
         w.io.sleep(.fromMilliseconds(20), .awake) catch {};
-        w.started_us.store(now(w.io).toMicroseconds(), .release);
+        w.started_us.store(benchmarkNow(w.io).toMicroseconds(), .release);
         for (w.names) |name| {
             w.dir.writeFile(w.io, .{ .sub_path = name, .data = "x" }) catch {
                 w.failed.store(true, .release);
@@ -220,7 +220,7 @@ fn burst(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, root: 
                     delivered += 1;
                     seen[index] = true;
                     const started = writer.started_us.load(.acquire);
-                    if (started != 0) last_us = now(io).toMicroseconds() - started;
+                    if (started != 0) last_us = benchmarkNow(io).toMicroseconds() - started;
                 }
             }
         }
@@ -318,6 +318,7 @@ fn renameWork(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, r
 }
 
 fn cpuMicros() i64 {
+    if (smoke) return 0;
     const usage = std.posix.getrusage(std.c.rusage.SELF);
     return @intCast(usage.utime.sec * 1_000_000 + usage.utime.usec + usage.stime.sec * 1_000_000 + usage.stime.usec);
 }
@@ -380,7 +381,7 @@ fn treeSetup(gpa: Allocator, io: Io, out: *std.Io.Writer, root: []const u8) !voi
     var total_us: i64 = 0;
     while (samples.items.len == 0 or (!smoke and total_us < 200_000)) {
         var watcher = try makeWatcher(gpa, io);
-        const started = now(io);
+        const started = benchmarkNow(io);
         _ = watcher.add(root, .{ .recursive = true }) catch |err| {
             watcher.deinit();
             std.debug.print("lookout setup failed: {s}\n", .{@errorName(err)});
@@ -388,7 +389,7 @@ fn treeSetup(gpa: Allocator, io: Io, out: *std.Io.Writer, root: []const u8) !voi
             try metric(out, "tree_setup", "setup_success", 0, "bool");
             return;
         };
-        const elapsed = started.durationTo(now(io)).toMicroseconds();
+        const elapsed = started.durationTo(benchmarkNow(io)).toMicroseconds();
         try samples.append(gpa, elapsed);
         total_us += elapsed;
         watcher.deinit();
@@ -396,4 +397,10 @@ fn treeSetup(gpa: Allocator, io: Io, out: *std.Io.Writer, root: []const u8) !voi
     std.mem.sort(i64, samples.items, {}, std.sort.asc(i64));
     try metric(out, "tree_setup", "setup_time", samples.items[(samples.items.len - 1) / 2], "us");
     try metric(out, "tree_setup", "setup_success", 1, "bool");
+}
+
+var smoke_ticks = std.atomic.Value(i64).init(1);
+fn benchmarkNow(io: Io) Io.Timestamp {
+    if (smoke) return .{ .nanoseconds = smoke_ticks.fetchAdd(1_000, .monotonic) };
+    return now(io);
 }

@@ -9,11 +9,13 @@ UNAVAILABLE = ['Parcel (not implemented)']
 
 
 def run(p, bins):
-    print('Building existing same-job tools', flush=True)
-    p.command([p.tool('cargo'), 'build', '-j1', '--manifest-path', 'src/rust/Cargo.toml', '--release', '--locked'])
+    print('Preparing existing same-job tools' if p.preparing else 'Using prepared same-job tools', flush=True)
+    p.setup_command([p.tool('cargo'), 'build', '-j1', '--manifest-path', 'src/rust/Cargo.toml', '--release', '--locked'])
     fsnotify = p.scratch / 'fsnotify-bench'
-    p.command([p.tool('go'), 'build', '-p=1', '-mod=readonly', '-trimpath', '-ldflags=-s -w', '-o', fsnotify, '.'], cwd=HERE / 'src/go')
-    p.command([p.tool('python'), 'src/generate_inputs.py', '--mode', 'smoke' if p.smoke else 'full'])
+    p.setup_command([p.tool('go'), 'build', '-p=1', '-mod=readonly', '-trimpath', '-ldflags=-s -w', '-o', fsnotify, '.'], cwd=HERE / 'src/go')
+    p.setup_command([p.tool('python'), 'src/generate_inputs.py', '--mode', 'smoke' if p.smoke else 'full'])
+    p.prepared.require(p.scratch / 'inputs')
+    p.prepared.require(fsnotify)
     config = json.loads((p.scratch / 'inputs/config.json').read_text())
     rust = p.env['CARGO_TARGET_DIR'] + '/release/'
     tools = [('before', bins['before'] / 'lookout-bench'), ('after', bins['after'] / 'lookout-bench'),

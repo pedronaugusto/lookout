@@ -15,6 +15,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+from prepared import Prepared
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -25,6 +26,10 @@ class Pass:
     def __init__(self, smoke: bool, scratch: Path, results: Path):
         self.smoke, self.scratch, self.results = smoke, scratch, results
         self.env = os.environ.copy()
+        self.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', PYTHONDONTWRITEBYTECODE='1')
+        self.preparing = smoke
+        self.plan_only = False
+        self.prepared = Prepared(HERE, scratch)
         self.env.update(BENCH_SMOKE='1' if smoke else '0',
                         BENCH_MODE='smoke' if smoke else 'full',
                         BENCH_BUILD_DIR=str(scratch))
@@ -35,7 +40,7 @@ class Pass:
                                 ('CARGO_TARGET_DIR', 'cargo-target'),
                                 ('GOCACHE', 'go-cache'), ('GOPATH', 'go-path'),
                                 ('GOMODCACHE', 'go-mod')]:
-            self.env.setdefault(name, str(cache / directory))
+            self.env[name] = str(cache / directory)
         self.data = {'schema': 1, 'mode': 'smoke' if smoke else 'full',
                      'status': 'preparing', 'timings_recorded': False,
                      'started_utc': utc(), 'samples': [], 'checks': []}
@@ -46,7 +51,7 @@ class Pass:
     def tool(self, name):
         return self.env.get('PYTHON', sys.executable) if name == 'python' else self.env.get(name.upper(), name)
 
-    def command(self, args, cwd=HERE, capture=False, timeout=1800):
+    def command(self, args, cwd=HERE, capture=False, timeout=None):
         result = subprocess.run([str(x) for x in args], cwd=cwd, env=self.env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, timeout=timeout)
@@ -58,33 +63,53 @@ class Pass:
             raise RuntimeError(f'{Path(str(args[0])).name} failed ({result.returncode})')
         return (result.stdout, result.stderr) if capture else result.stdout
 
+    def setup_command(self, args, **kwargs):
+        if self.preparing:
+            return self.command(args, **kwargs)
+        return ''
+
     def zig(self, directory: Path):
+        if not self.preparing:
+            return self.prepared.require(directory / 'out' / 'bin')
         print(f'Building {directory.relative_to(self.scratch)}', flush=True)
         self.command([self.tool('zig'), 'build', '-j1', '-Doptimize=ReleaseFast',
                       *(['-Dsnapshot=true'] if directory.name == 'bench' else []),
                       f'-Dsmoke={str(self.smoke).lower()}', '--prefix', directory / 'out',
                       '--cache-dir', directory / 'cache'], cwd=directory)
-        return directory / 'out' / 'bin'
+        return self.prepared.require(directory / 'out' / 'bin')
 
     def snapshots(self, before, after):
         binaries = {}
         for side, revision in [('before', before), ('after', after)]:
             root = self.scratch / side
-            root.mkdir()
-            archive = subprocess.check_output(['git', 'archive', revision], cwd=REPO)
-            subprocess.run(['tar', '-xf', '-', '-C', str(root)], input=archive, check=True)
-            if (root / 'bench').exists():
-                shutil.rmtree(root / 'bench')
+            if not self.preparing:
+                marker = root / '.bench-revision'
+                if not marker.exists() or marker.read_text() != revision:
+                    raise RuntimeError('Snapshot revision differs from preparation; run bench/quiet.sh --smoke')
+                binaries[side] = self.zig(root / 'bench')
+                continue
+            root.mkdir(parents=True, exist_ok=True)
+            marker = root / '.bench-revision'
+            if not marker.exists() or marker.read_text() != revision:
+                shutil.rmtree(root)
+                root.mkdir()
+                archive = subprocess.check_output(['git', 'archive', revision], cwd=REPO, env=self.env)
+                subprocess.run(['tar', '-xf', '-', '-C', str(root)], input=archive, check=True)
+                marker.write_text(revision)
             def ignored(directory, names):
                 return [n for n in names if n in {'build', 'results', '.zig-cache',
                         'zig-out', 'zig-pkg', 'target', '__pycache__'}]
-            shutil.copytree(HERE, root / 'bench', ignore=ignored)
+            shutil.copytree(HERE, root / 'bench', ignore=ignored, dirs_exist_ok=True)
             binaries[side] = self.zig(root / 'bench')
         return binaries
 
     def group(self, workload, sides, *, prepare=None, cleanup=None,
               parser='tsv', validate=None, warmup=True, repetitions=None):
         """For each job: A,B,A,B; comparisons follow each A/B pair."""
+        if self.plan_only:
+            for _, argv in sides:
+                if Path(str(argv[0])).is_absolute(): self.prepared.require(argv[0])
+            return
         print(f'Checking {workload}' if self.smoke else f'Running {workload}', flush=True)
         count = 1 if self.smoke else (self.runs if repetitions is None else repetitions)
         def invoke(side, args, trial):
@@ -256,7 +281,11 @@ def main():
     parser.add_argument('--smoke', action='store_true')
     parser.add_argument('--before', help='override the pre-pass main revision')
     parser.add_argument('--after', help='override current main')
+    parser.add_argument('--prepare-only', action='store_true', help='Build full artifacts without running workloads')
+    parser.add_argument('--check-prepared', action='store_true', help='Verify full artifacts without building or measuring')
     args = parser.parse_args()
+    if args.smoke:
+        subprocess.run([sys.executable, __file__, *[a for a in sys.argv[1:] if a != '--smoke'], '--prepare-only'], check=True)
     pins = json.loads((HERE / 'revisions.json').read_text())
     before = git('rev-parse', f'{args.before or pins["before"]}^{{commit}}')
     after = git('rev-parse', f'{args.after or pins["after"]}^{{commit}}')
@@ -269,36 +298,46 @@ def main():
     results.mkdir(parents=True)
     build = HERE / 'build'
     build.mkdir(exist_ok=True)
-    # A single pass owns its scratch; caches persist, measured fixtures do not.
-    with tempfile.TemporaryDirectory(prefix='quiet-', dir=build) as temporary:
-        p = Pass(args.smoke, Path(temporary), results)
-        import workloads
-        p.data.update(package=workloads.PACKAGE, before=before, after=after,
-                      cutoff=CUTOFF, optimize='ReleaseFast', harness_revision=git('rev-parse', 'HEAD'),
-                      harness_dirty=bool(git('status', '--porcelain', '--', 'bench')),
-                      comparisons=workloads.COMPARISONS,
-                      unavailable=getattr(workloads, 'UNAVAILABLE', []),
-                      trials=1 if args.smoke else p.runs)
-        digest = hashlib.sha256()
-        for name in sorted(git('ls-files', '--', 'bench').splitlines()):
-            source = REPO / name
-            if source.is_file():
-                digest.update(name.encode() + b'\0' + source.read_bytes())
-        p.data['harness_sha256'] = digest.hexdigest()
-        p.data['machine'] = machine(p)
+    # Smoke and full artifacts persist separately, including compiled snapshots.
+    scratch = build / 'quiet-prepared' / ('smoke' if args.smoke else 'full')
+    scratch.mkdir(parents=True, exist_ok=True)
+    p = Pass(args.smoke, scratch, results)
+    p.preparing = args.smoke or args.prepare_only
+    p.plan_only = args.prepare_only or args.check_prepared
+    if not p.preparing:
+        p.prepared.check()
+        if not json.loads(p.prepared.receipt.read_text()).get('smoke_passed'):
+            raise RuntimeError('Preparation has not passed smoke; run bench/quiet.sh --smoke')
+    import workloads
+    p.data.update(package=workloads.PACKAGE, before=before, after=after,
+                  cutoff=CUTOFF, optimize='ReleaseFast', harness_revision=git('rev-parse', 'HEAD'),
+                  harness_dirty=bool(git('status', '--porcelain', '--', 'bench')),
+                  comparisons=workloads.COMPARISONS,
+                  unavailable=getattr(workloads, 'UNAVAILABLE', []),
+                  trials=1 if args.smoke else p.runs)
+    digest = hashlib.sha256()
+    for name in sorted(git('ls-files', '--', 'bench').splitlines()):
+        source = REPO / name
+        if source.is_file():
+            digest.update(name.encode() + b'\0' + source.read_bytes())
+    p.data['harness_sha256'] = digest.hexdigest()
+    p.data['machine'] = machine(p)
+    p.persist()
+    try:
+        bins = p.snapshots(before, after)
+        p.data['status'] = 'running'
+        workloads.run(p, bins)
+        if args.prepare_only: p.prepared.write()
+        if args.smoke: Prepared(HERE, build/'quiet-prepared/full').certify()
+        p.data['status'] = 'passed'
+    except Exception as error:
+        p.data.update(status='failed', error=f'{type(error).__name__}: pass failed; see terminal')
+        raise
+    finally:
+        p.data['finished_utc'] = utc()
         p.persist()
-        try:
-            bins = p.snapshots(before, after)
-            p.data['status'] = 'running'
-            workloads.run(p, bins)
-            p.data['status'] = 'passed'
-        except Exception as error:
-            p.data.update(status='failed', error=f'{type(error).__name__}: pass failed; see terminal')
-            raise
-        finally:
-            p.data['finished_utc'] = utc()
-            p.persist()
-    print(f"{'Smoke checks' if args.smoke else 'Timed pass'} passed. Results: {results.relative_to(REPO)}")
+    label = 'Preparation' if args.prepare_only else 'Prepared checks' if args.check_prepared else 'Smoke checks' if args.smoke else 'Timed pass'
+    print(f"{label} passed. Results: {results.relative_to(REPO)}")
 
 
 if __name__ == '__main__':

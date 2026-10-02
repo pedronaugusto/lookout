@@ -1,0 +1,15 @@
+# Quiet preparation
+
+Run `./bench/quiet.sh --smoke` before leaving the Mac idle. It builds both pinned snapshots, full and smoke artifacts, comparison tools and both corpus sizes, then runs the existing correctness smoke without benchmark clock samples. `./bench/quiet.sh --check-prepared` checks the full artifacts without building or running a timed workload. Normal `./bench/quiet.sh` requires a matching preparation receipt and reuses those artifacts; missing/stale preparation fails before measurements.
+
+Snapshots and their compiler caches persist under `bench/build`; smoke and full Zig programs stay separate wherever smoke is a compile-time option. Installed comparison versions, source pins, full workload sizes, warm-ups, repetitions, comparison order and agreement checks are unchanged. Source identity and required artifact existence/sizes are checked without reading large corpus bytes into the page cache. Regenerate preparation after source/pin/tool changes or removal of build artifacts. Do not relocate the prepared worktree.
+
+Per-sample reset/copy/mutation and checks remain where the original protocol needs a fresh starting state. Executable-internal fixture construction and measured watch setup remain part of the original invocation. Network fixture servers still start for the transport pass. These costs belong in the estimate, even when outside an individual timing interval.
+
+Planning quiet duration: **15–25 minutes**, with all build/setup already completed, default repetitions, an idle Apple Silicon Mac and local SSD. This is an extrapolation, not a timing result or a deadline; there is no run time cap. It allows process startup, per-sample resets, reporting and correctness checks. Disk/fsync latency and compiler-backed graph analysis can exceed the range.
+
+Smoke invocation inventory: **27**. Full inventory: **105 (five tools × [3 latency + 3 burst + 5 rename + 3 idle + 5 setup], plus two backends × five)**. Unavailable rows are not executable calls.
+
+Each latency invocation writes 500 files with 50 ms gaps: 375 seconds of gaps over 15 invocations. Idle has two 10-second intervals per invocation: another 300 seconds. Bursts write 10,000 + 100,000 files per invocation (1,650,000 total); rename does 1,000 per invocation (25,000 total); setup watches the prebuilt 50,000-file tree. Quiet-drain waits, event delivery, recursive watch setup and backend checks remain.
+
+Planning assumptions across packages: local process start roughly 0.5–3 ms, durable storage operations roughly 0.5–3 ms, JSON processing roughly 50–300 MB/s, file create/scan roughly 5,000–30,000 files/s, and graph adapters roughly 1–30 seconds per invocation depending on the workspace. These deliberately broad assumptions are not measurements of this Mac. Fixed gaps, 200 ms codec loops, idle durations and repetition counts provide independent floors. The combined budget is **56–140 minutes (about 1–2 hours 20 minutes)**; no historical timing samples or smoke wall duration are used.

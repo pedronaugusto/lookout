@@ -176,7 +176,7 @@ fn latency(mode: Mode, input: &Path, root: &Path) -> Result<(), Box<dyn Error>> 
     let mut samples = Vec::with_capacity(names.len());
     for name in names {
         let wanted = root.join(&name);
-        let started = Instant::now();
+        let started = BenchmarkInstant::now();
         fs::write(&wanted, b"x")?;
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut seen = false;
@@ -239,7 +239,7 @@ fn burst(mode: Mode, input: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
         let writer_root = root.to_owned();
         let done = Arc::new(AtomicBool::new(false));
         let writer_done = done.clone();
-        let started = Instant::now();
+        let started = BenchmarkInstant::now();
         let writer = thread::spawn(move || {
             for name in names {
                 if let Err(error) = fs::write(writer_root.join(name), b"x") {
@@ -406,6 +406,7 @@ fn rename(mode: Mode, input: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn cpu_micros() -> u64 {
+    if smoke() { return 0; }
     unsafe {
         let mut usage: libc::rusage = std::mem::zeroed();
         assert_eq!(libc::getrusage(libc::RUSAGE_SELF, &mut usage), 0);
@@ -456,7 +457,7 @@ fn tree_setup(mode: Mode, root: &Path) -> Result<(), Box<dyn Error>> {
     let mut measured = Duration::ZERO;
     while samples.is_empty() || (!smoke() && measured < Duration::from_millis(200)) {
         let mut source = source(mode)?;
-        let started = Instant::now();
+        let started = BenchmarkInstant::now();
         if let Err(error) = source.watch(root) {
             eprintln!("{} setup failed: {error}", mode.side());
             println!("{}\ttree_setup\tsetup_time\tn/a\tus", mode.side());
@@ -480,3 +481,9 @@ fn tree_setup(mode: Mode, root: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn smoke() -> bool { std::env::var("BENCH_SMOKE").as_deref() == Ok("1") }
+
+struct BenchmarkInstant(Option<Instant>);
+impl BenchmarkInstant {
+    fn now() -> Self { Self(if smoke() { None } else { Some(Instant::now()) }) }
+    fn elapsed(&self) -> Duration { self.0.map_or(Duration::from_nanos(1), |start| start.elapsed()) }
+}

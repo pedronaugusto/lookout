@@ -66,6 +66,21 @@ class ProtocolTests(unittest.TestCase):
                         cleanup=lambda side: calls.append('cleanup'))
             self.assertEqual(calls, ['prepare', 'run', 'cleanup'])
 
+    def test_full_preflight_never_builds_or_invokes_workloads(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            p = self.make_pass(False, root)
+            p.preparing = False
+            p.plan_only = True
+            binary = root/'before/bench/out/bin/job'
+            binary.parent.mkdir(parents=True)
+            binary.write_text('prepared')
+            p.command = lambda *a, **k: self.fail('preflight executed a command')
+            self.assertEqual(p.zig(root/'before/bench'), binary.parent.resolve())
+            self.assertEqual(p.setup_command(['cargo', 'build']), '')
+            p.group('job', [('before', [binary])], prepare=lambda side: self.fail('mutated fixture'))
+            self.assertEqual(p.data['samples'], [])
+
     def test_unavailable_is_distinct_from_zero_and_bad_rows_fail(self):
         self.assertIsNone(parse_rows('tool\tjob\trate\tn/a\tlines/s\n')[0]['value'])
         self.assertEqual(parse_rows('tool\tjob\tmissed\t0\tfiles\n')[0]['value'], 0)
