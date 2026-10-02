@@ -66,8 +66,14 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
 };
 
+pub const entries: []const []const u8 = &.{};
+
 pub const modules: []const gantry.NamedModule = &.{};
 pub const references: []const gantry.rules.ReferenceRule = &.{
+    .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{
+        "builtin",
+        "std",
+    } },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
 };
 

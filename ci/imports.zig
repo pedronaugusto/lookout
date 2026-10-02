@@ -6,9 +6,16 @@ const declared = @import("layers.zig");
 pub const rules: gantry.rules.Rules = .{
     .ordered = &.{.{ .name = "layers", .layers = declared.layers }},
     .required = &.{.{ .name = "named sources", .paths = &declared.required }},
-    .nothing_imports = &.{.{ .name = "entry files", .to = "**/main.zig" }},
+    .nothing_imports = &entry_rules,
     .references = declared.references,
     .no_cycles = "cycles",
+};
+
+const entry_rules = blk: {
+    var result: [declared.entries.len + 1]gantry.rules.EdgeRule = undefined;
+    result[0] = .{ .name = "entry files", .to = "**/main.zig" };
+    for (declared.entries, 1..) |path, index| result[index] = .{ .name = "entry files", .to = path };
+    break :blk result;
 };
 
 fn keep(_: void, path: []const u8, kind: std.Io.File.Kind) bool {
@@ -46,11 +53,15 @@ pub fn main(init: std.process.Init) !void {
     const findings = try graph.check(a, rules);
     defer a.free(findings);
     for (graph.paths()) |path| {
-        var named = false;
+        var owners: usize = 0;
         for (declared.required) |source| if (std.mem.eql(u8, path, source)) {
-            named = true;
+            owners += 1;
         };
-        if (!named) {
+        if (owners > 1) {
+            std.debug.print("imports: {s}: source belongs to multiple layers\n", .{path});
+            return error.AmbiguousSource;
+        }
+        if (owners == 0) {
             std.debug.print("imports: {s}: source has no named layer\n", .{path});
             return error.UnnamedSource;
         }

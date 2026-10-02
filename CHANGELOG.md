@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Reject undeclared dependencies, duplicate layer membership and imports of source executables.
+
 - Pass the held inotify backend directly to synthetic read checks.
 
 - Keep synthetic inotify reads accessible to the relocated integration tests.
