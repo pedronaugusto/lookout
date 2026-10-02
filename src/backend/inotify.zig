@@ -928,3 +928,8 @@ fn removeOwner(n: *Inotify, registration_index: usize, id: WatchId) bool {
     }
     return false;
 }
+
+pub const test_access = if (@import("builtin").is_test) struct {
+    pub const handleRead = handleReadFixture;
+} else struct {};
+const handleReadFixture = handleRead;

@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Keep synthetic inotify reads accessible to the relocated integration tests.
+
 - Check named source layers, cycles, entry files and dependency owners during source CI.
 
 - Keep watch contracts below the watcher and its backends, with test assembly above them.

@@ -106,7 +106,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     // Straight into the batch the next poll returns, which is where a
     // read puts it.
     const n = &watcher.impl.inotify;
-    try n.handleRead(bytes[0..len], &watcher.batch);
+    try @import("backend/inotify.zig").test_access.handleRead(&n, bytes[0..len], &watcher.batch);
 
     var dir_overflows: usize = 0;
     var file_overflows: usize = 0;
@@ -181,7 +181,7 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
 
     var bytes: [records.header_len]u8 = undefined;
     const len = records.encode(&bytes, .{ .wd = -1, .mask = linux.IN.Q_OVERFLOW, .cookie = 0, .name = null });
-    try n.handleRead(bytes[0..len], &watcher.batch);
+    try @import("backend/inotify.zig").test_access.handleRead(&n, bytes[0..len], &watcher.batch);
     try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
     try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
     // Three entries: at the budget, as the folder is.
