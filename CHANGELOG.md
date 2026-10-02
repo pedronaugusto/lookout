@@ -6,7 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Reject undeclared dependencies, duplicate layer membership and imports of source executables.
+
+- Pass the held inotify backend directly to synthetic read checks.
+
+- Keep synthetic inotify reads accessible to the relocated integration tests.
+
+- Check named source layers, cycles, entry files and dependency owners during source CI.
+
+- Keep watch contracts below the watcher and its backends, with test assembly above them.
+
+- Bound local Zig build caches before builds, retaining downloaded packages and tools.
+
 ### Changed
+
+- The README usage excerpt keeps the example calls without the surrounding commentary.
 
 - The settling test checks every interim batch and the exact deadline after the last write through a controlled clock.
 

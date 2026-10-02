@@ -25,22 +25,14 @@ pub fn main() !void {
 
     // --- README:usage ---
 
-    // One watcher, one watch. `auto` means FSEvents on Apple platforms,
-    // kqueue on the BSDs, inotify on Linux, ReadDirectoryChangesW on
-    // Windows, and polling anywhere else.
     var watcher: lookout.Watcher = try .init(gpa, io, .{});
     defer watcher.deinit();
 
     const id = try watcher.add(dir_path, .{ .recursive = true });
     defer watcher.remove(id);
 
-    // Something changes the tree. In a real program this is someone else:
-    // an editor saving, a build writing, a package manager unpacking.
     try scratch.writeFile(io, .{ .sub_path = "notes.txt", .data = "hello" });
 
-    // `poll` blocks until something happens or the timeout expires, and
-    // returns one event per path, coalesced. The slice and every path in
-    // it belong to the watcher until the next call.
     for (try watcher.poll(1_000)) |event| {
         std.debug.print("{s} {s}\n", .{ @tagName(event.kind), event.path });
     }

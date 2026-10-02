@@ -14,4 +14,11 @@
         "LICENSE",
         "README.md",
     },
+    .dependencies = .{
+        .gantry = .{
+            .url = "git+https://github.com/pedronaugusto/gantry#70fec2b48206b224b8f37b80a9ba4509fbceb9c4",
+            .hash = "gantry-0.1.0-1iNrkQGcBAB2GKOphtOijBq388UW2CCqJ18MsYkCHCSJ",
+            .lazy = true,
+        },
+    },
 }

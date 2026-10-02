@@ -13,7 +13,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const lookout = @import("lookout.zig");
+const lookout = @import("types.zig");
 const Batch = @import("Batch.zig");
 const Filter = @import("Filter.zig");
 const Snapshot = @import("Snapshot.zig");
@@ -25,7 +25,7 @@ const Tree = @This();
 
 gpa: Allocator,
 io: Io,
-/// Mirrors `lookout.Options.max_dir_entries`.
+/// Mirrors `@import("options.zig").Options.max_dir_entries`.
 max_dir_entries: usize,
 /// Whether a directory node also gets a node per regular file inside it.
 ///
@@ -54,9 +54,9 @@ pub const Watch = struct {
     /// `lookout.Kind.overflow` is reported against.
     root: []u8,
     target: Target,
-    /// `lookout.AddOptions.recursive`.
+    /// `@import("options.zig").AddOptions.recursive`.
     recursive: bool,
-    /// `lookout.AddOptions.filter`, copied: the patterns are borrowed
+    /// `@import("options.zig").AddOptions.filter`, copied: the patterns are borrowed
     /// only for the duration of the `add` that supplied them.
     filter: Filter,
 };
@@ -127,7 +127,7 @@ pub fn addWatch(
     t: *Tree,
     id: WatchId,
     abs_path: []const u8,
-    options: lookout.AddOptions,
+    options: @import("options.zig").AddOptions,
     added: *std.ArrayList(NodeId),
     batch: *Batch,
 ) AddError!void {
@@ -460,7 +460,7 @@ fn isRecursive(t: *Tree, id: WatchId) bool {
 }
 
 /// Whether `subject` is outside what the watch `id` is about, so no
-/// event for it is reported. See `lookout.AddOptions.filter`.
+/// event for it is reported. See `@import("options.zig").AddOptions.filter`.
 fn excluded(t: *const Tree, id: WatchId, subject: []const u8) bool {
     const watch = t.watches.get(id) orelse return false;
     return watch.filter.excludes(watch.root, subject);

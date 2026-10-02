@@ -1,6 +1,6 @@
 //! The private, versioned checkpoint wire format.
 
-const lookout = @import("lookout.zig");
+const lookout = @import("types.zig");
 
 /// The serialized format is versioned independently of the package.
 pub const State = struct {

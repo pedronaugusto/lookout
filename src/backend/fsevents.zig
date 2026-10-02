@@ -6,7 +6,7 @@
 //! changed, where `kqueue` says only that a directory moved; it pairs
 //! the two halves of a rename; and it is the only one of the five that
 //! can say what happened before the watch existed, which is
-//! `lookout.Options.checkpoint`. That is why it, and not `kqueue`, is
+//! `@import("../options.zig").Options.checkpoint`. That is why it, and not `kqueue`, is
 //! `lookout.default_backend` on Apple targets.
 //!
 //! What it costs in exchange:
@@ -17,9 +17,9 @@
 //!   byte to a pipe, and everything else happens on the thread that calls
 //!   `lookout.Watcher.poll`. `lookout.Watcher.fd` hands out the read end of
 //!   that pipe, so a program with a wait loop of its own still works.
-//!   How much that buffer holds is `lookout.Options.buffer_bytes`.
+//!   How much that buffer holds is `@import("../options.zig").Options.buffer_bytes`.
 //! * FSEvents coalesces on its own, before lookout sees anything. Its
-//!   stream uses `lookout.Options.latency_ms` for that window and
+//!   stream uses `@import("../options.zig").Options.latency_ms` for that window and
 //!   `NoDefer`, so the first event is requested without waiting for the
 //!   rest of the window. Passing zero removes lookout's delay, but macOS
 //!   still imposed a measured 10.459 ms median (11.714 ms p99) delivery
@@ -34,7 +34,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
 
-const lookout = @import("../lookout.zig");
+const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Volume = @import("fsevents_volume.zig");
 const checkpoint_format = @import("../checkpoint_format.zig");
@@ -69,11 +69,11 @@ staging: std.ArrayList(u8),
 /// succeeds, including a delivery containing only an overflow notice.
 staging_overflowed: bool = false,
 /// How many entries each watched directory holds, against
-/// `lookout.Options.max_dir_entries`.
+/// `@import("../options.zig").Options.max_dir_entries`.
 budget: Budget,
 /// Owned restarting state, copied at init. Each stream consumes its matching
 /// watch only after registration and restoration succeed.
-restarting: ?lookout.Checkpoint,
+restarting: ?@import("../Checkpoint.zig"),
 resume_used: []bool,
 /// Every path each watch believes exists, seeded by walking the watch
 /// when it is added and kept current from what it reports. Path keys are
@@ -92,7 +92,7 @@ known: std.ArrayHashMapUnmanaged(KnownKey, void, KnownKeyContext, true),
 /// path it holds is owned here -- see `records.Half`.
 pairing: records.Pairing,
 /// FSEvents' coalescing window, in seconds. The stream takes the same
-/// window as `lookout.Options.latency_ms`; `NoDefer` still makes its
+/// window as `@import("../options.zig").Options.latency_ms`; `NoDefer` still makes its
 /// first event immediate.
 stream_latency: f64,
 
@@ -113,7 +113,7 @@ const KnownKeyContext = struct {
     }
 };
 
-/// What `lookout.Options.buffer_bytes` may ask for here.
+/// What `@import("../options.zig").Options.buffer_bytes` may ask for here.
 ///
 /// The default holds a burst of ten thousand paths without losing one:
 /// a record is a twenty-byte header and the path, so four megabytes is
@@ -175,7 +175,7 @@ const SpinLock = struct {
 /// callback.
 const Sink = struct {
     lock: SpinLock,
-    /// Sized by `lookout.Options.buffer_bytes`, allocated once at `init`
+    /// Sized by `@import("../options.zig").Options.buffer_bytes`, allocated once at `init`
     /// and never moved: the delivery thread writes into it.
     buffer: []u8,
     len: usize,
@@ -229,7 +229,7 @@ const Stream = struct {
     /// Which paths under the stream's own root this watch is about.
     /// FSEvents is always recursive, so a narrower watch is a filter.
     scope: Scope,
-    /// `lookout.AddOptions.filter`, copied.
+    /// `@import("../options.zig").AddOptions.filter`, copied.
     ///
     /// FSEvents recurses in the kernel and cannot be told to leave a
     /// directory out, so here the filter drops the events rather than
@@ -239,7 +239,7 @@ const Stream = struct {
     cursor: u64,
     resume_index: ?usize,
     /// Whether this stream was started from a checkpoint rather than from
-    /// now, which `lookout.Options.checkpoint` asked for. See `catchingUp`.
+    /// now, which `@import("../options.zig").Options.checkpoint` asked for. See `catchingUp`.
     resumed: bool,
     /// When `HistoryDone` arrived, or `null` while the system is still
     /// reading its log. See `catchingUp`.
@@ -261,7 +261,7 @@ const Stream = struct {
     };
 
     /// Whether this stream is still catching up on what happened
-    /// before it existed, which `lookout.Options.checkpoint` asked for.
+    /// before it existed, which `@import("../options.zig").Options.checkpoint` asked for.
     ///
     /// It changes what a path that is not there means. In the ordinary
     /// way, a path FSEvents names that is gone and that lookout has
@@ -343,7 +343,7 @@ const lost_track: u32 = flag.must_scan_sub_dirs | flag.user_dropped | flag.kerne
 
 /// Creates the delivery queue, the buffer it fills, and the pipe the
 /// watcher is woken through.
-pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!FsEvents {
+pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) @import("../watch_contract.zig").InitError!FsEvents {
     var fds: [2]posix.fd_t = undefined;
     if (std.c.pipe(&fds) != 0) return switch (posix.errno(@as(c_int, -1))) {
         .MFILE => error.ProcessFdQuotaExceeded,
@@ -382,7 +382,7 @@ pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.In
         return error.SystemResources;
 
     errdefer c.dispatch_release(queue);
-    var restarting: ?lookout.Checkpoint = if (options.checkpoint) |checkpoint|
+    var restarting: ?@import("../Checkpoint.zig") = if (options.checkpoint) |checkpoint|
         .{ .state = try checkpoint_format.copy(gpa, checkpoint.state.value) }
     else
         null;
@@ -438,7 +438,7 @@ pub fn fd(f: *const FsEvents) ?posix.fd_t {
 /// Copies only polling-thread state. Callback bytes are still in the log
 /// beyond each stream's cursor and need no snapshot copy. A retained failed
 /// drain has not committed its cursor and must be retried first.
-pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_ready: bool, roots: []const lookout.Watcher.WatchInfo) Allocator.Error!?lookout.Checkpoint {
+pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_ready: bool, roots: []const @import("../watch_contract.zig").WatchInfo) Allocator.Error!?@import("../Checkpoint.zig") {
     if (f.staging.items.len != 0 or f.staging_overflowed) return null;
     var watches: std.ArrayList(checkpoint_format.Watch) = .empty;
     defer watches.deinit(gpa);
@@ -523,15 +523,15 @@ pub fn add(
     f: *FsEvents,
     id: WatchId,
     abs_path: []const u8,
-    options: lookout.AddOptions,
+    options: @import("../options.zig").AddOptions,
     batch: *Batch,
-) lookout.Watcher.AddError!void {
+) @import("../watch_contract.zig").AddError!void {
     return f.addFor(id, abs_path, abs_path, options, batch);
 }
 
 /// The caller's root identifies a resume watch even when its registration
 /// is parked on an ancestor while that root is absent.
-pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: lookout.AddOptions, batch: *Batch) lookout.Watcher.AddError!void {
+pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: @import("../options.zig").AddOptions, batch: *Batch) @import("../watch_contract.zig").AddError!void {
     try f.streams.ensureUnusedCapacity(f.gpa, 1);
     var stream = try f.startStream(id, abs_path, requested, options, false);
     // The table owns the started stream and its initial state. If the
@@ -567,7 +567,7 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
 
 /// Creates and starts a stream, transferring ownership only on success.
 /// Seeding happens after start so changes during the walk stay queued.
-fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: lookout.AddOptions, force_live: bool) lookout.Watcher.AddError!*Stream {
+fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: @import("../options.zig").AddOptions, force_live: bool) @import("../watch_contract.zig").AddError!*Stream {
     const stat = try Io.Dir.cwd().statFile(f.io, abs_path, .{});
     const scope: Stream.Scope = if (stat.kind != .directory)
         .file
@@ -648,7 +648,7 @@ fn createStream(
     subject: []const u8,
     since: u64,
     latency: f64,
-) lookout.Watcher.AddError!c.FSEventStreamRef {
+) @import("../watch_contract.zig").AddError!c.FSEventStreamRef {
     const cf_path = c.CFStringCreateWithBytes(
         null,
         subject.ptr,
@@ -684,7 +684,7 @@ fn createStream(
 /// A tree crossing a mount needs the host's live namespace. A host cursor
 /// cannot be persisted safely. The caller reports the registration gap as
 /// loss in its own delivery phase; checkpoints stay unavailable for this watch.
-fn useLiveStream(f: *FsEvents, id: WatchId) lookout.Watcher.AddError!void {
+fn useLiveStream(f: *FsEvents, id: WatchId) @import("../watch_contract.zig").AddError!void {
     const old = f.streams.get(id).?;
     if (!old.persistent) return;
     const next = try f.startStream(id, old.root, old.root, .{ .recursive = old.scope == .tree, .filter = old.filter }, true);
@@ -733,7 +733,7 @@ fn withoutStream(bytes: []u8, id: WatchId) usize {
 
 /// Replaces the delivery filter, retaining the stream unless newly reached
 /// mounts require the host namespace.
-pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) lookout.Watcher.RefilterError!void {
+pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) @import("../watch_contract.zig").RefilterError!void {
     const stream = f.streams.get(id) orelse return error.UnknownWatch;
     const replacement = try next.dupe(f.gpa);
     var previous = stream.filter;
@@ -853,7 +853,7 @@ fn deliver(
 
 /// Waits on the wake pipe until the drain produces something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
     // A drain takes the delivery thread's records and decides what each
     // one was, asking the file system as it goes, so nothing in here is a
     // place to stop: see `Watcher.poll`. The wait itself is out of
@@ -866,7 +866,7 @@ pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollE
     try f.resolveHeld(batch);
 }
 
-fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
     const before = batch.revision;
     const deadline: Deadline = .start(f.io, timeout_ms);
 
@@ -912,7 +912,7 @@ fn readable(f: *FsEvents, timeout: i32) bool {
 
 /// Takes everything the delivery thread has left and turns it into
 /// events.
-fn drain(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
+fn drain(f: *FsEvents, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     // A failed drain keeps its bytes. Replaying can repeat bookkeeping,
     // which Watcher.poll covers with its conservative recovery notice.
     errdefer f.budget.reread({}, everyDirectory);
@@ -1049,7 +1049,7 @@ fn everyDirectory(_: void, _: []const u8) bool {
 
 /// Joins the half held from the last drain to its partner in this one,
 /// or gives up on it.
-fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) lookout.Watcher.PollError!void {
+fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) @import("../watch_contract.zig").PollError!void {
     const taken = f.pairing.take(delivered, used, Asking{ .f = f }) orelse return;
     errdefer {
         f.pairing.held = taken.half;
@@ -1060,7 +1060,7 @@ fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) 
 }
 
 /// The pairing owns the half until reporting it and its partner succeeds.
-fn reportTaken(f: *FsEvents, batch: *Batch, delivered: []const Record, taken: records.Pairing.Taken) lookout.Watcher.PollError!void {
+fn reportTaken(f: *FsEvents, batch: *Batch, delivered: []const Record, taken: records.Pairing.Taken) @import("../watch_contract.zig").PollError!void {
     const at = taken.partner orelse return f.reportHalf(batch, taken.half);
     const stream = f.streams.get(taken.half.id) orelse return f.reportHalf(batch, taken.half);
 
@@ -1106,7 +1106,7 @@ fn report(
     used: []bool,
     at: usize,
     losses: *std.ArrayList(Loss),
-) lookout.Watcher.PollError!void {
+) @import("../watch_contract.zig").PollError!void {
     const record = delivered[at];
     const stream = f.streams.get(record.id) orelse {
         trace.log("fsevents drop no-stream watch={d} path={s}", .{ @intFromEnum(record.id), record.path });
@@ -1123,7 +1123,7 @@ fn report(
         try losses.append(f.gpa, .{ .stream = stream, .at = record.path });
     }
     // The marker that the system has finished reading its log back to
-    // the position `lookout.Options.checkpoint` named. Nothing happened to a
+    // the position `@import("../options.zig").Options.checkpoint` named. Nothing happened to a
     // path, so there is nothing to report; it is declared and swallowed
     // rather than left to look like a change to the watch root. What it
     // is kept for is `Stream.catchingUp`, which measures the tail that
@@ -1209,7 +1209,7 @@ fn reportPlain(
     batch: *Batch,
     record: Record,
     stream: *const Stream,
-) lookout.Watcher.PollError!void {
+) @import("../watch_contract.zig").PollError!void {
     const seen = f.known.contains(.{ .id = record.id, .path = record.path });
     // A known path with no removal or rename flag, and a newly-created
     // path with neither, are present as far as this record can say. A
@@ -1322,7 +1322,7 @@ fn adopt(
     id: WatchId,
     root: []const u8,
     stream: *const Stream,
-) lookout.Watcher.PollError!void {
+) @import("../watch_contract.zig").PollError!void {
     try f.budget.begin(root);
     defer f.budget.end();
     const Adopting = struct {
@@ -1372,7 +1372,7 @@ fn joined(
     to: []const u8,
     from: []const u8,
     target: Target,
-) lookout.Watcher.PollError!void {
+) @import("../watch_contract.zig").PollError!void {
     const id = stream.id;
     const keeps_to = !stream.filter.excludes(stream.root, to);
     const keeps_from = !stream.filter.excludes(stream.root, from);
@@ -1404,7 +1404,7 @@ fn joined(
 
 /// Holds an unpaired rename until the next delivery arrives. Anything
 /// already held has waited as long as it is going to.
-fn hold(f: *FsEvents, batch: *Batch, record: Record) lookout.Watcher.PollError!void {
+fn hold(f: *FsEvents, batch: *Batch, record: Record) @import("../watch_contract.zig").PollError!void {
     // Copied first: the buffer the record points into is emptied before
     // the next delivery is read, and a dupe that fails must leave what
     // is already held where it was.
@@ -1422,7 +1422,7 @@ fn hold(f: *FsEvents, batch: *Batch, record: Record) lookout.Watcher.PollError!v
 
 /// Gives up on a half that never found its partner, at the end of the
 /// whole wait rather than at the end of one delivery.
-fn resolveHeld(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
+fn resolveHeld(f: *FsEvents, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     const half = f.pairing.held orelse return;
     try f.reportHalf(batch, half);
     f.pairing.held = null;
@@ -1433,7 +1433,7 @@ fn resolveHeld(f: *FsEvents, batch: *Batch) lookout.Watcher.PollError!void {
 /// out of the watch, or renamed and then deleted, and what is left is
 /// the removal or the creation the other backends would give. A half on
 /// a name the filter excludes is never held -- see `report`.
-fn reportHalf(f: *FsEvents, batch: *Batch, half: records.Half) lookout.Watcher.PollError!void {
+fn reportHalf(f: *FsEvents, batch: *Batch, half: records.Half) @import("../watch_contract.zig").PollError!void {
     const stream = f.streams.get(half.id) orelse return;
     trace.log("fsevents unpaired renamed path={s}", .{half.path});
     try f.reportPlain(batch, half.record(), stream);
@@ -1486,7 +1486,7 @@ fn refreshKnown(
     id: WatchId,
     root: []const u8,
     stream: *const Stream,
-) lookout.Watcher.PollError!void {
+) @import("../watch_contract.zig").PollError!void {
     f.forgetSubtree(id, root);
     try f.remember(id, root);
 
@@ -1605,10 +1605,6 @@ fn incomplete(f: *FsEvents, batch: *Batch, stream: *const Stream) Allocator.Erro
     try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
 }
 
-test "FSEvents initialization preserves sink allocator failure" {
-    try expectInitAllocationFailure(0);
-}
-
 test "FSEvents refuses a watch whose initial names could not be remembered" {
     const testing = std.testing;
     const gpa = testing.allocator;
@@ -1690,60 +1686,6 @@ test "removing an FSEvents stream releases its unreported delivery state" {
     for (batch.events.items) |event| try testing.expect(event.id != gone);
 }
 
-test "FSEvents initialization preserves buffer allocator failure" {
-    try expectInitAllocationFailure(1);
-}
-
-fn expectInitAllocationFailure(fail_index: usize) !void {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
-    try std.testing.expectError(error.OutOfMemory, lookout.Watcher.init(
-        failing.allocator(),
-        std.testing.io,
-        .{ .backend = .fsevents },
-    ));
-}
-
-test "FSEvents access failures preserve known paths and report an incomplete answer" {
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    const io = testing.io;
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "one" });
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(root);
-    const kept = try std.fs.path.join(gpa, &.{ root, "kept" });
-    defer gpa.free(kept);
-
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    const f = &watcher.impl.fsevents;
-    const stream = f.streams.get(id).?;
-    inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
-        var vtable = io.vtable.*;
-        vtable.dirStatFile = struct {
-            fn stat(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
-                if (std.mem.eql(u8, std.fs.path.basename(path), "kept")) return failure;
-                return testing.io.vtable.dirStatFile(userdata, dir, path, options);
-            }
-        }.stat;
-        f.io.vtable = &vtable;
-        try testing.expect(!records.pairs(
-            .{ .id = id, .path = kept, .flags = flag.item_renamed, .event = 0 },
-            .{ .id = id, .path = root, .flags = flag.item_renamed, .event = 0 },
-            Asking{ .f = f },
-        ));
-        try f.reportPlain(&watcher.batch, .{ .id = id, .path = kept, .flags = flag.item_removed, .event = 0 }, stream);
-        try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
-        try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
-        try testing.expectEqualStrings(root, watcher.batch.events.items[0].path);
-        try testing.expect(f.known.contains(.{ .id = id, .path = kept }));
-        f.io = io;
-        watcher.batch.reset(gpa);
-    }
-}
-
 /// Keeps the entry budget of the directory a change happened in, and
 /// reports `lookout.Kind.overflow` when it is past.
 ///
@@ -1759,7 +1701,7 @@ fn recount(
     subject: []const u8,
     move: Budget.Move,
     stream: *const Stream,
-) lookout.Watcher.PollError!void {
+) @import("../watch_contract.zig").PollError!void {
     const change: Change = .{
         .dir = std.fs.path.dirname(subject) orelse return,
         .subject = subject,
@@ -1842,271 +1784,6 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
 
 /// Polls until one `overflow` arrives, checks it against the watch it is
 /// for, and then that no second one follows it.
-fn expectOneOverflow(watcher: *lookout.Watcher, id: WatchId, root: []const u8, target: Target) !void {
-    var overflows: usize = 0;
-    var waited: u32 = 0;
-    while (waited < 10_000 and overflows == 0) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind != .overflow) continue;
-            try std.testing.expectEqual(id, event.id);
-            try std.testing.expectEqualStrings(root, event.path);
-            try std.testing.expectEqual(target, event.target);
-            overflows += 1;
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 1), overflows);
-    while (true) {
-        const events = try watcher.poll(200);
-        if (events.len == 0) return;
-        for (events) |event| try std.testing.expect(event.kind != .overflow);
-    }
-}
-
-test "the flags that say the system lost track are one overflow, and the watch goes on" {
-    // FSEvents.h on `kFSEventStreamEventFlagMustScanSubDirs`: "Your
-    // application must rescan not just the directory given in the event,
-    // but all its children, recursively. This can happen if there was a
-    // problem whereby events were coalesced hierarchically", with
-    // `UserDropped` and `KernelDropped` set beside it to say where. A
-    // hundred thousand creations against the smallest buffer this
-    // backend takes did not make the kernel set any of the three -- the
-    // callback is a bounded copy, so this process is never the
-    // bottleneck -- so the delivery is made by hand, through the
-    // callback the system calls and the buffer it writes.
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    const io = testing.io;
-
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(root);
-    try tmp.dir.createDirPath(io, "sub");
-    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
-    const sub = try std.fs.path.join(gpa, &.{ root, "sub" });
-    defer gpa.free(sub);
-    const file = try std.fs.path.join(gpa, &.{ root, "a.txt" });
-    defer gpa.free(file);
-
-    // The caller's half of the contract: seeded where the watch is taken.
-    var baseline: lookout.Baseline = try .seed(gpa, io, root, .{ .recursive = true });
-    defer baseline.deinit(gpa);
-
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const tree = try watcher.add(root, .{ .recursive = true });
-    const single = try watcher.add(file, .{});
-    while ((try watcher.poll(200)).len != 0) {}
-    const f = &watcher.impl.fsevents;
-
-    // What the lost events would have carried.
-    try tmp.dir.writeFile(io, .{ .sub_path = "missed.txt", .data = "x" });
-
-    // One delivery, the three flags across it, at the root and below it:
-    // one overflow, against the root.
-    try synthesize(gpa, f.streams.get(tree).?, &.{
-        .{ .path = root, .flags = flag.must_scan_sub_dirs | flag.kernel_dropped },
-        .{ .path = sub, .flags = flag.must_scan_sub_dirs | flag.user_dropped },
-        .{ .path = root, .flags = flag.must_scan_sub_dirs },
-    });
-    try expectOneOverflow(&watcher, tree, root, .directory);
-
-    // The tree read again, which is what the event asks for.
-    var recovered = false;
-    for (try baseline.diff(gpa)) |change| {
-        if (change.kind == .created and std.mem.endsWith(u8, change.path, "missed.txt")) recovered = true;
-    }
-    try testing.expect(recovered);
-
-    // A watch on a file has its stream on the parent directory, and the
-    // loss is reported there: a path the watch wants no event for, and
-    // the one place its events could have been lost.
-    try synthesize(gpa, f.streams.get(single).?, &.{
-        .{ .path = root, .flags = flag.must_scan_sub_dirs | flag.kernel_dropped },
-    });
-    try expectOneOverflow(&watcher, single, file, .file);
-
-    // A loss coalesced above the root took the root's events with it.
-    try synthesize(gpa, f.streams.get(tree).?, &.{
-        .{ .path = std.fs.path.dirname(root).?, .flags = flag.user_dropped },
-    });
-    try expectOneOverflow(&watcher, tree, root, .directory);
-
-    // And both watches are still watching.
-    try tmp.dir.writeFile(io, .{ .sub_path = "after.txt", .data = "x" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one and two" });
-    const after = try std.fs.path.join(gpa, &.{ root, "after.txt" });
-    defer gpa.free(after);
-    var saw_after = false;
-    var saw_file = false;
-    var waited: u32 = 0;
-    while (waited < 10_000 and !(saw_after and saw_file)) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.id == tree and event.kind == .created and std.mem.eql(u8, event.path, after)) saw_after = true;
-            if (event.id == single and event.kind == .modified and std.mem.eql(u8, event.path, file)) saw_file = true;
-        }
-    }
-    try testing.expect(saw_after);
-    try testing.expect(saw_file);
-}
-
-test "a loss the system reports reads the entry counts again, so the budget holds after it" {
-    // Three folders made and counted; then the count set back to what it
-    // would have been had their records been lost, and the loss said
-    // the two ways it is said here -- by the system, through the
-    // callback it calls, and by the delivery buffer when a delivery does
-    // not fit. A count that is not read again stays three short for as
-    // long as the watch lasts.
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    const io = testing.io;
-
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(root);
-    try tmp.dir.createDirPath(io, "sub");
-    const sub = try std.fs.path.join(gpa, &.{ root, "sub" });
-    defer gpa.free(sub);
-
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .max_dir_entries = 3 });
-    defer watcher.deinit();
-    const tree = try watcher.add(root, .{ .recursive = true });
-    while ((try watcher.poll(200)).len != 0) {}
-    const f = &watcher.impl.fsevents;
-
-    for ([_][]const u8{ "sub/a", "sub/b", "sub/c" }) |name| try tmp.dir.createDirPath(io, name);
-    var created: usize = 0;
-    var waited: u32 = 0;
-    while (waited < 10_000 and created < 3) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind == .created) created += 1;
-        }
-    }
-    try testing.expectEqual(@as(usize, 3), created);
-    while ((try watcher.poll(200)).len != 0) {}
-    try testing.expectEqual(@as(usize, 3), f.budget.count(sub).?);
-    const root_count = f.budget.count(root).?;
-
-    // Lost track at `sub`: its count is read again, and nothing above it.
-    try f.budget.misread(sub, true, 0);
-    try f.budget.misread(root, false, 5);
-    try synthesize(gpa, f.streams.get(tree).?, &.{
-        .{ .path = sub, .flags = flag.must_scan_sub_dirs | flag.user_dropped },
-    });
-    try expectOneOverflow(&watcher, tree, root, .directory);
-    try testing.expectEqual(@as(usize, 3), f.budget.count(sub).?);
-    try testing.expectEqual(root_count + 5, f.budget.count(root).?);
-    try f.budget.misread(root, false, 0);
-
-    // So the fourth is past it, and the watch is told.
-    try tmp.dir.createDirPath(io, "sub/d");
-    var overflowed = false;
-    waited = 0;
-    while (waited < 10_000 and !overflowed) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind == .overflow and event.id == tree) overflowed = true;
-        }
-    }
-    try testing.expect(overflowed);
-    // `sub` is past the budget now, so each record left of `sub/d` says
-    // so again; they are read out before the next loss is made.
-    while ((try watcher.poll(200)).len != 0) {}
-
-    // A delivery that did not fit: every watch lost it, so every count
-    // is read again.
-    try f.budget.misread(sub, true, 0);
-    {
-        f.sink.lock.acquire();
-        defer f.sink.lock.release();
-        f.sink.overflowed = true;
-        f.sink.signal();
-    }
-    try expectOneOverflow(&watcher, tree, root, .directory);
-    try testing.expectEqual(@as(usize, 4), f.budget.count(sub).?);
-}
-
-test "a rename whose halves arrive in two deliveries is one rename" {
-    // FSEvents puts both halves of a rename in one delivery unless a
-    // burst is long enough to split them, and then the old name ends one
-    // delivery and the new name starts the next. A burst long enough to
-    // do that is also long enough for fseventsd, on a busy machine, to
-    // drop part of it -- it did in 13 of 20 runs beside a build -- so a
-    // real burst cannot be told to split and cannot be told not to drop.
-    // The split is made here instead: every pair across two deliveries,
-    // made through the callback the system calls and each drained on its
-    // own, as a burst that split every one of its pairs would be. The
-    // renames are real, so the file system answers which name is there
-    // exactly as it would; the stream is stopped first, so what is
-    // drained is only what this test delivered.
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    const io = testing.io;
-    const pairs = 100;
-
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(root);
-
-    var before: [pairs][]u8 = undefined;
-    var after: [pairs][]u8 = undefined;
-    for (0..pairs) |i| {
-        var name: [32]u8 = undefined;
-        before[i] = try std.fs.path.join(gpa, &.{ root, std.fmt.bufPrint(&name, "before-{d}.txt", .{i}) catch unreachable });
-        after[i] = try std.fs.path.join(gpa, &.{ root, std.fmt.bufPrint(&name, "after-{d}.txt", .{i}) catch unreachable });
-        try Io.Dir.cwd().writeFile(io, .{ .sub_path = before[i], .data = "x" });
-    }
-    defer for (before, after) |b, a| {
-        gpa.free(b);
-        gpa.free(a);
-    };
-
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    const f = &watcher.impl.fsevents;
-    const stream = f.streams.get(id).?;
-
-    // No delivery of the system's from here on: stopped, the one it may
-    // be making waited out on its serial queue, and what it left thrown
-    // away.
-    c.FSEventStreamStop(stream.ref);
-    c.dispatch_sync_f(f.queue, null, settled);
-    {
-        f.sink.lock.acquire();
-        defer f.sink.lock.release();
-        f.sink.len = 0;
-        f.sink.overflowed = false;
-    }
-    _ = f.readable(0);
-
-    for (before, after) |b, a| try Io.Dir.renameAbsolute(b, a, io);
-
-    const renamed = flag.item_renamed;
-    try synthesize(gpa, stream, &.{.{ .path = before[0], .flags = renamed }});
-    try f.drain(&watcher.batch);
-    for (1..pairs) |i| {
-        try synthesize(gpa, stream, &.{
-            .{ .path = after[i - 1], .flags = renamed },
-            .{ .path = before[i], .flags = renamed },
-        });
-        try f.drain(&watcher.batch);
-    }
-    try synthesize(gpa, stream, &.{.{ .path = after[pairs - 1], .flags = renamed }});
-    try f.drain(&watcher.batch);
-    try f.resolveHeld(&watcher.batch);
-
-    // Every pair one `renamed`, from its old name to its new one, and
-    // nothing else.
-    try testing.expectEqual(@as(usize, pairs), watcher.batch.events.items.len);
-    for (watcher.batch.events.items, 0..) |event, i| {
-        try testing.expectEqual(lookout.Kind.renamed, event.kind);
-        try testing.expectEqualStrings(after[i], event.path);
-        try testing.expectEqualStrings(before[i], event.from.?);
-    }
-}
-
 /// The CoreFoundation, CoreServices and libdispatch surface lookout uses.
 ///
 /// Hand-written rather than `@cImport`ed: this is nine functions and a
@@ -2195,58 +1872,6 @@ const c = struct {
     ) void;
 };
 
-test "a failed FSEvents held rename transfer keeps its path" {
-    try expectHeldRenameFailure(.resolve);
-}
-
-test "a failed FSEvents held rename replacement keeps its path" {
-    try expectHeldRenameFailure(.replace);
-}
-
-test "a failed FSEvents held rename rejoin keeps its path" {
-    try expectHeldRenameFailure(.rejoin);
-}
-
-fn expectHeldRenameFailure(comptime transfer: enum { resolve, replace, rejoin }) !void {
-    const testing = std.testing;
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "old", .data = "x" });
-    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
-    defer testing.allocator.free(root);
-    const old = try std.fs.path.join(testing.allocator, &.{ root, "old" });
-    defer testing.allocator.free(old);
-    var watcher = try lookout.Watcher.init(testing.allocator, testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    const backend = &watcher.impl.fsevents;
-    try tmp.dir.deleteFile(testing.io, "old");
-    const record: Record = .{ .id = id, .path = old, .flags = flag.item_renamed, .event = 1 };
-    try backend.hold(&watcher.batch, record);
-    const original = backend.pairing.held.?.path.ptr;
-    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = if (transfer == .replace) 1 else 0 });
-    backend.gpa = failing.allocator();
-    defer backend.gpa = testing.allocator;
-    var used = [_]bool{};
-    const result = switch (transfer) {
-        .resolve => backend.resolveHeld(&watcher.batch),
-        .replace => backend.hold(&watcher.batch, record),
-        .rejoin => backend.rejoin(&watcher.batch, &.{}, &used),
-    };
-    try testing.expectError(error.OutOfMemory, result);
-    try testing.expect(backend.pairing.held != null);
-    try testing.expectEqual(original, backend.pairing.held.?.path.ptr);
-    try testing.expectEqualStrings(old, backend.pairing.held.?.path);
-    // With replacement, equality by contents is not enough: the original
-    // allocation must still be held and the incoming copy released.
-    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-    backend.gpa = testing.allocator;
-    try backend.resolveHeld(&watcher.batch);
-    try testing.expect(backend.pairing.held == null);
-    try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
-    try testing.expectEqual(lookout.Kind.removed, watcher.batch.events.items[0].kind);
-}
-
 test "a failed FSEvents rekey keeps every remembered name" {
     const testing = std.testing;
     const id: WatchId = @enumFromInt(0);
@@ -2317,41 +1942,6 @@ test "allocation failure during delivery retains FSEvents bytes and position" {
     try testing.expect(fail_index > 0);
 }
 
-test "checkpoints preserve independent cursors and unread stream records" {
-    if (!lookout.supported(.fsevents)) return error.SkipZigTest;
-    const gpa = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    try tmp.dir.createDirPath(std.testing.io, "first");
-    try tmp.dir.createDirPath(std.testing.io, "second");
-    const first = try tmp.dir.realPathFileAlloc(std.testing.io, "first", gpa);
-    defer gpa.free(first);
-    const second = try tmp.dir.realPathFileAlloc(std.testing.io, "second", gpa);
-    defer gpa.free(second);
-    const a = try watcher.add(first, .{});
-    const b = try watcher.add(second, .{});
-    const backend = &watcher.impl.fsevents;
-    backend.streams.get(a).?.cursor = 101;
-    backend.streams.get(b).?.cursor = 202;
-    // Unread callbacks cannot affect either saved cursor.
-    backend.sink.lock.acquire();
-    backend.sink.append(a, flag.item_modified, 303, first);
-    backend.sink.lock.release();
-    var checkpoint = (try watcher.checkpoint(gpa)).?;
-    defer checkpoint.deinit();
-    try std.testing.expectEqual(@as(u64, 101), checkpoint.state.value.watches[0].cursor);
-    try std.testing.expectEqual(@as(u64, 202), checkpoint.state.value.watches[1].cursor);
-    var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = checkpoint });
-    defer resumed.deinit();
-    // Registration order does not determine which cursor belongs to it.
-    const rb = try resumed.add(second, .{});
-    const ra = try resumed.add(first, .{});
-    try std.testing.expectEqual(@as(u64, 101), resumed.impl.fsevents.streams.get(ra).?.cursor);
-    try std.testing.expectEqual(@as(u64, 202), resumed.impl.fsevents.streams.get(rb).?.cursor);
-}
-
 test "a file stream accepts the replay sentinel outside its event scope" {
     const testing = std.testing;
     const gpa = testing.allocator;
@@ -2376,157 +1966,46 @@ test "a file stream accepts the replay sentinel outside its event scope" {
     try testing.expectEqual(@as(usize, 0), batch.events.items.len);
 }
 
-test "a checkpoint refuses a different volume or FSEvents log before restoring changes" {
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
-    defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    try testing.expectEqual(watcher.impl.fsevents.streams.get(id).?.volume.device, c.FSEventStreamGetDeviceBeingWatched(watcher.impl.fsevents.streams.get(id).?.ref));
-    try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
-    var saved = (try watcher.checkpoint(gpa)).?;
-    defer saved.deinit();
-    for ([_]bool{ true, false }) |volume| {
-        var changed = try checkpoint_format.copy(gpa, saved.state.value);
-        defer changed.deinit();
-        const watches = @constCast(changed.value.watches);
-        if (volume) watches[0].identity.volume[0] ^= 1 else watches[0].identity.log[0] ^= 1;
-        var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = .{ .state = changed } });
-        defer resumed.deinit();
-        try testing.expectError(error.InvalidCheckpoint, resumed.add(root, .{}));
-        try testing.expectEqual(@as(usize, 0), resumed.impl.fsevents.streams.count());
-        try testing.expectEqual(@as(usize, 0), resumed.batch.held.count());
-        try testing.expect(!resumed.impl.fsevents.resume_used[0]);
-    }
-}
+// Integration fixtures use the adapter’s own callback and native declarations.
+pub const test_access = if (@import("builtin").is_test) struct {
+    pub const Asking = AskingFixture;
+    pub const append = Sink.append;
+    pub const signal = Sink.signal;
+    pub const acquire = SpinLock.acquire;
+    pub const c = cAccess;
+    pub const drain = drainFixture;
+    pub const hold = holdFixture;
+    pub const readable = readableFixture;
+    pub const rejoin = rejoinFixture;
+    pub const release = SpinLock.release;
+    pub const reportPlain = reportPlainFixture;
+    pub const resolveHeld = resolveHeldFixture;
+    pub const settled = settledFixture;
+    pub const synthesize = synthesizeFixture;
+} else struct {};
+const fseventsC = c;
+const synthesizeFixture = synthesize;
 
-test "a checkpoint is unavailable without an unchanged persistent log" {
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
-    defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    const stream = watcher.impl.fsevents.streams.get(id).?;
-    const original = stream.volume.identity;
-    defer stream.volume.identity = original;
-    try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
-    stream.volume.identity = null;
-    try testing.expectEqual(@as(?lookout.Checkpoint, null), try watcher.checkpoint(gpa));
-    stream.volume.identity = original;
-    stream.volume.identity.?.log[0] ^= 1;
-    try testing.expectEqual(@as(?lookout.Checkpoint, null), try watcher.checkpoint(gpa));
-}
+const AskingFixture = Asking;
 
-test "a recursive mount keeps live coverage and refuses a single-device checkpoint" {
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
-    defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .latency_ms = 0 });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{ .recursive = true });
-    const backend = &watcher.impl.fsevents;
-    try synthesize(gpa, backend.streams.get(id).?, &.{.{ .path = root, .flags = 0x40 }});
-    try backend.drain(&watcher.batch);
-    try testing.expectEqual(@as(i32, 0), c.FSEventStreamGetDeviceBeingWatched(backend.streams.get(id).?.ref));
-    try testing.expectEqual(@as(?lookout.Checkpoint, null), try watcher.checkpoint(gpa));
-    try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
-    try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
-    try testing.expectEqualStrings(root, watcher.batch.events.items[0].path);
-    _ = try watcher.poll(0);
-    const wanted = try std.fs.path.join(gpa, &.{ root, "live" });
-    defer gpa.free(wanted);
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "live", .data = "x" });
-    var saw = false;
-    var waited: u32 = 0;
-    while (waited < 10_000 and !saw) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (std.mem.eql(u8, event.path, wanted) and event.kind == .created) saw = true;
-        }
-    }
-    try testing.expect(saw);
-}
+const settledFixture = settled;
 
-test "an absent pending root refuses a checkpoint from another volume" {
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
-    defer gpa.free(root);
-    const absent = try std.fs.path.join(gpa, &.{ root, "absent" });
-    defer gpa.free(absent);
-    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    _ = try watcher.add(absent, .{ .pending = true });
-    var saved = (try watcher.checkpoint(gpa)).?;
-    defer saved.deinit();
-    @constCast(saved.state.value.watches)[0].identity.volume[0] ^= 1;
-    var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = saved });
-    defer resumed.deinit();
-    try testing.expectError(error.InvalidCheckpoint, resumed.add(absent, .{ .pending = true }));
-    try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
-    try testing.expectEqual(@as(usize, 0), resumed.table.count());
-    try testing.expectEqual(@as(usize, 0), resumed.impl.fsevents.streams.count());
-}
+const cAccess = struct {
+    pub const FSEventStreamGetDeviceBeingWatched = c.FSEventStreamGetDeviceBeingWatched;
+    pub const FSEventStreamGetLatestEventId = c.FSEventStreamGetLatestEventId;
+    pub const FSEventStreamStop = c.FSEventStreamStop;
+    pub const dispatch_sync_f = c.dispatch_sync_f;
+    pub const kFSEventStreamEventIdSinceNow = c.kFSEventStreamEventIdSinceNow;
+};
 
-test "a pending promotion rescans when its saved log identity is refused" {
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
-    defer gpa.free(root);
-    const absent = try std.fs.path.join(gpa, &.{ root, "absent" });
-    defer gpa.free(absent);
-    var first = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
-    defer first.deinit();
-    _ = try first.add(absent, .{ .pending = true });
-    var saved = (try first.checkpoint(gpa)).?;
-    defer saved.deinit();
-    var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = saved });
-    defer resumed.deinit();
-    const id = try resumed.add(absent, .{ .pending = true });
-    const backend = &resumed.impl.fsevents;
-    // An anchor that had not consumed its snapshot encounters a different
-    // log when the requested path appears. Force that identity transition.
-    backend.resume_used[0] = false;
-    @constCast(backend.restarting.?.state.value.watches)[0].identity.log[0] ^= 1;
-    try tmp.dir.createDirPath(testing.io, "absent");
-    const events = try resumed.poll(0);
-    try testing.expectEqual(@as(usize, 1), events.len);
-    try testing.expectEqual(lookout.Kind.overflow, events[0].kind);
-    try testing.expectEqual(id, events[0].id);
-    try testing.expectEqualStrings(absent, events[0].path);
-    try testing.expect(backend.resume_used[0]);
-    _ = try resumed.poll(0);
-    try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
-    try testing.expect(backend.streams.contains(id));
-}
+const readableFixture = readable;
 
-test "a fresh native stream asks only for future events" {
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
-    defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    const stream = watcher.impl.fsevents.streams.get(id).?;
-    try testing.expectEqual(c.kFSEventStreamEventIdSinceNow, c.FSEventStreamGetLatestEventId(stream.ref));
-    // The saved cursor is a conservative device-log boundary; the live
-    // subscription must not replay records before this registration.
-    try testing.expect(stream.cursor != c.kFSEventStreamEventIdSinceNow);
-}
+const drainFixture = drain;
+
+const rejoinFixture = rejoin;
+
+const reportPlainFixture = reportPlain;
+
+const holdFixture = hold;
+
+const resolveHeldFixture = resolveHeld;

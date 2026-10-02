@@ -27,7 +27,7 @@ const Io = std.Io;
 const posix = std.posix;
 const linux = std.os.linux;
 
-const lookout = @import("../lookout.zig");
+const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
@@ -54,10 +54,10 @@ watches: std.AutoArrayHashMapUnmanaged(WatchId, Watch),
 /// Kernel watch descriptor to the directory or file it stands for.
 wds: std.AutoArrayHashMapUnmanaged(i32, Registration),
 /// How many entries each watched directory holds, against
-/// `lookout.Options.max_dir_entries`.
+/// `@import("../options.zig").Options.max_dir_entries`.
 budget: Budget,
 /// What every kernel watch is registered with: `base_mask`, plus
-/// `IN_CLOSE_WRITE` when `lookout.Options.report_closes` asked for it.
+/// `IN_CLOSE_WRITE` when `@import("../options.zig").Options.report_closes` asked for it.
 /// Kept rather than recomputed, because every `register` needs it and
 /// the kernel is not asked for events nobody wants.
 mask: u32,
@@ -84,7 +84,7 @@ const Watch = struct {
     root: []u8,
     target: Target,
     recursive: bool,
-    /// `lookout.AddOptions.filter`, copied. An excluded directory is
+    /// `@import("../options.zig").AddOptions.filter`, copied. An excluded directory is
     /// never registered, so the kernel is never asked for a watch on it.
     filter: Filter,
 };
@@ -122,7 +122,7 @@ const base_mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
 const read_buffer_len = 8192;
 
 /// Creates the inotify descriptor and the pipe `wake` pokes.
-pub fn init(gpa: Allocator, io: Io, options: lookout.Options) lookout.Watcher.InitError!Inotify {
+pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) @import("../watch_contract.zig").InitError!Inotify {
     // `linux.errno`, not `posix.errno`: these are raw syscalls, and on a
     // target that links libc `posix.errno` reads libc's thread-local
     // variable, which a raw syscall never writes.
@@ -214,9 +214,9 @@ pub fn add(
     n: *Inotify,
     id: WatchId,
     abs_path: []const u8,
-    options: lookout.AddOptions,
+    options: @import("../options.zig").AddOptions,
     batch: *Batch,
-) lookout.Watcher.AddError!void {
+) @import("../watch_contract.zig").AddError!void {
     const stat = try Io.Dir.cwd().statFile(n.io, abs_path, .{});
 
     const root = try n.gpa.dupe(u8, abs_path);
@@ -290,7 +290,7 @@ pub fn remove(n: *Inotify, id: WatchId) void {
 
 /// Reconciles this watch's directory registrations with a new filter.
 /// New directories are registered before excluded ones are released.
-pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) lookout.Watcher.RefilterError!void {
+pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) @import("../watch_contract.zig").RefilterError!void {
     const watch = n.watches.getPtr(id) orelse return error.UnknownWatch;
     const replacement = try next.dupe(n.gpa);
     var previous = watch.filter;
@@ -367,7 +367,7 @@ fn stillCounted(n: *const Inotify, dir: []const u8) bool {
 }
 
 /// Whether `subject` is outside what the watch `id` is about, so no
-/// event for it is reported. See `lookout.AddOptions.filter`.
+/// event for it is reported. See `@import("../options.zig").AddOptions.filter`.
 fn excluded(n: *const Inotify, id: WatchId, subject: []const u8) bool {
     const watch = n.watches.get(id) orelse return false;
     return watch.filter.excludes(watch.root, subject);
@@ -382,7 +382,7 @@ fn pruned(n: *const Inotify, id: WatchId, subject: []const u8) bool {
 
 /// Waits on the inotify descriptor until it reports something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
     // A read takes records off the descriptor, and a directory that
     // appears is registered below it one directory at a time, so nothing
     // in here is a place to stop: see `Watcher.poll`. The wait itself is
@@ -395,7 +395,7 @@ pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollEr
     try n.flushRenames(batch);
 }
 
-fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollError!void {
+fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
     const before = batch.revision;
     const deadline: Deadline = .start(n.io, timeout_ms);
 
@@ -445,7 +445,7 @@ fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) lookout.Watcher.PollErr
 
 /// Reads one buffer of kernel events and turns them into lookout events.
 /// `false` when there was nothing to read.
-fn read(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!bool {
+fn read(n: *Inotify, batch: *Batch) @import("../watch_contract.zig").PollError!bool {
     if (n.read_len == 0) {
         n.read_len = posix.read(n.ifd, &n.read_buffer) catch |err| switch (err) {
             error.WouldBlock => return false,
@@ -467,12 +467,12 @@ fn read(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!bool {
 /// the overflow record, because the records after that one are changes
 /// made since: counted from their records and then taken in again by a
 /// re-read made before them, they would be counted twice.
-fn handleRead(n: *Inotify, bytes: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+fn handleRead(n: *Inotify, bytes: []const u8, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     var offset: usize = 0;
     try n.consume(bytes, &offset, batch);
 }
 
-fn consume(n: *Inotify, bytes: []const u8, offset: *usize, batch: *Batch) lookout.Watcher.PollError!void {
+fn consume(n: *Inotify, bytes: []const u8, offset: *usize, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     // Partial bookkeeping can no longer supply reliable entry counts.
     errdefer n.budget.reread({}, everyDirectory);
     var lost = false;
@@ -533,7 +533,7 @@ const Change = struct {
 
 /// Turns one kernel event into lookout events: read the flags, pair what
 /// can be paired, report, then keep the books.
-fn handle(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.PollError!void {
+fn handle(n: *Inotify, event: records.Record, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     if (event.mask & linux.IN.Q_OVERFLOW != 0) {
         // The kernel does not say what was lost, so every watch is suspect.
         for (n.watches.keys(), n.watches.values()) |id, watch| {
@@ -597,7 +597,7 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) lookout.Watcher.Pol
 /// Reads the flags, and answers everything that is over before an entry
 /// is named: the queue overflowing, a watch going away, and the watched
 /// path itself being deleted or moved.
-fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u8) lookout.Watcher.PollError!?Change {
+fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u8) @import("../watch_contract.zig").PollError!?Change {
     const base = try n.gpa.dupe(u8, watched);
     errdefer n.gpa.free(base);
 
@@ -642,7 +642,7 @@ fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u
 /// excludes is then treated exactly as a name outside the watch: both
 /// names kept is `renamed`; only the new one kept is `created` there;
 /// only the old one kept is `removed` there; neither is nothing.
-fn pair(n: *Inotify, change: *const Change, batch: *Batch) lookout.Watcher.PollError!bool {
+fn pair(n: *Inotify, change: *const Change, batch: *Batch) @import("../watch_contract.zig").PollError!bool {
     if (change.moved_from) {
         const owned = try n.gpa.dupe(u8, change.path);
         errdefer n.gpa.free(owned);
@@ -682,7 +682,7 @@ fn pair(n: *Inotify, change: *const Change, batch: *Batch) lookout.Watcher.PollE
 
 /// Reports what happened to the entry, for everything a pairing did not
 /// already answer.
-fn emit(n: *Inotify, change: Change, paired: bool, batch: *Batch) lookout.Watcher.PollError!void {
+fn emit(n: *Inotify, change: Change, paired: bool, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     if (n.excluded(change.watch, change.path)) return;
     const target = change.target();
     if (change.appeared and !paired) {
@@ -694,7 +694,7 @@ fn emit(n: *Inotify, change: Change, paired: bool, batch: *Batch) lookout.Watche
     if (change.modified) {
         try batch.push(n.gpa, change.watch, change.path, .modified, target);
     }
-    // Only asked for when `lookout.Options.report_closes` is set, so a
+    // Only asked for when `@import("../options.zig").Options.report_closes` is set, so a
     // watcher that did not ask never sees one of these.
     if (change.closed) {
         try batch.push(n.gpa, change.watch, change.path, .closed, target);
@@ -710,7 +710,7 @@ fn bookkeep(
     change: Change,
     paired: bool,
     batch: *Batch,
-) lookout.Watcher.PollError!void {
+) @import("../watch_contract.zig").PollError!void {
     // Checked on every event for the directory rather than only on the
     // ones that move the count, so that a watch added to a directory
     // that is already too big says so at the first sign of life, which
@@ -749,7 +749,7 @@ fn targetOfWatchPath(n: *const Inotify, id: WatchId, subject: []const u8) Target
 /// from inside the watch is indistinguishable from a deletion. A half on
 /// a name the filter excludes is held only so that its partner can be
 /// told apart from a rename in, and is not reported.
-fn flushRenames(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!void {
+fn flushRenames(n: *Inotify, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     while (n.pending_renames.count() != 0) {
         const key = n.pending_renames.keys()[0];
         const half = n.pending_renames.values()[0];
@@ -773,7 +773,7 @@ fn flushRenames(n: *Inotify, batch: *Batch) lookout.Watcher.PollError!void {
 /// reports whatever is already inside them as created -- a directory can
 /// be populated before the watch on it exists, and those events would
 /// otherwise be lost.
-fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) lookout.Watcher.PollError!void {
+fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) @import("../watch_contract.zig").PollError!void {
     n.register(id, try n.gpa.dupe(u8, root)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -812,137 +812,8 @@ fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) lookout.Watc
     };
 }
 
-test "the kernel's queue overflow record is an overflow against every watch" {
-    // inotify(7): "IN_Q_OVERFLOW: Event queue overflowed (wd is -1 for
-    // this event)", and of max_queued_events: "Events in excess of this
-    // limit are dropped, but an IN_Q_OVERFLOW event is always
-    // generated." The record is written here the way the kernel writes
-    // it and read back through the decoder a real read goes through,
-    // so that what is asserted is the whole path from the bytes to the
-    // batch. src/test_gaps.zig fills a real queue past the limit.
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    const io = testing.io;
-
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(root);
-    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
-    const file = try std.fs.path.join(gpa, &.{ root, "a.txt" });
-    defer gpa.free(file);
-
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify });
-    defer watcher.deinit();
-    const dir = try watcher.add(root, .{ .recursive = true });
-    const single = try watcher.add(file, .{});
-    while ((try watcher.poll(200)).len != 0) {}
-
-    var bytes: [records.header_len]u8 = undefined;
-    const len = records.encode(&bytes, .{ .wd = -1, .mask = linux.IN.Q_OVERFLOW, .cookie = 0, .name = null });
-    var it = records.iterate(bytes[0..len]);
-    _ = (try it.next()).?;
-    try testing.expectEqual(@as(?records.Record, null), try it.next());
-
-    // Straight into the batch the next poll returns, which is where a
-    // read puts it.
-    const n = &watcher.impl.inotify;
-    try n.handleRead(bytes[0..len], &watcher.batch);
-
-    var dir_overflows: usize = 0;
-    var file_overflows: usize = 0;
-    for (watcher.batch.events.items) |event| {
-        try testing.expectEqual(lookout.Kind.overflow, event.kind);
-        if (event.id == dir) {
-            try testing.expectEqualStrings(root, event.path);
-            try testing.expectEqual(Target.directory, event.target);
-            dir_overflows += 1;
-        } else {
-            try testing.expectEqual(single, event.id);
-            try testing.expectEqualStrings(file, event.path);
-            try testing.expectEqual(Target.file, event.target);
-            file_overflows += 1;
-        }
-    }
-    try testing.expectEqual(@as(usize, 1), dir_overflows);
-    try testing.expectEqual(@as(usize, 1), file_overflows);
-
-    // And nothing about the watches themselves changed: the next write
-    // is reported to both.
-    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one and two" });
-    var saw_dir = false;
-    var saw_file = false;
-    var waited: u32 = 0;
-    while (waited < 10_000 and !(saw_dir and saw_file)) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind != .modified or !std.mem.eql(u8, event.path, file)) continue;
-            if (event.id == dir) saw_dir = true;
-            if (event.id == single) saw_file = true;
-        }
-    }
-    try testing.expect(saw_dir);
-    try testing.expect(saw_file);
-}
-
-test "a queue overflow reads the entry counts again, so the budget holds after it" {
-    // Three creations the kernel queues and nobody reads: taken off the
-    // queue here and thrown away, which is what an overflowing queue
-    // does to the events it has no room for, and then the record that
-    // says so, written the way the kernel writes it. The count the
-    // budget kept knew nothing of the three, and a count that is not
-    // read again stays three short for as long as the watch lasts.
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    const io = testing.io;
-
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(root);
-
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify, .max_dir_entries = 3 });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    while ((try watcher.poll(200)).len != 0) {}
-    const n = &watcher.impl.inotify;
-
-    for ([_][]const u8{ "a", "b", "c" }) |name| {
-        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
-    }
-    // inotify queues an event as the call that caused it returns, so
-    // the three are all there to be lost.
-    var scratch: [read_buffer_len]u8 align(@alignOf(linux.inotify_event)) = undefined;
-    while (true) {
-        const len = posix.read(n.ifd, &scratch) catch |err| switch (err) {
-            error.WouldBlock => break,
-            else => return err,
-        };
-        if (len == 0) break;
-    }
-
-    var bytes: [records.header_len]u8 = undefined;
-    const len = records.encode(&bytes, .{ .wd = -1, .mask = linux.IN.Q_OVERFLOW, .cookie = 0, .name = null });
-    try n.handleRead(bytes[0..len], &watcher.batch);
-    try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
-    try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
-    // Three entries: at the budget, as the folder is.
-    try testing.expectEqual(@as(usize, 3), n.budget.count(root).?);
-
-    // So the fourth is past it, and the watch is told.
-    _ = try watcher.poll(0);
-    try tmp.dir.writeFile(io, .{ .sub_path = "d", .data = "x" });
-    var overflowed = false;
-    var waited: u32 = 0;
-    while (waited < 10_000 and !overflowed) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
-        }
-    }
-    try testing.expect(overflowed);
-}
-
 /// Asks the kernel for a watch on `path`, taking ownership of it.
-fn register(n: *Inotify, id: WatchId, watched: []u8) lookout.Watcher.AddError!void {
+fn register(n: *Inotify, id: WatchId, watched: []u8) @import("../watch_contract.zig").AddError!void {
     if (n.ownsPath(id, watched)) {
         n.gpa.free(watched);
         return;
@@ -1058,35 +929,7 @@ fn removeOwner(n: *Inotify, registration_index: usize, id: WatchId) bool {
     return false;
 }
 
-test "a watch on a file keeps no count keyed by the file" {
-    // The kernel reports a watched file's own changes on the file's
-    // watch, with no name: the file was taken for a directory, and a
-    // count of nothing was kept under its path for as long as the watch
-    // lasted.
-    const testing = std.testing;
-    const gpa = testing.allocator;
-    const io = testing.io;
-
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "x" });
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(root);
-    const file = try std.fs.path.join(gpa, &.{ root, "file" });
-    defer gpa.free(file);
-
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify });
-    defer watcher.deinit();
-    const id = try watcher.add(file, .{});
-    while ((try watcher.poll(200)).len != 0) {}
-    try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "y" });
-    var modified = false;
-    var waited: u32 = 0;
-    while (waited < 10_000 and !modified) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
-            if (event.kind == .modified and event.id == id) modified = true;
-        }
-    }
-    try testing.expect(modified);
-    try testing.expect(watcher.impl.inotify.budget.count(file) == null);
-}
+pub const test_access = if (@import("builtin").is_test) struct {
+    pub const handleRead = handleReadFixture;
+} else struct {};
+const handleReadFixture = handleRead;
