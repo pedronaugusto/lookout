@@ -54,8 +54,11 @@ const Fixture = struct {
     }
 
     fn initOptions(options: lookout.Options) !Fixture {
+        return initIo(std.testing.io, options);
+    }
+
+    fn initIo(io: std.Io, options: lookout.Options) !Fixture {
         const gpa = std.testing.allocator;
-        const io = std.testing.io;
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         errdefer tmp.cleanup();
 
@@ -454,49 +457,61 @@ test "inotify does not pair a move across separate watches" {
 }
 
 test "settling holds a modification back until the writing stops" {
-    // The poll backend only: this is about the clock, and the clock is
-    // the one thing a kernel backend adds jitter to. What is being
-    // tested lives in `Batch` and is the same code under every backend.
-    var f = try Fixture.initOptions(.{
+    // Only the clock is replaced. File I/O keeps its original userdata;
+    // poll(0) scans synchronously, so this test never sleeps or races a
+    // kernel notification. The test thread owns and advances the time.
+    const Clock = struct {
+        threadlocal var milliseconds: i96 = 0;
+
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = milliseconds * std.time.ns_per_ms };
+        }
+    };
+    Clock.milliseconds = 1_000;
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var f = try Fixture.initIo(io, .{
         .backend = .poll,
-        .poll_interval_ms = 20,
         .settle_ms = 400,
         .latency_ms = 0,
     });
     defer f.deinit();
     try f.write("a.txt", "one");
-    _ = try f.watcher.add(f.root, .{});
-    try f.settle();
+    const id = try f.watcher.add(f.root, .{});
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
 
-    const gpa = std.testing.allocator;
     const wanted = try f.path("a.txt");
-    defer gpa.free(wanted);
+    defer std.testing.allocator.free(wanted);
 
-    // Four writes inside the settle window, each a different length so no
-    // backend can miss one for want of clock resolution.
+    // Keep writing past the first write's deadline. Different lengths
+    // make every write observable without relying on filesystem timestamps.
     const chunks = [_][]const u8{ "two.", "three..", "four....", "five....." };
-    const started: std.Io.Timestamp = .now(std.testing.io, .awake);
-    for (chunks) |chunk| {
+    const first_write = Clock.milliseconds;
+    for (chunks, 0..) |chunk, i| {
+        Clock.milliseconds = first_write + @as(i96, @intCast(i)) * 200;
         try f.write("a.txt", chunk);
-        _ = try f.watcher.poll(40);
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+        Clock.milliseconds += 199;
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
     }
 
-    var seen: usize = 0;
-    var waited: u32 = 0;
-    while (waited < timeout_ms and seen == 0) : (waited += 100) {
-        for (try f.watcher.poll(100)) |event| {
-            if (std.mem.eql(u8, event.path, wanted)) {
-                try std.testing.expectEqual(Kind.modified, event.kind);
-                seen += 1;
-            }
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 1), seen);
+    const last_write = first_write + (chunks.len - 1) * 200;
+    Clock.milliseconds = last_write + 399;
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+    Clock.milliseconds = last_write + 400;
+    const events = try f.watcher.poll(0);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqual(id, events[0].id);
+    try std.testing.expectEqual(Kind.modified, events[0].kind);
+    try std.testing.expectEqual(lookout.Target.file, events[0].target);
+    try std.testing.expectEqualStrings(wanted, events[0].path);
+    try std.testing.expectEqual(first_write * std.time.ns_per_ms, events[0].time.nanoseconds);
 
-    // And it arrived after the window, not during it: a debounce that
-    // fires early is not a debounce.
-    const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
-    try std.testing.expect(elapsed.toMilliseconds() >= 400);
+    // The deadline hands the change out once, including in later windows.
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+    Clock.milliseconds += 400;
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
 }
 
 test "a watch on a single file reports writes to it" {

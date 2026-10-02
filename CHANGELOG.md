@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The settling test checks every interim batch and the exact deadline after the last write through a controlled clock.
+
 - Keep the quiet-machine speed harness and its build targets only on the `bench` branch.
 
 - Breaking: checkpoints require volume and FSEvents log identities and use per-device history; `add` returns `InvalidCheckpoint` for a changed identity or unavailable history, and mounted volumes need separate watches for resumable history.
