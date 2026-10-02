@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Bound local Zig build caches before builds, retaining downloaded packages and tools.
+
 ### Changed
 
 - The README usage excerpt keeps the example calls without the surrounding commentary.

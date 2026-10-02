@@ -20,6 +20,7 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
+sh ci/cache.sh
 
 ZIG_VERSION=0.16.0
 IMAGE=${LOOKOUT_LINUX_IMAGE:-lookout-linux-zig-$ZIG_VERSION}

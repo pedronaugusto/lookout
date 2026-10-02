@@ -82,6 +82,8 @@ coverage but cannot produce a checkpoint. Other backends return null.
 
 ## Testing
 
+Local build scripts clear `.zig-cache/{o,h,z,tmp}` above the measured cap in `ci/cache.sh`; run `sh ci/cache.sh` before direct Zig builds (only a rebuild is lost).
+
 `zig build test` runs the suite and examples in Debug by default, exercising the
 backends available on the host. Tests cover filters, pending paths, renames, overflow,
 cancellation, settling, checkpoints and resource cleanup. `zig build examples` runs the
