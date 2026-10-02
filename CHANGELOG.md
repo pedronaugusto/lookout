@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The README usage excerpt keeps the example calls without the surrounding commentary.
+
 - The settling test checks every interim batch and the exact deadline after the last write through a controlled clock.
 
 - Keep the quiet-machine speed harness and its build targets only on the `bench` branch.
