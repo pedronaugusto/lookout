@@ -8,6 +8,7 @@ pub const rules: gantry.rules.Rules = .{
     .required = &.{.{ .name = "named sources", .paths = &declared.required }},
     .nothing_imports = &entry_rules,
     .references = declared.references,
+    .tokens = declared.owned,
     .no_cycles = "cycles",
 };
 
@@ -36,6 +37,7 @@ pub fn main(init: std.process.Init) !void {
         .manifests = false,
         .strict_imports = true,
         .named_modules = declared.modules,
+        .tokens = declared.owned,
     }, &diagnostic) catch |err| {
         if (diagnostic.failure) |failure| std.debug.print("imports: {s}: {s}: {s}\n", .{ failure.path orelse "<scan>", @tagName(failure.phase), @errorName(failure.cause) });
         return err;
@@ -72,6 +74,8 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("imports: {s}: {s} -> {s} ({s})\n", .{ finding.rule, edge.from, edge.to, @tagName(finding.reason) });
         } else if (finding.reference) |ref| {
             std.debug.print("imports: {s}: {s}: @import(\"{s}\")\n", .{ finding.rule, ref.from, ref.name });
+        } else if (finding.token) |token| {
+            std.debug.print("imports: {s}: {s}:{d}:{d}: {t} \"{f}\"\n", .{ finding.rule, token.path, token.line, token.column, token.kind, std.zig.fmtString(token.text) });
         } else if (finding.path) |path| std.debug.print("imports: {s}: {s}\n", .{ finding.rule, path });
     }
     if (graph.unread().len != 0 or findings.len != 0) return error.ImportBoundary;
