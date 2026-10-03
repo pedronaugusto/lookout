@@ -231,17 +231,14 @@ fn wanted(only: []const []const u8, relative: []const u8, absolute: []const u8, 
 /// Whether `subject` is a proper prefix of something `pattern` could
 /// match: the directory on the way to the files an include list asked
 /// for.
+///
+/// The pattern is matched against `subject` as against a name, until the
+/// subject runs out; it leads on when what is left of the pattern can
+/// begin with a separator. A `**` met on the way can, wherever it is
+/// written -- `a**/c` crosses `ax/y` to reach `ax/y/c` -- so from a `**`
+/// every directory is on the way.
 fn leadsTo(pattern: []const u8, subject: []const u8) bool {
-    var patterns = std.mem.splitAny(u8, pattern, path.separators);
-    var subjects = std.mem.splitAny(u8, subject, path.separators);
-    while (subjects.next()) |component| {
-        const want = patterns.next() orelse return false;
-        // Past a `**` the pattern can reach any depth, so every
-        // directory from here down is on the way.
-        if (std.mem.eql(u8, want, "**")) return true;
-        if (!matches(want, component)) return false;
-    }
-    return patterns.next() != null;
+    return matchFrom(.init(pattern), .init(subject), .prefix);
 }
 
 /// Whether `pattern` matches `name`.
@@ -250,37 +247,58 @@ fn leadsTo(pattern: []const u8, subject: []const u8) bool {
 /// and the depth is therefore the number of wildcards in the pattern
 /// rather than the length of either string.
 fn matches(pattern: []const u8, name: []const u8) bool {
-    return matchFrom(.init(pattern), .init(name));
+    return matchFrom(.init(pattern), .init(name), .whole);
 }
 
-fn matchFrom(pattern: path.Folder, name: path.Folder) bool {
+/// Whether the pattern has to match the whole name, or only a name that
+/// goes on past this one as a directory does.
+const Extent = enum { whole, prefix };
+
+/// Whether what is left of a pattern can match something that begins
+/// with a separator: a `*` can match nothing first, and a `**` can match
+/// the separator itself.
+fn opensDirectory(pattern: path.Folder) bool {
+    var p = pattern;
+    while (p.next()) |c| switch (c) {
+        '/' => return true,
+        '*' => if (p.peek() == '*') return true,
+        else => return false,
+    };
+    return false;
+}
+
+fn matchFrom(pattern: path.Folder, name: path.Folder, comptime extent: Extent) bool {
     var p = pattern;
     var n = name;
     while (true) {
+        if (extent == .prefix and n.peek() == null and n.settled()) return opensDirectory(p);
         const want = p.next() orelse return n.peek() == null;
         switch (want) {
             '*' => {
                 var after = p;
                 if (after.peek() == '*') {
+                    // The rest of the name, a separator and whatever the
+                    // rest of the pattern wants are all one run.
+                    if (extent == .prefix) return true;
                     _ = after.next();
                     // `**` crosses separators. Between two of them it
                     // also stands for no directory at all, so the
                     // separator that follows it is optional.
                     var skipped = after;
                     if (skipped.peek() == '/') _ = skipped.next();
-                    if (matchFrom(after, n) or matchFrom(skipped, n)) return true;
+                    if (matchFrom(after, n, extent) or matchFrom(skipped, n, extent)) return true;
                     while (n.next() != null) {
-                        if (matchFrom(after, n) or matchFrom(skipped, n)) return true;
+                        if (matchFrom(after, n, extent) or matchFrom(skipped, n, extent)) return true;
                     }
                     return false;
                 }
                 // A single `*` names an entry, not a path, so it stops
                 // at a separator.
-                if (matchFrom(after, n)) return true;
+                if (matchFrom(after, n, extent)) return true;
                 while (n.peek()) |c| {
                     if (c == '/') return false;
                     _ = n.next();
-                    if (matchFrom(after, n)) return true;
+                    if (matchFrom(after, n, extent)) return true;
                 }
                 return false;
             },
@@ -387,6 +405,30 @@ test "an include list keeps what it names and the way to it" {
     try testing.expect(f.excludes(sep("/w"), sep("/w/src/notes.txt")));
     try testing.expect(f.excludes(sep("/w"), sep("/w/docs")));
     try testing.expect(f.excludes(sep("/w"), sep("/w/docs/a.zig")));
+}
+
+test "two stars inside a name lead through the directories they cross" {
+    // `**` crosses separators wherever it is written, so `a**/c` names
+    // `ax/y/c`; the walk has to reach it through `ax` and `ax/y`.
+    const f: Filter = .{ .only = &.{sep("a**/c")} };
+    try testing.expect(!f.excludes(sep("/w"), sep("/w/ax/y/c")));
+    try testing.expect(!f.prunes(sep("/w"), sep("/w/ax")));
+    try testing.expect(!f.prunes(sep("/w"), sep("/w/ax/y")));
+    try testing.expect(f.prunes(sep("/w"), sep("/w/b")));
+    // A single star stays inside its name, and a name it cannot reach
+    // past is pruned.
+    const one: Filter = .{ .only = &.{sep("a*c/d")} };
+    try testing.expect(!one.prunes(sep("/w"), sep("/w/abc")));
+    try testing.expect(one.prunes(sep("/w"), sep("/w/ab")));
+    try testing.expect(one.prunes(sep("/w"), sep("/w/abc/x")));
+    // A star that can match nothing before the separator still leads on.
+    const empty: Filter = .{ .only = &.{sep("ab*/d")} };
+    try testing.expect(!empty.prunes(sep("/w"), sep("/w/ab")));
+    // What the fuzzer found first: two stars in the middle of a name, after
+    // a whole name that does not hold them.
+    const found: Filter = .{ .only = &.{sep("a*?a/**a**/")} };
+    try testing.expect(!found.excludes(sep("/w"), sep("/w/aba/b/a.b")));
+    try testing.expect(!found.prunes(sep("/w"), sep("/w/aba/b")));
 }
 
 test "an include list and an ignore list together, with the ignore winning" {

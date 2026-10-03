@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- An include pattern with `**` inside a name, such as `a**/c`, walks to what it names: the directories it crosses were pruned and the files below them never reported.
+
 - `Baseline.Change` carries the `target` its listing found, file or directory, including for a path that has gone.
 
 - Correct the Windows no-follow file flag so polling content reads wait for completion without crashing.
