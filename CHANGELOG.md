@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `Baseline.Change` carries the `target` its listing found, file or directory, including for a path that has gone.
 
-- Pin the benchmark after snapshot to the Windows polling content fix.
+- Pin the benchmark after snapshot to the final main.
 
 - Correct the Windows no-follow file flag so polling content reads wait for completion without crashing.
 
