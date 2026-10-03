@@ -81,7 +81,11 @@ pub fn capture(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat, taken_
 fn hashContent(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat) ?u64 {
     // Never open a special file or follow a symlink to hash its target.
     if (stat.kind != .file or stat.size > content_hash_cap) return null;
-    const file = dir.openFile(io, path, .{ .follow_symlinks = false, .allow_directory = false }) catch return null;
+    var file = dir.openFile(io, path, .{ .follow_symlinks = false, .allow_directory = false }) catch return null;
+    // Zig 0.16's std.Io.Threaded.dirOpenFileWtf16 opens no-follow handles
+    // asynchronously but returns nonblocking = false. Match the handle so
+    // positional reads wait for completion; remove when std fixes the flag.
+    if (@import("builtin").os.tag == .windows) file.flags.nonblocking = true;
     defer file.close(io);
     var hash = std.hash.Wyhash.init(0);
     var buffer: [8192]u8 = undefined;
