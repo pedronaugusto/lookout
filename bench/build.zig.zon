@@ -6,8 +6,8 @@
     .dependencies = .{
         .lookout = .{ .path = ".." },
         .after = .{
-            .url = "https://github.com/pedronaugusto/lookout/archive/c2d8f9d7bc71765a09a1bb8dd39cbf296a87d8f0.tar.gz",
-            .hash = "lookout-0.3.0-EbT0_4DBDQAeHBWhTOZQcM0YT5i-TOPX5Vdzf6jSIAts",
+            .url = "https://github.com/pedronaugusto/lookout/archive/c3dbb91ab51c71677b56c83806a30013e78432d0.tar.gz",
+            .hash = "lookout-0.3.0-EbT0_zQsDgDpZU07-qa9JgHtkmDXYp5EPy0gTv75PST_",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
