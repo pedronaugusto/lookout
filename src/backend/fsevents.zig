@@ -75,6 +75,11 @@ budget: Budget,
 /// watch only after registration and restoration succeed.
 restarting: ?@import("../Checkpoint.zig"),
 resume_used: []bool,
+/// Where a resumed stream's `Barrier` directory may be made, canonical
+/// and owned: the per-user temporary directory, then `/private/tmp` for
+/// a watch that covers it. Read at `init`, and only by a watcher that
+/// resumes.
+barrier_bases: std.ArrayList([]u8),
 /// Every path each watch believes exists, seeded by walking the watch
 /// when it is added and kept current from what it reports. Path keys are
 /// owned here and compared the way the file system compares them.
@@ -143,17 +148,43 @@ const bounds: buffer.Bounds = .{
 const grace_ms = 25;
 const grace_rounds = 4;
 
-/// How long after the end of the system's log a resumed stream is still
-/// hearing about the gap. See `Stream.catchingUp`.
+/// Where a resumed stream learns that its gap is over: a file lookout
+/// writes once the stream is started and seeded, in a directory of its
+/// own, and watches through a second stream until the system names it.
 ///
-/// Nothing marks the end of a replay, so this is a window and not a
-/// signal. Measured on a loaded machine, the last of the tail arrived
-/// some two hundred milliseconds after the sentinel; a second is four
-/// times that, and being generous costs only this -- a path created and
-/// deleted inside the window that lookout never knew about is reported
-/// as removed rather than dropped. It is paid once, by a watcher that
-/// asked to be told what it missed.
-const replay_tail_ms = 1_000;
+/// The system numbers every change in one sequence for the whole host,
+/// in the order the kernel made them, on every volume -- and it numbers
+/// them when it reads them, which can be long after they were made and
+/// after a stream that asked for them has started. So a change made
+/// while nothing watched can arrive after `HistoryDone`, live, under a
+/// number past the one `FSEventsGetCurrentEventId` gave when the stream
+/// began. What it cannot do is arrive numbered after a change made once
+/// the watch was in place. The marker is that change: every record
+/// numbered before it happened before the watch, whenever it arrives,
+/// and every record numbered after it happened since. See
+/// `Stream.catchingUp`.
+///
+/// Its own stream, because a stream relative to a device takes exactly
+/// one path: `FSEventStreamStart` refuses two (macOS 26). It is a host
+/// stream, so the marker can sit on the boot volume whatever volume the
+/// watch is on, read-only ones included, and never inside a watched
+/// tree. It lives until the marker is named, or a loss says it may not
+/// be, and the directory goes with it.
+const Barrier = struct {
+    id: WatchId,
+    sink: *Sink,
+    ref: c.FSEventStreamRef,
+    /// The directory, made by `mkdtemp`: private to this user, and
+    /// removed when the barrier is.
+    dir: [:0]u8,
+    /// The file inside it whose record ends the gap.
+    marker: [:0]u8,
+    /// See `Stream.published`.
+    published: std.atomic.Value(bool) = .init(false),
+};
+
+/// What `mkdtemp` names a `Barrier` directory from.
+const barrier_name = "lookout-barrier.XXXXXX";
 
 /// The lock between the delivery thread and the polling one.
 ///
@@ -248,9 +279,14 @@ const Stream = struct {
     /// Whether this stream was started from a checkpoint rather than from
     /// now, which `@import("../options.zig").Options.checkpoint` asked for. See `catchingUp`.
     resumed: bool,
-    /// When `HistoryDone` arrived, or `null` while the system is still
-    /// reading its log. See `catchingUp`.
-    replayed: ?Io.Timestamp,
+    /// Whether `HistoryDone` has arrived: the system has read its log
+    /// back to where the stream started. It says nothing about where the
+    /// gap ends -- see `catchingUp`.
+    replayed: bool,
+    /// Which records are the gap a resumed stream is catching up on.
+    gap: Gap,
+    /// The marker that ends the gap, until it is named. See `Barrier`.
+    barrier: ?*Barrier = null,
     /// Set, with release, once the fields the delivery thread reads are
     /// written, and read with acquire by every delivery. FSEvents orders
     /// its start before its first callback, but inside the framework,
@@ -267,37 +303,43 @@ const Stream = struct {
         file,
     };
 
-    /// Whether this stream is still catching up on what happened
-    /// before it existed, which `@import("../options.zig").Options.checkpoint` asked for.
+    /// Which records a resumed stream counts as the gap it was asked to
+    /// be told about.
+    const Gap = union(enum) {
+        /// None: the stream started from now, or the end of its gap was
+        /// lost and reported as an overflow.
+        closed,
+        /// The marker has not been named yet, so every record may be.
+        open,
+        /// The marker's own number. Records numbered before it are.
+        before: u64,
+    };
+
+    /// Whether `event` is part of what happened before this stream
+    /// existed, which `@import("../options.zig").Options.checkpoint` asked for.
     ///
     /// It changes what a path that is not there means. In the ordinary
     /// way, a path FSEvents names that is gone and that lookout has
     /// never seen came and went between two polls, and the tree is as
-    /// it was, so there is nothing to report. While catching up the
-    /// same two facts mean the opposite: the path was there at the
-    /// position the caller resumed from and is not there now, which is
-    /// exactly the deletion they asked to be told about.
+    /// it was, so there is nothing to report. In the gap the same two
+    /// facts mean the opposite: the path was there at the position the
+    /// caller resumed from and is not there now, which is exactly the
+    /// deletion they asked to be told about.
     ///
-    /// Two things end it, and neither on its own is the answer.
-    /// `HistoryDone` says the system has finished reading its log, not
-    /// that the replay is over: a change made while nothing was
-    /// watching that had not reached the log when the stream started is
-    /// delivered after the sentinel, live and numbered after it. And a
-    /// wait that reported nothing is not a wait the system was silent
-    /// through -- the sentinel is itself a delivery that reports no
-    /// event, and so is a poll that expires before the stream has said
-    /// anything at all. Ending on either of those ended the catching up
-    /// one delivery before the changes it was there to explain, and a
-    /// file deleted in the gap was dropped as one that came and went
-    /// between two polls.
-    ///
-    /// So it ends `replay_tail_ms` after the sentinel, and it is asked
-    /// of each record as the record is read rather than being flipped
-    /// on a wait boundary.
-    fn catchingUp(st: *const Stream, io: Io) bool {
-        if (!st.resumed) return false;
-        const sentinel = st.replayed orelse return true;
-        return sentinel.durationTo(.now(io, .awake)).toMilliseconds() < replay_tail_ms;
+    /// Neither `HistoryDone` nor a quiet wait says where the gap ends:
+    /// the system numbers a change when it reads it, so one made while
+    /// nothing watched can arrive after the sentinel, and after any wait.
+    /// A window after the sentinel lost such deletions on a loaded
+    /// machine. The gap is decided by number against `Barrier`'s marker,
+    /// so how late a record arrives does not matter; before the marker
+    /// is named every record is in it, which costs at most a path
+    /// created and deleted in that moment being reported as removed.
+    fn catchingUp(st: *const Stream, event: u64) bool {
+        return switch (st.gap) {
+            .closed => false,
+            .open => true,
+            .before => |end| event < end,
+        };
     }
 
     fn wants(st: *const Stream, subject: []const u8) bool {
@@ -395,7 +437,11 @@ pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) 
         null;
     errdefer if (restarting) |*checkpoint| checkpoint.deinit();
     const resume_used = try gpa.alloc(bool, if (restarting) |checkpoint| checkpoint.state.value.watches.len else 0);
+    errdefer gpa.free(resume_used);
     @memset(resume_used, false);
+    var barrier_bases: std.ArrayList([]u8) = .empty;
+    errdefer freeBases(gpa, &barrier_bases);
+    if (restarting != null) try readBarrierBases(gpa, &barrier_bases);
     return .{
         .gpa = gpa,
         .io = io,
@@ -406,11 +452,39 @@ pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) 
         .budget = .init(gpa, io, options.max_dir_entries),
         .restarting = restarting,
         .resume_used = resume_used,
+        .barrier_bases = barrier_bases,
         .known = .empty,
         .pairing = .{},
         .stream_latency = latencySeconds(options.latency_ms),
     };
 }
+
+/// The per-user temporary directory, then `/private/tmp`, each as the
+/// file system spells it, for `Barrier` directories. One that cannot be
+/// read is left out; with none, a resumed watch reports an overflow.
+fn readBarrierBases(gpa: Allocator, bases: *std.ArrayList([]u8)) Allocator.Error!void {
+    var temp: [std.c.PATH_MAX]u8 = undefined;
+    const len = confstr(cs_darwin_user_temp_dir, &temp, temp.len);
+    const named: [2]?[*:0]const u8 = .{
+        if (len > 0 and len <= temp.len) @ptrCast(&temp) else null, // safe: confstr wrote a terminated string of len bytes, terminator included
+        "/private/tmp",
+    };
+    for (named) |name| {
+        var resolved: [std.c.PATH_MAX]u8 = undefined;
+        const canonical = std.c.realpath(name orelse continue, &resolved) orelse continue;
+        try bases.ensureUnusedCapacity(gpa, 1);
+        bases.appendAssumeCapacity(try gpa.dupe(u8, std.mem.span(canonical)));
+    }
+}
+
+fn freeBases(gpa: Allocator, bases: *std.ArrayList([]u8)) void {
+    for (bases.items) |base| gpa.free(base);
+    bases.deinit(gpa);
+}
+
+const cs_darwin_user_temp_dir: c_int = 65537;
+extern "c" fn confstr(name: c_int, buf: [*]u8, len: usize) usize;
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
 
 fn latencySeconds(milliseconds: u32) f64 {
     return @as(f64, @floatFromInt(milliseconds)) / std.time.ms_per_s;
@@ -424,6 +498,7 @@ pub fn deinit(f: *FsEvents) void {
     f.staging.deinit(f.gpa);
     if (f.restarting) |*checkpoint| checkpoint.deinit();
     f.gpa.free(f.resume_used);
+    freeBases(f.gpa, &f.barrier_bases);
     f.budget.deinit();
     for (f.known.keys()) |key| f.gpa.free(key.path);
     f.known.deinit(f.gpa);
@@ -557,6 +632,12 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
         try f.useLiveStream(id);
         stream = f.streams.get(id).?;
     }
+    // After the seeding, not before it: a path deleted once the walk
+    // has passed it is known, and one deleted before is numbered before
+    // the marker. Written before, a path deleted between the two was
+    // neither. And before the checkpoint is spent below, so that an add
+    // failing here can be retried from it.
+    if (stream.resumed) try f.openBarrier(batch, stream);
     if (stream.resume_index) |index| {
         const saved = f.restarting.?.state.value.watches[index];
         for (saved.changes) |change| {
@@ -570,6 +651,121 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
         f.resume_used[index] = true;
     }
     trace.log("fsevents seeded watch={d} known={d}", .{ @intFromEnum(id), f.known.count() });
+}
+
+/// Starts `stream`'s `Barrier` and writes its marker. Where none can be
+/// started -- no directory outside every watch to put it in, or the
+/// system refusing one -- the end of the gap cannot be known, and the
+/// watch is told to look again, which is what a lost record means
+/// everywhere else.
+fn openBarrier(f: *FsEvents, batch: *Batch, stream: *Stream) Allocator.Error!void {
+    if (try f.startBarrier(stream)) |barrier| {
+        stream.barrier = barrier;
+        trace.log("fsevents barrier watch={d} marker={s}", .{ @intFromEnum(stream.id), barrier.marker });
+        return;
+    }
+    trace.log("fsevents barrier unavailable watch={d}", .{@intFromEnum(stream.id)});
+    stream.gap = .closed;
+    try batch.deferChange(f.gpa, stream.id, stream.root, .overflow, null, stream.rootTarget());
+}
+
+fn startBarrier(f: *FsEvents, stream: *const Stream) Allocator.Error!?*Barrier {
+    return f.makeBarrier(stream) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Unavailable => null,
+    };
+}
+
+fn makeBarrier(f: *FsEvents, stream: *const Stream) error{ OutOfMemory, Unavailable }!*Barrier {
+    const base = f.barrierBase() orelse return error.Unavailable;
+    const dir = try std.fmt.allocPrintSentinel(f.gpa, "{s}/" ++ barrier_name, .{base}, 0);
+    errdefer f.gpa.free(dir);
+    _ = mkdtemp(dir.ptr) orelse return error.Unavailable;
+    // From here the directory is there, and goes on every way out.
+    errdefer _ = std.c.rmdir(dir.ptr);
+    const marker = try std.fmt.allocPrintSentinel(f.gpa, "{s}/marker", .{dir}, 0);
+    errdefer f.gpa.free(marker);
+    const barrier = try f.gpa.create(Barrier);
+    errdefer f.gpa.destroy(barrier);
+    barrier.* = .{ .id = stream.id, .sink = f.sink, .ref = undefined, .dir = dir, .marker = marker };
+
+    const cf_path = c.CFStringCreateWithBytes(null, dir.ptr, @intCast(dir.len), c.kCFStringEncodingUTF8, 0) orelse
+        return error.Unavailable;
+    defer c.CFRelease(cf_path);
+    const values: [1]?*const anyopaque = .{cf_path};
+    const paths = c.CFArrayCreate(null, &values, 1, &c.kCFTypeArrayCallBacks) orelse return error.Unavailable;
+    defer c.CFRelease(paths);
+    var context: c.FSEventStreamContext = .{ .info = barrier };
+    // An explicit number rather than `SinceNow`, which the system
+    // resolves later and can resolve past the marker. Taken before the
+    // marker is written, it is at most the marker's own.
+    const since = c.FSEventsGetCurrentEventId();
+    const flags: u32 = c.kFSEventStreamCreateFlagFileEvents | c.kFSEventStreamCreateFlagNoDefer;
+    barrier.ref = c.FSEventStreamCreate(null, deliverBarrier, &context, paths, since, f.stream_latency, flags) orelse
+        return error.Unavailable;
+    barrier.published.store(true, .release);
+    c.FSEventStreamSetDispatchQueue(barrier.ref, f.queue);
+    // As in `startStream`: invalidation unschedules, so it follows the
+    // line above, and it waits out any delivery already running.
+    errdefer {
+        c.FSEventStreamStop(barrier.ref);
+        c.FSEventStreamInvalidate(barrier.ref);
+        c.FSEventStreamRelease(barrier.ref);
+        c.dispatch_sync_f(f.queue, null, settled);
+    }
+    if (c.FSEventStreamStart(barrier.ref) == 0) return error.Unavailable;
+
+    const written = std.c.open(marker.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+    if (written < 0) return error.Unavailable;
+    _ = std.c.close(written);
+    // Its creation is the record that counts; the name need not stay.
+    _ = std.c.unlink(marker.ptr);
+    return barrier;
+}
+
+/// The first place a barrier directory can go that no watch covers. A
+/// watch that saw it would report lookout's own marker as a change.
+fn barrierBase(f: *const FsEvents) ?[]const u8 {
+    next: for (f.barrier_bases.items) |base| {
+        for (f.streams.values()) |stream| {
+            const covered = if (stream.scope == .file) std.fs.path.dirname(stream.root) orelse stream.root else stream.root;
+            if (path_cmp.within(covered, base)) continue :next;
+        }
+        return base;
+    }
+    return null;
+}
+
+/// Stops a barrier's stream, waits out a delivery it may be making, and
+/// removes its directory.
+fn stopBarrier(f: *FsEvents, barrier: *Barrier) void {
+    c.FSEventStreamStop(barrier.ref);
+    c.FSEventStreamInvalidate(barrier.ref);
+    c.FSEventStreamRelease(barrier.ref);
+    c.dispatch_sync_f(f.queue, null, settled);
+    _ = std.c.unlink(barrier.marker.ptr);
+    _ = std.c.rmdir(barrier.dir.ptr);
+    f.gpa.free(barrier.marker);
+    f.gpa.free(barrier.dir);
+    f.gpa.destroy(barrier);
+}
+
+/// Ends `stream`'s gap where `record`, from its barrier, says: at the
+/// marker's number, or -- where the system says it lost track and so
+/// may have lost the marker -- with an overflow, which already tells the
+/// caller to look at everything again.
+fn passBarrier(f: *FsEvents, batch: *Batch, stream: *Stream, record: Record) Allocator.Error!void {
+    const barrier = stream.barrier orelse return;
+    if (record.flags & lost_track != 0) {
+        trace.log("fsevents barrier lost watch={d}", .{@intFromEnum(stream.id)});
+        try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
+        stream.gap = .closed;
+    } else if (std.mem.eql(u8, record.path, barrier.marker)) {
+        trace.log("fsevents barrier passed watch={d} event={d}", .{ @intFromEnum(stream.id), record.event });
+        stream.gap = .{ .before = record.event };
+    } else return;
+    stream.barrier = null;
+    f.stopBarrier(barrier);
 }
 
 /// Creates and starts a stream, transferring ownership only on success.
@@ -621,7 +817,8 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
         .cursor = since,
         .resume_index = resumed,
         .resumed = resumed != null,
-        .replayed = null,
+        .replayed = false,
+        .gap = if (resumed != null) .open else .closed,
     };
     stream.published.store(true, .release);
 
@@ -798,6 +995,7 @@ fn destroy(f: *FsEvents, stream: *Stream) void {
     // assertion and do nothing, which leaves the stream registered with
     // the system after it has been released, still holding the pointer
     // to the memory freed below.
+    if (stream.barrier) |barrier| f.stopBarrier(barrier);
     c.FSEventStreamStop(stream.ref);
     c.FSEventStreamInvalidate(stream.ref);
     c.FSEventStreamRelease(stream.ref);
@@ -854,6 +1052,35 @@ fn deliver(
         } else stream.sink.append(stream.id, flags[i], ids[i], subject);
     }
     stream.sink.signal();
+}
+
+/// What a `Barrier`'s stream calls. Of everything under its directory,
+/// only the marker and a loss say anything, and both are handed over
+/// tagged as the barrier's.
+fn deliverBarrier(
+    ref: c.FSEventStreamRef,
+    info: ?*anyopaque,
+    count: usize,
+    paths: ?*anyopaque,
+    flags: [*]const u32,
+    ids: [*]const u64,
+) callconv(.c) void {
+    _ = ref;
+    const barrier: *Barrier = @ptrCast(@alignCast(info.?)); // safe: info is the Barrier the stream was created with, alive until it is invalidated
+    const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?)); // safe: without kFSEventStreamCreateFlagUseCFTypes, paths is a C array of C strings, count long
+    if (!barrier.published.load(.acquire)) return;
+    var told = false;
+    barrier.sink.lock.acquire();
+    defer barrier.sink.lock.release();
+    for (0..count) |i| {
+        const subject = std.mem.span(list[i]);
+        if (flags[i] & lost_track == 0 and !std.mem.eql(u8, subject, barrier.marker)) continue;
+        barrier.sink.append(barrier.id, flags[i] | flag.barrier, ids[i], subject);
+        told = true;
+    }
+    if (!told) return;
+    barrier.sink.deliveries += 1;
+    barrier.sink.signal();
 }
 
 /// Waits on the wake pipe until the drain produces something `batch` did
@@ -947,11 +1174,15 @@ fn drain(f: *FsEvents, batch: *Batch) @import("../watch_contract.zig").PollError
     }
     if (overflowed) {
         for (f.streams.values()) |stream| {
-            // A delivery that did not fit may have carried the sentinel,
-            // and a stream waiting for one that was dropped would catch
-            // up for ever.
-            if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
             try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
+            // A delivery that did not fit may have carried a barrier's
+            // marker, and a stream waiting for one that was dropped
+            // would catch up for ever. The overflow says to look again.
+            if (stream.barrier) |barrier| {
+                stream.gap = .closed;
+                stream.barrier = null;
+                f.stopBarrier(barrier);
+            }
         }
     }
 
@@ -981,6 +1212,16 @@ fn drain(f: *FsEvents, batch: *Batch) @import("../watch_contract.zig").PollError
     defer f.gpa.free(used);
     @memset(used, false);
 
+    // A barrier's records first: a resumed stream's gap is decided by
+    // number, so the marker may as well be known before any record of
+    // the delivery is read against it. They are about no path.
+    for (delivered.items, used) |record, *taken| {
+        if (record.flags & flag.barrier == 0) continue;
+        taken.* = true;
+        const stream = f.streams.get(record.id) orelse continue;
+        try f.passBarrier(batch, stream, record);
+    }
+
     // The half held from the last drain looks for its partner here.
     try f.rejoin(batch, delivered.items, used);
 
@@ -994,6 +1235,9 @@ fn drain(f: *FsEvents, batch: *Batch) @import("../watch_contract.zig").PollError
         try f.report(batch, delivered.items, used, i, &losses);
     }
     for (delivered.items) |record| {
+        // A barrier's number is the host's, not this stream's position:
+        // records before it may not have arrived yet.
+        if (record.flags & flag.barrier != 0) continue;
         if (f.streams.get(record.id)) |stream| stream.cursor = @max(stream.cursor, record.event);
     }
 
@@ -1130,11 +1374,10 @@ fn report(
     // The marker that the system has finished reading its log back to
     // the captured registration boundary or an explicit checkpoint. Nothing
     // happened to a path, so there is nothing to report; it is swallowed
-    // rather than left to look like a change to the watch root. What it
-    // is kept for is `Stream.catchingUp`, which measures the tail that
-    // still follows it from here.
+    // rather than left to look like a change to the watch root. It does
+    // not end a resumed stream's gap: see `Stream.catchingUp`.
     if (record.flags & flag.history_done != 0) {
-        if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
+        stream.replayed = true;
         trace.log("fsevents history done root={s}", .{stream.root});
         return;
     }
@@ -1233,7 +1476,7 @@ fn reportPlain(
         // Gone. Whatever the flags remember about it, the fact now is
         // that the path is not there. A path lookout never knew about came
         // and went between two polls, and the tree is as it was.
-        if (seen or stream.catchingUp(f.io)) {
+        if (seen or stream.catchingUp(record.event)) {
             trace.log("fsevents push removed path={s}", .{record.path});
             try batch.push(f.gpa, record.id, record.path, .removed, record.target());
             f.forget(record.id, record.path);
@@ -1842,8 +2085,9 @@ test "stream latency follows the watcher latency" {
     try std.testing.expectEqual(@as(f64, 1.5), latencySeconds(1_500));
 }
 
-/// One record of a delivery made by hand.
-const Synthetic = struct { path: []const u8, flags: u32 };
+/// One record of a delivery made by hand. Numbered as the system
+/// numbers it now, unless `event` says otherwise.
+const Synthetic = struct { path: []const u8, flags: u32, event: ?u64 = null };
 
 /// Makes the delivery the system would make for `items`, through the
 /// callback it would call and into the buffer that callback writes.
@@ -1857,10 +2101,20 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
     for (items) |item| {
         paths[filled] = try gpa.dupeZ(u8, if (stream.persistent) stream.volume.relative(item.path) else item.path);
         flags[filled] = item.flags;
-        ids[filled] = c.FSEventsGetCurrentEventId();
+        ids[filled] = item.event orelse c.FSEventsGetCurrentEventId();
         filled += 1;
     }
     deliver(stream.ref, stream, filled, @ptrCast(&paths), &flags, &ids); // safe: the same C array of C strings FSEvents hands deliver
+}
+
+/// Makes the delivery a stream's barrier would make: its marker, or a
+/// loss, numbered `event`.
+fn synthesizeBarrier(stream: *Stream, flags: u32, event: u64) void {
+    const barrier = stream.barrier.?;
+    var paths: [1][*:0]const u8 = .{barrier.marker.ptr};
+    var all: [1]u32 = .{flags};
+    var ids: [1]u64 = .{event};
+    deliverBarrier(barrier.ref, barrier, 1, @ptrCast(&paths), &all, &ids); // safe: the same C array of C strings FSEvents hands deliverBarrier
 }
 
 /// Polls until one `overflow` arrives, checks it against the watch it is
@@ -2041,8 +2295,8 @@ test "a file stream accepts the replay sentinel outside its event scope" {
     stream.resumed = true;
     try synthesize(gpa, stream, &.{.{ .path = parent, .flags = flag.history_done }});
     try backend.drain(&batch);
-    if (stream.replayed == null) std.debug.print("file replay sentinel discarded root={s} parent={s} scope={s}\n", .{ root, parent, @tagName(stream.scope) });
-    try testing.expect(stream.replayed != null);
+    if (!stream.replayed) std.debug.print("file replay sentinel discarded root={s} parent={s} scope={s}\n", .{ root, parent, @tagName(stream.scope) });
+    try testing.expect(stream.replayed);
     try testing.expectEqual(@as(usize, 0), batch.events.items.len);
 }
 
@@ -2062,7 +2316,11 @@ pub const test_access = if (@import("builtin").is_test) struct {
     pub const resolveHeld = resolveHeldFixture;
     pub const settled = settledFixture;
     pub const synthesize = synthesizeFixture;
+    pub const synthesizeBarrier = synthesizeBarrierFixture;
+    pub const freeBases = freeBasesFixture;
 } else struct {};
+const synthesizeBarrierFixture = synthesizeBarrier;
+const freeBasesFixture = freeBases;
 const fseventsC = c;
 const synthesizeFixture = synthesize;
 
@@ -2073,6 +2331,7 @@ const settledFixture = settled;
 const cAccess = struct {
     pub const FSEventStreamGetDeviceBeingWatched = c.FSEventStreamGetDeviceBeingWatched;
     pub const FSEventStreamStop = c.FSEventStreamStop;
+    pub const FSEventsGetCurrentEventId = c.FSEventsGetCurrentEventId;
     pub const dispatch_sync_f = c.dispatch_sync_f;
 };
 

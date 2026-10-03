@@ -76,6 +76,12 @@ FSEvents checkpoints retain per-watch volume and log identity, durable cursors a
 pending changes. Resume with matching canonical roots, scopes and filters. A changed
 volume or log yields `InvalidCheckpoint`; watches spanning mounted volumes keep live
 coverage but cannot produce a checkpoint. Other backends return null.
+A resumed watch reports a path removed while nothing watched however late the system
+delivers it. FSEvents numbers changes host-wide in the order they were made, so once the
+watch is seeded lookout writes a marker in a private directory of its own outside every
+watch, in the per-user temporary directory or `/private/tmp`, and every record numbered
+before the marker belongs to the gap. If no marker can be written, or the system reports
+lost events before it arrives, the watch reports `overflow` instead.
 [examples/since.zig](examples/since.zig) exercises checkpoint tokens and resuming.
 
 ## Scope

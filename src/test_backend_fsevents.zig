@@ -29,7 +29,6 @@ const bounds: buffer.Bounds = .{
 };
 const grace_ms = 25;
 const grace_rounds = 4;
-const replay_tail_ms = 1_000;
 
 const lost_track: u32 = flag.must_scan_sub_dirs | flag.user_dropped | flag.kernel_dropped;
 pub const Held = struct {
@@ -253,6 +252,9 @@ test "a loss the system reports reads the entry counts again, so the budget hold
 /// left thrown away. What a test drains after this is what it delivered.
 fn stopDeliveries(f: *FsEvents, stream: anytype) void {
     c.FSEventStreamStop(stream.ref);
+    // A resumed stream's barrier too: it stays, with its marker unnamed,
+    // for a test to deliver by hand. See `access.synthesizeBarrier`.
+    if (stream.barrier) |barrier| c.FSEventStreamStop(barrier.ref);
     c.dispatch_sync_f(f.queue, null, settled);
     {
         access.acquire(&f.sink.lock);
@@ -468,13 +470,277 @@ test "a poll that expires before the replay begins is not the end of it" {
     // The sentinel, alone in its delivery: nothing happened to a path.
     try synthesize(gpa, stream, &.{.{ .path = root, .flags = flag.history_done }});
     try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
-    try testing.expect(stream.replayed != null);
+    try testing.expect(stream.replayed);
     // The tail, live after the sentinel.
     try synthesize(gpa, stream, &.{.{ .path = deleted, .flags = flag.item_created | flag.item_removed }});
     const events = try watcher.poll(0);
     try testing.expectEqual(@as(usize, 1), events.len);
     try testing.expectEqual(lookout.Kind.removed, events[0].kind);
     try testing.expectEqualStrings(deleted, events[0].path);
+}
+
+test "a deletion made while nothing watched is reported however late it is delivered" {
+    // A resumed watcher reports a deletion made while nothing watched:
+    // a path gone that it has never heard of, while it is catching up.
+    // The catching up once ended a second after the `HistoryDone`
+    // sentinel. But the system numbers a change when it reads it, and a
+    // change it had not read when the stream started is delivered after
+    // the sentinel, live -- beside a loaded machine in the bench, more
+    // than a second after it -- and a deletion there was dropped as a
+    // path that came and went between two polls.
+    //
+    // Made live, this waited for fseventsd to deliver that deletion, and
+    // beside four loops creating and removing files it did not: not in
+    // the replay, not live within two minutes, and not in a fresh replay
+    // from the same checkpoint fifteen seconds later, in 17 of 20 runs.
+    // So the order is made here: the deletion is real, the checkpoint is
+    // real, and the replay -- a quiet boundary, the sentinel alone, the
+    // barrier's marker, the deletion numbered before it but delivered
+    // after it, a second and a half later -- is delivered through the
+    // callbacks the system calls, with the streams stopped first.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "gone.txt", .data = "one" });
+
+    const token = try quietToken(gpa, io, root);
+    defer gpa.free(token);
+
+    try tmp.dir.deleteFile(io, "gone.txt");
+    const deleted = try std.fs.path.join(gpa, &.{ root, "gone.txt" });
+    defer gpa.free(deleted);
+
+    const Late = struct {
+        var ms: i96 = 1_000;
+        fn now(_: ?*anyopaque, _: Io.Clock) Io.Timestamp {
+            return .{ .nanoseconds = ms * std.time.ns_per_ms };
+        }
+    };
+    var vtable: Io.VTable = io.vtable.*;
+    vtable.now = Late.now;
+    const frozen: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: lookout.Watcher = try .init(gpa, frozen, .{
+        .backend = .fsevents,
+        .checkpoint = checkpoint,
+        .latency_ms = 0,
+    });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true });
+    const f = &watcher.impl.fsevents;
+    const stream = f.streams.get(id).?;
+
+    stopDeliveries(f, stream);
+
+    // The boundary: a wait before the stream has said anything.
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    // The sentinel, alone in its delivery: nothing happened to a path.
+    try synthesize(gpa, stream, &.{.{ .path = root, .flags = flag.history_done }});
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    try testing.expect(stream.replayed);
+    // The marker, written once the watch was in place. It is no change
+    // to the watch, its directory goes with it, and its number is no
+    // position in this stream's log.
+    const marker_at = c.FSEventsGetCurrentEventId() + 1_000;
+    const dir = try gpa.dupe(u8, stream.barrier.?.dir);
+    defer gpa.free(dir);
+    access.synthesizeBarrier(stream, flag.item_created | flag.item_removed, marker_at);
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    try testing.expectEqual(@as(?*@TypeOf(stream.barrier.?.*), null), stream.barrier);
+    try testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, dir, .{}));
+    try testing.expect(stream.cursor < marker_at);
+    // fseventsd delivers the deletion 1.5 s after the sentinel, as it
+    // did beside a loaded machine in the bench, numbered before the
+    // marker, as every change made before the watch is.
+    Late.ms += 1_500;
+    try synthesize(gpa, stream, &.{.{ .path = deleted, .flags = flag.item_created | flag.item_removed, .event = marker_at - 1 }});
+    const events = try watcher.poll(0);
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(lookout.Kind.removed, events[0].kind);
+    try testing.expectEqualStrings(deleted, events[0].path);
+}
+
+/// A checkpoint of a recursive watch on `root`, taken holding nothing
+/// unread, as a token the caller frees.
+fn quietToken(gpa: Allocator, io: Io, root: []const u8) ![]u8 {
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true });
+    stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(id).?);
+    var checkpoint = (try watcher.checkpoint(gpa)).?;
+    defer checkpoint.deinit();
+    return checkpoint.token(gpa);
+}
+
+test "a path that came and went after the marker is not a deletion" {
+    // The other side of the marker: a path lookout never knew, gone,
+    // numbered after the watch was in place, was made and removed
+    // between two polls, and the tree is as it was.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const token = try quietToken(gpa, io, root);
+    defer gpa.free(token);
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency_ms = 0 });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true });
+    const f = &watcher.impl.fsevents;
+    const stream = f.streams.get(id).?;
+    stopDeliveries(f, stream);
+
+    const brief = try std.fs.path.join(gpa, &.{ root, "brief.txt" });
+    defer gpa.free(brief);
+    const older = try std.fs.path.join(gpa, &.{ root, "older.txt" });
+    defer gpa.free(older);
+    const marker_at = c.FSEventsGetCurrentEventId() + 1_000;
+    // Both in one delivery, the marker after them: it is read first.
+    try synthesize(gpa, stream, &.{
+        .{ .path = brief, .flags = flag.item_created | flag.item_removed, .event = marker_at + 1 },
+        .{ .path = older, .flags = flag.item_removed, .event = marker_at - 1 },
+    });
+    access.synthesizeBarrier(stream, flag.item_created, marker_at);
+    const events = try watcher.poll(0);
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(lookout.Kind.removed, events[0].kind);
+    try testing.expectEqualStrings(older, events[0].path);
+    try testing.expectEqual(@as(u64, marker_at + 1), stream.cursor);
+}
+
+test "a loss on a resumed watch's barrier is one overflow, and its gap ends there" {
+    // The marker may be in what the system lost, and a gap waiting for
+    // it would never end. The overflow already says to look again.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const token = try quietToken(gpa, io, root);
+    defer gpa.free(token);
+    for ([_]u32{ flag.must_scan_sub_dirs, flag.kernel_dropped, 0 }) |loss| {
+        var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+        defer checkpoint.deinit();
+        var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency_ms = 0 });
+        defer watcher.deinit();
+        const id = try watcher.add(root, .{ .recursive = true });
+        const f = &watcher.impl.fsevents;
+        const stream = f.streams.get(id).?;
+        stopDeliveries(f, stream);
+        if (loss != 0) {
+            access.synthesizeBarrier(stream, loss, c.FSEventsGetCurrentEventId());
+        } else {
+            // A delivery that did not fit in the buffer: the marker may
+            // have been in it.
+            access.acquire(&f.sink.lock);
+            f.sink.overflowed = true;
+            access.release(&f.sink.lock);
+        }
+        const events = try watcher.poll(0);
+        try testing.expectEqual(@as(usize, 1), events.len);
+        try testing.expectEqual(lookout.Kind.overflow, events[0].kind);
+        try testing.expectEqualStrings(root, events[0].path);
+        try testing.expectEqual(.closed, std.meta.activeTag(stream.gap));
+        try testing.expect(stream.barrier == null);
+    }
+}
+
+test "a resumed watch's marker ends its gap and is never reported" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const token = try quietToken(gpa, io, root);
+    defer gpa.free(token);
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency_ms = 0 });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true });
+    const stream = watcher.impl.fsevents.streams.get(id).?;
+    const dir = try gpa.dupe(u8, stream.barrier.?.dir);
+    defer gpa.free(dir);
+    try testing.expect(!path_cmp.within(root, dir));
+    const deadline = Deadline.start(io, 10_000);
+    while (stream.gap == .open and !deadline.expired()) {
+        for (try watcher.poll(100)) |event| try testing.expect(path_cmp.within(root, event.path));
+    }
+    try testing.expectEqual(.before, std.meta.activeTag(stream.gap));
+    try testing.expect(stream.barrier == null);
+    try testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, dir, .{}));
+}
+
+test "a resumed watch with nowhere outside the watches for its marker overflows" {
+    // A marker inside a watched tree would be reported as a change to
+    // it, so it is never put there; with nowhere else, the end of the
+    // gap cannot be known, and the caller is told to look again.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const token = try quietToken(gpa, io, root);
+    defer gpa.free(token);
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency_ms = 0 });
+    defer watcher.deinit();
+    const f = &watcher.impl.fsevents;
+    try testing.expect(f.barrier_bases.items.len != 0);
+    access.freeBases(gpa, &f.barrier_bases);
+    f.barrier_bases = .empty;
+    try f.barrier_bases.append(gpa, try gpa.dupe(u8, root));
+    const id = try watcher.add(root, .{ .recursive = true });
+    const stream = f.streams.get(id).?;
+    try testing.expect(stream.barrier == null);
+    try testing.expectEqual(.closed, std.meta.activeTag(stream.gap));
+    var overflowed = false;
+    for (try watcher.poll(0)) |event| {
+        if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
+    }
+    try testing.expect(overflowed);
+}
+
+test "removing a resumed watch before its marker is named removes the barrier" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const token = try quietToken(gpa, io, root);
+    defer gpa.free(token);
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency_ms = 0 });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true });
+    const f = &watcher.impl.fsevents;
+    const stream = f.streams.get(id).?;
+    stopDeliveries(f, stream);
+    const dir = try gpa.dupe(u8, stream.barrier.?.dir);
+    defer gpa.free(dir);
+    try Io.Dir.cwd().access(io, dir, .{});
+    watcher.remove(id);
+    try testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, dir, .{}));
 }
 
 test "checkpoints preserve independent cursors and unread stream records" {
@@ -684,7 +950,7 @@ test "fresh FSEvents replay reports no pre-add state or sibling paths" {
     try testing.expect(found);
     // Every fresh stream now replays from a captured boundary. Its marker
     // is consumed even though this watch did not ask to resume a checkpoint.
-    try testing.expect(stream.replayed != null);
+    try testing.expect(stream.replayed);
     try testing.expect(!stream.resumed);
 }
 

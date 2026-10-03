@@ -43,6 +43,10 @@ pub const flag = struct {
     pub const item_change_owner: u32 = 0x0000_4000;
     pub const item_xattr_mod: u32 = 0x0000_8000;
     pub const item_is_dir: u32 = 0x0002_0000;
+    /// Not the system's: lookout sets it on a record its own barrier
+    /// stream delivered, which is about where a resumed watch's gap ends
+    /// and not about a path in the watch. See `fsevents.Barrier`.
+    pub const barrier: u32 = 0x8000_0000;
 };
 
 /// Watch id, flags, path length and the system's event id. The path

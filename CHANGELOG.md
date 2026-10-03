@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A resumed FSEvents watch reports a deletion made while nothing watched however late the system delivers it: the gap ends at a marker lookout writes outside the watch once it is seeded, decided by the system's event numbers, rather than one second after the replay sentinel. No marker, or lost events before it, report `overflow`.
+
 - Hash folded paths in blocks rather than one code point at a time; the values are unchanged.
 
 - FSEvents `add` reads each entry's initial metadata with its directory listing, one `getattrlistbulk` call for many entries, and remembers it in one lookup, instead of an `lstat` and four lookups per entry.
