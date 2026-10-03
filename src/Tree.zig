@@ -388,7 +388,9 @@ fn insert(t: *Tree, id: NodeId, node: Node) Allocator.Error!void {
 /// children, leaving it in the table.
 fn unlink(t: *Tree, id: NodeId, node: Node) void {
     const key: Key = .{ .watch = node.watch, .path = node.path };
-    if (t.index.get(key) == id) _ = t.index.swapRemove(key);
+    if (t.index.getIndex(key)) |at| {
+        if (t.index.values()[at] == id) t.index.swapRemoveAt(at);
+    }
     if (node.parent) |parent| {
         if (t.nodes.getPtr(parent)) |above| _ = above.children.swapRemove(id);
     }
@@ -456,11 +458,21 @@ pub fn removeWatch(t: *Tree, id: WatchId) void {
 
     // One pass over every node rather than the root's subtree: it is
     // one pass per call, and it leaves nothing of the watch whatever
-    // the links say.
+    // the links say. Every node of the watch goes, parents with their
+    // children, so none is unlinked from another, and the index loses
+    // its entries by position: hashing each path again to find its
+    // entry made removing a watch twice as slow as its nodes.
     var i: usize = 0;
+    while (i < t.index.count()) {
+        if (t.index.keys()[i].watch == id) t.index.swapRemoveAt(i) else i += 1;
+    }
+    i = 0;
     while (i < t.nodes.count()) {
         if (t.nodes.values()[i].watch == id) {
-            t.dropAt(i);
+            const node_id = t.nodes.keys()[i];
+            t.destroy(&t.nodes.values()[i]);
+            t.nodes.swapRemoveAt(i);
+            t.noteDropped(node_id);
         } else {
             i += 1;
         }
