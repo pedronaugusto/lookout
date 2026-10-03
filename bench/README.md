@@ -13,7 +13,7 @@ speed thresholds. Reports retain delivery/rename/setup counts and booleans,
 with no timing or CPU-time values. A successful smoke supports no speed claim.
 
 `revisions.json` fixes A at `6af22d4a5bb94956c6fa52fb07f4c40aec4c55db` and B at
-`c2d8f9d7bc71765a09a1bb8dd39cbf296a87d8f0`, the final main. A retains the original
+`8fac87aa96d5ac91bb8b4f17131d3f71b58b93ca`, the final main. A retains the original
 **2026-09-30 00:00:00 +01:00** cutoff. `--before REV --after REV` selects other
 immutable snapshots; refresh the pins when main advances.
 
