@@ -104,20 +104,26 @@ fn makeWatcher(gpa: Allocator, io: Io) !Watcher {
     });
 }
 
-// The `before` revision can lose a write made just after its watch starts
-// (fixed since, in 5249e23). Write again until one arrives, as the Go and
-// Rust comparisons do. Warm-up is not measured.
+// Before a trial the harness removes the previous side's watch root, up to
+// the largest burst's files, and macOS delivers those removals to whoever
+// watches next: a stream can be seconds behind. A write made just after a
+// watch starts can also be lost (`before`, fixed since in 5249e23). So write
+// until the warm-up file's own event arrives, however long the backlog takes
+// (a minute at most), then take everything still pending until the stream is
+// quiet, so nothing from before the trial is counted in it. Warm-up is not
+// measured. The Go and Rust comparisons warm up the same way.
 fn warmUp(watcher: *Watcher, dir: Io.Dir, io: Io) !void {
     var waited: u32 = 0;
-    while (waited < 5_000) : (waited += 100) {
+    const seen = seen: while (waited < 60_000) : (waited += 100) {
         var digits: [10]u8 = undefined;
         const data = std.fmt.bufPrint(&digits, "{d}", .{waited}) catch unreachable;
         try dir.writeFile(io, .{ .sub_path = ".warmup", .data = data });
         for (try watcher.poll(100)) |event| {
-            if (std.mem.endsWith(u8, event.path, ".warmup")) return;
+            if (std.mem.endsWith(u8, event.path, ".warmup")) break :seen true;
         }
-    }
-    return error.WarmupNotObserved;
+    } else false;
+    if (!seen) return error.WarmupNotObserved;
+    while ((try watcher.poll(200)).len != 0) {}
 }
 
 fn latency(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, root: []const u8) !void {

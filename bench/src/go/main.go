@@ -119,10 +119,13 @@ func receive(w *fsnotify.Watcher, timeout time.Duration) (*fsnotify.Event, error
 }
 
 func warmup(w *fsnotify.Watcher, root string) error {
-	// A write made as the watch starts can precede the event stream, so write
-	// again until one arrives. Warm-up is not measured.
+	// The harness removed the previous side's watch root just before, and a
+	// write made as the watch starts can precede the event stream: write until
+	// the warm-up file's own event arrives, however long the backlog takes (a
+	// minute at most), then take what is still pending until the stream is
+	// quiet. Warm-up is not measured.
 	wanted := filepath.Join(root, ".warmup")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for written := 0; time.Now().Before(deadline); written++ {
 		if err := os.WriteFile(wanted, []byte(strconv.Itoa(written)), 0o644); err != nil {
 			return err
@@ -132,7 +135,15 @@ func warmup(w *fsnotify.Watcher, root string) error {
 			return err
 		}
 		if event != nil && event.Name == wanted {
-			return nil
+			for {
+				event, err := receive(w, 200*time.Millisecond)
+				if err != nil {
+					return err
+				}
+				if event == nil {
+					return nil
+				}
+			}
 		}
 	}
 	return errors.New("warm-up event was not delivered")

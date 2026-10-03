@@ -152,11 +152,14 @@ fn print_metric(
 }
 
 fn warm_up(source: &mut dyn EventSource, root: &Path) -> Result<(), Box<dyn Error>> {
-    // A write made as the watch starts can precede the event stream (FSEvents
-    // drops what happens before its stream runs), so write again until one
-    // arrives. Warm-up is not measured.
+    // The harness removed the previous side's watch root just before, and a
+    // write made as the watch starts can precede the event stream (FSEvents
+    // drops what happens before its stream runs): write until the warm-up
+    // file's own event arrives, however long the backlog takes (a minute at
+    // most), then take what is still pending until the stream is quiet.
+    // Warm-up is not measured.
     let wanted = root.join(".warmup");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut written = 0u32;
     while Instant::now() < deadline {
         fs::write(&wanted, written.to_string())?;
@@ -166,6 +169,7 @@ fn warm_up(source: &mut dyn EventSource, root: &Path) -> Result<(), Box<dyn Erro
             .iter()
             .any(|event| event.paths.iter().any(|p| p == &wanted))
         {
+            while !source.receive(Duration::from_millis(200)).is_empty() {}
             return Ok(());
         }
     }
