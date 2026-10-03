@@ -244,7 +244,7 @@ func burst(input, root string) error {
 			done.Store(true)
 		}()
 		unique := make([]bool, count)
-		delivered, overflow := 0, false
+		delivered, observedSoFar, overflow := 0, 0, false
 		var last int64 = -1
 		var quiet time.Time
 		for {
@@ -260,6 +260,9 @@ func burst(input, root string) error {
 				quiet = time.Time{}
 				if i, ok := indexOf(event.Name, "f", ".txt", count); ok {
 					delivered++
+					if !unique[i] {
+						observedSoFar++
+					}
 					unique[i] = true
 					last = benchmarkSince(started).Microseconds()
 				}
@@ -267,7 +270,13 @@ func burst(input, root string) error {
 				if quiet.IsZero() {
 					quiet = time.Now()
 				}
-				if time.Since(quiet) >= 2*time.Second {
+				// Up to thirty quiet seconds while files are still missing;
+				// see burst_patience_ms in lookout_bench.zig.
+				patience := 2 * time.Second
+				if observedSoFar < count && !overflow && os.Getenv("BENCH_SMOKE") != "1" {
+					patience = 30 * time.Second
+				}
+				if time.Since(quiet) >= patience {
 					break
 				}
 			}

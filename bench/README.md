@@ -33,7 +33,11 @@ The existing same-job tools remain Rust notify 8.2.0, notify-debouncer-full
 0.6.0 and Go fsnotify v1.9.0, pinned in their manifests and lockfiles. The debouncer uses a 10 ms window and a 2 ms tick. Event
 coalescing and rename pairing differ: delivered counts, files missed, pairing,
 unmatched renames and overflow stay visible next to time/CPU data. Writes/renames are checked on disk outside the measured region so a failed
-writer cannot look like watcher loss. Setup must succeed in smoke. Missing burst/rename observations remain visible rather than
+writer cannot look like watcher loss. A burst ends after two quiet seconds once every
+file has arrived or an overflow was reported, and waits up to thirty quiet seconds
+while files are still missing: with two, FSEvents' lag after a large burst ended
+each side on a different subset (about 5% of 10,000), so the sides' last events
+were different events. Setup must succeed in smoke. Missing burst/rename observations remain visible rather than
 being silently treated as equivalent behavior. Parcel remains unavailable;
 no new comparison tool is added. Installed toolchains are recorded.
 
@@ -44,7 +48,7 @@ versions, execution order, samples and status. Results and owned scratch/cache
 files are ignored. Prepared scratch and compiler caches persist; tool caches remain
 under `bench/build/quiet-cache`. Smoke builds both snapshot and backend test artifacts; the full pass reuses them.
 
-Quiet-only planning estimate: **15–25 minutes** after successful smoke preparation. See [QUIET-PREP.md](QUIET-PREP.md) for invocation counts, sizes and assumptions. This is a planning estimate, not a measurement from this preparation. Have at
+Quiet-only planning estimate: **15–37 minutes** after successful smoke preparation. See [QUIET-PREP.md](QUIET-PREP.md) for invocation counts, sizes and assumptions. This is a planning estimate, not a measurement from this preparation. Have at
 least 3 GiB free for scratch and caches. `ZIG`, `GO`, `CARGO`, `PYTHON` and standard
 tool cache environment variables select installed tools/caches. The specialized
 `run.sh` remains; `quiet.sh` is the complete pass entry point.

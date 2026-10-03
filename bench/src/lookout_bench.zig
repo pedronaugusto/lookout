@@ -193,6 +193,11 @@ const FileWriter = struct {
     }
 };
 
+/// How long a burst waits in silence for files still missing. FSEvents
+/// delivers a burst seconds behind on a busy machine, and a two-second
+/// window ended the comparison sides on different subsets of it.
+const burst_patience_ms: u32 = 30_000;
+
 fn burst(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, root: []const u8) !void {
     var cfg = try readConfig(gpa, io, inputs);
     defer cfg.deinit();
@@ -215,10 +220,14 @@ fn burst(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, root: 
         var writer: FileWriter = .{ .io = io, .dir = dir, .names = names.lines };
         const thread = try std.Thread.spawn(.{}, FileWriter.run, .{&writer});
         var delivered: usize = 0;
+        var observed_so_far: usize = 0;
         var overflow = false;
         var last_us: ?i64 = null;
         var quiet: u32 = 0;
-        while (quiet < (if (smoke) @as(u32, 200) else 2_000)) {
+        // Two quiet seconds end the burst once every file has arrived or an
+        // overflow says some will not; while files are still missing, up to
+        // thirty, so that every side's last event is the same 10,000th one.
+        while (quiet < (if (smoke) @as(u32, 200) else if (observed_so_far < count and !overflow) burst_patience_ms else @as(u32, 2_000))) {
             const events = try watcher.poll(100);
             if (events.len == 0 and writer.done.load(.acquire)) {
                 quiet += 100;
@@ -229,6 +238,7 @@ fn burst(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, root: 
                 if (event.kind == .overflow) overflow = true;
                 if (pathIndex(event.path, "f", ".txt", count)) |index| {
                     delivered += 1;
+                    if (!seen[index]) observed_so_far += 1;
                     seen[index] = true;
                     const started = writer.started_us.load(.acquire);
                     if (started != 0) last_us = benchmarkNow(io).toMicroseconds() - started;

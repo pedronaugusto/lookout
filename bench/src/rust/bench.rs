@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 const RECEIVE_SLICE: Duration = Duration::from_millis(100);
 const QUIET_AFTER_WRITER: Duration = Duration::from_secs(2);
+/// How long a burst waits in silence for files still missing; see
+/// `burst_patience_ms` in lookout_bench.zig.
+const BURST_PATIENCE: Duration = Duration::from_secs(30);
 
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
@@ -261,6 +264,7 @@ fn burst(mode: Mode, input: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
 
         let mut unique = vec![false; count];
         let mut delivered = 0usize;
+        let mut observed_so_far = 0usize;
         let mut overflow = false;
         let mut last = None;
         let mut quiet_since = None;
@@ -269,7 +273,12 @@ fn burst(mode: Mode, input: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
             if events.is_empty() {
                 if done.load(Ordering::Acquire) {
                     let quiet = quiet_since.get_or_insert_with(Instant::now);
-                    if quiet.elapsed() >= QUIET_AFTER_WRITER {
+                    let patience = if observed_so_far < count && !overflow && !smoke() {
+                        BURST_PATIENCE
+                    } else {
+                        QUIET_AFTER_WRITER
+                    };
+                    if quiet.elapsed() >= patience {
                         break;
                     }
                 }
@@ -280,6 +289,7 @@ fn burst(mode: Mode, input: &Path, root: &Path) -> Result<(), Box<dyn Error>> {
                     for path in &event.paths {
                         if let Some(index) = matching_index(path, "f", ".txt", count) {
                             delivered += 1;
+                            observed_so_far += usize::from(!unique[index]);
                             unique[index] = true;
                             last = Some(started.elapsed().as_micros());
                         }
