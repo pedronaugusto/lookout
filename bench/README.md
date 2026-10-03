@@ -21,7 +21,10 @@ Jobs are single-file latency, 10,000/100,000-file bursts, 1,000 renames, idle an
 100-writes/second CPU time, recursive setup over 50,000 files, and existing
 backend checks: blocked-change delivery, rename/delete delivery, cancellation,
 wake and stop-by-flag. Backend tests emit measurements in full mode and retain
-their speed ceilings; failure leaves a failed report with collected samples.
+their speed ceilings; every backend is measured before a test fails. A check over
+its ceiling is kept as a failed row with its value and budget, the pass runs to the
+end, writes its results and exits non-zero. Any other failure stops the pass and
+leaves a failed report with the samples collected so far.
 
 The existing same-job tools remain Rust notify 8.2.0, notify-debouncer-full
 0.6.0 and Go fsnotify v1.9.0, pinned in their manifests and lockfiles. The debouncer uses a 10 ms window and a 2 ms tick. Event

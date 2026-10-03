@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import statistics
 import subprocess
@@ -43,7 +44,7 @@ class Pass:
             self.env[name] = str(cache / directory)
         self.data = {'schema': 1, 'mode': 'smoke' if smoke else 'full',
                      'status': 'preparing', 'timings_recorded': False,
-                     'started_utc': utc(), 'samples': [], 'checks': []}
+                     'started_utc': utc(), 'samples': [], 'checks': [], 'failed_checks': []}
         self.runs = int(os.environ.get('BENCH_RUNS', '5'))
         if self.runs < 1:
             raise ValueError('BENCH_RUNS must be positive')
@@ -51,10 +52,14 @@ class Pass:
     def tool(self, name):
         return self.env.get('PYTHON', sys.executable) if name == 'python' else self.env.get(name.upper(), name)
 
-    def command(self, args, cwd=HERE, capture=False, timeout=None):
+    def command(self, args, cwd=HERE, capture=False, timeout=None, judged=False):
+        """`judged` returns a failed run's output and status to the caller, which
+        records it; any other failure raises."""
         result = subprocess.run([str(x) for x in args], cwd=cwd, env=self.env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, timeout=timeout)
+        if judged:
+            return result.stdout, result.stderr, result.returncode
         if result.returncode:
             if capture and self.smoke:
                 # Failed smoke stderr may contain time values; do not retain it.
@@ -116,7 +121,13 @@ class Pass:
             if prepare:
                 prepare(side)
             try:
-                stdout, stderr = self.command(args, capture=True)
+                # A full pass keeps a speed check that went over its ceiling as a
+                # failed sample and goes on; smoke still stops at the first failure.
+                judged = parser == 'test' and not self.smoke
+                if judged:
+                    stdout, stderr, status = self.command(args, capture=True, judged=True)
+                else:
+                    stdout, stderr = self.command(args, capture=True)
                 if parser == 'text':
                     rows = []
                     if not stdout.strip():
@@ -127,10 +138,26 @@ class Pass:
                         raise RuntimeError(f'{workload}/{side}: no result rows')
                 if validate:
                     validate(side, rows)
+                verdicts = []
+                if judged:
+                    rows, verdicts = budgets(rows)
+                    over = {v['workload'] for v in verdicts if not v['passed']}
+                    if status and not only_over_budget(stderr, over):
+                        # Not a ceiling: a broken check is not a measurement.
+                        sys.stderr.write(stderr)
+                        raise RuntimeError(f'{Path(str(args[0])).name} failed ({status})')
+                    if not status and over:
+                        raise RuntimeError(f'{workload}/{side}: over budget but the check passed')
                 if trial is None:
                     return
-                item = {'job': workload, 'side': side, 'trial': trial, 'status': 'passed',
+                item = {'job': workload, 'side': side, 'trial': trial,
+                        'status': 'failed' if any(not v['passed'] for v in verdicts) else 'passed',
                         'result_rows': len(rows)}
+                if verdicts:
+                    item['budgets'] = verdicts
+                for v in verdicts:
+                    if not v['passed']:
+                        self.data['failed_checks'].append({'job': workload, 'side': side, 'trial': trial, **v})
                 if self.smoke:
                     # Keep only counts/booleans; discard all timing/throughput/ratios.
                     item['correctness'] = [r for r in rows if r['unit'] in
@@ -170,6 +197,12 @@ class Pass:
                  json.dumps(self.data.get('machine', {}), indent=2), '```', '']
         if self.smoke:
             lines.extend(['## Checks', '', f"{len(self.data['checks'])} smoke invocations passed.", ''])
+        if self.data['failed_checks']:
+            lines.extend(['## Failed checks', '', '| Job | Side | Trial | Workload | Value | Budget | Unit |',
+                          '|---|---|---:|---|---:|---:|---|'])
+            for r in self.data['failed_checks']:
+                lines.append(f"| {r['job']} | {r['side']} | {r['trial']} | {r['workload']} | {r['value']} | {r['budget']} | {r['unit']} |")
+            lines.append('')
         lines.extend(['## Comparison scope', '', *['- ' + name for name in self.data.get('comparisons', [])], '',
                       *['Unavailable: ' + name for name in self.data.get('unavailable', [])], ''])
         if self.data['summary']:
@@ -209,6 +242,52 @@ def parse_rows(output, work=False, loose=False):
             raise RuntimeError(f'non-finite metric: {workload}/{metric}')
         rows.append({'workload': workload, 'metric': metric, 'value': number, 'unit': unit})
     return rows
+
+
+def budgets(rows):
+    """Splits a speed check's ceilings out of its measurements: each `budget`
+    row and `within_budget` verdict joins the `elapsed` row of its workload."""
+    measured, ceilings, within = [], {}, {}
+    for row in rows:
+        if row['metric'] == 'budget':
+            ceilings[row['workload']] = row
+        elif row['metric'] == 'within_budget':
+            within[row['workload']] = row['value'] == 1
+        else:
+            measured.append(row)
+    if set(ceilings) != set(within):
+        raise RuntimeError('speed check budget without a verdict')
+    values = {r['workload']: r for r in measured if r['metric'] == 'elapsed'}
+    verdicts = []
+    for workload in sorted(ceilings):
+        if workload not in values or values[workload]['unit'] != ceilings[workload]['unit']:
+            raise RuntimeError(f'{workload}: budget without a matching measurement')
+        verdicts.append({'workload': workload, 'value': values[workload]['value'],
+                         'budget': ceilings[workload]['value'], 'unit': ceilings[workload]['unit'],
+                         'passed': within[workload]})
+    return measured, verdicts
+
+
+def only_over_budget(output, over):
+    """Whether every test the Zig runner failed went over a ceiling, and
+    nothing else went wrong: each failure is an unmet expectation in a test
+    that reported a workload in `over`."""
+    tests, current, failed = {}, None, []
+    for line in output.splitlines():
+        if re.match(r'\d+/\d+ ', line):
+            current = line.split('...', 1)[0]
+            tests[current] = set()
+        fields = line.split('\t')
+        if current is not None and len(fields) == 5:
+            tests[current].add(fields[1])
+        reason = re.search(r'FAIL \((\w+)\)$', line)
+        if reason:
+            if reason.group(1) != 'TestUnexpectedResult':
+                return False
+            failed.append(current)
+    if not failed or 'leaked' in output or not re.search(rf'\b{len(failed)} failed\.', output):
+        return False
+    return all(name is not None and tests[name] & over for name in failed)
 
 
 def summarize(samples):
@@ -329,7 +408,7 @@ def main():
         workloads.run(p, bins)
         if args.prepare_only: p.prepared.write()
         if args.smoke: Prepared(HERE, build/'quiet-prepared/full').certify()
-        p.data['status'] = 'passed'
+        p.data['status'] = 'failed' if p.data['failed_checks'] else 'passed'
     except Exception as error:
         p.data.update(status='failed', error=f'{type(error).__name__}: pass failed; see terminal')
         raise
@@ -337,8 +416,21 @@ def main():
         p.data['finished_utc'] = utc()
         p.persist()
     label = 'Preparation' if args.prepare_only else 'Prepared checks' if args.check_prepared else 'Smoke checks' if args.smoke else 'Timed pass'
-    print(f"{label} passed. Results: {results.relative_to(REPO)}")
+    return verdict(p.data, label, results.relative_to(REPO))
+
+
+def verdict(data, label, results):
+    """Says how the pass ended, once its results are written; the exit status."""
+    if data['failed_checks']:
+        for r in data['failed_checks']:
+            print(f"Over budget: {r['job']}/{r['side']}/trial {r['trial']} {r['workload']} "
+                  f"{r['value']:g} {r['unit']} (budget {r['budget']:g})", file=sys.stderr)
+        print(f"{label} failed: {len(data['failed_checks'])} speed checks over budget. Results: {results}",
+              file=sys.stderr)
+        return 1
+    print(f"{label} passed. Results: {results}")
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

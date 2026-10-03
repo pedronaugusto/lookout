@@ -89,6 +89,7 @@ test "quiet: a change that happens while poll is blocked comes back promptly" {
     const rounds = if (smoke) 1 else 5;
     const interval_ms = 200;
 
+    var over = false;
     for (backends) |backend| {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
@@ -150,8 +151,9 @@ test "quiet: a change that happens while poll is blocked comes back promptly" {
             });
         }
         metric("blocked_change", backend, worst);
-        if (!smoke) try std.testing.expect(worst <= budget);
+        over = !judged("blocked_change", backend, budget, worst <= budget) or over;
     }
+    try std.testing.expect(!over);
 }
 
 test "quiet: a file saved by a rename and then deleted is reported gone at once, in a long wait" {
@@ -160,6 +162,7 @@ test "quiet: a file saved by a rename and then deleted is reported gone at once,
     // deletion arrives as a rename half with no partner, which is held for
     // one. A wait with no deadline of its own must still decide it within
     // the pairing grace, not when the next unrelated change comes.
+    var over = false;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
@@ -186,10 +189,12 @@ test "quiet: a file saved by a rename and then deleted is reported gone at once,
         const waited_ms = @divTrunc(started.durationTo(benchmarkNow(std.testing.io)).nanoseconds, std.time.ns_per_ms);
         try std.testing.expect(seen);
         metric("rename_then_delete", backend, waited_ms);
-        if (!smoke) try std.testing.expect(waited_ms < timeout_ms / 2);
+        over = !judged("rename_then_delete", backend, timeout_ms / 2, waited_ms < timeout_ms / 2) or over;
     }
+    try std.testing.expect(!over);
 }
 test "quiet: a cancellation requested before poll is reported at once" {
+    var over = false;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
@@ -211,11 +216,13 @@ test "quiet: a cancellation requested before poll is reported at once" {
         try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
         const elapsed = started.durationTo(benchmarkNow(std.testing.io));
         metric("cancel_before_poll", backend, elapsed.toMilliseconds());
-        if (!smoke) try std.testing.expect(elapsed.toMilliseconds() < timeout_ms / 2);
+        over = !judged("cancel_before_poll", backend, timeout_ms / 2, elapsed.toMilliseconds() < timeout_ms / 2) or over;
     }
+    try std.testing.expect(!over);
 }
 
 test "quiet: a watcher can be woken from another thread" {
+    var over = false;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
@@ -240,11 +247,13 @@ test "quiet: a watcher can be woken from another thread" {
         const elapsed = started.durationTo(benchmarkNow(std.testing.io));
         try std.testing.expectEqual(@as(usize, 0), events.len);
         metric("wake", backend, elapsed.toMilliseconds());
-        if (!smoke) try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+        over = !judged("wake", backend, timeout_ms, elapsed.toMilliseconds() < timeout_ms) or over;
     }
+    try std.testing.expect(!over);
 }
 
 test "quiet: a polling task is stopped by a flag and a wake on every backend" {
+    var over = false;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
@@ -275,12 +284,24 @@ test "quiet: a polling task is stopped by a flag and a wake on every backend" {
         try future.await(std.testing.io);
         const elapsed = started.durationTo(benchmarkNow(std.testing.io));
         metric("stop_by_flag", backend, elapsed.toMilliseconds());
-        if (!smoke) try std.testing.expect(elapsed.toMilliseconds() < timeout_ms);
+        over = !judged("stop_by_flag", backend, timeout_ms, elapsed.toMilliseconds() < timeout_ms) or over;
     }
+    try std.testing.expect(!over);
 }
 
 fn metric(job: []const u8, backend: lookout.Backend, milliseconds: anytype) void {
     std.debug.print("lookout\t{s}_{s}\telapsed\t{d}\tms\n", .{ job, @tagName(backend), milliseconds });
+}
+
+/// Reports a speed ceiling and whether the measurement kept to it, and
+/// returns that verdict. A backend over its ceiling fails the test only
+/// once every backend has been measured, so one slow backend does not
+/// hide the others' numbers. Smoke has no clock and checks no ceiling.
+fn judged(job: []const u8, backend: lookout.Backend, budget_ms: anytype, within: bool) bool {
+    if (smoke) return true;
+    std.debug.print("lookout\t{s}_{s}\tbudget\t{d}\tms\n", .{ job, @tagName(backend), budget_ms });
+    std.debug.print("lookout\t{s}_{s}\twithin_budget\t{d}\tbool\n", .{ job, @tagName(backend), @intFromBool(within) });
+    return within;
 }
 
 var smoke_ticks = std.atomic.Value(i64).init(1);

@@ -6,7 +6,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from quiet import Pass, paired, parse_rows
+import io
+from contextlib import redirect_stderr, redirect_stdout
+
+from quiet import Pass, paired, parse_rows, verdict
 
 
 class ProtocolTests(unittest.TestCase):
@@ -80,6 +83,82 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(p.setup_command(['cargo', 'build']), '')
             p.group('job', [('before', [binary])], prepare=lambda side: self.fail('mutated fixture'))
             self.assertEqual(p.data['samples'], [])
+
+    # What the speed-check binary prints when FSEvents misses its ceiling and
+    # kqueue keeps to it, and when it passes.
+    OVER = ('1/2 speed_claims.test.quiet: a change...fsevents: worst wake 4504 ms, budget 500 ms\n'
+            'lookout\tblocked_change_fsevents\telapsed\t4504\tms\n'
+            'lookout\tblocked_change_fsevents\tbudget\t500\tms\n'
+            'lookout\tblocked_change_fsevents\twithin_budget\t0\tbool\n'
+            'lookout\tblocked_change_kqueue\telapsed\t1\tms\n'
+            'lookout\tblocked_change_kqueue\tbudget\t500\tms\n'
+            'lookout\tblocked_change_kqueue\twithin_budget\t1\tbool\n'
+            'FAIL (TestUnexpectedResult)\n'
+            '2/2 speed_claims.test.quiet: a watcher can be woken...lookout\twake_fsevents\telapsed\t107\tms\n'
+            'lookout\twake_fsevents\tbudget\t5000\tms\n'
+            'lookout\twake_fsevents\twithin_budget\t1\tbool\n'
+            'OK\n'
+            '1 passed; 0 skipped; 1 failed.\n')
+    WITHIN = ('1/1 speed_claims.test.quiet: a change...lookout\tblocked_change_fsevents\telapsed\t90\tms\n'
+              'lookout\tblocked_change_fsevents\tbudget\t500\tms\n'
+              'lookout\tblocked_change_fsevents\twithin_budget\t1\tbool\n'
+              'OK\nAll 1 tests passed.\n')
+
+    def test_an_over_budget_speed_check_is_a_failed_row_and_the_pass_goes_on(self):
+        with tempfile.TemporaryDirectory() as name:
+            p = self.make_pass(False, Path(name))
+            calls = []
+            def command(args, judged=False, **kwargs):
+                self.assertTrue(judged)
+                calls.append(args[0])
+                return ('', self.OVER, 1) if len(calls) == 1 else ('', self.WITHIN, 0)
+            p.command = command
+            p.group('backend-speed-checks', [('before', ['A']), ('after', ['B'])], parser='test', warmup=False)
+            # every trial of every side still ran, and every measurement was kept
+            self.assertEqual(calls, ['A', 'B', 'A', 'B'])
+            self.assertEqual([s['status'] for s in p.data['samples']], ['failed', 'passed', 'passed', 'passed'])
+            failed = p.data['samples'][0]
+            self.assertEqual({r['workload']: r['value'] for r in failed['metrics']},
+                             {'blocked_change_fsevents': 4504, 'blocked_change_kqueue': 1, 'wake_fsevents': 107})
+            self.assertEqual(p.data['failed_checks'], [
+                {'job': 'backend-speed-checks', 'side': 'before', 'trial': 0,
+                 'workload': 'blocked_change_fsevents', 'value': 4504, 'budget': 500, 'unit': 'ms', 'passed': False}])
+            written = json.loads((p.results / 'results.json').read_text())
+            self.assertEqual(written['failed_checks'], p.data['failed_checks'])
+            self.assertIn('| backend-speed-checks | before | 0 | blocked_change_fsevents | 4504.0 | 500.0 | ms |',
+                          (p.results / 'results.md').read_text())
+            # the pass reports the failure, after the results, with a failing status
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                self.assertEqual(verdict(p.data, 'Timed pass', 'results/x'), 1)
+            self.assertIn('blocked_change_fsevents 4504 ms (budget 500)', err.getvalue())
+            self.assertEqual(out.getvalue(), '')
+            p.data['failed_checks'] = []
+            with redirect_stdout(out):
+                self.assertEqual(verdict(p.data, 'Timed pass', 'results/x'), 0)
+
+    def test_a_speed_check_that_breaks_rather_than_runs_slow_stops_the_pass(self):
+        broken = [
+            # an expectation other than a ceiling
+            self.OVER.replace('FAIL (TestUnexpectedResult)', 'FAIL (EventNotObserved)'),
+            # a failed test that reported nothing over its ceiling
+            self.OVER.replace('within_budget\t0', 'within_budget\t1'),
+            # a crash: no runner summary
+            self.OVER.replace('1 passed; 0 skipped; 1 failed.\n', ''),
+        ]
+        for output in broken:
+            with tempfile.TemporaryDirectory() as name:
+                p = self.make_pass(False, Path(name))
+                p.command = lambda args, judged=False, **kwargs: ('', output, 1)
+                with redirect_stderr(io.StringIO()), self.assertRaises(RuntimeError):
+                    p.group('backend-speed-checks', [('before', ['A'])], parser='test', warmup=False)
+                self.assertEqual(p.data['failed_checks'], [])
+        with tempfile.TemporaryDirectory() as name:
+            p = self.make_pass(False, Path(name))
+            # a verdict over budget from a binary that exited cleanly
+            p.command = lambda args, judged=False, **kwargs: ('', self.OVER.replace('1 failed', '0 failed'), 0)
+            with self.assertRaises(RuntimeError):
+                p.group('backend-speed-checks', [('before', ['A'])], parser='test', warmup=False)
 
     def test_unavailable_is_distinct_from_zero_and_bad_rows_fail(self):
         self.assertIsNone(parse_rows('tool\tjob\trate\tn/a\tlines/s\n')[0]['value'])
