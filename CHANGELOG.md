@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Hash folded paths in blocks rather than one code point at a time; the values are unchanged.
+
 - FSEvents `add` reads each entry's initial metadata with its directory listing, one `getattrlistbulk` call for many entries, and remembers it in one lookup, instead of an `lstat` and four lookups per entry.
 
 - An include pattern with `**` inside a name, such as `a**/c`, walks to what it names: the directories it crosses were pruned and the files below them never reported.
