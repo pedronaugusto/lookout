@@ -35,6 +35,8 @@ max_dir_entries: usize,
 /// only seen to be modified if it is watched itself. The `poll` backend
 /// re-stats every entry anyway and leaves this off.
 track_entries: bool,
+/// Polling enables content checks for timestamps within the snapshot tick.
+check_contents: bool = false,
 /// Every registered path, keyed by an id that is never reused.
 nodes: std.AutoArrayHashMapUnmanaged(NodeId, Node),
 /// The caller's watches, keyed by the id `lookout.Watcher.add` returned.
@@ -131,6 +133,7 @@ pub fn addWatch(
     added: *std.ArrayList(NodeId),
     batch: *Batch,
 ) AddError!void {
+    const taken_ns = Io.Clock.real.now(t.io).nanoseconds;
     const stat = try Io.Dir.cwd().statFile(t.io, abs_path, .{});
     const recursive = options.recursive;
 
@@ -155,12 +158,7 @@ pub fn addWatch(
         // frees it on failure, without the two ever both happening.
         errdefer t.gpa.free(node_path);
         if (stat.kind != .directory) {
-            _ = try t.createFile(id, node_path, .{
-                .size = stat.size,
-                .mtime_ns = stat.mtime.nanoseconds,
-                .ctime_ns = stat.ctime.nanoseconds,
-                .file_kind = stat.kind,
-            }, added);
+            _ = try t.createFile(id, node_path, Snapshot.capture(t.io, .cwd(), abs_path, stat, taken_ns, t.check_contents, false), added);
             return;
         }
         _ = try t.createDirectory(id, node_path, added);
@@ -244,7 +242,7 @@ fn createDirectory(t: *Tree, watch: WatchId, path: []u8, added: *std.ArrayList(N
         .path = path,
         .role = .directory,
         .dir = dir,
-        .snapshot = .empty,
+        .snapshot = .{ .entries = .empty, .truncated = false, .check_contents = t.check_contents },
         .meta = undefined,
     });
     errdefer {
@@ -646,6 +644,7 @@ pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {
     const node = t.nodes.getPtr(id) orelse return;
     if (node.role != .file) return;
 
+    const taken_ns = Io.Clock.real.now(t.io).nanoseconds;
     const stat = Io.Dir.cwd().statFile(t.io, node.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {
             const gone = try t.gpa.dupe(u8, node.path);
@@ -657,13 +656,8 @@ pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {
         else => return err,
     };
     const before = node.meta;
-    const next: Snapshot.Meta = .{
-        .size = stat.size,
-        .mtime_ns = stat.mtime.nanoseconds,
-        .ctime_ns = stat.ctime.nanoseconds,
-        .file_kind = stat.kind,
-    };
-    if (before.size != stat.size or before.mtime_ns != stat.mtime.nanoseconds) {
+    const next = Snapshot.capture(t.io, .cwd(), node.path, stat, taken_ns, t.check_contents, before.racy);
+    if (before.size != stat.size or before.mtime_ns != stat.mtime.nanoseconds or before.contentChanged(next)) {
         try batch.push(t.gpa, node.watch, node.path, .modified, .of(stat.kind));
     } else if (before.ctime_ns != stat.ctime.nanoseconds) {
         try batch.push(t.gpa, node.watch, node.path, .attributes, .of(stat.kind));

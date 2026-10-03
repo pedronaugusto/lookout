@@ -38,11 +38,13 @@ const slice_ms = 100;
 /// backend holds no kernel resource -- and returns the error union every
 /// backend returns, so that `lookout.Watcher.init` can treat them alike.
 pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) @import("../watch_contract.zig").InitError!Poll {
+    var tree: Tree = .init(gpa, io, options.max_dir_entries, false);
+    tree.check_contents = true;
     return .{
         .gpa = gpa,
         .io = io,
         .interval_ms = @max(1, options.poll_interval_ms),
-        .tree = .init(gpa, io, options.max_dir_entries, false),
+        .tree = tree,
     };
 }
 
@@ -50,6 +52,78 @@ test "a zero polling interval still sleeps between quiet scans" {
     var p = try Poll.init(std.testing.allocator, std.testing.io, .{ .poll_interval_ms = 0 });
     defer p.deinit();
     try std.testing.expectEqual(@as(u32, 1), p.interval_ms);
+}
+
+test "polling racy entries compare bytes even when size and timestamps match" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const Clock = struct {
+        threadlocal var time_ns: i96 = 0;
+        threadlocal var mtime_ns: i96 = 0;
+        threadlocal var ctime_ns: i96 = 0;
+
+        fn now(_: ?*anyopaque, _: Io.Clock) Io.Timestamp {
+            return .{ .nanoseconds = time_ns };
+        }
+
+        fn stat(context: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
+            var result = try testing.io.vtable.dirStatFile(context, dir, path, options);
+            if (result.kind == .file) {
+                result.mtime.nanoseconds = mtime_ns;
+                result.ctime.nanoseconds = ctime_ns;
+            }
+            return result;
+        }
+    };
+    var vtable = testing.io.vtable.*;
+    vtable.now = Clock.now;
+    vtable.dirStatFile = Clock.stat;
+    const io: Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "nested", .default_dir);
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const nested = try tmp.dir.realPathFileAlloc(io, "nested", gpa);
+    defer gpa.free(nested);
+    const file_path = try std.fs.path.join(gpa, &.{ root, "nested", "file" });
+    defer gpa.free(file_path);
+
+    // Hold both stat timestamps fixed across positional writes. The clock
+    // is in the same two-second filesystem tick, then crosses its edge.
+    for ([_]bool{ false, true }) |ctime_only| {
+        for (0..3) |scope| {
+            Clock.time_ns = 3 * std.time.ns_per_s + 500 * std.time.ns_per_ms;
+            Clock.mtime_ns = if (ctime_only) 0 else 2 * std.time.ns_per_s;
+            Clock.ctime_ns = if (ctime_only) 2 * std.time.ns_per_s else 0;
+            try tmp.dir.writeFile(io, .{ .sub_path = "nested/file", .data = "one" });
+            var p = try Poll.init(gpa, io, .{});
+            defer p.deinit();
+            var batch: Batch = .init(io, .{});
+            defer batch.deinit(gpa);
+            const watch_path = if (scope == 2) file_path else if (scope == 1) root else nested;
+            try p.add(@enumFromInt(0), watch_path, .{ .recursive = scope == 1 }, &batch);
+            try p.scan(&batch);
+            try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+
+            const file = try tmp.dir.openFile(io, "nested/file", .{ .mode = .read_write });
+            defer file.close(io);
+            for ([_][]const u8{ "two", "six", "ten" }, 0..) |bytes, index| {
+                batch.reset(gpa);
+                try file.writePositionalAll(io, bytes, 0);
+                // A racy baseline must still compare content on the scan
+                // where the timestamps first become strictly older.
+                if (index == 2) Clock.time_ns = 4 * std.time.ns_per_s;
+                try p.scan(&batch);
+                try testing.expectEqual(@as(usize, 1), batch.events.items.len);
+                try testing.expectEqual(lookout.Kind.modified, batch.events.items[0].kind);
+                try testing.expectEqualStrings(file_path, batch.events.items[0].path);
+            }
+            batch.reset(gpa);
+            try p.scan(&batch);
+            try testing.expectEqual(@as(usize, 0), batch.events.items.len);
+        }
+    }
 }
 
 /// Releases the watch tables and the directory handles they hold open.

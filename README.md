@@ -48,6 +48,10 @@ lets a caller check availability before choosing a backend. `pairsRenames`,
 `reportsRootMove`, `reportsCloses`, `prunesIgnored` and `tracksCheckpoint` describe
 differences that affect event handling.
 
+| Backend | Snapshot comparison |
+| --- | --- |
+| Polling | Entries whose mtime or ctime is not strictly older than their snapshot in a conservative two-second tick are checked by content until they age; hashes cover files up to 1 MiB, and larger or unreadable racy entries report modification. |
+
 `add` accepts file or directory watches, optional recursion and filters. Pending watches
 wait at an existing ancestor for a missing path to appear. Filters select paths by
 pattern or predicate, and `refilter` changes the selection. Excluded directories are

@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Compare racy polling entries by content on every platform so same-size writes within one timestamp tick are reported.
+
 - Capture the FSEvents registration boundary before starting the stream so changes made immediately after `add` returns are reported.
 
 - Reject undeclared dependencies, duplicate layer membership and imports of source executables.
