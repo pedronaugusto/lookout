@@ -434,10 +434,22 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
     // under a recursive root against one number, so twelve directories
     // of a hundred and fifty entries overflowed a budget none of them
     // reached.
+    //
+    // The burst has to be one the system cannot lose, or an overflow
+    // here is a loss it reported and not the budget. inotify's queue and
+    // the Windows read buffer hold one directory's hundred and fifty
+    // records whatever the machine is doing, and `kqueue` and `poll` list
+    // the directories themselves. fseventsd does not: beside sixteen busy
+    // processes it dropped part of this burst in 4 of 10 runs and said
+    // so. So FSEvents is held to this claim in
+    // src/test_backend_fsevents.zig ("the entry budget is one
+    // directory's, with every creation delivered"), with the same
+    // creations delivered by hand through the callback the system calls.
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
     for (backends) |backend| {
+        if (backend == .fsevents) continue;
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);

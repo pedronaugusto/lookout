@@ -248,6 +248,21 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     try testing.expectEqual(@as(usize, 4), f.budget.count(sub).?);
 }
 
+/// No delivery of the system's from here on: the stream stopped, the
+/// delivery it may be making waited out on its serial queue, and what it
+/// left thrown away. What a test drains after this is what it delivered.
+fn stopDeliveries(f: *FsEvents, stream: anytype) void {
+    c.FSEventStreamStop(stream.ref);
+    c.dispatch_sync_f(f.queue, null, settled);
+    {
+        access.acquire(&f.sink.lock);
+        defer access.release(&f.sink.lock);
+        f.sink.len = 0;
+        f.sink.overflowed = false;
+    }
+    _ = access.readable(f, 0);
+}
+
 test "a rename whose halves arrive in two deliveries is one rename" {
     // FSEvents puts both halves of a rename in one delivery unless a
     // burst is long enough to split them, and then the old name ends one
@@ -290,18 +305,7 @@ test "a rename whose halves arrive in two deliveries is one rename" {
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
 
-    // No delivery of the system's from here on: stopped, the one it may
-    // be making waited out on its serial queue, and what it left thrown
-    // away.
-    c.FSEventStreamStop(stream.ref);
-    c.dispatch_sync_f(f.queue, null, settled);
-    {
-        access.acquire(&f.sink.lock);
-        defer access.release(&f.sink.lock);
-        f.sink.len = 0;
-        f.sink.overflowed = false;
-    }
-    _ = access.readable(f, 0);
+    stopDeliveries(f, stream);
 
     for (before, after) |b, a| try Io.Dir.renameAbsolute(b, a, io);
 
@@ -326,6 +330,72 @@ test "a rename whose halves arrive in two deliveries is one rename" {
         try testing.expectEqual(lookout.Kind.renamed, event.kind);
         try testing.expectEqualStrings(after[i], event.path);
         try testing.expectEqualStrings(before[i], event.from.?);
+    }
+}
+
+test "the entry budget is one directory's, with every creation delivered" {
+    // The FSEvents half of the claim in src/test_gaps.zig ("the entry
+    // budget is one directory's, not a whole recursive watch's"): twelve
+    // directories of a hundred and fifty creations under a budget of 512
+    // are twelve directories inside it. Made live, the burst is one
+    // fseventsd may drop part of on a busy machine -- it said
+    // `MustScanSubDirs` with `UserDropped` in 4 of 10 runs beside sixteen
+    // busy processes -- and lookout then rightly reports an overflow that
+    // is the system's and not the budget's. So the creations are real and
+    // their records are made here, through the callback the system calls,
+    // with the stream stopped first: what is drained is every creation
+    // and nothing the system lost.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const dirs = 12;
+    const files = 150;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    for (0..dirs) |d| {
+        var name: [16]u8 = undefined;
+        try tmp.dir.createDirPath(io, std.fmt.bufPrint(&name, "d{d}", .{d}) catch unreachable);
+    }
+
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .max_dir_entries = 512 });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true });
+    const f = &watcher.impl.fsevents;
+    const stream = f.streams.get(id).?;
+
+    stopDeliveries(f, stream);
+
+    // Each directory's creations in deliveries of their own, drained as
+    // they go, as the live test drains them.
+    for (0..dirs) |d| {
+        for (0..files) |i| {
+            var name: [32]u8 = undefined;
+            const sub_path = std.fmt.bufPrint(&name, "d{d}/f{d}.txt", .{ d, i }) catch unreachable;
+            try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = "x" });
+            const full = try std.fs.path.join(gpa, &.{ root, sub_path });
+            defer gpa.free(full);
+            try synthesize(gpa, stream, &.{.{ .path = full, .flags = flag.item_created | flag.item_modified }});
+        }
+        try access.drain(f, &watcher.batch);
+    }
+
+    var created: usize = 0;
+    var overflow: usize = 0;
+    for (watcher.batch.events.items) |event| switch (event.kind) {
+        .created => created += 1,
+        .overflow => overflow += 1,
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 0), overflow);
+    try testing.expectEqual(@as(usize, dirs * files), created);
+    for (0..dirs) |d| {
+        var name: [16]u8 = undefined;
+        const dir = try std.fs.path.join(gpa, &.{ root, std.fmt.bufPrint(&name, "d{d}", .{d}) catch unreachable });
+        defer gpa.free(dir);
+        try testing.expectEqual(@as(usize, files), f.budget.count(dir).?);
     }
 }
 
