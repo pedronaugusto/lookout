@@ -104,10 +104,15 @@ fn makeWatcher(gpa: Allocator, io: Io) !Watcher {
     });
 }
 
+// The `before` revision can lose a write made just after its watch starts
+// (fixed since, in 5249e23). Write again until one arrives, as the Go and
+// Rust comparisons do. Warm-up is not measured.
 fn warmUp(watcher: *Watcher, dir: Io.Dir, io: Io) !void {
-    try dir.writeFile(io, .{ .sub_path = ".warmup", .data = "x" });
     var waited: u32 = 0;
     while (waited < 5_000) : (waited += 100) {
+        var digits: [10]u8 = undefined;
+        const data = std.fmt.bufPrint(&digits, "{d}", .{waited}) catch unreachable;
+        try dir.writeFile(io, .{ .sub_path = ".warmup", .data = data });
         for (try watcher.poll(100)) |event| {
             if (std.mem.endsWith(u8, event.path, ".warmup")) return;
         }
