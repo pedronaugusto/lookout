@@ -450,6 +450,9 @@ pub const Watcher = struct {
     /// quietly take the first one's events over; refusing it is the same
     /// answer everywhere instead of a difference to discover.
     ///
+    /// Changes made after `add` returns are reported, subject to the
+    /// watch's scope, filters and coalescing.
+    ///
     /// The returned id is valid until `remove` is called with it or the
     /// watcher is deinitialized.
     ///

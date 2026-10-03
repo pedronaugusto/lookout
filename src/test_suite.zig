@@ -175,6 +175,33 @@ const Fixture = struct {
     }
 };
 
+test "every write immediately after add returns is reported" {
+    for (backends) |backend| {
+        for (0..200) |attempt| {
+            var f = try Fixture.initOptions(.{
+                .backend = backend,
+                .poll_interval_ms = 20,
+                .latency_ms = 0,
+            });
+            defer f.deinit();
+            const file_watch = attempt % 3 == 1;
+            const recursive = attempt % 3 == 2;
+            const name = if (recursive) "sub/immediate.txt" else "immediate.txt";
+            if (recursive) try f.tmp.dir.createDirPath(std.testing.io, "sub");
+            if (file_watch) try f.write(name, "before");
+            const target = try f.path(name);
+            defer std.testing.allocator.free(target);
+            _ = try f.watcher.add(if (file_watch) target else f.root, .{ .recursive = recursive });
+            // No settling poll or sleep may separate registration and writing.
+            if (file_watch) try f.overwrite(name, "after") else try f.write(name, "one");
+            f.expectEvent(name, if (file_watch) .modified else .created) catch |err| {
+                std.debug.print("{s}: immediate write missing on registration {d}\n", .{ @tagName(backend), attempt });
+                return err;
+            };
+        }
+    }
+}
+
 test "a fresh watch reports nothing that was already there as new" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);

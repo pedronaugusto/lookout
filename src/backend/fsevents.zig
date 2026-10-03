@@ -84,10 +84,10 @@ resume_used: []bool,
 /// them, so a file created an hour ago and written now still arrives
 /// with `ItemCreated` set beside `ItemModified`, and no reading of the
 /// flags alone can tell a creation from a write. What can tell them
-/// apart is whether lookout has seen the path before. It costs one string
-/// per watched file -- still nothing against `kqueue`'s descriptor per
+/// apart is whether lookout has seen the path before. It costs a string
+/// and initial metadata per watched file -- still nothing against `kqueue`'s descriptor per
 /// watched file, which is the comparison that matters on this platform.
-known: std.ArrayHashMapUnmanaged(KnownKey, void, KnownKeyContext, true),
+known: std.ArrayHashMapUnmanaged(KnownKey, ?Initial, KnownKeyContext, true),
 /// The half of a rename whose partner has not been delivered yet. The
 /// path it holds is owned here -- see `records.Half`.
 pairing: records.Pairing,
@@ -95,6 +95,21 @@ pairing: records.Pairing,
 /// window as `@import("../options.zig").Options.latency_ms`; `NoDefer` still makes its
 /// first event immediate.
 stream_latency: f64,
+
+/// Fresh streams replay a conservative device boundary. Remember the initial
+/// metadata until the path first changes, so old accumulated flags do not
+/// report the state add just seeded. Checkpoint replay bypasses this baseline.
+const Initial = struct {
+    inode: Io.File.INode,
+    size: u64,
+    mtime: i96,
+    ctime: i96,
+    kind: Io.File.Kind,
+
+    fn from(stat: Io.File.Stat) Initial {
+        return .{ .inode = stat.inode, .size = stat.size, .mtime = stat.mtime.nanoseconds, .ctime = stat.ctime.nanoseconds, .kind = stat.kind };
+    }
+};
 
 const KnownKey = struct {
     id: WatchId,
@@ -593,7 +608,9 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     const since = if (resumed) |index| f.restarting.?.state.value.watches[index].cursor else if (!force_live and volume.identity != null)
         c.FSEventsGetLastEventIdForDeviceBeforeTime(volume.device, c.CFAbsoluteTimeGetCurrent() + 978307200)
     else
-        c.kFSEventStreamEventIdSinceNow;
+        c.FSEventsGetCurrentEventId();
+    // Start at the captured boundary, including fresh subscriptions. SinceNow
+    // is resolved later by fseventsd and can skip the caller's first write.
     const stream = try f.gpa.create(Stream);
     errdefer f.gpa.destroy(stream);
     const root = try f.gpa.dupe(u8, abs_path);
@@ -619,11 +636,7 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
         @intFromEnum(id), @tagName(scope), abs_path, stream_path,
     });
-    // The cursor must be a durable device-log boundary, which may lag
-    // registration. A new live subscription still starts from now; only
-    // an explicit checkpoint asks the native stream to replay history.
-    const native_since = if (resumed != null) since else c.kFSEventStreamEventIdSinceNow;
-    stream.ref = try createStream(stream, if (stream.persistent) volume.relative(stream_path) else stream_path, native_since, f.stream_latency);
+    stream.ref = try createStream(stream, if (stream.persistent) volume.relative(stream_path) else stream_path, since, f.stream_latency);
     // Invalidation is what unschedules a stream, and it requires one that
     // is scheduled, so this may only run after the line below it.
     errdefer {
@@ -1123,8 +1136,8 @@ fn report(
         try losses.append(f.gpa, .{ .stream = stream, .at = record.path });
     }
     // The marker that the system has finished reading its log back to
-    // the position `@import("../options.zig").Options.checkpoint` named. Nothing happened to a
-    // path, so there is nothing to report; it is declared and swallowed
+    // the captured registration boundary or an explicit checkpoint. Nothing
+    // happened to a path, so there is nothing to report; it is swallowed
     // rather than left to look like a change to the watch root. What it
     // is kept for is `Stream.catchingUp`, which measures the tail that
     // still follows it from here.
@@ -1153,6 +1166,8 @@ fn report(
         try batch.push(f.gpa, record.id, stream.root, .removed, stream.rootTarget());
         return;
     }
+
+    if (f.unchangedInitial(record) orelse return f.incomplete(batch, stream)) return;
 
     // A rename is paired before the filter is asked, because the filter
     // is about the two names and the pair is one change: see `joined`.
@@ -1445,7 +1460,36 @@ fn remember(f: *FsEvents, id: WatchId, subject: []const u8) Allocator.Error!void
     if (f.known.contains(key)) return;
     const owned = try f.gpa.dupe(u8, subject);
     errdefer f.gpa.free(owned);
-    try f.known.put(f.gpa, .{ .id = id, .path = owned }, {});
+    try f.known.put(f.gpa, .{ .id = id, .path = owned }, null);
+}
+
+/// Seeding on an ordinary add is a baseline, not a change to report.
+fn rememberInitial(f: *FsEvents, stream: *const Stream, subject: []const u8) !void {
+    if (stream.resumed or f.known.contains(.{ .id = stream.id, .path = subject }))
+        return f.remember(stream.id, subject);
+    const stat = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return,
+        else => return err,
+    };
+    try f.remember(stream.id, subject);
+    f.known.getPtr(.{ .id = stream.id, .path = subject }).?.* = .from(stat);
+}
+
+/// Old replay flags on an unchanged seeded path say nothing new. A missing
+/// path or changed inode, contents or metadata still goes through reporting.
+fn unchangedInitial(f: *FsEvents, record: Record) ?bool {
+    const entry = f.known.getPtr(.{ .id = record.id, .path = record.path }) orelse return false;
+    const initial = entry.* orelse return false;
+    const stat = Io.Dir.cwd().statFile(f.io, record.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => {
+            entry.* = null;
+            return false;
+        },
+        else => return null,
+    };
+    if (std.meta.eql(initial, Initial.from(stat))) return true;
+    entry.* = null;
+    return false;
 }
 
 /// Records that a path does not.
@@ -1539,7 +1583,7 @@ fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.
         if (f.known.contains(key)) {
             f.gpa.free(move.after);
         } else {
-            f.known.putAssumeCapacity(key, {});
+            f.known.putAssumeCapacity(key, null);
         }
     }
     committed = true;
@@ -1548,14 +1592,14 @@ fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.
 /// Walks a watch once, so that everything already there is known and the
 /// first thing to happen to it is not reported as its creation.
 ///
-/// Listing only: no descriptor is kept, which is the difference between
-/// this and what the `kqueue` backend has to do.
+/// Names and initial metadata only: no descriptor is kept, which is the
+/// difference between this and what the `kqueue` backend has to do.
 fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
     // The root itself, before anything below it: FSEvents names the
     // watched path as readily as it names an entry, and a path the
     // backend has never heard of is a path it reports as created. This
     // is the whole of the seeding for a watch on a single file.
-    if (f.exists(stream.root) orelse return error.Unexpected) try f.remember(stream.id, stream.root);
+    try f.rememberInitial(stream, stream.root);
     if (stream.scope == .file) return false;
     try f.budget.begin(stream.root);
     defer f.budget.end();
@@ -1583,7 +1627,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
                 if (device != s.stream.volume.device) s.cross_device = true;
             }
             trace.log("fsevents seed remembered {s}", .{entry.path});
-            try s.f.remember(s.stream.id, entry.path);
+            try s.f.rememberInitial(s.stream, entry.path);
             return if (s.stream.scope == .tree) .into else .over;
         }
     };
@@ -1797,7 +1841,6 @@ const c = struct {
     const dispatch_queue_t = *anyopaque;
 
     const kCFStringEncodingUTF8: u32 = 0x0800_0100;
-    const kFSEventStreamEventIdSinceNow: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
     const kFSEventStreamCreateFlagNoDefer: u32 = 0x00000002;
     const kFSEventStreamCreateFlagWatchRoot: u32 = 0x00000004;
@@ -1992,10 +2035,8 @@ const settledFixture = settled;
 
 const cAccess = struct {
     pub const FSEventStreamGetDeviceBeingWatched = c.FSEventStreamGetDeviceBeingWatched;
-    pub const FSEventStreamGetLatestEventId = c.FSEventStreamGetLatestEventId;
     pub const FSEventStreamStop = c.FSEventStreamStop;
     pub const dispatch_sync_f = c.dispatch_sync_f;
-    pub const kFSEventStreamEventIdSinceNow = c.kFSEventStreamEventIdSinceNow;
 };
 
 const readableFixture = readable;

@@ -53,6 +53,8 @@ wait at an existing ancestor for a missing path to appear. Filters select paths 
 pattern or predicate, and `refilter` changes the selection. Excluded directories are
 pruned where the backend supports it; other backends discard their events.
 
+Every change within a watch's scope and filters made after `add` returns is reported, subject to coalescing.
+
 `latency_ms` combines events collected together. `settle_ms` waits for modified file
 contents to stop changing. `debounce_ms` holds ordinary changes until the path is quiet
 and reports the last kind; it takes precedence over the other windows. Overflow and
