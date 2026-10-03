@@ -24,6 +24,7 @@ const lookout = @import("types.zig");
 const Filter = @import("Filter.zig");
 const Snapshot = @import("Snapshot.zig");
 const Kind = lookout.Kind;
+const Target = lookout.Target;
 
 const Baseline = @This();
 
@@ -80,6 +81,12 @@ pub const Change = struct {
     /// way. Never `closed` either: a listing is not told about a writer
     /// finishing.
     kind: Kind,
+    /// Whether the path is a file or a directory, as the listing that
+    /// noticed the change found it: the one taken now for a path that is
+    /// there, the remembered one for a path that has gone — which no `stat`
+    /// can ask after it. A name that changed kind is the kind it is now.
+    /// The root, removed or overflowing, is a `directory`. Never `unknown`.
+    target: Target = .unknown,
 };
 
 /// Errors seeding or diffing can return, on top of the file-system errors
@@ -204,7 +211,7 @@ const Scan = struct {
                 // has no parent to report it.
                 if (i != 0) continue;
                 if (!report) return err;
-                if (b.dirs.count() != 0) try s.record(gpa, b.root, .removed);
+                if (b.dirs.count() != 0) try s.record(gpa, b.root, .removed, .directory);
                 return;
             };
             defer dir.close(b.io);
@@ -242,7 +249,7 @@ const Scan = struct {
     fn reportChanges(s: *Scan, gpa: Allocator, path: []const u8, index: usize) Error!void {
         const b = s.baseline;
         if (s.dirs.values()[index].snapshot.truncated) {
-            try s.record(gpa, b.root, .overflow);
+            try s.record(gpa, b.root, .overflow, .directory);
         }
         for (s.scratch.items) |change| {
             // A directory's own times move whenever anything inside it
@@ -255,7 +262,7 @@ const Scan = struct {
             const child = try std.fs.path.join(gpa, &.{ path, change.name });
             defer gpa.free(child);
             if (b.filter.excludes(b.root, child)) continue;
-            try s.record(gpa, child, change.kind);
+            try s.record(gpa, child, change.kind, .of(change.file_kind));
         }
     }
 
@@ -266,11 +273,11 @@ const Scan = struct {
         const b = s.baseline;
         for (b.dirs.keys(), b.dirs.values()) |path, remembered| {
             if (s.dirs.contains(path)) continue;
-            for (remembered.snapshot.entries.keys()) |name| {
+            for (remembered.snapshot.entries.keys(), remembered.snapshot.entries.values()) |name, meta| {
                 const child = try std.fs.path.join(gpa, &.{ path, name });
                 defer gpa.free(child);
                 if (b.filter.excludes(b.root, child)) continue;
-                try s.record(gpa, child, .removed);
+                try s.record(gpa, child, .removed, .of(meta.file_kind));
             }
         }
     }
@@ -283,10 +290,10 @@ const Scan = struct {
         return s.dirs.getIndex(path).?;
     }
 
-    fn record(s: *Scan, gpa: Allocator, path: []const u8, kind: Kind) Allocator.Error!void {
+    fn record(s: *Scan, gpa: Allocator, path: []const u8, kind: Kind, target: Target) Allocator.Error!void {
         const owned = try gpa.dupe(u8, path);
         errdefer gpa.free(owned);
-        try s.changes.append(gpa, .{ .path = owned, .kind = kind });
+        try s.changes.append(gpa, .{ .path = owned, .kind = kind, .target = target });
     }
 };
 
@@ -421,6 +428,60 @@ test "a removed directory takes everything it held with it" {
     try testing.expect(try holds(changes, root, "tree/a.txt", .removed));
     try testing.expect(try holds(changes, root, "tree/deep", .removed));
     try testing.expect(try holds(changes, root, "tree/deep/b.txt", .removed));
+}
+
+/// The target the diff gives `sub_path`, which it must hold once.
+fn targetOf(changes: []const Change, root: []const u8, sub_path: []const u8) !Target {
+    const gpa = testing.allocator;
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(gpa);
+    try parts.append(gpa, root);
+    var it = std.mem.splitScalar(u8, sub_path, '/');
+    while (it.next()) |part| try parts.append(gpa, part);
+    const wanted = try std.fs.path.join(gpa, parts.items);
+    defer gpa.free(wanted);
+    var found: ?Target = null;
+    for (changes) |change| if (std.mem.eql(u8, change.path, wanted)) {
+        try testing.expect(found == null);
+        found = change.target;
+    };
+    return found orelse error.TestExpectedChange;
+}
+
+test "a change says whether its path is a file or a directory, gone or not" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "tree/deep");
+    try tmp.dir.writeFile(io, .{ .sub_path = "tree/a.txt", .data = "one" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tree/deep/b.txt", .data = "two" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "edited.txt", .data = "one" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "turns.txt", .data = "a file" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
+    defer base.deinit(gpa);
+
+    // Gone: no stat could say what these were, and the diff still does.
+    try tmp.dir.deleteTree(io, "tree");
+    try tmp.dir.writeFile(io, .{ .sub_path = "edited.txt", .data = "longer now" });
+    try tmp.dir.createDirPath(io, "made/inner");
+    try tmp.dir.deleteFile(io, "turns.txt");
+    try tmp.dir.createDir(io, "turns.txt", .default_dir);
+
+    const changes = try base.diff(gpa);
+    try testing.expectEqual(Target.directory, try targetOf(changes, root, "tree"));
+    try testing.expectEqual(Target.directory, try targetOf(changes, root, "tree/deep"));
+    try testing.expectEqual(Target.file, try targetOf(changes, root, "tree/a.txt"));
+    try testing.expectEqual(Target.file, try targetOf(changes, root, "tree/deep/b.txt"));
+    try testing.expectEqual(Target.file, try targetOf(changes, root, "edited.txt"));
+    try testing.expectEqual(Target.directory, try targetOf(changes, root, "made"));
+    try testing.expectEqual(Target.directory, try targetOf(changes, root, "made/inner"));
+    // A name that changed kind is what it is now.
+    try testing.expectEqual(Target.directory, try targetOf(changes, root, "turns.txt"));
+    for (changes) |change| try testing.expect(change.target != .unknown);
 }
 
 test "a filter keeps a subtree out of the diff" {
