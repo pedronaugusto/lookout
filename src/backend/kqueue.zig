@@ -89,13 +89,15 @@ pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) 
         .NOMEM => error.SystemResources,
         else => error.Unexpected,
     };
-    const k: Kqueue = .{
+    var k: Kqueue = .{
         .gpa = gpa,
         .io = io,
         .kq = rc,
         .tree = .init(gpa, io, options.max_dir_entries, true),
         .registrations = .empty,
     };
+    // A file's descriptor is this backend's, and goes with its node.
+    k.tree.keeps_dropped = true;
     // The one thing on this queue that is not a file: how another
     // thread makes a blocked `wait` come back.
     const change: posix.Kevent = .{
@@ -387,17 +389,33 @@ fn retryRegistrations(k: *Kqueue, batch: *Batch) @import("../watch_contract.zig"
 /// Closes the file descriptors of nodes the tree no longer holds. Closing
 /// a descriptor is also what removes its registration from the queue, so
 /// there is nothing else to undo.
+///
+/// The tree says which nodes went, so this costs what went rather than
+/// a pass over every registration after every event; only when it could
+/// not keep that list are all of them compared with the tree.
 fn closeOrphanedRegistrations(k: *Kqueue) void {
-    var i: usize = 0;
-    while (i < k.registrations.count()) {
-        if (k.tree.nodes.contains(k.registrations.keys()[i])) {
-            i += 1;
-        } else {
-            const registration = k.registrations.values()[i];
-            if (registration.owns_file) _ = std.c.close(registration.fd);
-            k.registrations.swapRemoveAt(i);
+    defer k.tree.clearDropped();
+    const dropped = k.tree.takeDropped() orelse {
+        var i: usize = 0;
+        while (i < k.registrations.count()) {
+            if (k.tree.nodes.contains(k.registrations.keys()[i])) {
+                i += 1;
+            } else {
+                k.release(i);
+            }
         }
+        return;
+    };
+    for (dropped) |id| {
+        const at = k.registrations.getIndex(id) orelse continue;
+        k.release(at);
     }
+}
+
+fn release(k: *Kqueue, at: usize) void {
+    const registration = k.registrations.values()[at];
+    if (registration.owns_file) _ = std.c.close(registration.fd);
+    k.registrations.swapRemoveAt(at);
 }
 
 /// Maps the POSIX open errors onto the error set `lookout.Watcher.add`
