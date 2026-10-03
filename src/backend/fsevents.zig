@@ -99,17 +99,9 @@ stream_latency: f64,
 /// Fresh streams replay a conservative device boundary. Remember the initial
 /// metadata until the path first changes, so old accumulated flags do not
 /// report the state add just seeded. Checkpoint replay bypasses this baseline.
-const Initial = struct {
-    inode: Io.File.INode,
-    size: u64,
-    mtime: i96,
-    ctime: i96,
-    kind: Io.File.Kind,
-
-    fn from(stat: Io.File.Stat) Initial {
-        return .{ .inode = stat.inode, .size = stat.size, .mtime = stat.mtime.nanoseconds, .ctime = stat.ctime.nanoseconds, .kind = stat.kind };
-    }
-};
+/// The seeding walk reads it with each directory listing; a record compares
+/// it with an `lstat`, which reports the same fields for an unchanged entry.
+const Initial = walk.Meta;
 
 const KnownKey = struct {
     id: WatchId,
@@ -1456,23 +1448,42 @@ fn reportHalf(f: *FsEvents, batch: *Batch, half: records.Half) @import("../watch
 
 /// Records that a path exists.
 fn remember(f: *FsEvents, id: WatchId, subject: []const u8) Allocator.Error!void {
-    const key: KnownKey = .{ .id = id, .path = subject };
-    if (f.known.contains(key)) return;
-    const owned = try f.gpa.dupe(u8, subject);
-    errdefer f.gpa.free(owned);
-    try f.known.put(f.gpa, .{ .id = id, .path = owned }, null);
+    _ = try f.rememberNew(id, subject);
+}
+
+/// Records a path not yet known and returns its slot, in one lookup:
+/// seeding does this once per entry of the tree. Null if already known.
+fn rememberNew(f: *FsEvents, id: WatchId, subject: []const u8) Allocator.Error!?*?Initial {
+    const entry = try f.known.getOrPut(f.gpa, .{ .id = id, .path = subject });
+    if (entry.found_existing) return null;
+    // The new entry is the last one, still keyed by the borrowed name.
+    const owned = f.gpa.dupe(u8, subject) catch |err| {
+        _ = f.known.pop();
+        return err;
+    };
+    entry.key_ptr.path = owned;
+    entry.value_ptr.* = null;
+    return entry.value_ptr;
 }
 
 /// Seeding on an ordinary add is a baseline, not a change to report.
-fn rememberInitial(f: *FsEvents, stream: *const Stream, subject: []const u8) !void {
-    if (stream.resumed or f.known.contains(.{ .id = stream.id, .path = subject }))
-        return f.remember(stream.id, subject);
-    const stat = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return,
-        else => return err,
+/// `listed` is the metadata the walk read with the name, if it could.
+fn rememberInitial(f: *FsEvents, stream: *const Stream, subject: []const u8, listed: ?Initial) !void {
+    if (stream.resumed) return f.remember(stream.id, subject);
+    const initial = try f.rememberNew(stream.id, subject) orelse return;
+    if (listed) |meta| {
+        initial.* = meta;
+        return;
+    }
+    const stat = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch |err| {
+        // Gone already, or not remembered at all: drop the entry just made.
+        f.gpa.free(f.known.pop().?.key.path);
+        switch (err) {
+            error.FileNotFound, error.NotDir => return,
+            else => return err,
+        }
     };
-    try f.remember(stream.id, subject);
-    f.known.getPtr(.{ .id = stream.id, .path = subject }).?.* = .from(stat);
+    initial.* = .of(stat);
 }
 
 /// Old replay flags on an unchanged seeded path say nothing new. A missing
@@ -1487,7 +1498,7 @@ fn unchangedInitial(f: *FsEvents, record: Record) ?bool {
         },
         else => return null,
     };
-    if (std.meta.eql(initial, Initial.from(stat))) return true;
+    if (std.meta.eql(initial, Initial.of(stat))) return true;
     entry.* = null;
     return false;
 }
@@ -1599,7 +1610,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
     // watched path as readily as it names an entry, and a path the
     // backend has never heard of is a path it reports as created. This
     // is the whole of the seeding for a watch on a single file.
-    try f.rememberInitial(stream, stream.root);
+    try f.rememberInitial(stream, stream.root, null);
     if (stream.scope == .file) return false;
     try f.budget.begin(stream.root);
     defer f.budget.end();
@@ -1627,12 +1638,12 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
                 if (device != s.stream.volume.device) s.cross_device = true;
             }
             trace.log("fsevents seed remembered {s}", .{entry.path});
-            try s.f.rememberInitial(s.stream, entry.path);
+            try s.f.rememberInitial(s.stream, entry.path, entry.meta);
             return if (s.stream.scope == .tree) .into else .over;
         }
     };
     var seeding: Seeding = .{ .f = f, .stream = stream };
-    try walk.tree(f.gpa, f.io, stream.root, &seeding, Seeding.visit);
+    try walk.treeWithMeta(f.gpa, f.io, stream.root, &seeding, Seeding.visit);
     return seeding.cross_device;
 }
 
@@ -1678,6 +1689,32 @@ test "FSEvents refuses a watch whose initial names could not be remembered" {
             try testing.expectEqual(@as(usize, 0), f.known.count());
             try testing.expectEqual(@as(usize, 0), f.budget.counts.count());
         }
+    }
+}
+
+test "seeding remembers each entry with the metadata an lstat reads" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "sub/deep");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sub/deep/kept", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "top", .data = "contents" });
+    try tmp.dir.symLink(io, "top", "sub/link", .{});
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var f = try FsEvents.init(gpa, io, .{});
+    defer f.deinit();
+    var batch = Batch.init(io, .{});
+    defer batch.deinit(gpa);
+    try f.add(@enumFromInt(0), root, .{ .recursive = true }, &batch);
+    // A replayed record is compared with a later lstat: the seeded value
+    // must be exactly what that lstat reads for an unchanged entry.
+    try testing.expectEqual(@as(usize, 6), f.known.count());
+    for (f.known.keys(), f.known.values()) |key, initial| {
+        const stat = try Io.Dir.cwd().statFile(io, key.path, .{ .follow_symlinks = false });
+        try testing.expectEqual(Initial.of(stat), initial.?);
     }
 }
 

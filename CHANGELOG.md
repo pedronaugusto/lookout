@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- FSEvents `add` reads each entry's initial metadata with its directory listing, one `getattrlistbulk` call for many entries, and remembers it in one lookup, instead of an `lstat` and four lookups per entry.
+
 - An include pattern with `**` inside a name, such as `a**/c`, walks to what it names: the directories it crosses were pruned and the files below them never reported.
 
 - `Baseline.Change` carries the `target` its listing found, file or directory, including for a path that has gone.
