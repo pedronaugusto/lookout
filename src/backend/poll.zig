@@ -296,12 +296,10 @@ fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
     }
 }
 
-/// Whether any node of `id` is still registered.
+/// Whether any node of `id` is still registered: its root's, without
+/// which it has none. One lookup, not a pass over every node per watch.
 fn hasNodes(p: *const Poll, id: WatchId) bool {
-    for (p.tree.nodes.values()) |node| {
-        if (node.watch == id) return true;
-    }
-    return false;
+    return p.tree.hasNode(id, p.tree.watchRoot(id));
 }
 
 test "a failed polling removal allocation releases its staged path" {

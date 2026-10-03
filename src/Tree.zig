@@ -39,6 +39,24 @@ track_entries: bool,
 check_contents: bool = false,
 /// Every registered path, keyed by an id that is never reused.
 nodes: std.AutoArrayHashMapUnmanaged(NodeId, Node),
+/// The node of each watch at each path, so that asking whether a path
+/// is registered, or finding its node, costs one lookup rather than a
+/// pass over every node: a tree of fifty thousand files once took
+/// minutes to add, every file asking that of all the others. The path
+/// a key holds is the node's own. One node per watch and path: a node
+/// made where another is -- the name now naming an object of another
+/// kind -- replaces it. See `insert`.
+index: std.ArrayHashMapUnmanaged(Key, NodeId, KeyContext, true),
+/// Whether `dropped` is kept, for a backend that holds something per
+/// node -- `kqueue`'s file descriptors -- and must let go of it when
+/// the node goes.
+keeps_dropped: bool = false,
+/// The nodes dropped since the backend last took them. See
+/// `takeDropped`.
+dropped: std.ArrayList(NodeId) = .empty,
+/// Set when `dropped` could not grow: which nodes went is then not
+/// known, and the backend has to look at all of its own.
+dropped_lost: bool = false,
 /// The caller's watches, keyed by the id `lookout.Watcher.add` returned.
 watches: std.AutoArrayHashMapUnmanaged(WatchId, Watch),
 next_node: u64,
@@ -49,6 +67,23 @@ changes: std.ArrayList(Snapshot.Change),
 /// Identifies one registered path within one tree. Never reused, so a
 /// stale kernel event naming a freed node simply finds nothing.
 pub const NodeId = enum(u64) { _ };
+
+const Key = struct {
+    watch: WatchId,
+    path: []const u8,
+};
+
+const KeyContext = struct {
+    pub fn hash(_: KeyContext, key: Key) u32 {
+        const mixed = path_cmp.hash(key.path) ^
+            (@as(u64, @intFromEnum(key.watch)) *% 0x9e3779b97f4a7c15);
+        return @truncate(mixed);
+    }
+
+    pub fn eql(_: KeyContext, a: Key, b: Key, _: usize) bool {
+        return a.watch == b.watch and path_cmp.eql(a.path, b.path);
+    }
+};
 
 /// What the caller asked for.
 pub const Watch = struct {
@@ -80,6 +115,12 @@ pub const Node = struct {
     /// The file's remembered metadata. Only meaningful when `role` is
     /// `file`.
     meta: Snapshot.Meta,
+    /// The node of the directory this one was listed in, or `null` for
+    /// a watch's own root.
+    parent: ?NodeId,
+    /// The nodes listed in this one, so that dropping a directory costs
+    /// what is below it and not a pass over every node.
+    children: std.AutoArrayHashMapUnmanaged(NodeId, void) = .empty,
 
     /// What a node stands for.
     pub const Role = enum { file, directory };
@@ -100,6 +141,7 @@ pub fn init(gpa: Allocator, io: Io, max_dir_entries: usize, track_entries: bool)
         .max_dir_entries = max_dir_entries,
         .track_entries = track_entries,
         .nodes = .empty,
+        .index = .empty,
         .watches = .empty,
         .next_node = 0,
         .changes = .empty,
@@ -110,6 +152,8 @@ pub fn init(gpa: Allocator, io: Io, max_dir_entries: usize, track_entries: bool)
 pub fn deinit(t: *Tree) void {
     for (t.nodes.values()) |*node| t.destroy(node);
     t.nodes.deinit(t.gpa);
+    t.index.deinit(t.gpa);
+    t.dropped.deinit(t.gpa);
     for (t.watches.values()) |*watch| {
         t.gpa.free(watch.root);
         watch.filter.deinit(t.gpa);
@@ -158,10 +202,10 @@ pub fn addWatch(
         // frees it on failure, without the two ever both happening.
         errdefer t.gpa.free(node_path);
         if (stat.kind != .directory) {
-            _ = try t.createFile(id, node_path, Snapshot.capture(t.io, .cwd(), abs_path, stat, taken_ns, t.check_contents, false), added);
+            _ = try t.createFile(id, null, node_path, Snapshot.capture(t.io, .cwd(), abs_path, stat, taken_ns, t.check_contents, false), added);
             return;
         }
-        _ = try t.createDirectory(id, node_path, added);
+        _ = try t.createDirectory(id, null, node_path, added);
     }
     if (!recursive) return;
 
@@ -179,9 +223,8 @@ pub fn addWatch(
 /// partway: a half-registered watch would report a fraction of a tree.
 fn rollback(t: *Tree, added: *std.ArrayList(NodeId), start: usize) void {
     for (added.items[start..]) |node_id| {
-        const node = t.nodes.getPtr(node_id) orelse continue;
-        t.destroy(node);
-        _ = t.nodes.swapRemove(node_id);
+        const at = t.nodes.getIndex(node_id) orelse continue;
+        t.dropAt(at);
     }
     added.shrinkRetainingCapacity(start);
 }
@@ -214,7 +257,7 @@ fn descend(t: *Tree, parent_id: NodeId, added: *std.ArrayList(NodeId), batch: *B
             t.gpa.free(child_path);
             continue;
         }
-        _ = t.createDirectory(watch, child_path, added) catch |err| switch (err) {
+        _ = t.createDirectory(watch, parent_id, child_path, added) catch |err| switch (err) {
             // A subdirectory that vanished between the listing and the
             // open is not an error; the parent's next scan reports it.
             // One that is not ours to read is neither, and it is not
@@ -232,21 +275,27 @@ fn descend(t: *Tree, parent_id: NodeId, added: *std.ArrayList(NodeId), batch: *B
     }
 }
 
-fn createDirectory(t: *Tree, watch: WatchId, path: []u8, added: *std.ArrayList(NodeId)) AddError!NodeId {
+fn createDirectory(t: *Tree, watch: WatchId, parent: ?NodeId, path: []u8, added: *std.ArrayList(NodeId)) AddError!NodeId {
     var dir = try Io.Dir.openDirAbsolute(t.io, path, .{ .iterate = true });
     errdefer dir.close(t.io);
 
     const id: NodeId = @enumFromInt(t.next_node);
-    try t.nodes.put(t.gpa, id, .{
+    try t.insert(id, .{
         .watch = watch,
         .path = path,
         .role = .directory,
         .dir = dir,
         .snapshot = .{ .entries = .empty, .truncated = false, .check_contents = t.check_contents },
         .meta = undefined,
+        .parent = parent,
     });
     errdefer {
-        t.nodes.getPtr(id).?.snapshot.deinit(t.gpa);
+        // The handle and the path are still this call's and its
+        // caller's; the children, if any, have been rolled back.
+        const node = t.nodes.getPtr(id).?;
+        node.snapshot.deinit(t.gpa);
+        node.children.deinit(t.gpa);
+        t.unlink(id, node.*);
         _ = t.nodes.swapRemove(id);
     }
     t.next_node += 1;
@@ -297,24 +346,105 @@ fn trackEntries(t: *Tree, dir_id: NodeId, added: *std.ArrayList(NodeId)) AddErro
             t.gpa.free(child);
             continue;
         }
-        _ = try t.createFile(dir_node.watch, child, meta, added);
+        _ = try t.createFile(dir_node.watch, dir_id, child, meta, added);
     }
 }
 
-fn createFile(t: *Tree, watch: WatchId, path: []u8, meta: Snapshot.Meta, added: *std.ArrayList(NodeId)) Allocator.Error!NodeId {
+fn createFile(t: *Tree, watch: WatchId, parent: ?NodeId, path: []u8, meta: Snapshot.Meta, added: *std.ArrayList(NodeId)) Allocator.Error!NodeId {
     const id: NodeId = @enumFromInt(t.next_node);
-    try t.nodes.put(t.gpa, id, .{
+    try t.insert(id, .{
         .watch = watch,
         .path = path,
         .role = .file,
         .dir = undefined,
         .snapshot = undefined,
         .meta = meta,
+        .parent = parent,
     });
-    errdefer _ = t.nodes.swapRemove(id);
+    errdefer {
+        t.unlink(id, t.nodes.get(id).?);
+        _ = t.nodes.swapRemove(id);
+    }
     t.next_node += 1;
     try added.append(t.gpa, id);
     return id;
+}
+
+/// Puts `node` into the table, the index and its parent's children,
+/// all or none. A node of the same watch already at the path is of an
+/// object that name no longer names -- a file where a directory was --
+/// and goes first, with everything below it.
+fn insert(t: *Tree, id: NodeId, node: Node) Allocator.Error!void {
+    const key: Key = .{ .watch = node.watch, .path = node.path };
+    if (t.index.get(key)) |stale| t.dropSubtree(stale);
+    try t.nodes.ensureUnusedCapacity(t.gpa, 1);
+    try t.index.ensureUnusedCapacity(t.gpa, 1);
+    if (node.parent) |parent| try t.nodes.getPtr(parent).?.children.put(t.gpa, id, {});
+    t.nodes.putAssumeCapacity(id, node);
+    t.index.putAssumeCapacity(key, id);
+}
+
+/// Takes the node `id` out of the index and out of its parent's
+/// children, leaving it in the table.
+fn unlink(t: *Tree, id: NodeId, node: Node) void {
+    const key: Key = .{ .watch = node.watch, .path = node.path };
+    if (t.index.get(key) == id) _ = t.index.swapRemove(key);
+    if (node.parent) |parent| {
+        if (t.nodes.getPtr(parent)) |above| _ = above.children.swapRemove(id);
+    }
+}
+
+/// Drops the node at position `at` of the table, alone: the nodes below
+/// it, if any, stay, no longer anyone's children. Every caller drops
+/// those too, in the same pass. The order of the table's other entries
+/// changes as `swapRemoveAt` changes it.
+fn dropAt(t: *Tree, at: usize) void {
+    const id = t.nodes.keys()[at];
+    const node = &t.nodes.values()[at];
+    t.unlink(id, node.*);
+    for (node.children.keys()) |child| {
+        if (t.nodes.getPtr(child)) |below| below.parent = null;
+    }
+    t.destroy(node);
+    t.nodes.swapRemoveAt(at);
+    t.noteDropped(id);
+}
+
+/// Drops `top` and every node below it, deepest first, at the cost of
+/// what is dropped. Allocates nothing.
+fn dropSubtree(t: *Tree, top: NodeId) void {
+    var current = top;
+    while (true) {
+        const node = t.nodes.getPtr(current) orelse return;
+        if (node.children.count() != 0) {
+            current = node.children.keys()[node.children.count() - 1];
+            continue;
+        }
+        const parent = node.parent;
+        t.dropAt(t.nodes.getIndex(current).?);
+        if (current == top) return;
+        current = parent orelse return;
+    }
+}
+
+fn noteDropped(t: *Tree, id: NodeId) void {
+    if (!t.keeps_dropped) return;
+    t.dropped.append(t.gpa, id) catch {
+        t.dropped_lost = true;
+    };
+}
+
+/// The nodes dropped since the last call, for a backend that set
+/// `keeps_dropped`; `null` when which ones is not known, and the
+/// backend has to compare everything it holds with `nodes`. Valid
+/// until the next change to the tree; `clearDropped` once handled.
+pub fn takeDropped(t: *const Tree) ?[]const NodeId {
+    return if (t.dropped_lost) null else t.dropped.items;
+}
+
+pub fn clearDropped(t: *Tree) void {
+    t.dropped.clearRetainingCapacity();
+    t.dropped_lost = false;
 }
 
 /// Drops `id` and every node it created, releasing their descriptors.
@@ -324,11 +454,13 @@ pub fn removeWatch(t: *Tree, id: WatchId) void {
     t.gpa.free(watch.value.root);
     watch.value.filter.deinit(t.gpa);
 
+    // One pass over every node rather than the root's subtree: it is
+    // one pass per call, and it leaves nothing of the watch whatever
+    // the links say.
     var i: usize = 0;
     while (i < t.nodes.count()) {
         if (t.nodes.values()[i].watch == id) {
-            t.destroy(&t.nodes.values()[i]);
-            t.nodes.swapRemoveAt(i);
+            t.dropAt(i);
         } else {
             i += 1;
         }
@@ -346,12 +478,7 @@ pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeI
     errdefer {
         watch.filter.deinit(t.gpa);
         watch.filter = previous;
-        for (added.items) |node_id| {
-            const node = t.nodes.getPtr(node_id) orelse continue;
-            t.destroy(node);
-            _ = t.nodes.swapRemove(node_id);
-        }
-        added.clearRetainingCapacity();
+        t.rollback(added, 0);
     }
 
     if (watch.target == .directory) {
@@ -389,19 +516,15 @@ pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeI
             .directory => t.pruned(id, node.path),
             .file => t.excluded(id, node.path),
         };
-        if (rejected) {
-            t.destroy(&t.nodes.values()[i]);
-            t.nodes.swapRemoveAt(i);
-        } else i += 1;
+        if (rejected) t.dropAt(i) else i += 1;
     }
     previous.deinit(t.gpa);
 }
 
-fn hasNode(t: *const Tree, id: WatchId, subject: []const u8) bool {
-    for (t.nodes.values()) |node| {
-        if (node.watch == id and path_cmp.eql(node.path, subject)) return true;
-    }
-    return false;
+/// Whether the watch `id` has a node at `subject`. A watch whose root
+/// has none has no nodes at all: every other node was listed in one.
+pub fn hasNode(t: *const Tree, id: WatchId, subject: []const u8) bool {
+    return t.index.contains(.{ .watch = id, .path = subject });
 }
 
 /// Drops the node of `watch` at `root` and every node of it below.
@@ -412,26 +535,14 @@ fn hasNode(t: *const Tree, id: WatchId, subject: []const u8) bool {
 /// watches that overlap -- is told of the disappearance by its own node
 /// and reports it itself. Dropping its nodes here would have taken its
 /// event with them.
+///
+/// What is below a node was listed in it, so the node's children are
+/// the whole subtree, and a path with no node has none below it.
+/// `root` may be the path of the node being dropped: it is looked up
+/// once, before anything is freed.
 pub fn removeSubtree(t: *Tree, watch: WatchId, root: []const u8) void {
-    // `root` may be the path of one of the nodes being dropped, so that
-    // node goes last, once nothing is compared with it any more.
-    var itself: ?NodeId = null;
-    var i: usize = 0;
-    while (i < t.nodes.count()) {
-        const node = &t.nodes.values()[i];
-        if (node.watch != watch or !path_cmp.within(root, node.path)) {
-            i += 1;
-        } else if (node.path.ptr == root.ptr) {
-            itself = t.nodes.keys()[i];
-            i += 1;
-        } else {
-            t.destroy(node);
-            t.nodes.swapRemoveAt(i);
-        }
-    }
-    const id = itself orelse return;
-    t.destroy(t.nodes.getPtr(id).?);
-    _ = t.nodes.swapRemove(id);
+    const id = t.index.get(.{ .watch = watch, .path = root }) orelse return;
+    t.dropSubtree(id);
 }
 
 fn destroy(t: *Tree, node: *Node) void {
@@ -439,12 +550,13 @@ fn destroy(t: *Tree, node: *Node) void {
         node.dir.close(t.io);
         node.snapshot.deinit(t.gpa);
     }
+    node.children.deinit(t.gpa);
     t.gpa.free(node.path);
 }
 
 /// The absolute path of the watch a node belongs to, for reporting
 /// `lookout.Kind.overflow`.
-pub fn watchRoot(t: *Tree, id: WatchId) []const u8 {
+pub fn watchRoot(t: *const Tree, id: WatchId) []const u8 {
     return (t.watches.get(id) orelse return "").root;
 }
 
@@ -542,7 +654,7 @@ pub fn rescanDirectory(
                     const meta = next.entries.get(change.name) orelse continue;
                     const owned = try t.gpa.dupe(u8, child);
                     errdefer t.gpa.free(owned);
-                    _ = try t.createFile(watch, owned, meta, added);
+                    _ = try t.createFile(watch, id, owned, meta, added);
                 },
                 .removed => t.removeSubtree(watch, child),
                 else => {},
@@ -551,7 +663,7 @@ pub fn rescanDirectory(
         }
         if (!recursive or change.file_kind != .directory) continue;
         switch (change.kind) {
-            .created => try t.adopt(watch, child, batch, added),
+            .created => try t.adopt(watch, id, child, batch, added),
             .removed => t.removeSubtree(watch, child),
             else => {},
         }
@@ -574,28 +686,31 @@ pub fn rescanDirectory(
 fn adopt(
     t: *Tree,
     watch: WatchId,
+    parent: ?NodeId,
     root: []const u8,
     batch: *Batch,
     added: *std.ArrayList(NodeId),
 ) ScanError!void {
-    var frontier: std.ArrayList([]u8) = .empty;
+    // Each directory still to register, with the node it was listed in.
+    const Found = struct { path: []u8, parent: ?NodeId };
+    var frontier: std.ArrayList(Found) = .empty;
     defer {
-        for (frontier.items) |path| t.gpa.free(path);
+        for (frontier.items) |found| t.gpa.free(found.path);
         frontier.deinit(t.gpa);
     }
     {
         const owned = try t.gpa.dupe(u8, root);
         errdefer t.gpa.free(owned);
-        try frontier.append(t.gpa, owned);
+        try frontier.append(t.gpa, .{ .path = owned, .parent = parent });
     }
 
     var i: usize = 0;
     while (i < frontier.items.len) : (i += 1) {
-        const current = frontier.items[i];
+        const current = frontier.items[i].path;
         const id = registering: {
             const owned = try t.gpa.dupe(u8, current);
             errdefer t.gpa.free(owned);
-            break :registering t.createDirectory(watch, owned, added) catch |err| switch (err) {
+            break :registering t.createDirectory(watch, frontier.items[i].parent, owned, added) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 // Created and gone again, or not ours to open: reported
                 // through its parent, and as a hole in the watch when the
@@ -630,7 +745,7 @@ fn adopt(
                 try batch.push(t.gpa, watch, entry, .created, .of(file_kind));
             }
             if (file_kind == .directory) {
-                try frontier.append(t.gpa, entry);
+                try frontier.append(t.gpa, .{ .path = entry, .parent = id });
             } else {
                 t.gpa.free(entry);
             }
@@ -774,7 +889,7 @@ test "a failed tree adoption releases every unregistered path" {
             defer added.deinit(gpa);
             var batch: Batch = .init(testing.io, .{});
             defer batch.deinit(gpa);
-            if (tree.adopt(@enumFromInt(0), root, &batch, &added)) |_| {
+            if (tree.adopt(@enumFromInt(0), null, root, &batch, &added)) |_| {
                 succeeded = true;
             } else |err| try testing.expectEqual(error.OutOfMemory, err);
         }
@@ -907,4 +1022,105 @@ test "refilter releases files that only lead to an included path" {
     // cannot, so keeping its descriptor would only waste a registration.
     try tree.refilter(id, .{ .only = &.{"prefix/inside"} }, &added, &batch);
     try testing.expectEqual(@as(usize, 1), tree.nodes.count());
+}
+
+/// Every node is in the index under its own watch and path, and listed
+/// in its parent's children, and every child names its parent.
+fn expectLinked(tree: *const Tree) !void {
+    const testing = std.testing;
+    try testing.expectEqual(tree.nodes.count(), tree.index.count());
+    for (tree.nodes.keys(), tree.nodes.values()) |id, node| {
+        try testing.expectEqual(id, tree.index.get(.{ .watch = node.watch, .path = node.path }).?);
+        if (node.parent) |parent| {
+            try testing.expect(tree.nodes.get(parent).?.children.contains(id));
+            try testing.expect(path_cmp.eql(std.fs.path.dirname(node.path).?, tree.nodes.get(parent).?.path));
+        } else {
+            try testing.expect(path_cmp.eql(node.path, tree.watchRoot(node.watch)));
+        }
+        for (node.children.keys()) |child| try testing.expectEqual(id, tree.nodes.get(child).?.parent.?);
+    }
+}
+
+test "removing a directory drops its subtree and only it, and says which nodes went" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "gone/deeper");
+    try tmp.dir.createDirPath(io, "kept");
+    try tmp.dir.createDirPath(io, "gone-sibling");
+    for ([_][]const u8{ "gone/a", "gone/deeper/b", "kept/c", "gone-sibling/d", "e" }) |name| {
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
+    }
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var tree: Tree = .init(gpa, io, 4096, true);
+    defer tree.deinit();
+    tree.keeps_dropped = true;
+    var batch: Batch = .init(io, .{});
+    defer batch.deinit(gpa);
+    var added: std.ArrayList(NodeId) = .empty;
+    defer added.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try tree.addWatch(id, root, .{ .recursive = true }, &added, &batch);
+    // The root, four directories and five files.
+    try testing.expectEqual(@as(usize, 10), tree.nodes.count());
+    try expectLinked(&tree);
+    tree.clearDropped();
+
+    const gone = try std.fs.path.join(gpa, &.{ root, "gone" });
+    defer gpa.free(gone);
+    tree.removeSubtree(id, gone);
+    try expectLinked(&tree);
+    try testing.expectEqual(@as(usize, 6), tree.nodes.count());
+    try testing.expectEqual(@as(usize, 4), tree.takeDropped().?.len);
+    for (tree.takeDropped().?) |dropped| try testing.expect(!tree.nodes.contains(dropped));
+    for (tree.nodes.values()) |node| try testing.expect(!path_cmp.within(gone, node.path));
+    for ([_][]const u8{ "gone-sibling", "gone-sibling/d", "kept/c", "e" }) |name| {
+        const path = try std.fs.path.join(gpa, &.{ root, name });
+        defer gpa.free(path);
+        try testing.expect(tree.hasNode(id, path));
+    }
+    // A path with no node has nothing below it to drop.
+    tree.removeSubtree(id, gone);
+    try testing.expectEqual(@as(usize, 6), tree.nodes.count());
+
+    tree.clearDropped();
+    tree.removeWatch(id);
+    try testing.expectEqual(@as(usize, 0), tree.nodes.count());
+    try testing.expectEqual(@as(usize, 0), tree.index.count());
+    try testing.expectEqual(@as(usize, 6), tree.takeDropped().?.len);
+}
+
+test "a name that comes back as another kind replaces its node" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "name", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var tree: Tree = .init(gpa, io, 4096, true);
+    defer tree.deinit();
+    var batch: Batch = .init(io, .{});
+    defer batch.deinit(gpa);
+    var added: std.ArrayList(NodeId) = .empty;
+    defer added.deinit(gpa);
+    try tree.addWatch(@enumFromInt(0), root, .{ .recursive = true }, &added, &batch);
+    const directory = added.items[0];
+    try testing.expectEqual(@as(usize, 2), tree.nodes.count());
+
+    try tmp.dir.deleteFile(io, "name");
+    try tmp.dir.createDirPath(io, "name");
+    try tmp.dir.writeFile(io, .{ .sub_path = "name/inside", .data = "y" });
+    added.clearRetainingCapacity();
+    try tree.rescanDirectory(directory, &batch, &added);
+    try expectLinked(&tree);
+    // The root, the directory where the file was, and the file in it.
+    try testing.expectEqual(@as(usize, 3), tree.nodes.count());
+    const name = try std.fs.path.join(gpa, &.{ root, "name" });
+    defer gpa.free(name);
+    try testing.expectEqual(Node.Role.directory, tree.nodes.get(tree.index.get(.{ .watch = @enumFromInt(0), .path = name }).?).?.role);
 }
