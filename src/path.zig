@@ -119,10 +119,20 @@ pub fn hash(p: []const u8) u64 {
     if (!folds_case) return std.hash.Wyhash.hash(0, p);
     var hasher: std.hash.Wyhash = .init(0);
     var folder: Folder = .init(p);
+    // The same bytes as one `toBytes(cp)` update per code point, which
+    // made hashing most of the cost of remembering a tree; Wyhash gives
+    // one result however its input is split.
+    var chunk: [64]u32 = undefined;
+    var len: usize = 0;
     while (folder.next()) |cp| {
-        const bytes = std.mem.toBytes(cp);
-        hasher.update(&bytes);
+        chunk[len] = cp;
+        len += 1;
+        if (len == chunk.len) {
+            hasher.update(std.mem.sliceAsBytes(&chunk));
+            len = 0;
+        }
     }
+    hasher.update(std.mem.sliceAsBytes(chunk[0..len]));
     return hasher.final();
 }
 
@@ -318,6 +328,17 @@ test "the folded hash agrees with the folded comparison" {
         try testing.expectEqual(hash("/w/caf\u{00e9}"), hash("/w/cafe\u{0301}"));
     }
     try testing.expect(hash("/w/a.txt") != hash("/w/b.txt"));
+}
+
+test "the folded hash is one hash of every folded code point, however long the path" {
+    if (!folds_case) return error.SkipZigTest;
+    const long = "/Users/Someone/Documents/" ++ "Caf\u{e9}/" ** 30 ++ "\xff/Ending.TXT";
+    for ([_][]const u8{ "", "a", "/A/\u{c9}", long, long[0..63], long[0..64], long[0..65], long[0..130] }) |p| {
+        var reference: std.hash.Wyhash = .init(0);
+        var folder: Folder = .init(p);
+        while (folder.next()) |cp| reference.update(&std.mem.toBytes(cp));
+        try std.testing.expectEqual(reference.final(), hash(p));
+    }
 }
 
 test "what is below a root is found by comparison, not by offset" {
