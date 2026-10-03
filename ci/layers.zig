@@ -88,3 +88,17 @@ pub const required = blk: {
     };
     break :blk paths;
 };
+
+/// Tokens only their owners may spell: each backend alone speaks to its
+/// kernel interface.
+pub const owned: []const gantry.rules.TokenRule = &.{
+    .{ .name = "inotify backend", .token = "inotify_init1", .owners = &.{"src/backend/inotify*.zig"} },
+    .{ .name = "inotify backend", .token = "inotify_add_watch", .owners = &.{"src/backend/inotify*.zig"} },
+    .{ .name = "inotify backend", .token = "inotify_rm_watch", .owners = &.{"src/backend/inotify*.zig"} },
+    .{ .name = "fsevents backend", .token = "FSEventStreamCreate", .owners = &.{"src/backend/fsevents*.zig"} },
+    .{ .name = "fsevents backend", .token = "FSEventStreamStart", .owners = &.{"src/backend/fsevents*.zig"} },
+    .{ .name = "kqueue backend", .token = "kevent", .owners = &.{"src/backend/kqueue.zig"} },
+    .{ .name = "windows backend", .token = "ReadDirectoryChangesW", .owners = &.{"src/backend/windows*.zig"} },
+    .{ .name = "windows backend", .token = "CreateFileW", .owners = &.{"src/backend/windows*.zig"} },
+    .{ .name = "windows backend", .kind = .string, .token = "kernel32", .owners = &.{"src/backend/windows*.zig"} },
+};
