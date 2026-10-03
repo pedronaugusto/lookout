@@ -17,10 +17,13 @@ with no timing or CPU-time values. A successful smoke supports no speed claim.
 **2026-09-30 00:00:00 +01:00** cutoff. `--before REV --after REV` selects other
 immutable snapshots; refresh the pins when main advances.
 
-Jobs are single-file latency, 10,000/100,000-file bursts, 1,000 renames, idle and
-100-writes/second CPU time, recursive setup over 50,000 files, and existing
-backend checks: blocked-change delivery, rename/delete delivery, cancellation,
-wake and stop-by-flag. Backend tests emit measurements in full mode and retain
+Jobs are the existing backend checks (blocked-change delivery, rename/delete
+delivery, cancellation, wake and stop-by-flag), then single-file latency,
+10,000/100,000-file bursts, 1,000 renames, idle and 100-writes/second CPU time and
+recursive setup over 50,000 files. The backend checks run first: the burst
+cleanups remove up to 100,000 files, and FSEvents delivers those removals to every
+later stream. `--jobs tree_setup,backend-speed-checks` times only the named jobs,
+after a smoke. Backend tests emit measurements in full mode and retain
 their speed ceilings; every backend is measured before a test fails. A check over
 its ceiling is kept as a failed row with its value and budget, the pass runs to the
 end, writes its results and exits non-zero. Any other failure stops the pass and

@@ -30,6 +30,8 @@ class Pass:
         self.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', PYTHONDONTWRITEBYTECODE='1')
         self.preparing = smoke
         self.plan_only = False
+        self.jobs = None
+        self.ran = set()
         self.prepared = Prepared(HERE, scratch)
         self.env.update(BENCH_SMOKE='1' if smoke else '0',
                         BENCH_MODE='smoke' if smoke else 'full',
@@ -115,6 +117,9 @@ class Pass:
             for _, argv in sides:
                 if Path(str(argv[0])).is_absolute(): self.prepared.require(argv[0])
             return
+        if self.jobs is not None and workload not in self.jobs:
+            return
+        self.ran.add(workload)
         print(f'Checking {workload}' if self.smoke else f'Running {workload}', flush=True)
         count = 1 if self.smoke else (self.runs if repetitions is None else repetitions)
         def invoke(side, args, trial):
@@ -362,7 +367,10 @@ def main():
     parser.add_argument('--after', help='override current main')
     parser.add_argument('--prepare-only', action='store_true', help='Build full artifacts without running workloads')
     parser.add_argument('--check-prepared', action='store_true', help='Verify full artifacts without building or measuring')
+    parser.add_argument('--jobs', help='Time only these comma-separated jobs (a timed pass after smoke)')
     args = parser.parse_args()
+    if args.jobs and (args.smoke or args.prepare_only or args.check_prepared):
+        parser.error('--jobs selects jobs of a timed pass; smoke and preparation cover every job')
     if args.smoke:
         subprocess.run([sys.executable, __file__, *[a for a in sys.argv[1:] if a != '--smoke'], '--prepare-only'], check=True)
     pins = json.loads((HERE / 'revisions.json').read_text())
@@ -383,6 +391,9 @@ def main():
     p = Pass(args.smoke, scratch, results)
     p.preparing = args.smoke or args.prepare_only
     p.plan_only = args.prepare_only or args.check_prepared
+    if args.jobs:
+        p.jobs = set(args.jobs.split(','))
+        p.data['jobs'] = sorted(p.jobs)
     if not p.preparing:
         p.prepared.check()
         if not json.loads(p.prepared.receipt.read_text()).get('smoke_passed'):
@@ -406,6 +417,8 @@ def main():
         bins = p.snapshots(before, after)
         p.data['status'] = 'running'
         workloads.run(p, bins)
+        if p.jobs is not None and p.jobs - p.ran:
+            raise RuntimeError(f"no such job: {', '.join(sorted(p.jobs - p.ran))}")
         if args.prepare_only: p.prepared.write()
         if args.smoke: Prepared(HERE, build/'quiet-prepared/full').certify()
         p.data['status'] = 'failed' if p.data['failed_checks'] else 'passed'

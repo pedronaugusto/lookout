@@ -35,6 +35,37 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(len(p.data['before_after']), 1)
             self.assertEqual(p.data['before_after'][0]['pairs'], 2)
 
+    def test_selected_jobs_run_and_the_others_are_skipped(self):
+        with tempfile.TemporaryDirectory() as name:
+            p = self.make_pass(False, Path(name))
+            p.jobs = {'kept'}
+            calls = []
+            def command(args, **kwargs):
+                calls.append(args[0])
+                return 'side\tjob\telapsed\t1\tms\n', ''
+            p.command = command
+            p.group('skipped', [('before', ['S'])])
+            p.group('kept', [('before', ['K'])])
+            self.assertEqual(calls, ['K'] * 3)
+            self.assertEqual(p.ran, {'kept'})
+
+    def test_speed_checks_run_before_any_tree_workload(self):
+        import workloads
+        groups = []
+        class Recorder:
+            smoke = preparing = False
+            scratch = Path('/nonexistent')
+            env = {'CARGO_TARGET_DIR': '/nonexistent'}
+            class prepared:
+                @staticmethod
+                def require(path): return path
+            def tool(self, name): return name
+            def setup_command(self, args, **kwargs): return ''
+            def group(self, workload, sides, **kwargs): groups.append(workload)
+        with patch('pathlib.Path.read_text', return_value='{}'):
+            workloads.run(Recorder(), {'before': Path('/b'), 'after': Path('/a')})
+        self.assertEqual(groups[0], 'backend-speed-checks')
+
     def test_smoke_runs_once_and_drops_time_rate_ratio_and_raw_output(self):
         with tempfile.TemporaryDirectory() as name:
             p = self.make_pass(True, Path(name))

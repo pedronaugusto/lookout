@@ -21,6 +21,12 @@ def run(p, bins):
     tools = [('before', bins['before'] / 'lookout-bench'), ('after', bins['after'] / 'lookout-bench'),
              ('notify', rust + 'notify-raw-bench'), ('notify-debouncer-full', rust + 'notify-debounced-bench'),
              ('fsnotify', fsnotify)]
+    # First, before any workload creates or removes a tree: FSEvents delivers
+    # those removals to every later stream, and a check run behind 100,000 of
+    # them measures the event service's backlog, not lookout. The checks'
+    # own trees are a few files each and settle within their tests.
+    p.group('backend-speed-checks', [(side, [bins[side] / 'speed-claims'])
+                                     for side in ('before', 'after')], parser='test', warmup=False)
     for job in ('latency', 'burst', 'rename', 'idle', 'tree_setup'):
         roots = {side: p.scratch / 'work' / f'{side}-{job}' for side, _ in tools}
         def prepare(side):
@@ -52,5 +58,3 @@ def run(p, bins):
                  for side, exe in tools]
         p.group(job, sides, prepare=prepare, cleanup=cleanup, validate=validate, warmup=False,
                 repetitions=int(p.env.get('BENCH_RUNS', '5' if job in ('rename', 'tree_setup') else '3')))
-    p.group('backend-speed-checks', [(side, [bins[side] / 'speed-claims'])
-                                     for side in ('before', 'after')], parser='test', warmup=False)
