@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `Baseline.Change` carries the `target` its listing found, file or directory, including for a path that has gone.
+
 - Correct the Windows no-follow file flag so polling content reads wait for completion without crashing.
 
 - Compare racy polling entries by content on every platform so same-size writes within one timestamp tick are reported.

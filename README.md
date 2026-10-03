@@ -64,6 +64,8 @@ contents to stop changing. `debounce_ms` holds ordinary changes until the path i
 and reports the last kind; it takes precedence over the other windows. Overflow and
 unwatched notices bypass these waits. A seeded `Baseline` can diff the current tree
 after an overflow, but cannot recover transient changes absent from both snapshots.
+Each change carries its `target`, file or directory, from the listing that saw it, so a
+removed directory is known for one without a `stat`.
 
 `poll` accepts a timeout and is a `std.Io` cancellation point. Cancellation preserves
 gathered events for a later poll. Native waits observe cancellation when they wake; use
