@@ -23,9 +23,10 @@ delivery, cancellation, wake and stop-by-flag), then single-file latency,
 recursive setup over 50,000 files. The jobs after them time every other public
 operation: `backend_setup` (recursive `add`, `refilter` narrowing to half the
 directories and back, and `remove` on the FSEvents and poll backends over the
-50,000-file tree, plus one polling scan; kqueue's over the 1,000- and 10,000-file
-baseline trees, because it checks each added file against every node of the tree
-and one add of 50,000 files took three and a half minutes, on both pins), `poll_cpu` (CPU over a two-second
+50,000-file tree, plus one polling scan; kqueue's over the 1,000-, 10,000- and
+50,000-file baseline trees, the larger two once per invocation: on a pin before
+lookout found a node by path in one lookup, one add of 50,000 files took four and a
+half minutes), `poll_cpu` (CPU over a two-second
 window of a 100 ms poll watcher on that tree), `checkpoint` (checkpoint and token,
 parse, and the time a resume takes to report 100 files removed while nothing
 watched; `Position` on the before pin; removals it missed are a visible count, as

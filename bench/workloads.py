@@ -16,8 +16,6 @@ UNAVAILABLE = ['Parcel (not implemented)',
                'refilter: notify, fsnotify, watchdog (a watch has no filter to change)',
                'backend_setup fsevents and poll, poll_cpu: fsnotify (kqueue only on macOS, no polling backend)',
                'baseline: notify, fsnotify (no snapshot or diff API)',
-               'kqueue add, refilter and remove over the 50,000-file tree: every side is timed on the 1,000- and '
-               '10,000-file trees, because lookout checks each added file against every node (minutes at 50,000)',
                'filter, path, baseline: notify-debouncer-full (the same notify underneath)']
 
 WATCHDOG = 'watchdog==6.0.0'

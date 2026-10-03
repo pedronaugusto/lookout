@@ -483,11 +483,12 @@ const narrow_filter: lookout.Filter = .{ .ignore = &.{ "d000?", "d001?", "d002?"
 /// the setup tree, and one polling scan of it. The poll interval is an
 /// hour, so nothing scans between the timed calls.
 ///
-/// kqueue's are timed over the 1,000- and 10,000-file baseline trees
-/// instead, and so are its comparisons': it checks each file it adds
-/// against every node already in the tree, so its time grows with the
-/// square of the tree, and one add of the 50,000-file tree took three and
-/// a half minutes.
+/// kqueue's are timed over the 1,000-, 10,000- and 50,000-file baseline
+/// trees instead, and so are its comparisons': a descriptor per file, so
+/// the sizes show how its cost grows with the tree. Before lookout found
+/// a node by path in one lookup, each file it added was checked against
+/// every node already in the tree, and one add of the 50,000-file tree
+/// took four and a half minutes.
 fn backendSetup(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, root: []const u8) !void {
     raiseDescriptorLimit();
     const Cycle = struct {
@@ -566,7 +567,8 @@ fn backendSetup(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8,
         defer gpa.free(tree);
         var cycle: Cycle = .{ .gpa = gpa, .io = io, .root = tree, .backend = .kqueue, .filter = .{ .ignore = patterns.items } };
         defer cycle.deinit();
-        // Once for the larger tree: its add and widening take seconds.
+        // Once for the larger trees: on a pin before the lookup, their add
+        // and widening take seconds to minutes.
         const setup = if (std.mem.eql(u8, size, "small")) try medianOf(gpa, &cycle) else try cycle.once();
         var suffix: [16]u8 = undefined;
         try cycle.report(out, setup, try std.fmt.bufPrint(&suffix, "_{s}", .{size}));
@@ -599,7 +601,7 @@ fn backendSetup(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8,
 }
 
 /// The baseline trees kqueue's add, refilter and remove are timed over.
-const kqueue_trees = [_][]const u8{ "small", "medium" };
+const kqueue_trees = [_][]const u8{ "small", "medium", "large" };
 
 fn countDirs(gpa: Allocator, io: Io, inputs: []const u8, size: []const u8) !usize {
     var cfg = try readConfig(gpa, io, inputs);

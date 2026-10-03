@@ -36,12 +36,12 @@ func median(samples []int64) int64 {
 	return samples[(len(samples)-1)/2]
 }
 
-// backendSetup watches the 1,000- and 10,000-file baseline trees
+// backendSetup watches the 1,000-, 10,000- and 50,000-file baseline trees
 // recursively with fsnotify, which is kqueue on macOS, and removes every
 // directory it added: the trees lookout's kqueue backend is timed on. Go
 // raises the descriptor limit at start.
 func backendSetup(input string) error {
-	for _, size := range []string{"small", "medium"} {
+	for _, size := range []string{"small", "medium", "large"} {
 		root := filepath.Join(input, "baseline_trees", size)
 		var removes []int64
 		setup, err := medianOf(func() (time.Duration, error) {
