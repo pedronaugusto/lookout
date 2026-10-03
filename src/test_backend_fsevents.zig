@@ -502,21 +502,42 @@ test "a pending promotion rescans when its saved log identity is refused" {
     try testing.expect(backend.streams.contains(id));
 }
 
-test "a fresh native stream asks only for future events" {
+test "fresh FSEvents replay reports no pre-add state or sibling paths" {
     const testing = std.testing;
     const gpa = testing.allocator;
+    const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    try tmp.dir.createDirPath(io, "watched");
+    try tmp.dir.writeFile(io, .{ .sub_path = "watched/old.txt", .data = "before" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "sibling.txt", .data = "before" });
+    const root = try tmp.dir.realPathFileAlloc(io, "watched", gpa);
     defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
+    const old = try std.fs.path.join(gpa, &.{ root, "old.txt" });
+    defer gpa.free(old);
+    const wanted = try std.fs.path.join(gpa, &.{ root, "new.txt" });
+    defer gpa.free(wanted);
+    var watcher = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents, .latency_ms = 0 });
     defer watcher.deinit();
     const id = try watcher.add(root, .{});
+    try tmp.dir.writeFile(io, .{ .sub_path = "watched/new.txt", .data = "after" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "sibling.txt", .data = "after" });
     const stream = watcher.impl.fsevents.streams.get(id).?;
-    try testing.expectEqual(c.kFSEventStreamEventIdSinceNow, c.FSEventStreamGetLatestEventId(stream.ref));
-    // The saved cursor is a conservative device-log boundary; the live
-    // subscription must not replay records before this registration.
-    try testing.expect(stream.cursor != c.kFSEventStreamEventIdSinceNow);
+    var found = false;
+    const deadline = Deadline.start(io, 5_000);
+    while (!deadline.expired()) {
+        for (try watcher.poll(100)) |event| {
+            try testing.expectEqual(id, event.id);
+            try testing.expect(path_cmp.within(root, event.path));
+            try testing.expect(!path_cmp.eql(old, event.path));
+            if (path_cmp.eql(wanted, event.path) and event.kind == .created) found = true;
+        }
+    }
+    try testing.expect(found);
+    // Every fresh stream now replays from a captured boundary. Its marker
+    // is consumed even though this watch did not ask to resume a checkpoint.
+    try testing.expect(stream.replayed != null);
+    try testing.expect(!stream.resumed);
 }
 
 fn expectOneOverflow(watcher: *lookout.Watcher, id: WatchId, root: []const u8, target: Target) !void {
