@@ -399,6 +399,84 @@ test "the entry budget is one directory's, with every creation delivered" {
     }
 }
 
+test "a poll that expires before the replay begins is not the end of it" {
+    // A resumed watcher reports a deletion made while nothing watched:
+    // a path gone that it has never heard of, while it is catching up.
+    // The catching up once ended at the first wait that reported
+    // nothing, and two such waits come before the replay is over: one
+    // spent before the stream has said anything at all, here `poll(0)`,
+    // and the one the `HistoryDone` sentinel lands in, a delivery that
+    // reports no event. A change the system had not written to its log
+    // when the stream started is delivered after the sentinel, live, and
+    // a deletion there was dropped as a path that came and went between
+    // two polls.
+    //
+    // Made live, this waited for fseventsd to deliver that deletion, and
+    // beside four loops creating and removing files it did not: not in
+    // the replay, not live within two minutes, and not in a fresh replay
+    // from the same checkpoint fifteen seconds later, in 17 of 20 runs.
+    // So the order is made here: the deletion is real, the checkpoint is
+    // real, and the replay -- a quiet boundary, the sentinel alone, the
+    // deletion after it -- is delivered through the callback the system
+    // calls, with the stream stopped first. The clock is frozen, so how
+    // long the machine takes between two deliveries is not the question.
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "gone.txt", .data = "one" });
+
+    var token: []u8 = undefined;
+    defer gpa.free(token);
+    {
+        var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
+        defer watcher.deinit();
+        const first = try watcher.add(root, .{ .recursive = true });
+        // Taken before the deletion, and holding nothing unread.
+        stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(first).?);
+        var checkpoint = (try watcher.checkpoint(gpa)).?;
+        defer checkpoint.deinit();
+        token = try checkpoint.token(gpa);
+    }
+
+    try tmp.dir.deleteFile(io, "gone.txt");
+    const deleted = try std.fs.path.join(gpa, &.{ root, "gone.txt" });
+    defer gpa.free(deleted);
+
+    var vtable: Io.VTable = undefined;
+    const frozen = @import("test_clock.zig").frozen(&vtable, io);
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: lookout.Watcher = try .init(gpa, frozen, .{
+        .backend = .fsevents,
+        .checkpoint = checkpoint,
+        .latency_ms = 0,
+    });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true });
+    const f = &watcher.impl.fsevents;
+    const stream = f.streams.get(id).?;
+
+    stopDeliveries(f, stream);
+
+    // The boundary: a wait before the stream has said anything.
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    // The sentinel, alone in its delivery: nothing happened to a path.
+    try synthesize(gpa, stream, &.{.{ .path = root, .flags = flag.history_done }});
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    try testing.expect(stream.replayed != null);
+    // The tail, live after the sentinel.
+    try synthesize(gpa, stream, &.{.{ .path = deleted, .flags = flag.item_created | flag.item_removed }});
+    const events = try watcher.poll(0);
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(lookout.Kind.removed, events[0].kind);
+    try testing.expectEqualStrings(deleted, events[0].path);
+}
+
 test "checkpoints preserve independent cursors and unread stream records" {
     if (!lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
