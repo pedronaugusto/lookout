@@ -1,0 +1,15 @@
+[package]
+name = "lookout-rust-kqueue-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# notify's kqueue backend is a build feature that takes the place of its
+# FSEvents one, so it builds here, apart from every other notify binary.
+[dependencies]
+libc = "=0.2.177"
+notify = { version = "=8.2.0", features = ["macos_kqueue"] }
+
+[[bin]]
+name = "notify-kqueue-bench"
+path = "main.rs"

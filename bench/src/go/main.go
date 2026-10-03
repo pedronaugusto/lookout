@@ -27,7 +27,7 @@ type config struct {
 
 func main() {
 	if len(os.Args) != 4 {
-		fail(errors.New("usage: fsnotify-bench <latency|burst|rename|idle|tree_setup> <inputs> <watch-root>"))
+		fail(errors.New("usage: fsnotify-bench <latency|burst|rename|idle|tree_setup|backend_setup|filter|path> <inputs> <watch-root>"))
 	}
 	input, root := os.Args[2], os.Args[3]
 	var err error
@@ -42,6 +42,12 @@ func main() {
 		err = idle(input, root)
 	case "tree_setup":
 		err = treeSetup(root)
+	case "backend_setup":
+		err = backendSetup(input)
+	case "filter":
+		err = filterWork(input, root)
+	case "path":
+		err = pathWork(input, root)
 	default:
 		err = fmt.Errorf("unknown workload %q", os.Args[1])
 	}

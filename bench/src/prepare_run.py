@@ -25,7 +25,7 @@ def checked(path_text: str) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("root")
-    parser.add_argument("workload", choices=("latency", "burst", "rename", "idle"))
+    parser.add_argument("workload", choices=("latency", "burst", "rename", "idle", "checkpoint"))
     parser.add_argument("--remove", action="store_true")
     args = parser.parse_args()
     path = checked(args.root)
@@ -39,6 +39,9 @@ def main() -> None:
     if args.workload == "burst":
         for count in cfg["burst_counts"]:
             (path / f"burst-{count}").mkdir()
+    elif args.workload == "checkpoint":
+        for i in range(cfg["checkpoint_files"]):
+            (path / f"c{i:04d}.txt").write_bytes(b"x")
     elif args.workload == "rename":
         for line in (INPUTS / "rename.tsv").read_text(encoding="utf-8").splitlines():
             old, _ = line.split("\t")

@@ -65,6 +65,10 @@ class ProtocolTests(unittest.TestCase):
         with patch('pathlib.Path.read_text', return_value='{}'):
             workloads.run(Recorder(), {'before': Path('/b'), 'after': Path('/a')})
         self.assertEqual(groups[0], 'backend-speed-checks')
+        # The job that clones and changes 61,000 files runs after every
+        # FSEvents measurement.
+        self.assertEqual(groups[-1], 'baseline')
+        self.assertLess(groups.index('tree_setup'), groups.index('backend_setup'))
 
     def test_smoke_runs_once_and_drops_time_rate_ratio_and_raw_output(self):
         with tempfile.TemporaryDirectory() as name:

@@ -18,6 +18,22 @@ def write_lines(path: Path, values: list[str]) -> None:
     path.write_text("".join(v + "\n" for v in values), encoding="utf-8")
 
 
+def write_tree(root: Path, files: int, dirs: int) -> list[str]:
+    """`dirs` directories sharing `files` one-byte files; returns every
+    entry's path relative to `root`, directories first in each."""
+    root.mkdir(parents=True)
+    names = []
+    per_dir, extra = divmod(files, dirs)
+    for d in range(dirs):
+        sub = root / f"d{d:04d}"
+        sub.mkdir()
+        names.append(sub.name)
+        for i in range(per_dir + (1 if d < extra else 0)):
+            (sub / f"f{i:06d}.txt").write_bytes(b"x")
+            names.append(f"{sub.name}/f{i:06d}.txt")
+    return names
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("full", "smoke"), default="full")
@@ -34,6 +50,14 @@ def main() -> None:
             "idle_rate": 100,
             "setup_files": 50_000,
             "setup_dirs": 100,
+            "baseline_sizes": [
+                {"name": "small", "files": 1_000, "dirs": 10},
+                {"name": "medium", "files": 10_000, "dirs": 100},
+                {"name": "large", "files": 50_000, "dirs": 100},
+            ],
+            "baseline_change_every": 100,
+            "checkpoint_files": 100,
+            "poll_window_ms": 2_000,
         }
     else:
         cfg = {
@@ -46,6 +70,14 @@ def main() -> None:
             "idle_rate": 1,
             "setup_files": 1,
             "setup_dirs": 1,
+            "baseline_sizes": [
+                {"name": "small", "files": 3, "dirs": 1},
+                {"name": "medium", "files": 6, "dirs": 2},
+                {"name": "large", "files": 9, "dirs": 3},
+            ],
+            "baseline_change_every": 3,
+            "checkpoint_files": 3,
+            "poll_window_ms": 0,
         }
 
     marker = INPUTS / "config.json"
@@ -77,16 +109,12 @@ def main() -> None:
     idle_count = cfg["idle_seconds"] * cfg["idle_rate"]
     write_lines(INPUTS / "idle.txt", [f"idle-{i:06d}.txt" for i in range(idle_count)])
 
-    setup = INPUTS / "setup_tree"
-    setup.mkdir()
-    per_dir = cfg["setup_files"] // cfg["setup_dirs"]
-    extra = cfg["setup_files"] % cfg["setup_dirs"]
-    for d in range(cfg["setup_dirs"]):
-        sub = setup / f"d{d:04d}"
-        sub.mkdir()
-        count = per_dir + (1 if d < extra else 0)
-        for i in range(count):
-            (sub / f"f{i:06d}.txt").write_bytes(b"x")
+    names = write_tree(INPUTS / "setup_tree", cfg["setup_files"], cfg["setup_dirs"])
+    # Every entry of the setup tree, for the filter and path workloads.
+    write_lines(INPUTS / "paths.txt", names)
+    # Pristine trees the baseline workload clones and changes.
+    for size in cfg["baseline_sizes"]:
+        write_tree(INPUTS / "baseline_trees" / size["name"], size["files"], size["dirs"])
 
     marker.write_text(json.dumps(cfg, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
