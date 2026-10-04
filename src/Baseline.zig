@@ -188,8 +188,9 @@ pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8,
     const bytes = try format.encode(a, .{ .platform = format.platform, .root = b.root, .recursive = b.recursive, .max_dir_entries = b.max_dir_entries, .ignore = b.filter.ignore, .only = b.filter.only, .dirs = dirs });
     // An explicit parent handle is needed for fsync even for a relative name;
     // cwd may be the POSIX AT_FDCWD sentinel rather than an open descriptor.
+    // Iteration also avoids Linux O_PATH, which cannot be fsynced.
     const parent: ?Io.Dir = if (options.durable)
-        try Io.Dir.cwd().openDir(b.io, std.fs.path.dirname(filename) orelse ".", .{})
+        try Io.Dir.cwd().openDir(b.io, std.fs.path.dirname(filename) orelse ".", .{ .iterate = true })
     else
         null;
     defer if (parent) |dir| dir.close(b.io);

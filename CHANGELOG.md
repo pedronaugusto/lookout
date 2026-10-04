@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Open the baseline parent with a syncable directory handle on Linux.
+
 - `Baseline.saveWithOptions` can fsync the file and parent directory on POSIX; Windows refuses durable replacement by name before writing.
 
 - Checkpoints retain a shared path revision instead of copying the tree on each capture; tokens keep the full resume baseline.
