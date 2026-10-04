@@ -36,9 +36,10 @@ for (try watcher.poll(1_000)) |event| {
 
 ## Design
 
-lookout has no package dependencies. Apple targets link libc and CoreServices for
-FSEvents and need a macOS SDK; the build locates the host SDK or uses the supplied
-sysroot. A watcher uses the caller's allocator for watches, paths and event storage. A
+The watcher module uses Zig's standard library. Apple targets link libc and
+CoreServices for FSEvents and need a macOS SDK. Native macOS builds locate the host
+SDK; cross-builds on other hosts use a pinned SDK package. An explicit `--sysroot`
+takes precedence, and `-Dbundled-macos-sdk=true` selects the pinned SDK on macOS too. A watcher uses the caller's allocator for watches, paths and event storage. A
 returned event slice and its paths belong to the watcher until the next poll or
 `deinit`. Baselines and checkpoints retain their storage and must be released.
 A checkpoint can outlive its watcher; the watcher allocator must remain valid
@@ -150,7 +151,7 @@ backends available on the host. Tests cover filters, pending paths, renames, ove
 cancellation, settling, checkpoints and resource cleanup. `zig build examples` runs the
 examples separately. CI also runs `zig build lint`.
 
-[CI](.github/workflows/ci.yml) runs tests and examples in Debug and ReleaseSafe on
+Full [CI](.github/workflows/ci.yml) runs tests and examples in Debug and ReleaseSafe on
 `ubuntu-latest`, `macos-latest` and `windows-latest`, plus ReleaseFast on Ubuntu.
 ReleaseSmall compiles the tests and library without running them on Ubuntu. Separate
 Ubuntu jobs run ThreadSanitizer in Debug and check formatting and cast reasons.
@@ -159,7 +160,9 @@ The default `zig build` compiles the backend-bearing tests and library. CI uses 
 `x86_64-linux-gnu`, `aarch64-linux-gnu`, `x86_64-linux-musl`, `x86_64-windows-gnu`,
 `x86_64-windows-msvc`, `aarch64-windows-gnu`, `x86_64-freebsd` and `x86_64-netbsd`.
 These jobs do not execute the targets or compile the examples. Apple targets are built
-and run by the native macOS jobs.
+and run by the native macOS jobs. Fast CI runs the full Linux Debug suite and
+source checks, then compiles the tests and examples for every configured target
+and macOS in the same Ubuntu job.
 
 ## Licence
 

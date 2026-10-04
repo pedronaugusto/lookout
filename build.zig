@@ -17,6 +17,8 @@ pub fn build(b: *std.Build) void {
     // the only thing in the package that needs a system library. Every
     // other target stays free-standing Zig.
     const darwin = target.result.os.tag.isDarwin();
+    const bundled_sdk = b.option(bool, "bundled-macos-sdk", "Use the pinned framework SDK for cross-linking Apple targets") orelse
+        (b.graph.host.result.os.tag != .macos);
 
     // Cross-compiling to an Apple target from an Apple host: Zig finds
     // the SDK by itself for a native build and not for a named one, so
@@ -28,6 +30,7 @@ pub fn build(b: *std.Build) void {
         if (b.sysroot) |root| break :frameworks .{
             .cwd_relative = b.pathJoin(&.{ root, "System", "Library", "Frameworks" }),
         };
+        if (bundled_sdk) break :frameworks null;
         const sdk = std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target.result) orelse
             break :frameworks null;
         b.sysroot = sdk;
@@ -35,6 +38,8 @@ pub fn build(b: *std.Build) void {
             .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }),
         };
     };
+
+    const sdk_dep = if (darwin and bundled_sdk and b.sysroot == null) b.lazyDependency("macos_sdk", .{}) else null;
 
     const module = b.addModule("lookout", .{
         .root_source_file = b.path("src/lookout.zig"),
@@ -44,6 +49,7 @@ pub fn build(b: *std.Build) void {
     });
     if (darwin) {
         if (frameworks) |path| module.addSystemFrameworkPath(path);
+        if (sdk_dep) |sdk| addSdkPaths(module, sdk);
         module.linkFramework("CoreServices", .{});
     }
 
@@ -83,6 +89,7 @@ pub fn build(b: *std.Build) void {
     });
     if (darwin) {
         if (frameworks) |path| tests.root_module.addSystemFrameworkPath(path);
+        if (sdk_dep) |sdk| addSdkPaths(tests.root_module, sdk);
         tests.root_module.linkFramework("CoreServices", .{});
     }
 
@@ -150,4 +157,9 @@ const example_sources = [_][]const u8{
     "examples/since.zig",
 };
 
-// Build-only tooling belongs to a root invocation, never a consumer's dependency graph.
+// Framework search paths come from the pinned package root.
+fn addSdkPaths(module: *std.Build.Module, sdk: *std.Build.Dependency) void {
+    module.addSystemFrameworkPath(sdk.path("Frameworks"));
+    module.addSystemIncludePath(sdk.path("include"));
+    module.addLibraryPath(sdk.path("lib"));
+}
