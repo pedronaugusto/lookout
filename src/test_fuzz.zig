@@ -809,7 +809,7 @@ fn fuzzCheckpoint(_: void, smith: *testing.Smith) !void {
     const gpa = testing.allocator;
     const absolute = if (builtin.os.tag == .windows) "\"C:\\\\w\"" else "\"/w\"";
     const pieces = [_][]const u8{
-        "{\"version\":1,\"backend\":\"fsevents\",\"watches\":[",                                                             "]}",
+        "{\"version\":2,\"backend\":\"fsevents\",\"watches\":[",                                                             "]}",
         "{\"root\":" ++ absolute ++ ",\"cursor\":1,\"recursive\":true,\"identity\":{\"volume\":[",                           "],\"log\":[",
         "]}",                                                                                                                "}",
         "48,",                                                                                                               "48",

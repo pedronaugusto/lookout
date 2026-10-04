@@ -23,7 +23,7 @@ pub fn token(p: Checkpoint, gpa: Allocator) Allocator.Error![]u8 {
 pub const ParseError = Allocator.Error || error{InvalidCheckpoint};
 
 /// Reads an owned snapshot. The input is borrowed only during this call.
-/// Tokens without volume and log identity are refused. Call deinit when
+/// Tokens without the current baseline format, volume and log identity are refused. Call deinit when
 /// the snapshot is no longer needed.
 pub fn parse(gpa: Allocator, text: []const u8) ParseError!Checkpoint {
     return .{ .state = try format.parse(gpa, text) };
@@ -33,7 +33,7 @@ test "checkpoint tokens own their paths and refuse unknown formats" {
     const testing = std.testing;
     const gpa = testing.allocator;
     const root = if (@import("builtin").os.tag == .windows) "C:\\watch" else "/watch";
-    var original: Checkpoint = .{ .state = try format.copy(gpa, .{ .version = 1, .backend = .fsevents, .watches = &.{.{
+    var original: Checkpoint = .{ .state = try format.copy(gpa, .{ .version = 2, .backend = .fsevents, .watches = &.{.{
         .root = root,
         .recursive = true,
         .cursor = 1234,
@@ -47,7 +47,7 @@ test "checkpoint tokens own their paths and refuse unknown formats" {
     defer parsed.deinit();
     try testing.expectEqual(@as(u64, 1234), parsed.state.value.watches[0].cursor);
     try testing.expectEqualStrings(root, parsed.state.value.watches[0].changes[0].path);
-    for ([_][]const u8{ "", "1.fsevents.1234", "{}", "{\"version\":2,\"backend\":\"fsevents\",\"watches\":[]}", "{\"version\":1,\"backend\":\"poll\",\"watches\":[]}" }) |bad| {
+    for ([_][]const u8{ "", "1.fsevents.1234", "{}", "{\"version\":1,\"backend\":\"fsevents\",\"watches\":[]}", "{\"version\":1,\"backend\":\"poll\",\"watches\":[]}" }) |bad| {
         try testing.expectError(error.InvalidCheckpoint, parse(gpa, bad));
     }
 }

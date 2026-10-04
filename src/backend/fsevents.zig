@@ -143,18 +143,6 @@ const bounds: buffer.Bounds = .{
 const grace_ms = 25;
 const grace_rounds = 4;
 
-/// How long after the end of the system's log a resumed stream is still
-/// hearing about the gap. See `Stream.catchingUp`.
-///
-/// Nothing marks the end of a replay, so this is a window and not a
-/// signal. Measured on a loaded machine, the last of the tail arrived
-/// some two hundred milliseconds after the sentinel; a second is four
-/// times that, and being generous costs only this -- a path created and
-/// deleted inside the window that lookout never knew about is reported
-/// as removed rather than dropped. It is paid once, by a watcher that
-/// asked to be told what it missed.
-const replay_tail_ms = 1_000;
-
 /// The lock between the delivery thread and the polling one.
 ///
 /// A spin lock rather than `std.Io.Mutex`, which needs an `Io` to block
@@ -246,10 +234,10 @@ const Stream = struct {
     cursor: u64,
     resume_index: ?usize,
     /// Whether this stream was started from a checkpoint rather than from
-    /// now, which `@import("../options.zig").Options.checkpoint` asked for. See `catchingUp`.
+    /// now, which `@import("../options.zig").Options.checkpoint` asked for. The persisted path baseline closes the resume gap.
     resumed: bool,
     /// When `HistoryDone` arrived, or `null` while the system is still
-    /// reading its log. See `catchingUp`.
+    /// reading its log. The persisted path baseline closes the resume gap.
     replayed: ?Io.Timestamp,
     /// Set, with release, once the fields the delivery thread reads are
     /// written, and read with acquire by every delivery. FSEvents orders
@@ -266,39 +254,6 @@ const Stream = struct {
         /// directory, because FSEvents watches directories.
         file,
     };
-
-    /// Whether this stream is still catching up on what happened
-    /// before it existed, which `@import("../options.zig").Options.checkpoint` asked for.
-    ///
-    /// It changes what a path that is not there means. In the ordinary
-    /// way, a path FSEvents names that is gone and that lookout has
-    /// never seen came and went between two polls, and the tree is as
-    /// it was, so there is nothing to report. While catching up the
-    /// same two facts mean the opposite: the path was there at the
-    /// position the caller resumed from and is not there now, which is
-    /// exactly the deletion they asked to be told about.
-    ///
-    /// Two things end it, and neither on its own is the answer.
-    /// `HistoryDone` says the system has finished reading its log, not
-    /// that the replay is over: a change made while nothing was
-    /// watching that had not reached the log when the stream started is
-    /// delivered after the sentinel, live and numbered after it. And a
-    /// wait that reported nothing is not a wait the system was silent
-    /// through -- the sentinel is itself a delivery that reports no
-    /// event, and so is a poll that expires before the stream has said
-    /// anything at all. Ending on either of those ended the catching up
-    /// one delivery before the changes it was there to explain, and a
-    /// file deleted in the gap was dropped as one that came and went
-    /// between two polls.
-    ///
-    /// So it ends `replay_tail_ms` after the sentinel, and it is asked
-    /// of each record as the record is read rather than being flipped
-    /// on a wait boundary.
-    fn catchingUp(st: *const Stream, io: Io) bool {
-        if (!st.resumed) return false;
-        const sentinel = st.replayed orelse return true;
-        return sentinel.durationTo(.now(io, .awake)).toMilliseconds() < replay_tail_ms;
-    }
 
     fn wants(st: *const Stream, subject: []const u8) bool {
         const rest = path_cmp.relative(st.root, subject) orelse return false;
@@ -449,7 +404,10 @@ pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_
     if (f.staging.items.len != 0 or f.staging_overflowed) return null;
     var watches: std.ArrayList(checkpoint_format.Watch) = .empty;
     defer watches.deinit(gpa);
-    defer for (watches.items) |watch| gpa.free(watch.changes);
+    defer for (watches.items) |watch| {
+        gpa.free(watch.changes);
+        gpa.free(watch.baseline);
+    };
     for (roots) |root| {
         const stream = f.streams.get(root.id) orelse return null;
         if (!stream.persistent) return null;
@@ -464,10 +422,15 @@ pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_
         if (f.pairing.held) |held| {
             if (held.id == root.id) half = .{ .path = held.path, .flags = held.flags, .event = held.event };
         }
+        var baseline: std.ArrayList([]const u8) = .empty;
+        errdefer baseline.deinit(gpa);
+        for (f.known.keys()) |key| if (key.id == root.id and path_cmp.within(root.path, key.path)) try baseline.append(gpa, key.path);
+        const paths = try baseline.toOwnedSlice(gpa);
+        errdefer gpa.free(paths);
         const cursor = stream.cursor;
-        try watches.append(gpa, .{ .root = root.path, .recursive = root.recursive, .cursor = cursor, .identity = identity, .changes = changes, .half = half });
+        try watches.append(gpa, .{ .root = root.path, .recursive = root.recursive, .cursor = cursor, .identity = identity, .changes = changes, .half = half, .baseline = paths });
     }
-    return .{ .state = try checkpoint_format.copy(gpa, .{ .version = 1, .backend = .fsevents, .watches = watches.items }) };
+    return .{ .state = try checkpoint_format.copy(gpa, .{ .version = 2, .backend = .fsevents, .watches = watches.items }) };
 }
 
 fn resumeIndex(f: *const FsEvents, root: []const u8) ?usize {
@@ -559,6 +522,18 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
     }
     if (stream.resume_index) |index| {
         const saved = f.restarting.?.state.value.watches[index];
+        // Compare the persisted baseline with the walk just taken. A gone
+        // path is a deletion even if the daemon never delivers its record.
+        // Remembered live names already cover changes racing the walk.
+        for (saved.baseline) |subject| {
+            if (!stream.wants(subject) or stream.filter.excludes(stream.root, subject)) continue;
+            if (f.known.contains(.{ .id = id, .path = subject })) continue;
+            const there = f.exists(subject) orelse {
+                try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
+                continue;
+            };
+            if (!there) try batch.deferChange(f.gpa, id, subject, .removed, null, .unknown);
+        }
         for (saved.changes) |change| {
             try batch.deferChange(f.gpa, id, change.path, change.kind, change.from, change.target);
         }
@@ -594,6 +569,7 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     errdefer volume.deinit(f.gpa);
     const resumed = if (force_live) null else f.resumeIndex(requested);
     if (resumed) |index| {
+        if (f.restarting.?.state.value.watches[index].recursive != options.recursive) return error.InvalidCheckpoint;
         const identity = volume.identity orelse return error.InvalidCheckpoint;
         if (!Volume.matches(identity, f.restarting.?.state.value.watches[index].identity)) return error.InvalidCheckpoint;
     }
@@ -1130,9 +1106,8 @@ fn report(
     // The marker that the system has finished reading its log back to
     // the captured registration boundary or an explicit checkpoint. Nothing
     // happened to a path, so there is nothing to report; it is swallowed
-    // rather than left to look like a change to the watch root. What it
-    // is kept for is `Stream.catchingUp`, which measures the tail that
-    // still follows it from here.
+    // rather than left to look like a change to the watch root. The persisted path baseline, rather than this marker or its
+    // arrival time, establishes which missing paths must be reported.
     if (record.flags & flag.history_done != 0) {
         if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
         trace.log("fsevents history done root={s}", .{stream.root});
@@ -1233,7 +1208,7 @@ fn reportPlain(
         // Gone. Whatever the flags remember about it, the fact now is
         // that the path is not there. A path lookout never knew about came
         // and went between two polls, and the tree is as it was.
-        if (seen or stream.catchingUp(f.io)) {
+        if (seen) {
             trace.log("fsevents push removed path={s}", .{record.path});
             try batch.push(f.gpa, record.id, record.path, .removed, record.target());
             f.forget(record.id, record.path);
@@ -1843,7 +1818,7 @@ test "stream latency follows the watcher latency" {
 }
 
 /// One record of a delivery made by hand.
-const Synthetic = struct { path: []const u8, flags: u32 };
+const Synthetic = struct { path: []const u8, flags: u32, event: ?u64 = null };
 
 /// Makes the delivery the system would make for `items`, through the
 /// callback it would call and into the buffer that callback writes.
@@ -1857,7 +1832,7 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
     for (items) |item| {
         paths[filled] = try gpa.dupeZ(u8, if (stream.persistent) stream.volume.relative(item.path) else item.path);
         flags[filled] = item.flags;
-        ids[filled] = c.FSEventsGetCurrentEventId();
+        ids[filled] = item.event orelse c.FSEventsGetCurrentEventId();
         filled += 1;
     }
     deliver(stream.ref, stream, filled, @ptrCast(&paths), &flags, &ids); // safe: the same C array of C strings FSEvents hands deliver

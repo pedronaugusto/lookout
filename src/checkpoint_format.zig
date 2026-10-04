@@ -16,6 +16,8 @@ pub const Watch = struct {
     cursor: u64,
     identity: Identity,
     recursive: bool,
+    /// The path baseline at this cursor, persisted with the checkpoint.
+    baseline: []const []const u8 = &.{},
     changes: []const Change = &.{},
     half: ?Half = null,
 };
@@ -49,10 +51,13 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!std.json.Parsed(State)
         else => error.InvalidCheckpoint,
     };
     errdefer state.deinit();
-    if (state.value.version != 1 or state.value.backend != .fsevents) return error.InvalidCheckpoint;
+    if (state.value.version != 2 or state.value.backend != .fsevents) return error.InvalidCheckpoint;
     var halves: usize = 0;
     for (state.value.watches) |watch| {
         if (!std.fs.path.isAbsolute(watch.root)) return error.InvalidCheckpoint;
+        for (watch.baseline) |known| {
+            if (!@import("path.zig").within(watch.root, known) or std.mem.indexOfScalar(u8, known, 0) != null) return error.InvalidCheckpoint;
+        }
         for (watch.changes) |change| {
             if (!std.fs.path.isAbsolute(change.path)) return error.InvalidCheckpoint;
             if ((change.kind == .renamed) != (change.from != null)) return error.InvalidCheckpoint;

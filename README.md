@@ -81,7 +81,10 @@ gathered events for a later poll. Native waits observe cancellation when they wa
 the backend provides one.
 
 FSEvents checkpoints retain per-watch volume and log identity, durable cursors and
-pending changes. Resume with matching canonical roots, scopes and filters. A changed
+pending changes and the path baseline the watch knew. On resume a path in that
+baseline that is gone is reported as a deletion once, independent of event ids
+and replay arrival time. The replay has no time window or id-space barrier;
+version-1 checkpoint tokens are refused. Resume with matching canonical roots, scopes and filters. A changed
 volume or log yields `InvalidCheckpoint`; watches spanning mounted volumes keep live
 coverage but cannot produce a checkpoint. Other backends return null.
 [examples/since.zig](examples/since.zig) exercises checkpoint tokens and resuming.

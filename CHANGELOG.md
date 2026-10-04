@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- FSEvents checkpoints persist the known path baseline and report paths gone on resume exactly once, even when deletion records arrive late or are numbered after the replay marker; version-1 tokens are refused.
+
 - `Baseline.save` and `load` atomically persist versioned, checksummed tree snapshots on every backend and refuse corrupt, foreign and old-version files by name.
 
 - The kqueue and poll backends find a watched path's node in one lookup and drop a removed directory at the cost of what was below it: adding a tree checked every file against every node, and each removal and rescan passed over every node and registration, quadratic in the tree (50,000 files took minutes to add). A name that comes back as another kind replaces its node.
