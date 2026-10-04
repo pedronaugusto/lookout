@@ -10,8 +10,6 @@ on:
         default: false
   pull_request:
   merge_group:
-  schedule:
-    - cron: '17 4 * * 1'
 concurrency:
   # Main status runs must not share the replaceable branch queue.
   group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-status-{0}', github.run_id) || github.head_ref || github.ref_name }}
@@ -21,8 +19,16 @@ permissions:
   actions: read
 jobs:
   gate:
-    uses: pedronaugusto/preflight/.github/workflows/zig.yml@25a0b56ab1802b3479105a5b477b8fb3b6658869
+    uses: pedronaugusto/preflight/.github/workflows/zig.yml@709e5c312f5f9d86b3bbdd577ad3b0a6db0c8f44
     with:
-      preflight-ref: 25a0b56ab1802b3479105a5b477b8fb3b6658869
+      preflight-ref: 709e5c312f5f9d86b3bbdd577ad3b0a6db0c8f44
       full: ${{ github.event_name != 'workflow_dispatch' || inputs.full }}
       attest: ${{ github.event_name == 'push' }}
+      # Generated from ci/workflow.json with zig build plan -- --full true.
+      full-matrix: >-
+        {"include":[{"os":"ubuntu-latest","name":"test (ubuntu-latest, Debug)","step":"ci","args":"-Doptimize=Debug -Dci-lint=false -Dci-timings=true","cases":"","timeout":"","setup":true,"job_timeout":20,"cache_key":"0dc96c7aa5b8dbd7","artifact":""},{"os":"ubuntu-latest","name":"test (ubuntu-latest, ReleaseSafe)","step":"ci","args":"-Doptimize=ReleaseSafe -Dci-lint=false -Dci-timings=true","cases":"","timeout":"","setup":true,"job_timeout":20,"cache_key":"2d572e8719d44f39","artifact":""},{"os":"ubuntu-latest","name":"test (ubuntu-latest, ReleaseFast)","step":"ci","args":"-Doptimize=ReleaseFast -Dci-lint=false -Dci-timings=true","cases":"","timeout":"","setup":true,"job_timeout":20,"cache_key":"8206d5a705df8f65","artifact":""},{"os":"macos-latest","name":"test (macos-latest, Debug)","step":"ci","args":"-Doptimize=Debug -Dci-lint=false -Dci-timings=true","cases":"","timeout":"","setup":true,"job_timeout":20,"cache_key":"856b401ed5dfdcc7","artifact":""},{"os":"macos-latest","name":"test (macos-latest, ReleaseSafe)","step":"ci","args":"-Doptimize=ReleaseSafe -Dci-lint=false -Dci-timings=true","cases":"","timeout":"","setup":true,"job_timeout":20,"cache_key":"2379a1e7a1df7841","artifact":""},{"os":"ubuntu-latest","name":"source checks and documented snippets","step":"lint","args":"","cases":"","timeout":"","setup":false,"job_timeout":20,"cache_key":"10bdf2590c7a0117","artifact":""},{"os":"ubuntu-latest","name":"compile (ReleaseSmall)","step":"install","args":"-Doptimize=ReleaseSmall","cases":"","timeout":"","setup":false,"job_timeout":20,"cache_key":"cfdd7189ec5ebfa3","artifact":""},{"os":"ubuntu-latest","name":"cross (all configured targets)","step":"preflight-cross","args":"","cases":"","timeout":"","setup":false,"job_timeout":20,"cache_key":"0abaad5bfb3ff7f9","artifact":""},{"os":"ubuntu-latest","name":"ThreadSanitizer (Linux)","step":"test","args":"-Dthread-sanitizer -Doptimize=Debug","cases":"","timeout":"--test-timeout 120s","setup":true,"job_timeout":20,"cache_key":"4ec6aa8d1272e7e4","artifact":""}]}
+      compile-matrix: >-
+        {"include":[{"os":"ubuntu-latest","name":"compile for test (windows-latest, Debug)","step":"ci-build","args":"-Doptimize=Debug -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","cases":"","timeout":"","setup":false,"job_timeout":20,"cache_key":"compile-fdf46551155f42b8","artifact":"preflight-fdf46551155f42b8"},{"os":"ubuntu-latest","name":"compile for test (windows-latest, ReleaseSafe)","step":"ci-build","args":"-Doptimize=ReleaseSafe -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","cases":"","timeout":"","setup":false,"job_timeout":20,"cache_key":"compile-0894f776de4f698d","artifact":"preflight-0894f776de4f698d"}]}
+      run-matrix: >-
+        {"include":[{"os":"windows-latest","name":"test (windows-latest, Debug)","step":"ci-run","args":"-Doptimize=Debug -Dci-lint=false -Dci-timings=true","cases":"","timeout":"","setup":true,"job_timeout":20,"cache_key":"fdf46551155f42b8","artifact":"preflight-fdf46551155f42b8"},{"os":"windows-latest","name":"test (windows-latest, ReleaseSafe)","step":"ci-run","args":"-Doptimize=ReleaseSafe -Dci-lint=false -Dci-timings=true","cases":"","timeout":"","setup":true,"job_timeout":20,"cache_key":"0894f776de4f698d","artifact":"preflight-0894f776de4f698d"}]}
+      compile-once: true
