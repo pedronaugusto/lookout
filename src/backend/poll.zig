@@ -225,7 +225,7 @@ pub fn wait(
 /// have taken some of the differences and not reported them. The sleep
 /// between scans is where a cancellation ends this backend's wait; see
 /// `Watcher.poll`.
-fn scan(p: *Poll, batch: *Batch) Tree.ScanError!void {
+pub fn scan(p: *Poll, batch: *Batch) Tree.ScanError!void {
     const protection = p.io.swapCancelProtection(.blocked);
     defer _ = p.io.swapCancelProtection(protection);
     try p.checkRoots(batch);

@@ -4,6 +4,7 @@ const gantry = @import("gantry");
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "primitives", .patterns = &.{
         "src/Waker.zig",
+        "src/filesystem.zig",
         "src/backend/inotify_records.zig",
         "src/backend/windows_records.zig",
         "src/buffer.zig",
@@ -101,5 +102,5 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "kqueue backend", .token = "kevent", .owners = &.{"src/backend/kqueue.zig"} },
     .{ .name = "windows backend", .token = "ReadDirectoryChangesW", .owners = &.{"src/backend/windows*.zig"} },
     .{ .name = "windows backend", .token = "CreateFileW", .owners = &.{"src/backend/windows*.zig"} },
-    .{ .name = "windows backend", .kind = .string, .token = "kernel32", .owners = &.{"src/backend/windows*.zig"} },
+    .{ .name = "windows backend", .kind = .string, .token = "kernel32", .owners = &.{ "src/backend/windows*.zig", "src/filesystem.zig" } },
 };

@@ -43,7 +43,18 @@ returned event slice and its paths belong to the watcher until the next poll or
 `deinit`. Baselines and checkpoints own separate storage and must be released.
 
 The automatic backend is FSEvents on Apple targets, kqueue on supported BSD targets,
-inotify on Linux, ReadDirectoryChangesW on Windows and polling elsewhere. `supported`
+inotify on Linux, ReadDirectoryChangesW on Windows and polling elsewhere.
+For each `.auto` watch, network and FUSE filesystems select polling instead; local
+watches in the same watcher retain their native backend. Explicit backend choices
+are kept. `Watcher.capabilities(id)` reports the selected backend and filesystem
+fact (`local`, `network`, `fuse`, or `unknown`), measured with statfs/statvfs on POSIX
+and drive type plus the remote-device flag on Windows. Failed or unavailable type
+queries report `unknown` and keep the default backend. Pending watches recheck when
+they move to another ancestor or their root. `backend()` reports the watcher's
+primary backend; use the per-watch result for backend capability queries. A watcher
+with polling registrations returns null from `fd` and `checkpoint`; drive it with
+`poll` and persist a Baseline for those roots. Detection describes the root mount,
+so watch nested mounted volumes separately. `supported`
 lets a caller check availability before choosing a backend. `pairsRenames`,
 `reportsRootMove`, `reportsCloses`, `prunesIgnored` and `tracksCheckpoint` describe
 differences that affect event handling.
@@ -95,6 +106,7 @@ coverage but cannot produce a checkpoint. Other backends return null.
 | --- | --- |
 | `Baseline.seed`, `diff`, `deinit` | Own, compare and release a tree snapshot. |
 | `Baseline.save`, `load` | Atomically persist and restore a checked snapshot for any backend. |
+| `Watcher.capabilities(id)` | The backend and filesystem fact for one watch; null for an unknown id. |
 
 ## Scope
 

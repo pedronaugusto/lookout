@@ -28,6 +28,10 @@ const Tree = @import("Tree.zig");
 const Waker = @import("Waker.zig");
 const walk = @import("walk.zig");
 const path_cmp = @import("path.zig");
+const fs_type = @import("filesystem.zig");
+
+/// The filesystem fact measured at each watch registration.
+pub const Filesystem = fs_type.Kind;
 
 /// Paths compared as a watch compares them: the same case folding and
 /// separators (`folds_case`).
@@ -247,6 +251,8 @@ pub const Watcher = struct {
     batch: Batch,
     next_id: u32,
     impl: Impl,
+    /// Polling registrations selected per watch beside the native backend.
+    polling: Poll,
     /// Every watch `add` has issued an id for, in the order it issued
     /// them. Kept here rather than in the backends because all five had
     /// the same table and the same linear scan over it, and because a
@@ -289,7 +295,17 @@ pub const Watcher = struct {
         /// An allocation failure may have interrupted this watch's delivery.
         /// Set without allocation and cleared only after its notice is handed out.
         incomplete: bool = false,
+        capabilities: Capabilities = .{ .backend = .auto, .filesystem = .unknown },
     };
+
+    /// Facts for one watch; use the backend with the global capability queries.
+    pub const Capabilities = struct { backend: Backend, filesystem: Filesystem };
+
+    /// Returns facts measured on registration, including for an explicitly
+    /// selected backend. Pending watches report their current ancestor facts.
+    pub fn capabilities(w: *const Watcher, id: WatchId) ?Capabilities {
+        return (w.table.get(id) orelse return null).capabilities;
+    }
 
     /// One watch, as `watches` reports it.
     pub const WatchInfo = @import("watch_contract.zig").WatchInfo;
@@ -412,6 +428,7 @@ pub const Watcher = struct {
             .batch = .init(io, options),
             .next_id = 0,
             .impl = impl,
+            .polling = Poll.init(gpa, io, options) catch unreachable,
             .table = .empty,
             .pending = .empty,
             .woken = .init(false),
@@ -425,6 +442,7 @@ pub const Watcher = struct {
     /// Releases every watch, every descriptor, and the events handed out
     /// by the last `poll`.
     pub fn deinit(w: *Watcher) void {
+        w.polling.deinit();
         switch (w.impl) {
             inline else => |*impl| impl.deinit(),
         }
@@ -489,13 +507,14 @@ pub const Watcher = struct {
         const mirror = try w.gpa.dupe(u8, abs);
         errdefer w.gpa.free(mirror);
         try w.table.ensureUnusedCapacity(w.gpa, 1);
-        try w.addBackend(id, abs, abs, options);
         w.table.putAssumeCapacity(id, .{
             .path = owned,
             .registered = mirror,
             .target = .of(stat.kind),
             .recursive = options.recursive,
         });
+        errdefer _ = w.table.swapRemove(id);
+        try w.addBackend(id, abs, abs, options);
         w.next_id += 1;
         return id;
     }
@@ -503,6 +522,10 @@ pub const Watcher = struct {
     /// Backend registrations may live on an ancestor; resume identity is
     /// always the caller's root, owned by Watcher.
     fn addBackend(w: *Watcher, id: WatchId, physical: []const u8, requested: []const u8, options: AddOptions) AddError!void {
+        const filesystem = fs_type.read(w.gpa, w.io, physical);
+        const use_poll = w.options.backend == .auto and (filesystem == .network or filesystem == .fuse) and w.backend() != .poll;
+        if (w.table.getPtr(id)) |held| held.capabilities = .{ .backend = if (use_poll) .poll else w.backend(), .filesystem = filesystem };
+        if (use_poll) return w.polling.add(id, physical, options, &w.batch);
         if (comptime @hasField(Impl, "fsevents")) {
             if (w.impl == .fsevents) return w.impl.fsevents.addFor(id, physical, requested, options, &w.batch);
         }
@@ -716,9 +739,7 @@ pub const Watcher = struct {
                 // Something appeared on the way down, or the ancestor the
                 // watch was parked on is itself gone. Either way the
                 // parking place is no longer the right one.
-                switch (w.impl) {
-                    inline else => |*impl| impl.remove(p.id),
-                }
+                w.removeBackend(p.id);
                 try w.reanchorPending(p);
                 // What appeared between the look and the new registration
                 // has no event of its own — `mkdir -p` makes the next step
@@ -752,9 +773,7 @@ pub const Watcher = struct {
     /// `Kind.unwatched`, as an `add` of that path would have been
     /// refused. `true` then too, because it is no longer waiting.
     fn promotePending(w: *Watcher, p: *Pending) PollError!bool {
-        switch (w.impl) {
-            inline else => |*impl| impl.remove(p.id),
-        }
+        w.removeBackend(p.id);
         w.unregister(p.id);
         if (try w.takenElsewhere(p)) {
             try w.batch.pushDetail(w.gpa, p.id, p.target, .unwatched, null, .unknown);
@@ -841,6 +860,13 @@ pub const Watcher = struct {
         w.gpa.destroy(p);
     }
 
+    fn removeBackend(w: *Watcher, id: WatchId) void {
+        w.polling.remove(id);
+        switch (w.impl) {
+            inline else => |*impl| impl.remove(id),
+        }
+    }
+
     /// Stops watching `id`, releasing its descriptors. Events already
     /// collected for it by the last `poll` stay valid until the next one;
     /// no further events are produced for it.
@@ -848,9 +874,7 @@ pub const Watcher = struct {
     /// Removing an id that is not currently watched — one already
     /// removed — does nothing.
     pub fn remove(w: *Watcher, id: WatchId) void {
-        switch (w.impl) {
-            inline else => |*impl| impl.remove(id),
-        }
+        w.removeBackend(id);
         if (w.table.fetchSwapRemove(id)) |entry| {
             var held = entry.value;
             w.release(&held);
@@ -894,7 +918,9 @@ pub const Watcher = struct {
             p.filter = replacement;
             return;
         }
-        switch (w.impl) {
+        if (w.table.get(id).?.capabilities.backend == .poll and w.backend() != .poll) {
+            try w.polling.refilter(id, filter, &w.batch);
+        } else switch (w.impl) {
             inline else => |*impl| try impl.refilter(id, filter, &w.batch),
         }
         w.batch.refilter(w.gpa, id, w.table.get(id).?.path, filter, w.handed_out);
@@ -1036,12 +1062,23 @@ pub const Watcher = struct {
     /// where a cancellation that arrived during any of it is reported,
     /// with everything the wait read already in the batch.
     fn wait(w: *Watcher, wait_ms: ?u32) PollError!void {
+        const mixed = w.polling.registrationCount() != 0;
+        if (mixed) {
+            const before = w.batch.revision;
+            try w.polling.scan(&w.batch);
+            if (w.batch.revision != before) {
+                try w.io.checkCancel();
+                return;
+            }
+        }
+        const bounded = if (mixed) @min(wait_ms orelse w.polling.interval_ms, w.polling.interval_ms) else wait_ms;
         switch (w.impl) {
             // Nothing to interrupt, only a sleep to cut short: it reads
             // the flag `wake` sets between the slices it sleeps in.
-            .poll => |*impl| try impl.wait(&w.batch, wait_ms, &w.woken),
-            inline else => |*impl| try impl.wait(&w.batch, wait_ms),
+            .poll => |*impl| try impl.wait(&w.batch, bounded, &w.woken),
+            inline else => |*impl| try impl.wait(&w.batch, bounded),
         }
+        if (mixed) try w.polling.scan(&w.batch);
         try w.io.checkCancel();
     }
 
@@ -1127,7 +1164,7 @@ pub const Watcher = struct {
     /// before persistence replays work since the previously saved snapshot;
     /// processing and persistence need a caller transaction for exactly once.
     pub fn checkpoint(w: *const Watcher, gpa: Allocator) Allocator.Error!?Checkpoint {
-        if (w.batch.dropped.count() != 0) return null;
+        if (w.batch.dropped.count() != 0 or w.polling.registrationCount() != 0) return null;
         for (w.table.values()) |held| if (held.incomplete) return null;
         if (comptime @hasField(Impl, "fsevents")) {
             if (w.impl == .fsevents) {
@@ -1195,7 +1232,7 @@ pub const Watcher = struct {
         return .{
             .watches = w.table.count(),
             .registrations = switch (w.impl) {
-                inline else => |*impl| impl.registrationCount(),
+                inline else => |*impl| impl.registrationCount() + w.polling.registrationCount(),
             },
             .held = w.batch.held.count(),
             .events = w.batch.events.items.len,
@@ -1216,13 +1253,14 @@ pub const Watcher = struct {
     /// or registering it for anything other than readability is illegal
     /// behavior; use it to decide when to call `poll`, and nothing else.
     pub fn fd(w: *const Watcher) ?std.posix.fd_t {
+        if (w.polling.registrationCount() != 0) return null;
         return switch (w.impl) {
             inline else => |*impl| impl.fd(),
         };
     }
 
     /// The backend this watcher actually uses, with `Backend.auto`
-    /// resolved.
+    /// resolved. Individual auto watches may use polling: see capabilities.
     pub fn backend(w: *const Watcher) Backend {
         return switch (w.impl) {
             inline else => |_, tag| @field(Backend, @tagName(tag)),
@@ -1309,4 +1347,84 @@ test "a failed pending promotion keeps each registered path owned" {
         if (!failed) break;
     }
     try testing.expect(fail_index > 0);
+}
+
+test "auto chooses polling per network or FUSE watch and explicit backends retain their choice" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const Fake = struct {
+        fn read(_: Allocator, _: Io, subject: []const u8) Filesystem {
+            if (std.mem.endsWith(u8, subject, "remote")) return .network;
+            if (std.mem.endsWith(u8, subject, "fuse")) return .fuse;
+            return .local;
+        }
+    };
+    fs_type.test_access.source = Fake.read;
+    defer fs_type.test_access.source = null;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    for ([_][]const u8{ "local", "remote", "fuse" }) |name| try tmp.dir.createDirPath(io, name);
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    for ([_]Backend{ .auto, default_backend, .poll }) |selected| {
+        var w = try Watcher.init(gpa, io, .{ .backend = selected, .latency_ms = 0, .poll_interval_ms = 1 });
+        defer w.deinit();
+        var ids: [3]WatchId = undefined;
+        for ([_][]const u8{ "local", "remote", "fuse" }, 0..) |name, index| {
+            const absolute = try std.fs.path.join(gpa, &.{ root, name });
+            defer gpa.free(absolute);
+            ids[index] = try w.add(absolute, .{ .recursive = true });
+            const caps = w.capabilities(ids[index]).?;
+            try testing.expectEqual(if (index == 0) Filesystem.local else if (index == 1) Filesystem.network else Filesystem.fuse, caps.filesystem);
+            try testing.expectEqual(if (selected == .auto and index != 0) Backend.poll else if (selected == .auto) default_backend else selected, caps.backend);
+        }
+        if (selected == .auto) try testing.expect(w.fd() == null);
+        // Polling selection still uses the same batching, filtering and removal.
+        try w.refilter(ids[1], .{ .ignore = &.{"*.tmp"} });
+        try tmp.dir.writeFile(io, .{ .sub_path = "remote/kept", .data = "one" });
+        try tmp.dir.writeFile(io, .{ .sub_path = "remote/excluded.tmp", .data = "one" });
+        var found = false;
+        const deadline = Deadline.start(io, 5_000);
+        while (!found and !deadline.expired()) {
+            for (try w.poll(100)) |event| {
+                try testing.expect(!std.mem.endsWith(u8, event.path, "excluded.tmp"));
+                if (event.id == ids[1] and std.mem.endsWith(u8, event.path, "kept")) found = true;
+            }
+        }
+        try testing.expect(found);
+        w.remove(ids[1]);
+        try testing.expect(w.capabilities(ids[1]) == null);
+        try tmp.dir.deleteFile(io, "remote/kept");
+        try tmp.dir.deleteFile(io, "remote/excluded.tmp");
+    }
+}
+
+test "pending watches recheck filesystem facts when they move to their root" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const Fake = struct {
+        fn read(_: Allocator, _: Io, subject: []const u8) Filesystem {
+            return if (std.mem.endsWith(u8, subject, "appeared")) .network else .local;
+        }
+    };
+    fs_type.test_access.source = Fake.read;
+    defer fs_type.test_access.source = null;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const absent = try std.fs.path.join(gpa, &.{ root, "appeared" });
+    defer gpa.free(absent);
+    var w = try Watcher.init(gpa, io, .{ .latency_ms = 0 });
+    defer w.deinit();
+    const id = try w.add(absent, .{ .pending = true });
+    try testing.expectEqual(Filesystem.local, w.capabilities(id).?.filesystem);
+    try tmp.dir.createDirPath(io, "appeared");
+    _ = try w.poll(0);
+    try testing.expectEqual(Filesystem.network, w.capabilities(id).?.filesystem);
+    try testing.expectEqual(Backend.poll, w.capabilities(id).?.backend);
+    w.remove(id);
+    try testing.expectEqual(@as(usize, 0), w.polling.registrationCount());
 }

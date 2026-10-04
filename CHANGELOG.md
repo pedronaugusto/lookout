@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `Watcher.capabilities(id)` reports the filesystem fact and backend per watch; `.auto` uses polling on network and FUSE mounts, while explicit backend choices are kept.
+
 - FSEvents checkpoints persist the known path baseline and report paths gone on resume exactly once, even when deletion records arrive late or are numbered after the replay marker; version-1 tokens are refused.
 
 - `Baseline.save` and `load` atomically persist versioned, checksummed tree snapshots on every backend and refuse corrupt, foreign and old-version files by name.
