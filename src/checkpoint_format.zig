@@ -17,7 +17,7 @@ pub const Watch = struct {
     identity: Identity,
     recursive: bool,
     /// The path baseline at this cursor, persisted with the checkpoint.
-    baseline: []const []const u8,
+    baseline: @import("CheckpointPaths.zig").Paths,
     changes: []const Change = &.{},
     half: ?Half = null,
 };
@@ -45,7 +45,19 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const ParseError = Allocator.Error || error{InvalidCheckpoint};
 
-pub fn parse(gpa: Allocator, text: []const u8) ParseError!std.json.Parsed(State) {
+pub const Owned = struct {
+    value: State,
+    arena: *std.heap.ArenaAllocator,
+
+    pub fn deinit(state: Owned) void {
+        for (state.value.watches) |watch| watch.baseline.release();
+        const gpa = state.arena.child_allocator;
+        state.arena.deinit();
+        gpa.destroy(state.arena);
+    }
+};
+
+pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {
     var state = std.json.parseFromSlice(State, gpa, text, .{ .allocate = .alloc_always }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidCheckpoint,
@@ -57,7 +69,9 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!std.json.Parsed(State)
         if (!std.fs.path.isAbsolute(watch.root)) return error.InvalidCheckpoint;
         var names: std.StringHashMapUnmanaged(void) = .empty;
         defer names.deinit(gpa);
-        for (watch.baseline) |known| {
+        var paths = watch.baseline.iterator();
+        defer paths.deinit();
+        while (paths.next()) |known| {
             if (!@import("path.zig").within(watch.root, known) or std.mem.indexOfScalar(u8, known, 0) != null) return error.InvalidCheckpoint;
             var components = std.mem.tokenizeAny(u8, known, @import("path.zig").separators);
             while (components.next()) |component| {
@@ -76,15 +90,41 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!std.json.Parsed(State)
             if (halves > 1 or !std.fs.path.isAbsolute(half.path) or half.flags & 0x800 == 0) return error.InvalidCheckpoint;
         }
     }
-    return state;
+    return .{ .value = state.value, .arena = state.arena };
 }
 
 /// Copies borrowed internal state into an owned snapshot.
-pub fn copy(gpa: Allocator, state: State) Allocator.Error!std.json.Parsed(State) {
-    const text = try std.json.Stringify.valueAlloc(gpa, state, .{});
-    defer gpa.free(text);
-    return parse(gpa, text) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.InvalidCheckpoint => unreachable,
-    };
+pub fn copy(gpa: Allocator, state: State) Allocator.Error!Owned {
+    const arena = try gpa.create(std.heap.ArenaAllocator);
+    arena.* = .init(gpa);
+    errdefer {
+        arena.deinit();
+        gpa.destroy(arena);
+    }
+    const a = arena.allocator();
+    const watches = try a.alloc(Watch, state.watches.len);
+    var copied: usize = 0;
+    errdefer for (watches[0..copied]) |watch| watch.baseline.release();
+    for (state.watches, watches) |watch, *owned| {
+        owned.* = watch;
+        owned.root = try a.dupe(u8, watch.root);
+        const changes = try a.alloc(Change, watch.changes.len);
+        for (watch.changes, changes) |change, *out| {
+            out.* = change;
+            out.path = try a.dupe(u8, change.path);
+            if (change.from) |from| out.from = try a.dupe(u8, from);
+        }
+        owned.changes = changes;
+        if (watch.half) |half| owned.half = .{ .path = try a.dupe(u8, half.path), .flags = half.flags, .event = half.event };
+        owned.baseline = switch (watch.baseline) {
+            .flat => |names| blk: {
+                const paths = try a.alloc([]const u8, names.len);
+                for (names, paths) |name, *out| out.* = try a.dupe(u8, name);
+                break :blk .{ .flat = paths };
+            },
+            .shared => watch.baseline.retain(),
+        };
+        copied += 1;
+    }
+    return .{ .arena = arena, .value = .{ .version = state.version, .backend = state.backend, .watches = watches } };
 }

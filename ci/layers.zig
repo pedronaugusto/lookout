@@ -25,6 +25,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/Snapshot.zig",
         "src/backend/fsevents_records.zig",
         "src/checkpoint_format.zig",
+        "src/CheckpointPaths.zig",
     } },
     .{ .name = "baseline storage", .patterns = &.{"src/baseline_format.zig"} },
     .{ .name = "snapshots", .patterns = &.{

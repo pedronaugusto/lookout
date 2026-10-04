@@ -7,9 +7,10 @@ const Checkpoint = @This();
 const Allocator = std.mem.Allocator;
 const format = @import("checkpoint_format.zig");
 
-state: std.json.Parsed(format.State),
+state: format.Owned,
 
-/// Frees the snapshot. No watcher or token borrows its storage.
+/// Releases the snapshot and its retained path revision. It may outlive the
+/// watcher, whose allocator must remain valid until all revisions are released.
 pub fn deinit(p: *Checkpoint) void {
     p.state.deinit();
     p.* = undefined;
@@ -35,7 +36,7 @@ test "checkpoint tokens own their paths and refuse unknown formats" {
     const root = if (@import("builtin").os.tag == .windows) "C:\\watch" else "/watch";
     var original: Checkpoint = .{ .state = try format.copy(gpa, .{ .version = 2, .backend = .fsevents, .watches = &.{.{
         .root = root,
-        .baseline = &.{root},
+        .baseline = .{ .flat = &.{root} },
         .recursive = true,
         .cursor = 1234,
         .identity = .{ .volume = .{'1'} ** 32, .log = .{'2'} ** 32 },
@@ -71,7 +72,7 @@ test "checkpoint paths cannot omit their baseline or escape the root" {
     const escaped = try std.fs.path.join(gpa, &.{ root, "..", "outside" });
     defer gpa.free(escaped);
     const identity: format.Identity = .{ .volume = .{'1'} ** 32, .log = .{'2'} ** 32 };
-    const text = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 2, .backend = .fsevents, .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true, .baseline = &.{escaped} }} }, .{});
+    const text = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 2, .backend = .fsevents, .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true, .baseline = .{ .flat = &.{escaped} } }} }, .{});
     defer gpa.free(text);
     try std.testing.expectError(error.InvalidCheckpoint, parse(gpa, text));
     const missing = try std.json.Stringify.valueAlloc(gpa, .{ .version = 2, .backend = "fsevents", .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true }} }, .{});

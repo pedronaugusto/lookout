@@ -862,3 +862,59 @@ test "a recursive pending checkpoint resumes on its nonrecursive ancestor" {
     try testing.expectEqual(id, resumed.table.keys()[0]);
     try testing.expect(resumed.table.values()[0].recursive);
 }
+
+test "checkpoint capture allocation does not grow with the remembered tree" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var bytes: [2]usize = undefined;
+    for (0..2) |round| {
+        if (round == 1) for (0..256) |i| {
+            var name: [32]u8 = undefined;
+            try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&name, "file-{d}", .{i}), .data = "" });
+        };
+        var watcher = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents });
+        defer watcher.deinit();
+        _ = try watcher.add(root, .{ .recursive = true });
+        var counting: std.testing.FailingAllocator = .init(gpa, .{});
+        var saved = (try watcher.checkpoint(counting.allocator())).?;
+        defer saved.deinit();
+        bytes[round] = counting.allocated_bytes;
+    }
+    try std.testing.expectEqual(bytes[0], bytes[1]);
+}
+
+test "a shared checkpoint token keeps its revision after the watch is removed" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var saved: lookout.Checkpoint = undefined;
+    {
+        var watcher = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents });
+        defer watcher.deinit();
+        const id = try watcher.add(root, .{});
+        saved = (try watcher.checkpoint(gpa)).?;
+        watcher.remove(id);
+        try tmp.dir.deleteFile(io, "kept");
+    }
+    defer saved.deinit();
+    const token = try saved.token(gpa);
+    defer gpa.free(token);
+    var parsed = try lookout.Checkpoint.parse(gpa, token);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.state.value.watches[0].baseline.flat.len);
+    var resumed = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
+    defer resumed.deinit();
+    const restored = try resumed.add(root, .{});
+    stopDeliveries(&resumed.impl.fsevents, resumed.impl.fsevents.streams.get(restored).?);
+    const events = try resumed.poll(0);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqual(lookout.Kind.removed, events[0].kind);
+}

@@ -40,7 +40,9 @@ lookout has no package dependencies. Apple targets link libc and CoreServices fo
 FSEvents and need a macOS SDK; the build locates the host SDK or uses the supplied
 sysroot. A watcher uses the caller's allocator for watches, paths and event storage. A
 returned event slice and its paths belong to the watcher until the next poll or
-`deinit`. Baselines and checkpoints own separate storage and must be released.
+`deinit`. Baselines and checkpoints retain their storage and must be released.
+A checkpoint can outlive its watcher; the watcher allocator must remain valid
+until every shared checkpoint is released.
 
 The automatic backend is FSEvents on Apple targets, kqueue on supported BSD targets,
 inotify on Linux, ReadDirectoryChangesW on Windows and polling elsewhere.
@@ -92,7 +94,10 @@ gathered events for a later poll. Native waits observe cancellation when they wa
 the backend provides one.
 
 FSEvents checkpoints retain per-watch volume and log identity, durable cursors and
-pending changes and the path baseline the watch knew. On resume a path in that
+pending changes and the path baseline the watch knew. Capture retains a shared
+path revision without walking or copying the tree; token writing flattens it
+to a self-contained baseline. Paths removed since a retained revision are reclaimed
+when that revision is released. On resume a path in that
 baseline that is gone is reported as a deletion once, independent of event ids
 and replay arrival time. The replay has no time window or id-space barrier;
 version-1 checkpoint tokens are refused. Resume with matching canonical roots, scopes and filters. A changed

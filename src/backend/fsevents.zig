@@ -37,6 +37,7 @@ const posix = std.posix;
 const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Volume = @import("fsevents_volume.zig");
+const CheckpointPaths = @import("../CheckpointPaths.zig");
 const checkpoint_format = @import("../checkpoint_format.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
@@ -88,6 +89,8 @@ resume_used: []bool,
 /// and initial metadata per watched file -- still nothing against `kqueue`'s descriptor per
 /// watched file, which is the comparison that matters on this platform.
 known: std.ArrayHashMapUnmanaged(KnownKey, ?Initial, KnownKeyContext, true),
+/// Paths and retained revisions share storage; known keys borrow their nodes.
+paths: *CheckpointPaths,
 /// The half of a rename whose partner has not been delivered yet. The
 /// path it holds is owned here -- see `records.Half`.
 pairing: records.Pairing,
@@ -106,6 +109,7 @@ const Initial = walk.Meta;
 const KnownKey = struct {
     id: WatchId,
     path: []const u8,
+    history: ?*CheckpointPaths.Node = null,
 };
 
 const KnownKeyContext = struct {
@@ -350,7 +354,9 @@ pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) 
         null;
     errdefer if (restarting) |*checkpoint| checkpoint.deinit();
     const resume_used = try gpa.alloc(bool, if (restarting) |checkpoint| checkpoint.state.value.watches.len else 0);
+    errdefer gpa.free(resume_used);
     @memset(resume_used, false);
+    const paths = try CheckpointPaths.init(gpa);
     return .{
         .gpa = gpa,
         .io = io,
@@ -361,6 +367,7 @@ pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) 
         .budget = .init(gpa, io, options.max_dir_entries),
         .restarting = restarting,
         .resume_used = resume_used,
+        .paths = paths,
         .known = .empty,
         .pairing = .{},
         .stream_latency = latencySeconds(options.latency_ms),
@@ -380,8 +387,8 @@ pub fn deinit(f: *FsEvents) void {
     if (f.restarting) |*checkpoint| checkpoint.deinit();
     f.gpa.free(f.resume_used);
     f.budget.deinit();
-    for (f.known.keys()) |key| f.gpa.free(key.path);
     f.known.deinit(f.gpa);
+    f.paths.release();
     if (f.pairing.held) |half| f.gpa.free(half.path);
     c.dispatch_release(f.queue);
     _ = std.c.close(f.sink.wake_r);
@@ -406,7 +413,7 @@ pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_
     defer watches.deinit(gpa);
     defer for (watches.items) |watch| {
         gpa.free(watch.changes);
-        gpa.free(watch.baseline);
+        watch.baseline.release();
     };
     for (roots) |root| {
         const stream = f.streams.get(root.id) orelse return null;
@@ -422,11 +429,8 @@ pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_
         if (f.pairing.held) |held| {
             if (held.id == root.id) half = .{ .path = held.path, .flags = held.flags, .event = held.event };
         }
-        var baseline: std.ArrayList([]const u8) = .empty;
-        errdefer baseline.deinit(gpa);
-        for (f.known.keys()) |key| if (key.id == root.id and path_cmp.within(root.path, key.path)) try baseline.append(gpa, key.path);
-        const paths = try baseline.toOwnedSlice(gpa);
-        errdefer gpa.free(paths);
+        const paths = try f.paths.snapshot(gpa, root.id, root.path);
+        errdefer paths.release();
         const cursor = stream.cursor;
         try watches.append(gpa, .{ .root = root.path, .recursive = root.recursive, .cursor = cursor, .identity = identity, .changes = changes, .half = half, .baseline = paths });
     }
@@ -525,7 +529,9 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
         // Compare the persisted baseline with the walk just taken. A gone
         // path is a deletion even if the daemon never delivers its record.
         // Remembered live names already cover changes racing the walk.
-        for (saved.baseline) |subject| {
+        var saved_paths = saved.baseline.iterator();
+        defer saved_paths.deinit();
+        while (saved_paths.next()) |subject| {
             if (!stream.wants(subject) or stream.filter.excludes(stream.root, subject)) continue;
             if (f.known.contains(.{ .id = id, .path = subject })) continue;
             const there = f.exists(subject) orelse {
@@ -731,7 +737,7 @@ pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) 
     while (i < f.known.count()) {
         const key = f.known.keys()[i];
         if (key.id == id and stream.filter.prunes(stream.root, key.path)) {
-            f.gpa.free(key.path);
+            f.paths.remove(key.history.?);
             f.known.swapRemoveAt(i);
         } else i += 1;
     }
@@ -1432,11 +1438,13 @@ fn rememberNew(f: *FsEvents, id: WatchId, subject: []const u8) Allocator.Error!?
     const entry = try f.known.getOrPut(f.gpa, .{ .id = id, .path = subject });
     if (entry.found_existing) return null;
     // The new entry is the last one, still keyed by the borrowed name.
-    const owned = f.gpa.dupe(u8, subject) catch |err| {
+    const node = f.paths.prepare(id, subject) catch |err| {
         _ = f.known.pop();
         return err;
     };
-    entry.key_ptr.path = owned;
+    f.paths.publish(node);
+    entry.key_ptr.path = node.path;
+    entry.key_ptr.history = node;
     entry.value_ptr.* = null;
     return entry.value_ptr;
 }
@@ -1452,7 +1460,7 @@ fn rememberInitial(f: *FsEvents, stream: *const Stream, subject: []const u8, lis
     }
     const stat = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch |err| {
         // Gone already, or not remembered at all: drop the entry just made.
-        f.gpa.free(f.known.pop().?.key.path);
+        f.paths.remove(f.known.pop().?.key.history.?);
         switch (err) {
             error.FileNotFound, error.NotDir => return,
             else => return err,
@@ -1481,7 +1489,7 @@ fn unchangedInitial(f: *FsEvents, record: Record) ?bool {
 /// Records that a path does not.
 fn forget(f: *FsEvents, id: WatchId, subject: []const u8) void {
     if (f.known.fetchSwapRemove(.{ .id = id, .path = subject })) |entry| {
-        f.gpa.free(entry.key.path);
+        f.paths.remove(entry.key.history.?);
     }
 }
 
@@ -1491,7 +1499,7 @@ fn forgetSubtree(f: *FsEvents, id: WatchId, root: []const u8) void {
     while (i < f.known.count()) {
         const key = f.known.keys()[i];
         if (key.id == id and path_cmp.within(root, key.path)) {
-            f.gpa.free(key.path);
+            f.paths.remove(key.history.?);
             f.known.swapRemoveAt(i);
         } else {
             i += 1;
@@ -1506,7 +1514,7 @@ fn forgetWatch(f: *FsEvents, id: WatchId) void {
             i += 1;
             continue;
         }
-        f.gpa.free(f.known.keys()[i].path);
+        f.paths.remove(f.known.keys()[i].history.?);
         f.known.swapRemoveAt(i);
     }
 }
@@ -1541,11 +1549,11 @@ fn refreshKnown(
 /// Moves everything remembered under `old` to sit under `new`, which is
 /// what a directory rename does to a tree.
 fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.Error!void {
-    const Move = struct { before: []const u8, after: []u8 };
+    const Move = struct { before: []const u8, after: *CheckpointPaths.Node };
     var moved: std.ArrayList(Move) = .empty;
     var committed = false;
     defer {
-        if (!committed) for (moved.items) |move| f.gpa.free(move.after);
+        if (!committed) for (moved.items) |move| f.paths.discard(move.after);
         moved.deinit(f.gpa);
     }
 
@@ -1559,16 +1567,19 @@ fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.
         else
             try std.fs.path.join(f.gpa, &.{ new, rest });
         errdefer f.gpa.free(renamed);
-        try moved.append(f.gpa, .{ .before = key.path, .after = renamed });
+        const node = try f.paths.prepareOwned(id, renamed);
+        errdefer f.paths.gpa.destroy(node);
+        try moved.append(f.gpa, .{ .before = key.path, .after = node });
     }
     try f.known.ensureUnusedCapacity(f.gpa, moved.items.len);
     for (moved.items) |move| {
-        _ = f.known.swapRemove(.{ .id = id, .path = move.before });
-        f.gpa.free(move.before);
-        const key: KnownKey = .{ .id = id, .path = move.after };
+        const removed = f.known.fetchSwapRemove(.{ .id = id, .path = move.before }).?;
+        f.paths.remove(removed.key.history.?);
+        const key: KnownKey = .{ .id = id, .path = move.after.path, .history = move.after };
         if (f.known.contains(key)) {
-            f.gpa.free(move.after);
+            f.paths.discard(move.after);
         } else {
+            f.paths.publish(move.after);
             f.known.putAssumeCapacity(key, null);
         }
     }
@@ -1938,7 +1949,9 @@ test "a failed FSEvents rekey keeps every remembered name" {
         try backend.remember(id, "/old");
         try backend.remember(id, "/old/child");
         backend.gpa = failing.allocator();
+        backend.paths.gpa = failing.allocator();
         defer backend.gpa = testing.allocator;
+        defer backend.paths.gpa = testing.allocator;
         if (backend.rekey(id, "/old", "/new")) |_| {
             try testing.expect(backend.known.contains(.{ .id = id, .path = "/new" }));
             try testing.expect(backend.known.contains(.{ .id = id, .path = "/new/child" }));
