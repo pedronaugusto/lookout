@@ -290,7 +290,7 @@ test "a link to a directory another link reached first takes over when that one 
         try f.expect("watched/first/one.txt", .created, &.{"watched/second/one.txt"});
 
         try f.unlink("watched/first");
-        try f.expect("watched/first", .removed, &.{});
+        try f.expect("watched/first", null, &.{});
         try f.await(plain, true);
         try f.write("outside/target/two.txt");
         try f.expect("watched/second/two.txt", .created, &.{"watched/first/two.txt"});
@@ -371,8 +371,8 @@ test "removing a followed link stops watching what it led to" {
         try testing.expect(f.watcher.stats().registrations > plain);
 
         try f.unlink("watched/link");
-        try f.expect("watched/link", .removed, &.{});
-        try testing.expectEqual(plain, f.watcher.stats().registrations);
+        try f.expect("watched/link", null, &.{});
+        try f.await(plain, false);
         try f.write("outside/target/after.txt");
         try f.quiet(&.{ "watched/link", "outside" });
     }
@@ -464,8 +464,10 @@ test "a watch that follows a link produces no checkpoint" {
         _ = try f.watch(.{});
         var before = (try f.watcher.checkpoint(gpa)) orelse return error.TestUnexpectedResult;
         before.deinit();
+        const plain = f.watcher.stats().registrations;
         try f.link("outside/target", "watched/link");
         try f.expect("watched/link", null, &.{});
+        try f.await(plain, true);
         try testing.expect(try f.watcher.checkpoint(gpa) == null);
     }
 }

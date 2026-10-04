@@ -1245,7 +1245,12 @@ fn reportPlain(
     // Both flags on a path that still exists and was already known mean
     // that the old entry left and another now occupies its name. Removal
     // wins inside a coalescing window so the caller knows to read it anew.
-    if (wasReplaced(record.flags)) {
+    // A removal alone on a name that is there again means the same: the
+    // system recorded the removal before the name was taken again, and
+    // the creation, in a later delivery, says nothing a known path does
+    // not already say -- a symbolic link replaced in two steps carries
+    // no content or metadata flag, and was otherwise not reported at all.
+    if (wasReplaced(record.flags) or record.flags & flag.item_removed != 0) {
         trace.log("fsevents push replaced-as-removed path={s}", .{record.path});
         try batch.push(f.gpa, record.id, record.path, .removed, record.target());
         if (record.target() == .directory) try f.refreshKnown(record.id, record.path, stream);
