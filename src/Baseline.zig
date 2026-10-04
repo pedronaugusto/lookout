@@ -183,7 +183,10 @@ pub fn save(b: *const Baseline, gpa: Allocator, filename: []const u8) SaveError!
 /// UnsupportedBaselineVersion respectively. A later diff costs one walk.
 pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, options: Options) LoadError!Baseline {
     if (options.filter.allow != null) return error.UnsupportedBaselineFilter;
-    const bytes = try Io.Dir.cwd().readFileAlloc(io, filename, gpa, .limited(format.file_limit));
+    const bytes = Io.Dir.cwd().readFileAlloc(io, filename, gpa, .limited(format.file_limit)) catch |err| switch (err) {
+        error.StreamTooLong => return error.InvalidBaseline,
+        else => return err,
+    };
     defer gpa.free(bytes);
     var parsed = try format.parse(gpa, bytes);
     defer parsed.deinit();
@@ -865,4 +868,54 @@ test "baseline storage refuses corrupt foreign and old files by name" {
     const other = try format.encode(gpa, foreign);
     defer gpa.free(other);
     try testing.expectError(error.ForeignBaseline, format.parse(gpa, other));
+}
+
+test "a failed baseline replacement leaves the previous file intact" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "tree");
+    const root = try tmp.dir.realPathFileAlloc(io, "tree", gpa);
+    defer gpa.free(root);
+    const parent = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(parent);
+    const filename = try std.fs.path.join(gpa, &.{ parent, "saved" });
+    defer gpa.free(filename);
+    var b = try seed(gpa, io, root, .{});
+    defer b.deinit(gpa);
+    try b.save(gpa, filename);
+    const original = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
+    defer gpa.free(original);
+    const Broken = struct {
+        fn write(context: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
+            // Write only a prefix into the temporary file, then fail.
+            if (offset != 0) return error.NoSpaceLeft;
+            return testing.io.vtable.fileWritePositional(context, file, header, &.{data[0][0..8]}, splat, offset);
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.fileWritePositional = Broken.write;
+    b.io = .{ .userdata = io.userdata, .vtable = &vtable };
+    try testing.expectError(error.NoSpaceLeft, b.save(gpa, filename));
+    b.io = io;
+    const after = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
+    defer gpa.free(after);
+    try testing.expectEqualSlices(u8, original, after);
+    var it = tmp.dir.iterate();
+    var entries: usize = 0;
+    while (try it.next(io)) |_| entries += 1;
+    try testing.expectEqual(@as(usize, 2), entries); // tree and saved; no leaked temporary file
+}
+
+test "baseline storage validates checksummed paths before trusting them" {
+    const gpa = testing.allocator;
+    const root = if (@import("builtin").os.tag == .windows) "C:\\tree" else "/tree";
+    const bad = try std.fs.path.join(gpa, &.{ root, "..", "outside" });
+    defer gpa.free(bad);
+    const directory: format.Directory = .{ .path = bad, .truncated = false, .check_contents = false, .entries = &.{} };
+    const state: format.State = .{ .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{directory} };
+    const bytes = try format.encode(gpa, state);
+    defer gpa.free(bytes);
+    try testing.expectError(error.InvalidBaseline, format.parse(gpa, bytes));
 }
