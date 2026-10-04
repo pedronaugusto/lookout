@@ -22,10 +22,10 @@
 const std = @import("std");
 const testing = std.testing;
 
-const fsevents_records = @import("backend/fsevents_records.zig");
-const inotify_records = @import("backend/inotify_records.zig");
-const windows_records = @import("backend/windows_records.zig");
-const lookout = @import("lookout.zig");
+const fsevents_records = @import("../backend/fsevents/records.zig");
+const inotify_records = @import("../backend/inotify/records.zig");
+const windows_records = @import("../backend/windows/records.zig");
+const lookout = @import("../lookout.zig");
 const WatchId = lookout.WatchId;
 
 /// How much of one read a target builds. Large enough for a run of
@@ -347,10 +347,10 @@ const Fake = struct {
 // that spent a restart on a disk.
 //=========================================================================
 
-const path_cmp = @import("path.zig");
-const Filter = @import("Filter.zig");
-const Baseline = @import("Baseline.zig");
-const Checkpoint = @import("Checkpoint.zig");
+const path_cmp = @import("../path.zig");
+const Filter = @import("../Filter.zig");
+const Baseline = @import("../Baseline.zig");
+const Checkpoint = @import("../Checkpoint.zig");
 const builtin = @import("builtin");
 
 /// A path out of the pieces two spellings of one path differ by: case,
@@ -869,7 +869,7 @@ test "a persisted baseline loader accepts only intact validated storage" {
 
 fn fuzzBaselineStorage(_: void, smith: *testing.Smith) !void {
     @disableInstrumentation();
-    const format = @import("Baseline/baseline_format.zig");
+    const format = @import("../Baseline/format.zig");
     const gpa = testing.allocator;
     var buf: [2048]u8 = undefined;
     const bytes = buf[0..smith.slice(&buf)];
@@ -877,7 +877,7 @@ fn fuzzBaselineStorage(_: void, smith: *testing.Smith) !void {
     // find a cryptographic checksum or the whole JSON schema.
     if (smith.boolWeighted(1, 1)) {
         const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
-        const meta: @import("Snapshot.zig").Meta = .{ .size = smith.value(u64), .mtime_ns = smith.value(i96), .ctime_ns = smith.value(i96), .file_kind = .file };
+        const meta: @import("../Snapshot.zig").Meta = .{ .size = smith.value(u64), .mtime_ns = smith.value(i96), .ctime_ns = smith.value(i96), .file_kind = .file };
         const wrapped = try format.encode(gpa, .{ .platform = format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{.{ .path = root, .truncated = false, .check_contents = false, .entries = &.{.{ .name = bytes, .meta = meta }} }} });
         defer gpa.free(wrapped);
         var structured = format.parse(gpa, wrapped) catch |err| {

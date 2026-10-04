@@ -10,7 +10,7 @@ const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
 const path_cmp = @import("../path.zig");
-const records = @import("inotify_records.zig");
+const records = @import("inotify/records.zig");
 const walk = @import("../walk.zig");
 const Waker = @import("../Waker.zig");
 const Target = lookout.Target;
@@ -78,7 +78,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     // generated." The record is written here the way the kernel writes
     // it and read back through the decoder a real read goes through,
     // so that what is asserted is the whole path from the bytes to the
-    // batch. src/gaps_test.zig fills a real queue past the limit.
+    // batch. src/testing/gaps_test.zig fills a real queue past the limit.
     const testing = std.testing;
     const gpa = testing.allocator;
     const io = testing.io;

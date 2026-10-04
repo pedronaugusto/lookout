@@ -5,14 +5,14 @@ const Io = std.Io;
 const posix = std.posix;
 const lookout = @import("../lookout.zig");
 const Batch = @import("../Batch.zig");
-const Volume = @import("fsevents_volume.zig");
-const checkpoint_format = @import("../Checkpoint/checkpoint_format.zig");
+const Volume = @import("fsevents/volume.zig");
+const checkpoint_format = @import("../Checkpoint/format.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
-const records = @import("fsevents_records.zig");
+const records = @import("fsevents/records.zig");
 const trace = @import("../trace.zig");
 const walk = @import("../walk.zig");
 const Waker = @import("../Waker.zig");
@@ -333,7 +333,7 @@ test "a rename whose halves arrive in two deliveries is one rename" {
 }
 
 test "the entry budget is one directory's, with every creation delivered" {
-    // The FSEvents half of the claim in src/gaps_test.zig ("the entry
+    // The FSEvents half of the claim in src/testing/gaps_test.zig ("the entry
     // budget is one directory's, not a whole recursive watch's"): twelve
     // directories of a hundred and fifty creations under a budget of 512
     // are twelve directories inside it. Made live, the burst is one
@@ -430,7 +430,7 @@ test "a poll that expires before the replay begins is not the end of it" {
     defer gpa.free(deleted);
 
     var vtable: Io.VTable = undefined;
-    const frozen = @import("../testing/test_clock.zig").frozen(&vtable, io);
+    const frozen = @import("../testing/clock.zig").frozen(&vtable, io);
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
     var watcher: lookout.Watcher = try .init(gpa, frozen, .{

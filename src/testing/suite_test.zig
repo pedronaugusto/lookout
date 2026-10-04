@@ -9,8 +9,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const lookout = @import("lookout.zig");
-const trace = @import("trace.zig");
+const lookout = @import("../lookout.zig");
+const trace = @import("../trace.zig");
 
 const Kind = lookout.Kind;
 const Watcher = lookout.Watcher;
@@ -2889,7 +2889,7 @@ test "a polling task is stopped by a flag and a wake on every backend" {
         };
         // Bound a task that never starts. Readiness, rather than a sleep,
         // puts stopping and wake after the task has entered its poll loop.
-        const deadline = @import("Deadline.zig").start(std.testing.io, timeout_ms);
+        const deadline = @import("../Deadline.zig").start(std.testing.io, timeout_ms);
         while (!task.entered.load(.acquire) and !deadline.expired()) {
             try std.testing.io.sleep(.fromMilliseconds(1), .awake);
         }
@@ -3196,7 +3196,7 @@ test "resuming retains a debounced change that poll has not handed out" {
         try tmp.dir.writeFile(io, .{ .sub_path = "held.txt", .data = "one" });
         // Read the backend without promoting: stage the pending delivery
         // deterministically, independent of a pause in the test thread.
-        const deadline = @import("Deadline.zig").start(io, timeout_ms);
+        const deadline = @import("../Deadline.zig").start(io, timeout_ms);
         while (watcher.batch.held.count() == 0 and !deadline.expired()) {
             try watcher.impl.fsevents.wait(&watcher.batch, 0);
             try io.sleep(.fromMilliseconds(1), .awake);
@@ -3256,7 +3256,7 @@ test "checkpoints keep settling and rename changes beside handed deliveries" {
             f.watcher.impl.fsevents.pairing.held = .{
                 .id = id,
                 .path = try gpa.dupe(u8, from),
-                .flags = @import("backend/fsevents_records.zig").flag.item_renamed,
+                .flags = @import("../backend/fsevents/records.zig").flag.item_renamed,
                 .event = stream.cursor,
             };
         }

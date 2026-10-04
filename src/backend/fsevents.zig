@@ -36,15 +36,15 @@ const posix = std.posix;
 
 const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
-const Volume = @import("fsevents_volume.zig");
-const CheckpointPaths = @import("../Checkpoint/CheckpointPaths.zig");
-const checkpoint_format = @import("../Checkpoint/checkpoint_format.zig");
+const Volume = @import("fsevents/volume.zig");
+const CheckpointPaths = @import("../Checkpoint/paths.zig");
+const checkpoint_format = @import("../Checkpoint/format.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
-const records = @import("fsevents_records.zig");
+const records = @import("fsevents/records.zig");
 const trace = @import("../trace.zig");
 const walk = @import("../walk.zig");
 const Waker = @import("../Waker.zig");
@@ -198,7 +198,7 @@ const Sink = struct {
     wake_w: posix.fd_t,
 
     /// Written here and read back in `drain`, both through
-    /// src/backend/fsevents_records.zig, which is where the layout is
+    /// src/backend/fsevents/records.zig, which is where the layout is
     /// written down and where it is fuzzed.
     fn append(s: *Sink, id: WatchId, flags: u32, event: u64, subject: []const u8) void {
         if (s.len + records.encodedLen(subject) > s.buffer.len) {
@@ -1061,7 +1061,7 @@ fn reportTaken(f: *FsEvents, batch: *Batch, delivered: []const Record, taken: re
     try f.recount(batch, partner.path, .unchanged, stream);
 }
 
-/// What the matching in src/backend/fsevents_records.zig asks the
+/// What the matching in src/backend/fsevents/records.zig asks the
 /// watcher about a path: whether it is inside that watch's scope, and
 /// whether the file system has it now.
 ///

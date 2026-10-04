@@ -8,7 +8,7 @@
 //!
 //! It lives in a file of its own, compiled on every target rather than
 //! only on Linux, because a walk over bytes somebody else wrote is a
-//! parser. It is fuzzed in src/fuzz_test.zig, and a decoder that exists
+//! parser. It is fuzzed in src/testing/fuzz_test.zig, and a decoder that exists
 //! only on Linux can only be fuzzed there.
 
 const std = @import("std");

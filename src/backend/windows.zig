@@ -21,7 +21,7 @@
 //!
 //! This file has never been executed on the machine it was written on;
 //! see README.md. It compiles for `x86_64-windows-gnu` and
-//! `x86_64-windows-msvc`, and the shared suite in src/suite_test.zig is
+//! `x86_64-windows-msvc`, and the shared suite in src/testing/suite_test.zig is
 //! what runs it on a Windows host.
 
 const std = @import("std");
@@ -36,7 +36,7 @@ const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
-const records = @import("windows_records.zig");
+const records = @import("windows/records.zig");
 const Waker = @import("../Waker.zig");
 const trace = @import("../trace.zig");
 const Target = lookout.Target;

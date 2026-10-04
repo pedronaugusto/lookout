@@ -23,7 +23,7 @@ const Io = std.Io;
 const lookout = @import("types.zig");
 const Filter = @import("Filter.zig");
 const Snapshot = @import("Snapshot.zig");
-const format = @import("Baseline/baseline_format.zig");
+const format = @import("Baseline/format.zig");
 const Kind = lookout.Kind;
 const Target = lookout.Target;
 

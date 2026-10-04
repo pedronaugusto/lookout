@@ -2,7 +2,7 @@
 //! Poll timeouts bound a missing event; allocation budgets count bytes.
 
 const std = @import("std");
-const lookout = @import("lookout.zig");
+const lookout = @import("../lookout.zig");
 const Watcher = lookout.Watcher;
 
 /// Every backend this target was built with.

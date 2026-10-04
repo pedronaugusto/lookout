@@ -8,7 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const lookout = @import("lookout.zig");
+const lookout = @import("../lookout.zig");
 const Kind = lookout.Kind;
 const Watcher = lookout.Watcher;
 
@@ -719,7 +719,7 @@ const Held = struct {
     const budget_ms = 60_000;
 
     fn await(watcher: *Watcher, burst: usize, until: Until) !Held {
-        const records = @import("backend/fsevents_records.zig");
+        const records = @import("../backend/fsevents/records.zig");
         const gpa = std.testing.allocator;
         const io = std.testing.io;
         var seen = try std.DynamicBitSetUnmanaged.initEmpty(gpa, burst);

@@ -10,13 +10,13 @@
 //!
 //! It lives in a file of its own, compiled on every target rather than
 //! only on Apple ones, because a walk over bytes and a matching over
-//! records are both parsers. They are fuzzed in src/fuzz_test.zig, and
+//! records are both parsers. They are fuzzed in src/testing/fuzz_test.zig, and
 //! a decoder that exists only on macOS can only be fuzzed there.
 
 const std = @import("std");
 
-const lookout = @import("../types.zig");
-const path_cmp = @import("../path.zig");
+const lookout = @import("../../types.zig");
+const path_cmp = @import("../../path.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 

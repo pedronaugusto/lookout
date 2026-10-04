@@ -7,9 +7,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const lookout = @import("../lookout.zig");
-const Deadline = @import("../Deadline.zig");
-const path_cmp = @import("../path.zig");
+const lookout = @import("lookout.zig");
+const Deadline = @import("Deadline.zig");
+const path_cmp = @import("path.zig");
 
 const Kind = lookout.Kind;
 const Watcher = lookout.Watcher;

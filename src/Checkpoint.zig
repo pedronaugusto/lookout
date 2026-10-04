@@ -5,7 +5,7 @@ const std = @import("std");
 const lookout = @import("types.zig");
 const Checkpoint = @This();
 const Allocator = std.mem.Allocator;
-const format = @import("Checkpoint/checkpoint_format.zig");
+const format = @import("Checkpoint/format.zig");
 
 state: format.Owned,
 

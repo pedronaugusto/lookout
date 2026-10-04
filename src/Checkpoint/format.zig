@@ -17,7 +17,7 @@ pub const Watch = struct {
     identity: Identity,
     recursive: bool,
     /// The path baseline at this cursor, persisted with the checkpoint.
-    baseline: @import("CheckpointPaths.zig").Paths,
+    baseline: @import("paths.zig").Paths,
     changes: []const Change = &.{},
     half: ?Half = null,
 };
