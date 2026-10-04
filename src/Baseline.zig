@@ -170,7 +170,7 @@ pub fn save(b: *const Baseline, gpa: Allocator, filename: []const u8) SaveError!
         for (remembered.snapshot.entries.keys(), remembered.snapshot.entries.values(), entries) |name, meta, *entry| entry.* = .{ .name = name, .meta = meta };
         dir.* = .{ .path = path, .truncated = remembered.snapshot.truncated, .check_contents = remembered.snapshot.check_contents, .entries = entries };
     }
-    const bytes = try format.encode(a, .{ .root = b.root, .recursive = b.recursive, .max_dir_entries = b.max_dir_entries, .ignore = b.filter.ignore, .only = b.filter.only, .dirs = dirs });
+    const bytes = try format.encode(a, .{ .platform = format.platform, .root = b.root, .recursive = b.recursive, .max_dir_entries = b.max_dir_entries, .ignore = b.filter.ignore, .only = b.filter.only, .dirs = dirs });
     var file = try Io.Dir.cwd().createFileAtomic(b.io, filename, .{ .replace = true });
     defer file.deinit(b.io);
     try file.file.writePositionalAll(b.io, bytes, 0);
@@ -855,7 +855,7 @@ test "a saved baseline reports changes since last run and replaces its file" {
 test "baseline storage refuses corrupt foreign and old files by name" {
     const gpa = testing.allocator;
     const root = if (@import("builtin").os.tag == .windows) "C:\\tree" else "/tree";
-    const state: format.State = .{ .root = root, .recursive = false, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{} };
+    const state: format.State = .{ .platform = format.platform, .root = root, .recursive = false, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{} };
     const bytes = try format.encode(gpa, state);
     defer gpa.free(bytes);
     bytes[bytes.len - 1] ^= 1;
@@ -914,7 +914,7 @@ test "baseline storage validates checksummed paths before trusting them" {
     const bad = try std.fs.path.join(gpa, &.{ root, "..", "outside" });
     defer gpa.free(bad);
     const directory: format.Directory = .{ .path = bad, .truncated = false, .check_contents = false, .entries = &.{} };
-    const state: format.State = .{ .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{directory} };
+    const state: format.State = .{ .platform = format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{directory} };
     const bytes = try format.encode(gpa, state);
     defer gpa.free(bytes);
     try testing.expectError(error.InvalidBaseline, format.parse(gpa, bytes));

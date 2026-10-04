@@ -5,7 +5,7 @@ const Snapshot = @import("Snapshot.zig");
 const path = @import("path.zig");
 
 pub const State = struct {
-    platform: []const u8 = @tagName(builtin.os.tag),
+    platform: []const u8,
     root: []const u8,
     recursive: bool,
     max_dir_entries: usize,
@@ -23,6 +23,7 @@ pub const Entry = struct { name: []const u8, meta: Snapshot.Meta };
 pub const ParseError = std.mem.Allocator.Error || error{ InvalidBaseline, UnsupportedBaselineVersion, ForeignBaseline };
 const magic = "LOOKBASE";
 const header_size = 44;
+pub const platform = @tagName(builtin.os.tag);
 pub const file_limit = 256 * 1024 * 1024;
 
 pub fn encode(gpa: std.mem.Allocator, state: State) std.mem.Allocator.Error![]u8 {
@@ -49,7 +50,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!std.json.Pars
     errdefer parsed.deinit();
     const state = parsed.value;
     if (!std.mem.eql(u8, state.platform, @tagName(builtin.os.tag))) return error.ForeignBaseline;
-    if (!std.fs.path.isAbsolute(state.root) or std.mem.indexOfScalar(u8, state.root, 0) != null) return error.InvalidBaseline;
+    if (!std.fs.path.isAbsolute(state.root) or !safePath(state.root)) return error.InvalidBaseline;
     var dirs: std.StringHashMapUnmanaged(void) = .empty;
     defer dirs.deinit(gpa);
     for (state.dirs) |dir| {
