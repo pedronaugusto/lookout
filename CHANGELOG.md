@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Share the Zig CI gate through preflight, with requested fast runs and full merge checks.
+
 - `AddOptions.follow_symlinks` makes a recursive watch follow links to directories and report changes below a link under the link's path. A link into a directory the watch already reaches is refused by device and inode, or volume and file id; `max_followed_links` bounds each watch and a link past it is reported `unwatched`. Off by default.
 
 - FSEvents reports a known path whose removal arrives after the name is taken again as `removed`; a symbolic link replaced in two steps was not reported at all.

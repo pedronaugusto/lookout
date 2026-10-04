@@ -1,133 +1,27 @@
 name: CI
-
 on:
   push:
-    branches: [main, layers]
-  pull_request:
+    branches: [main]
   workflow_dispatch:
-
+    inputs:
+      full:
+        description: Run the full merge gate
+        type: boolean
+        default: false
+  pull_request:
+  merge_group:
+  schedule:
+    - cron: '17 4 * * 1'
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 permissions:
   contents: read
-
-env:
-  ZIG_VERSION: 0.16.0
-
+  actions: read
 jobs:
-  # Debug catches safety faults; ReleaseSafe checks optimized code and timing on each host.
-  # Every host still runs all its backends, with safety checks in both modes.
-  # The full test target already builds and runs the examples.
-  test:
-    name: test (${{ matrix.os }}, ${{ matrix.optimize }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        optimize: [Debug, ReleaseSafe]
-        include:
-          # One unchecked run catches optimizer-dependent behaviour; the other hosts have ReleaseSafe.
-          - os: ubuntu-latest
-            optimize: ReleaseFast
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - name: Test — ${{ matrix.optimize }}
-        run: zig build test -Doptimize=${{ matrix.optimize }}
-
-  # ReleaseSmall must build; its unchecked tests add no distinct assertion to ReleaseFast.
-  small:
-    name: compile (ReleaseSmall)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - run: zig build -Doptimize=ReleaseSmall
-
-  # The watcher receives changes on another thread; ThreadSanitizer checks the handoff.
-  # Linux has a working runtime here; Debug is the detector's most complete instrumentation.
-  sanitizer:
-    name: ThreadSanitizer (Linux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - run: zig build test -Dthread-sanitizer -Doptimize=Debug --test-timeout 120s
-
-  # Formatting and source-policy checks read the same files on every host; once is enough.
-  source:
-    name: source checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - name: Formatting
-        run: zig fmt --check build.zig build.zig.zon src examples ci
-      - name: Casts out of the type system carry their reason
-        run: python3 ci/casts.py
-      - name: Source import boundaries
-        run: zig build check-imports
-      - name: Import gate regression checks
-        run: python3 ci/test_imports.py
-
-  # Compile-only coverage of the targets the suite cannot execute on --
-  # and of the ones it can, under the other libc. The default step
-  # compiles the test binary as well as the archive, so these really do
-  # analyse the backend sources rather than an empty library.
-  #
-  # The Windows targets are the gate that matters most here, because the
-  # Windows backend is the one this package was written without ever
-  # running: it must compile under both ABIs before the Windows runner
-  # above can run it.
-  #
-  # The Apple targets are absent deliberately. FSEvents needs the macOS
-  # SDK, which a Linux runner does not have and which Zig only finds for
-  # a native build, so what proves those targets is the macOS leg of the
-  # `test` job, which builds and runs them natively.
-  cross-compile:
-    name: cross (${{ matrix.target }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-linux-gnu
-          - aarch64-linux-gnu
-          - x86_64-linux-musl
-          - x86_64-windows-gnu
-          - x86_64-windows-msvc
-          - aarch64-windows-gnu
-          - x86_64-freebsd
-          - x86_64-netbsd
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - run: zig build -Dtarget=${{ matrix.target }}
-
-  # The Usage block in README.md is a region of examples/usage.zig, which
-  # the job above builds and runs. This is what keeps the two identical.
-  docs:
-    name: documented snippets
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - run: ci/check-docs.sh
+  gate:
+    uses: pedronaugusto/preflight/.github/workflows/zig.yml@9cdff538384c14e7f268cbb4942c5075caf0ed42
+    with:
+      preflight-ref: 9cdff538384c14e7f268cbb4942c5075caf0ed42
+      full: ${{ github.event_name != 'workflow_dispatch' || inputs.full }}
+      attest: ${{ github.event_name == 'push' }}

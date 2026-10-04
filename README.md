@@ -16,7 +16,7 @@ settings.
 [examples/usage.zig](examples/usage.zig) watches an absolute `dir_path` and writes
 through an open scratch directory with the supplied `std.Io`.
 
-<!-- BEGIN GENERATED ci/readme_usage.sh -->
+<!-- BEGIN GENERATED zig build docs -- usage -->
 ```zig
 const lookout = @import("lookout");
 
@@ -143,12 +143,12 @@ coverage but cannot produce a checkpoint. Other backends return null.
 
 ## Testing
 
-Local build scripts clear `.zig-cache/{o,h,z,tmp}` above the measured cap in `ci/cache.sh`; run `sh ci/cache.sh` before direct Zig builds (only a rebuild is lost).
+Local build scripts clear `.zig-cache/{o,h,z,tmp}` above the measured cap through preflight; run `zig build cache` before direct Zig builds (only a rebuild is lost).
 
 `zig build test` runs the suite and examples in Debug by default, exercising the
 backends available on the host. Tests cover filters, pending paths, renames, overflow,
 cancellation, settling, checkpoints and resource cleanup. `zig build examples` runs the
-examples separately. CI also runs `ci/check-docs.sh`.
+examples separately. CI also runs `zig build lint`.
 
 [CI](.github/workflows/ci.yml) runs tests and examples in Debug and ReleaseSafe on
 `ubuntu-latest`, `macos-latest` and `windows-latest`, plus ReleaseFast on Ubuntu.

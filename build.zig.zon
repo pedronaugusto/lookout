@@ -15,6 +15,11 @@
         "README.md",
     },
     .dependencies = .{
+        .preflight = .{
+            .url = "https://codeload.github.com/pedronaugusto/preflight/tar.gz/9cdff538384c14e7f268cbb4942c5075caf0ed42",
+            .hash = "preflight-0.1.0-LX1Zwla7AQAYN_Odjiy2TNK_2XgEz-7JsyFg85Ggw2at",
+            .lazy = true,
+        },
         .gantry = .{
             .url = "git+https://github.com/pedronaugusto/gantry#b5b991bcc590a8f7032444287465269acda4fdaa",
             .hash = "gantry-0.1.0-1iNrkcw4BwBD3pRucqF5FkGsGSOPIhkPh0rLr1u4EMDW",

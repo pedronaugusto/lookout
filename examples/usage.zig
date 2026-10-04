@@ -1,6 +1,6 @@
 //! Watch a directory, change it, and print what the watcher reports.
 //!
-//! `zig build examples` builds AND runs this; `ci/readme_usage.sh`
+//! `zig build examples` builds AND runs this; `zig build docs -- usage`
 //! extracts the region between the usage markers into README.md, so the
 //! snippet a reader copies is code CI executes.
 

@@ -1,0 +1,20 @@
+{
+  "package": "lookout",
+  "compile_step": "install",
+  "targets": [
+    "x86_64-linux-gnu",
+    "aarch64-linux-gnu",
+    "x86_64-linux-musl",
+    "x86_64-windows-gnu",
+    "x86_64-windows-msvc",
+    "aarch64-windows-gnu",
+    "x86_64-freebsd",
+    "x86_64-netbsd"
+  ],
+  "compile_once": true,
+  "portable_hosts": [
+    "windows-latest"
+  ],
+  "test_timeout": "",
+  "sanitizer": "test"
+}
