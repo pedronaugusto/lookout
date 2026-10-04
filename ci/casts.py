@@ -11,7 +11,8 @@ where a reviewer reads the cast and the argument together; one without is a
 failure here.
 
 Code inside a `test` block, and a file that is all tests (`*_test.zig`,
-`test_*.zig`, `tests.zig`), may cast freely.
+`test_*.zig`, `tests.zig`, anything under `src/testing/`), may cast
+freely.
 
 Usage: ci/casts.py [PATH...]     # default: every .zig file tracked by git
 """
@@ -25,7 +26,7 @@ CAST = re.compile(r"@(constCast|ptrCast|alignCast|intFromPtr)\s*\(")
 SAFE = re.compile(r"//\s*safe:\s*\S")
 STRING = re.compile(r'"(?:\\.|[^"\\\n])*"')
 CHAR = re.compile(r"'(?:\\.|[^'\\\n])+'")
-TEST_FILE = re.compile(r"(^|/)(\w+_test|test_\w+|tests)\.zig$")
+TEST_FILE = re.compile(r"(^src/testing/.*\.zig$)|(^|/)(\w+_test|test_\w+|tests)\.zig$")
 
 
 def code_of(line):
