@@ -7,9 +7,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const lookout = @import("lookout.zig");
-const Deadline = @import("Deadline.zig");
-const path_cmp = @import("path.zig");
+const lookout = @import("../lookout.zig");
+const Deadline = @import("../Deadline.zig");
+const path_cmp = @import("../path.zig");
 
 const Kind = lookout.Kind;
 const Watcher = lookout.Watcher;
@@ -85,24 +85,17 @@ const Fixture = struct {
         try f.tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = "x" });
     }
 
-    /// Makes `link` lead to the directory `target`. A Windows runner may
-    /// not hold the privilege a symbolic link needs; a junction needs none
-    /// and is a link to lookout all the same.
+    /// Makes `link` lead to the directory `target`. On Windows it is a
+    /// junction, which needs no privilege where a symbolic link does, and
+    /// is a link to lookout all the same.
     fn link(f: *Fixture, target: []const u8, at: []const u8) !void {
         const absolute = if (std.mem.eql(u8, target, ".")) try gpa.dupe(u8, f.root) else try f.path(target);
         defer gpa.free(absolute);
-        f.tmp.dir.symLink(io, absolute, at, .{ .is_directory = true }) catch |err| {
-            if (builtin.os.tag != .windows) return err;
-            const spelled = try f.path(at);
-            defer gpa.free(spelled);
-            const result = std.process.run(gpa, io, .{ .argv = &.{ "cmd.exe", "/c", "mklink", "/J", spelled, absolute } }) catch
-                return error.SkipZigTest;
-            defer {
-                gpa.free(result.stdout);
-                gpa.free(result.stderr);
-            }
-            if (result.term != .exited or result.term.exited != 0) return error.SkipZigTest;
-        };
+        if (builtin.os.tag != .windows) return f.tmp.dir.symLink(io, absolute, at, .{ .is_directory = true });
+        try f.tmp.dir.createDir(io, at, .default_dir);
+        const spelled = try f.path(at);
+        defer gpa.free(spelled);
+        try junction(spelled, absolute);
     }
 
     fn unlink(f: *Fixture, at: []const u8) !void {
@@ -130,6 +123,21 @@ const Fixture = struct {
             }
         }
         std.debug.print("{s}: no {s} event for {s}\n", .{ @tagName(f.watcher.backend()), if (kind) |k| @tagName(k) else "", want });
+        return error.EventNotObserved;
+    }
+
+    /// Polls until the watcher holds `wanted` registrations, or more than
+    /// `wanted` when `above` is set. A link's change can arrive as two
+    /// events in two polls, and what is written below it is only seen
+    /// once it is followed again.
+    fn await(f: *Fixture, wanted: usize, above: bool) !void {
+        const deadline = Deadline.start(io, timeout_ms);
+        while (!deadline.expired()) {
+            const held = f.watcher.stats().registrations;
+            if (if (above) held > wanted else held == wanted) return;
+            _ = try f.watcher.poll(100);
+        }
+        std.debug.print("{s}: {d} registrations, wanted {s}{d}\n", .{ @tagName(f.watcher.backend()), f.watcher.stats().registrations, if (above) "more than " else "", wanted });
         return error.EventNotObserved;
     }
 
@@ -162,6 +170,72 @@ const Fixture = struct {
         return plain.stats().registrations;
     }
 };
+
+/// Turns the empty directory `at` into a junction leading to `target`,
+/// both absolute: an `IO_REPARSE_TAG_MOUNT_POINT` reparse point set with
+/// `FSCTL_SET_REPARSE_POINT`, which is what `mklink /J` does.
+fn junction(at: []const u8, target: []const u8) !void {
+    const w = std.os.windows;
+    const nt_at = try std.unicode.wtf8ToWtf16LeAlloc(gpa, at);
+    defer gpa.free(nt_at);
+    const prefixed_at = try std.mem.concat(gpa, u16, &.{ std.unicode.wtf8ToWtf16LeStringLiteral("\\??\\"), nt_at });
+    defer gpa.free(prefixed_at);
+    var handle: w.HANDLE = undefined;
+    var iosb: w.IO_STATUS_BLOCK = undefined;
+    var object_name = w.UNICODE_STRING.init(prefixed_at);
+    const attributes: w.OBJECT.ATTRIBUTES = .{ .RootDirectory = null, .ObjectName = &object_name };
+    switch (w.ntdll.NtCreateFile(
+        &handle,
+        .{ .GENERIC = .{ .READ = true, .WRITE = true }, .STANDARD = .{ .SYNCHRONIZE = true } },
+        &attributes,
+        &iosb,
+        null,
+        .{ .NORMAL = true },
+        .VALID_FLAGS,
+        .OPEN,
+        .{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true },
+        null,
+        0,
+    )) {
+        .SUCCESS => {},
+        else => return error.Unexpected,
+    }
+    defer _ = w.ntdll.NtClose(handle);
+
+    // REPARSE_DATA_BUFFER with its MountPointReparseBuffer: the tag, the
+    // length of what follows the eight-byte header, four offsets and
+    // lengths in bytes, then the NT name and the printed name, each
+    // terminated. The lengths leave the terminators out.
+    const print = try std.unicode.wtf8ToWtf16LeAlloc(gpa, target);
+    defer gpa.free(print);
+    const substitute = try std.mem.concat(gpa, u16, &.{ std.unicode.wtf8ToWtf16LeStringLiteral("\\??\\"), print });
+    defer gpa.free(substitute);
+    const names = (substitute.len + 1 + print.len + 1) * 2;
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(gpa);
+    const little = std.builtin.Endian.little;
+    try appendInt(&data, u32, 0xA000_0003, little);
+    try appendInt(&data, u16, @intCast(8 + names), little);
+    try appendInt(&data, u16, 0, little);
+    try appendInt(&data, u16, 0, little);
+    try appendInt(&data, u16, @intCast(substitute.len * 2), little);
+    try appendInt(&data, u16, @intCast((substitute.len + 1) * 2), little);
+    try appendInt(&data, u16, @intCast(print.len * 2), little);
+    for ([_][]const u16{ substitute, print }) |name| {
+        for (name) |unit| try appendInt(&data, u16, unit, little);
+        try appendInt(&data, u16, 0, little);
+    }
+    switch (w.ntdll.NtFsControlFile(handle, null, null, null, &iosb, .SET_REPARSE_POINT, data.items.ptr, @intCast(data.items.len), null, 0)) {
+        .SUCCESS => {},
+        else => return error.Unexpected,
+    }
+}
+
+fn appendInt(data: *std.ArrayList(u8), comptime T: type, value: T, endian: std.builtin.Endian) !void {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &bytes, value, endian);
+    try data.appendSlice(gpa, &bytes);
+}
 
 test "a followed link reports what happens below it under its own path" {
     for (backends) |backend| {
@@ -207,6 +281,7 @@ test "a link to a directory another link reached first takes over when that one 
         defer f.deinit();
         try f.tmp.dir.createDirPath(io, "outside/target");
         try f.link("outside/target", "watched/first");
+        const plain = try f.plainRegistrations(backend, .none);
         _ = try f.watch(.{});
         try f.link("outside/target", "watched/second");
         try f.expect("watched/second", null, &.{});
@@ -216,6 +291,7 @@ test "a link to a directory another link reached first takes over when that one 
 
         try f.unlink("watched/first");
         try f.expect("watched/first", .removed, &.{});
+        try f.await(plain, true);
         try f.write("outside/target/two.txt");
         try f.expect("watched/second/two.txt", .created, &.{"watched/first/two.txt"});
     }
@@ -227,8 +303,10 @@ test "a link made after the watch is followed" {
         defer f.deinit();
         try f.tmp.dir.createDirPath(io, "outside/target/old");
         _ = try f.watch(.{});
+        const plain = f.watcher.stats().registrations;
         try f.link("outside/target", "watched/link");
         try f.expect("watched/link", null, &.{});
+        try f.await(plain, true);
 
         try f.write("outside/target/new.txt");
         try f.expect("watched/link/new.txt", .created, &.{"outside"});
@@ -252,7 +330,7 @@ test "a link changed to lead elsewhere is reported on its path and follows the n
         try f.unlink("watched/link");
         try f.link("outside/second", "watched/link");
         try f.expect("watched/link", null, &.{});
-        try testing.expectEqual(followed, f.watcher.stats().registrations);
+        try f.await(followed, false);
 
         try f.write("outside/one/old.txt");
         try f.write("outside/second/new.txt");
@@ -270,11 +348,13 @@ test "a link that leads nowhere is an entry until it is changed to lead somewher
         try f.tmp.dir.createDirPath(io, "outside/target");
         try f.link("outside/missing", "watched/link");
         _ = try f.watch(.{});
-        try testing.expectEqual(try f.plainRegistrations(backend, .none), f.watcher.stats().registrations);
+        const plain = try f.plainRegistrations(backend, .none);
+        try testing.expectEqual(plain, f.watcher.stats().registrations);
 
         try f.unlink("watched/link");
         try f.link("outside/target", "watched/link");
         try f.expect("watched/link", null, &.{});
+        try f.await(plain, true);
         try f.write("outside/target/now.txt");
         try f.expect("watched/link/now.txt", .created, &.{"outside"});
     }

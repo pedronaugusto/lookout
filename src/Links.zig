@@ -428,11 +428,9 @@ fn noted(l: *Links, host: anytype, batch: *Batch, item: Batch.Note) Allocator.Er
             if (try l.follow(host, batch, item.path)) |link| try l.followBelow(host, batch, link.path);
             return false;
         },
-        .removed => {
-            l.wake(item.path, true);
-            return l.recheck(host, batch, item.path, true);
-        },
-        .created, .renamed => {
+        // A name that went may be back already: FSEvents can report a
+        // link replaced in one breath as removed while the new one stands.
+        .removed, .created, .renamed => {
             l.wake(item.path, true);
             const went = try l.recheck(host, batch, item.path, true);
             const named = Io.Dir.cwd().statFile(l.io, item.path, .{ .follow_symlinks = false }) catch return went;
