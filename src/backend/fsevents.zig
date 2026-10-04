@@ -569,7 +569,7 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     errdefer volume.deinit(f.gpa);
     const resumed = if (force_live) null else f.resumeIndex(requested);
     if (resumed) |index| {
-        if (f.restarting.?.state.value.watches[index].recursive != options.recursive) return error.InvalidCheckpoint;
+        if (path_cmp.eql(abs_path, requested) and f.restarting.?.state.value.watches[index].recursive != options.recursive) return error.InvalidCheckpoint;
         const identity = volume.identity orelse return error.InvalidCheckpoint;
         if (!Volume.matches(identity, f.restarting.?.state.value.watches[index].identity)) return error.InvalidCheckpoint;
     }

@@ -29,7 +29,6 @@ const bounds: buffer.Bounds = .{
 };
 const grace_ms = 25;
 const grace_rounds = 4;
-const replay_tail_ms = 1_000;
 
 const lost_track: u32 = flag.must_scan_sub_dirs | flag.user_dropped | flag.kernel_dropped;
 pub const Held = struct {
@@ -400,26 +399,9 @@ test "the entry budget is one directory's, with every creation delivered" {
 }
 
 test "a poll that expires before the replay begins is not the end of it" {
-    // A resumed watcher reports a deletion made while nothing watched:
-    // a path gone that it has never heard of, while it is catching up.
-    // The catching up once ended at the first wait that reported
-    // nothing, and two such waits come before the replay is over: one
-    // spent before the stream has said anything at all, here `poll(0)`,
-    // and the one the `HistoryDone` sentinel lands in, a delivery that
-    // reports no event. A change the system had not written to its log
-    // when the stream started is delivered after the sentinel, live, and
-    // a deletion there was dropped as a path that came and went between
-    // two polls.
-    //
-    // Made live, this waited for fseventsd to deliver that deletion, and
-    // beside four loops creating and removing files it did not: not in
-    // the replay, not live within two minutes, and not in a fresh replay
-    // from the same checkpoint fifteen seconds later, in 17 of 20 runs.
-    // So the order is made here: the deletion is real, the checkpoint is
-    // real, and the replay -- a quiet boundary, the sentinel alone, the
-    // deletion after it -- is delivered through the callback the system
-    // calls, with the stream stopped first. The clock is frozen, so how
-    // long the machine takes between two deliveries is not the question.
+    // The persisted path baseline reports the real deletion before the
+    // system has delivered anything. Neither a quiet poll nor HistoryDone
+    // changes that answer, and the late replay cannot report it twice.
     const testing = std.testing;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -479,26 +461,10 @@ test "a poll that expires before the replay begins is not the end of it" {
 }
 
 test "a deletion numbered after the checkpoint marker is reported exactly once however late" {
-    // A resumed watcher reports a deletion made while nothing watched:
-    // a path gone that it has never heard of, while it is catching up.
-    // The catching up once ended at the first wait that reported
-    // nothing, and two such waits come before the replay is over: one
-    // spent before the stream has said anything at all, here `poll(0)`,
-    // and the one the `HistoryDone` sentinel lands in, a delivery that
-    // reports no event. A change the system had not written to its log
-    // when the stream started is delivered after the sentinel, live, and
-    // a deletion there was dropped as a path that came and went between
-    // two polls.
-    //
-    // Made live, this waited for fseventsd to deliver that deletion, and
-    // beside four loops creating and removing files it did not: not in
-    // the replay, not live within two minutes, and not in a fresh replay
-    // from the same checkpoint fifteen seconds later, in 17 of 20 runs.
-    // So the order is made here: the deletion is real, the checkpoint is
-    // real, and the replay -- a quiet boundary, the sentinel alone, the
-    // deletion after it -- is delivered through the callback the system
-    // calls, with the stream stopped first. The clock is frozen, so how
-    // long the machine takes between two deliveries is not the question.
+    // Reuse the real checkpoint/deletion and stopped callback fixture from
+    // the rejected marker-barrier experiment. The clock advances fifteen
+    // seconds and the deletion is numbered after the checkpoint and sentinel.
+    // Only the persisted baseline can establish that this path was known.
     const testing = std.testing;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -869,4 +835,30 @@ test "a failed FSEvents held rename replacement keeps its path" {
 
 test "a failed FSEvents held rename rejoin keeps its path" {
     try expectHeldRenameFailure(.rejoin);
+}
+
+test "a recursive pending checkpoint resumes on its nonrecursive ancestor" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const absent = try std.fs.path.join(gpa, &.{ root, "pending" });
+    defer gpa.free(absent);
+    var first = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents });
+    defer first.deinit();
+    _ = try first.add(absent, .{ .pending = true, .recursive = true });
+    var checkpoint = (try first.checkpoint(gpa)).?;
+    defer checkpoint.deinit();
+    var resumed = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint });
+    defer resumed.deinit();
+    const id = try resumed.add(absent, .{ .pending = true, .recursive = true });
+    try testing.expectEqual(@as(usize, 1), resumed.pending.items.len);
+    try tmp.dir.createDirPath(io, "pending/sub");
+    _ = try resumed.poll(0);
+    try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
+    try testing.expectEqual(id, resumed.table.keys()[0]);
+    try testing.expect(resumed.table.values()[0].recursive);
 }
