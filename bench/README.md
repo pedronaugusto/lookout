@@ -31,11 +31,25 @@ window of a 100 ms poll watcher on that tree), `checkpoint` (checkpoint and toke
 parse, and the time a resume takes to report 100 files removed while nothing
 watched; `Position` on the before pin; removals it missed are a visible count, as
 burst losses are, because lookout drops one fseventsd delivers more than a second
-after the replay's sentinel), `filter` (`Filter.excludes` over the tree's 50,100
+after the replay's sentinel on the before pin; a checkpoint with a persisted path baseline must miss none), `filter` (`Filter.excludes` over the tree's 50,100
 paths), `path` (`path.relative` and `path.within` over those paths and as many in
 a sibling) and `baseline` (`Baseline.seed`, a diff with nothing changed and a diff
 after one file in a hundred is changed, removed and created beside, over 1,000,
-10,000 and 50,000 files). Pure value queries (`supported`, `pairsRenames`,
+10,000 and 50,000 files). `persisted_baseline` adds save, load and load-plus-diff after a restart at the
+same three baseline sizes, checking every creation, modification and removal
+count and an empty second diff. Pins without persistence emit `available = 0`:
+there is no timing comparison for an absent API. Feature preparation uses
+`--before 7ddd913 --after features`; the release coordinator updates the pins.
+`filesystem` measures local non-recursive add on a small tree on both pins and
+validates the new per-watch filesystem and backend fact; the pure `capabilities`
+getter is not timed separately. Network and FUSE selection is exercised with a
+fake filesystem source in package tests; this host has no network/FUSE fixture
+mount. Neither notify nor fsnotify exposes mount detection, and watchdog
+snapshots have no persisted storage API. Checkpoint capture and parse retain more
+data on the new pin: every known path, which guarantees missing baseline paths
+are reported independent of the daemon's delivery. Those costs describe different
+guarantees and do not support a faster/slower claim about equal-sized tokens.
+Pure value queries (`supported`, `pairsRenames`,
 `reportsRootMove`, `reportsCloses`, `prunesIgnored`, `tracksCheckpoint`,
 `default_backend`, `folds_case`) and counters (`stats`, `watches`, `fd`, `backend`)
 are not timed. `Snapshot` is internal: the poll scan and the baseline diffs are
@@ -57,7 +71,7 @@ file has arrived or an overflow was reported, and waits up to thirty quiet secon
 while files are still missing: with two, FSEvents' lag after a large burst ended
 each side on a different subset (about 5% of 10,000), so the sides' last events
 were different events. Setup must succeed in smoke. Missing burst/rename observations remain visible rather than
-being silently treated as equivalent behavior. Parcel remains unavailable.
+being silently treated as equivalent behavior. Parcel snapshots remain unavailable: Node is not installed on this host.
 
 The later jobs compare each operation with the tool a reader would otherwise
 use, where one has it: notify 8.2.0's FSEvents, poll and kqueue watchers (kqueue
@@ -82,7 +96,7 @@ versions, execution order, samples and status. Results and owned scratch/cache
 files are ignored. Prepared scratch and compiler caches persist; tool caches remain
 under `bench/build/quiet-cache`. Smoke builds both snapshot and backend test artifacts; the full pass reuses them.
 
-Quiet-only planning estimate: **20–45 minutes** after successful smoke preparation. See [QUIET-PREP.md](QUIET-PREP.md) for invocation counts, sizes and assumptions. This is a planning estimate, not a measurement from this preparation. Have at
+Quiet-only planning estimate: **21–47 minutes** after successful smoke preparation. See [QUIET-PREP.md](QUIET-PREP.md) for invocation counts, sizes and assumptions. This is a planning estimate, not a measurement from this preparation. Have at
 least 4 GiB free for scratch and caches. `ZIG`, `GO`, `CARGO`, `PYTHON` and standard
 tool cache environment variables select installed tools/caches. The specialized
 `run.sh` remains; `quiet.sh` is the complete pass entry point.

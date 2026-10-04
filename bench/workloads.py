@@ -10,12 +10,14 @@ COMPARISONS = ['Rust notify 8.2.0', 'Rust notify-debouncer-full 0.6.0', 'Go fsno
                'Rust notify 8.2.0 kqueue and poll backends', 'Rust globset 0.4.20', 'Rust std Path',
                'Go doublestar v4.10.2', 'Go path/filepath', 'Python watchdog 6.0.0 DirectorySnapshot']
 
-UNAVAILABLE = ['Parcel (not implemented)',
+UNAVAILABLE = ['Parcel @parcel/watcher snapshot: Node is not installed on this host; no executable comparison',
                'checkpoint: notify and notify-debouncer-full (FSEvents streams start at now, no since or history API), '
                'fsnotify (kqueue has no history), watchdog (no history), watchman (since-clocks need its resident daemon; not installed)',
                'refilter: notify, fsnotify, watchdog (a watch has no filter to change)',
                'backend_setup fsevents and poll, poll_cpu: fsnotify (kqueue only on macOS, no polling backend)',
                'baseline: notify, fsnotify (no snapshot or diff API)',
+               'persisted_baseline: pins without save/load emit available=0 (no timing row); notify, fsnotify, watchdog: no persisted snapshot API',
+               'filesystem: notify, fsnotify and watchdog expose no per-watch filesystem type or automatic remote-mount selection; watchman is not installed',
                'filter, path, baseline: notify-debouncer-full (the same notify underneath)']
 
 WATCHDOG = 'watchdog==6.0.0'
@@ -111,6 +113,8 @@ def run(p, bins):
                ('notify-kqueue', [kqueue, 'backend_setup', inputs, setup_tree]),
                ('fsnotify', [fsnotify, 'backend_setup', inputs, setup_tree])],
             validate=no_events, warmup=False, repetitions=int(p.env.get('BENCH_RUNS', '3')))
+    p.group('filesystem', [(side, [exe, 'filesystem', inputs, inputs / 'baseline_trees/small']) for side, exe in zig.items()],
+            validate=agree('filesystem', {'valid_selection'}), warmup=False, repetitions=int(p.env.get('BENCH_RUNS', '3')))
     p.group('poll_cpu', [(side, [exe, 'poll_cpu', inputs, setup_tree]) for side, exe in zig.items()]
             + [('notify', [extra, 'poll_cpu', inputs, setup_tree])],
             validate=no_events, warmup=False, repetitions=int(p.env.get('BENCH_RUNS', '3')))
@@ -150,5 +154,7 @@ def run(p, bins):
                 + [('watchdog', [watchdog, HERE / 'src/watchdog_bench.py', 'baseline', inputs, trees])],
                 prepare=clone, validate=agree('baseline', {'created', 'modified', 'removed'}), warmup=False,
                 repetitions=int(p.env.get('BENCH_RUNS', '3')))
+        p.group('persisted_baseline', [('after', [zig['after'], 'persisted_baseline', inputs, trees])],
+                prepare=clone, warmup=False, repetitions=int(p.env.get('BENCH_RUNS', '3')))
     finally:
         shutil.rmtree(trees, ignore_errors=True)

@@ -61,6 +61,12 @@ pub fn main(init: std.process.Init) !void {
         try pollCpu(gpa, io, out, inputs, root);
     } else if (std.mem.eql(u8, workload, "baseline")) {
         try baselineWork(gpa, io, out, inputs, root);
+    } else if (std.mem.eql(u8, workload, "persisted_baseline")) {
+        if (comptime @hasDecl(lookout.Baseline, "save")) {
+            try persistedBaseline(gpa, io, out, inputs, root);
+        } else try metric(out, "persisted_baseline", "available", 0, "bool");
+    } else if (std.mem.eql(u8, workload, "filesystem")) {
+        try filesystemWork(gpa, io, out, root);
     } else if (std.mem.eql(u8, workload, "checkpoint")) {
         try checkpointWork(gpa, io, out, inputs, root);
     } else if (std.mem.eql(u8, workload, "filter")) {
@@ -889,6 +895,11 @@ fn checkpointWork(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u
             last_us = since(started, io);
         }
     }
+    if (comptime has_checkpoint) {
+        if (comptime @hasField(@TypeOf(resumed.checkpoint.state.value.watches[0]), "baseline")) {
+            if (observed != count) return error.PersistedBaselineMissedRemovals;
+        }
+    }
     try metric(out, "checkpoint", "take_time", take_us, "us");
     try metric(out, "checkpoint", "parse_time", parse_us, "us");
     try metric(out, "checkpoint", "resume_add_time", add_us, "us");
@@ -1005,4 +1016,111 @@ var smoke_ticks = std.atomic.Value(i64).init(1);
 fn benchmarkNow(io: Io) Io.Timestamp {
     if (smoke) return .{ .nanoseconds = smoke_ticks.fetchAdd(1_000, .monotonic) };
     return now(io);
+}
+
+/// Save and load independently, then load + one diff after a restart.
+/// All snapshots are outside the fixture tree, with no fsync on either side.
+fn persistedBaseline(gpa: Allocator, io: Io, out: *std.Io.Writer, inputs: []const u8, root: []const u8) !void {
+    var cfg = try readConfig(gpa, io, inputs);
+    defer cfg.deinit();
+    for (cfg.value.baseline_sizes) |size| {
+        const path = try std.fs.path.join(gpa, &.{ root, size.name });
+        defer gpa.free(path);
+        const filename = try std.fs.path.join(gpa, &.{ root, "saved-baseline" });
+        defer gpa.free(filename);
+        defer Io.Dir.cwd().deleteFile(io, filename) catch {};
+        const opts: lookout.Baseline.Options = .{ .recursive = true, .max_dir_entries = 1_000_000 };
+        var b = try lookout.Baseline.seed(gpa, io, path, opts);
+        defer b.deinit(gpa);
+        const Save = struct {
+            gpa: Allocator,
+            io: Io,
+            b: *lookout.Baseline,
+            filename: []const u8,
+            fn once(c: *@This()) !i64 {
+                const start = benchmarkNow(c.io);
+                try c.b.save(c.gpa, c.filename);
+                return since(start, c.io);
+            }
+        };
+        var save: Save = .{ .gpa = gpa, .io = io, .b = &b, .filename = filename };
+        const save_us = try medianOf(gpa, &save);
+        const Load = struct {
+            gpa: Allocator,
+            io: Io,
+            filename: []const u8,
+            path: []const u8,
+            opts: lookout.Baseline.Options,
+            fn once(c: *@This()) !i64 {
+                const start = benchmarkNow(c.io);
+                var loaded = try lookout.Baseline.load(c.gpa, c.io, c.filename, c.path, c.opts);
+                const us = since(start, c.io);
+                loaded.deinit(c.gpa);
+                return us;
+            }
+        };
+        var load: Load = .{ .gpa = gpa, .io = io, .filename = filename, .path = path, .opts = opts };
+        const load_us = try medianOf(gpa, &load);
+        var dir = try openRoot(io, path);
+        defer dir.close(io);
+        const Restart = struct {
+            load: *Load,
+            dir: Io.Dir,
+            size: BaselineSize,
+            every: usize,
+            counts: ChangeCount = .{},
+            fn once(c: *@This()) !i64 {
+                const l = c.load;
+                try mutateTree(l.io, c.dir, c.size, c.every, false);
+                defer mutateTree(l.io, c.dir, c.size, c.every, true) catch {};
+                const start = benchmarkNow(l.io);
+                var loaded = try lookout.Baseline.load(l.gpa, l.io, l.filename, l.path, l.opts);
+                defer loaded.deinit(l.gpa);
+                const changes = try loaded.diff(l.gpa);
+                const us = since(start, l.io);
+                c.counts = .of(changes);
+                if ((try loaded.diff(l.gpa)).len != 0) return error.RestartReplayedChanges;
+                return us;
+            }
+        };
+        var restart: Restart = .{ .load = &load, .dir = dir, .size = size, .every = cfg.value.baseline_change_every };
+        const restart_us = try medianOf(gpa, &restart);
+        var name: [80]u8 = undefined;
+        const workload = try std.fmt.bufPrint(&name, "persisted_baseline_{s}", .{size.name});
+        const expected = (size.files + cfg.value.baseline_change_every - 1) / cfg.value.baseline_change_every;
+        if (restart.counts.created != expected or restart.counts.modified != expected or restart.counts.removed != expected or restart.counts.other != 0) return error.RestartCountsDiffered;
+        try metric(out, workload, "save_time", save_us, "us");
+        try metric(out, workload, "load_time", load_us, "us");
+        try metric(out, workload, "restart_diff_time", restart_us, "us");
+        try metric(out, workload, "created", restart.counts.created, "records");
+        try metric(out, workload, "modified", restart.counts.modified, "records");
+        try metric(out, workload, "removed", restart.counts.removed, "records");
+    }
+}
+
+/// Local filesystem selection is included in add, as on the earlier pin.
+/// The pure per-watch capability getter is validated, not timed separately.
+fn filesystemWork(gpa: Allocator, io: Io, out: *std.Io.Writer, root: []const u8) !void {
+    var watcher = try Watcher.init(gpa, io, .{ .backend = .auto });
+    defer watcher.deinit();
+    const Add = struct {
+        watcher: *Watcher,
+        io: Io,
+        root: []const u8,
+        fn once(c: *@This()) !i64 {
+            const start = benchmarkNow(c.io);
+            const id = try c.watcher.add(c.root, .{});
+            const us = since(start, c.io);
+            if (comptime @hasDecl(Watcher, "capabilities")) {
+                const caps = c.watcher.capabilities(id) orelse return error.CapabilityMissing;
+                if (caps.filesystem != .local or caps.backend != lookout.default_backend) return error.WrongLocalSelection;
+            }
+            c.watcher.remove(id);
+            return us;
+        }
+    };
+    var add: Add = .{ .watcher = &watcher, .io = io, .root = root };
+    const us = try medianOf(gpa, &add);
+    try metric(out, "filesystem", "local_add_time", us, "us");
+    try metric(out, "filesystem", "valid_selection", 1, "records");
 }
