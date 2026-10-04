@@ -4,18 +4,18 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
 const linux = std.os.linux;
-const lookout = @import("lookout.zig");
-const Batch = @import("Batch.zig");
-const Budget = @import("Budget.zig");
-const Deadline = @import("Deadline.zig");
-const Filter = @import("Filter.zig");
-const path_cmp = @import("path.zig");
-const records = @import("backend/inotify_records.zig");
-const walk = @import("walk.zig");
-const Waker = @import("Waker.zig");
+const lookout = @import("../lookout.zig");
+const Batch = @import("../Batch.zig");
+const Budget = @import("../Budget.zig");
+const Deadline = @import("../Deadline.zig");
+const Filter = @import("../Filter.zig");
+const path_cmp = @import("../path.zig");
+const records = @import("inotify_records.zig");
+const walk = @import("../walk.zig");
+const Waker = @import("../Waker.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
-const Inotify = @import("backend/inotify.zig");
+const Inotify = @import("inotify.zig");
 const Watch = struct {
     /// Absolute, canonical path, owned by the backend.
     root: []u8,
@@ -78,7 +78,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     // generated." The record is written here the way the kernel writes
     // it and read back through the decoder a real read goes through,
     // so that what is asserted is the whole path from the bytes to the
-    // batch. src/test_gaps.zig fills a real queue past the limit.
+    // batch. src/gaps_test.zig fills a real queue past the limit.
     const testing = std.testing;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -106,7 +106,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     // Straight into the batch the next poll returns, which is where a
     // read puts it.
     const n = &watcher.impl.inotify;
-    try @import("backend/inotify.zig").test_access.handleRead(n, bytes[0..len], &watcher.batch);
+    try @import("inotify.zig").test_access.handleRead(n, bytes[0..len], &watcher.batch);
 
     var dir_overflows: usize = 0;
     var file_overflows: usize = 0;
@@ -181,7 +181,7 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
 
     var bytes: [records.header_len]u8 = undefined;
     const len = records.encode(&bytes, .{ .wd = -1, .mask = linux.IN.Q_OVERFLOW, .cookie = 0, .name = null });
-    try @import("backend/inotify.zig").test_access.handleRead(n, bytes[0..len], &watcher.batch);
+    try @import("inotify.zig").test_access.handleRead(n, bytes[0..len], &watcher.batch);
     try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
     try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
     // Three entries: at the budget, as the folder is.

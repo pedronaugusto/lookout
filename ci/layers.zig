@@ -9,7 +9,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/backend/windows_records.zig",
         "src/buffer.zig",
         "src/path.zig",
-        "src/test_clock.zig",
+        "src/testing/**",
         "src/trace.zig",
         "src/walk.zig",
     } },
@@ -24,10 +24,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "records", .patterns = &.{
         "src/Snapshot.zig",
         "src/backend/fsevents_records.zig",
-        "src/checkpoint_format.zig",
-        "src/CheckpointPaths.zig",
+        "src/Checkpoint/**",
     } },
-    .{ .name = "baseline storage", .patterns = &.{"src/baseline_format.zig"} },
+    .{ .name = "baseline storage", .patterns = &.{"src/Baseline/**"} },
     .{ .name = "snapshots", .patterns = &.{
         "src/Baseline.zig",
         "src/Checkpoint.zig",
@@ -57,14 +56,14 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/lookout.zig",
     } },
     .{ .name = "scenarios", .patterns = &.{
-        "src/test_backend_fsevents.zig",
-        "src/test_backend_inotify.zig",
-        "src/test_backend_windows.zig",
-        "src/test_fuzz.zig",
-        "src/test_gaps.zig",
+        "src/backend/fsevents_test.zig",
+        "src/backend/inotify_test.zig",
+        "src/backend/windows_test.zig",
+        "src/fuzz_test.zig",
+        "src/gaps_test.zig",
+        "src/resources_test.zig",
+        "src/suite_test.zig",
         "src/testing/links.zig",
-        "src/test_resources.zig",
-        "src/test_suite.zig",
     } },
     .{ .name = "tests", .patterns = &.{
         "src/tests.zig",
@@ -82,16 +81,46 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
 };
 
-pub const required = blk: {
-    var count: usize = 0;
-    for (layers) |layer| count += layer.patterns.len;
-    var paths: [count][]const u8 = undefined;
-    var i: usize = 0;
-    for (layers) |layer| for (layer.patterns) |path| {
-        paths[i] = path;
-        i += 1;
-    };
-    break :blk paths;
+pub const required = [_][]const u8{
+    "src/Waker.zig",
+    "src/filesystem.zig",
+    "src/backend/inotify_records.zig",
+    "src/backend/windows_records.zig",
+    "src/buffer.zig",
+    "src/path.zig",
+    "src/testing/test_clock.zig",
+    "src/trace.zig",
+    "src/walk.zig",
+    "src/Budget.zig",
+    "src/Deadline.zig",
+    "src/Filter.zig",
+    "src/types.zig",
+    "src/Snapshot.zig",
+    "src/backend/fsevents_records.zig",
+    "src/Checkpoint/checkpoint_format.zig",
+    "src/Checkpoint/CheckpointPaths.zig",
+    "src/Baseline/baseline_format.zig",
+    "src/Baseline.zig",
+    "src/Checkpoint.zig",
+    "src/backend/fsevents_volume.zig",
+    "src/options.zig",
+    "src/Batch.zig",
+    "src/Tree.zig",
+    "src/watch_contract.zig",
+    "src/backend/fsevents.zig",
+    "src/backend/inotify.zig",
+    "src/backend/kqueue.zig",
+    "src/backend/poll.zig",
+    "src/backend/windows.zig",
+    "src/lookout.zig",
+    "src/backend/fsevents_test.zig",
+    "src/backend/inotify_test.zig",
+    "src/backend/windows_test.zig",
+    "src/fuzz_test.zig",
+    "src/gaps_test.zig",
+    "src/resources_test.zig",
+    "src/suite_test.zig",
+    "src/tests.zig",
 };
 
 /// Tokens only their owners may spell: each backend alone speaks to its

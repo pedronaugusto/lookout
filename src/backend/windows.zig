@@ -21,7 +21,7 @@
 //!
 //! This file has never been executed on the machine it was written on;
 //! see README.md. It compiles for `x86_64-windows-gnu` and
-//! `x86_64-windows-msvc`, and the shared suite in src/test_suite.zig is
+//! `x86_64-windows-msvc`, and the shared suite in src/suite_test.zig is
 //! what runs it on a Windows host.
 
 const std = @import("std");

@@ -1,7 +1,7 @@
 //! Proving tests, one per defect.
 //!
 //! Each of these failed before the change it stands for and passes after
-//! it. They live apart from `test_suite.zig` because that file is the
+//! it. They live apart from `suite_test.zig` because that file is the
 //! contract every backend is held to, while these name a particular way
 //! one backend, or one shared rule, was wrong.
 
@@ -442,7 +442,7 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
     // the directories themselves. fseventsd does not: beside sixteen busy
     // processes it dropped part of this burst in 4 of 10 runs and said
     // so. So FSEvents is held to this claim in
-    // src/test_backend_fsevents.zig ("the entry budget is one
+    // src/backend/fsevents_test.zig ("the entry budget is one
     // directory's, with every creation delivered"), with the same
     // creations delivered by hand through the callback the system calls.
     const gpa = std.testing.allocator;

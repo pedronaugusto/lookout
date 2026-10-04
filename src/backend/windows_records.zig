@@ -9,7 +9,7 @@
 //!
 //! It lives in a file of its own, compiled on every target rather than
 //! only on Windows, because a walk over bytes somebody else wrote is a
-//! parser. It is fuzzed in src/test_fuzz.zig, and a decoder that exists
+//! parser. It is fuzzed in src/fuzz_test.zig, and a decoder that exists
 //! only on Windows can only be fuzzed there -- which, for a backend
 //! whose host is a CI runner, would be nowhere a change is written.
 

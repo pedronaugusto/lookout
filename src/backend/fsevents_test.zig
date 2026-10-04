@@ -3,24 +3,24 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
-const lookout = @import("lookout.zig");
-const Batch = @import("Batch.zig");
-const Volume = @import("backend/fsevents_volume.zig");
-const checkpoint_format = @import("checkpoint_format.zig");
-const Budget = @import("Budget.zig");
-const Deadline = @import("Deadline.zig");
-const Filter = @import("Filter.zig");
-const buffer = @import("buffer.zig");
-const path_cmp = @import("path.zig");
-const records = @import("backend/fsevents_records.zig");
-const trace = @import("trace.zig");
-const walk = @import("walk.zig");
-const Waker = @import("Waker.zig");
+const lookout = @import("../lookout.zig");
+const Batch = @import("../Batch.zig");
+const Volume = @import("fsevents_volume.zig");
+const checkpoint_format = @import("../Checkpoint/checkpoint_format.zig");
+const Budget = @import("../Budget.zig");
+const Deadline = @import("../Deadline.zig");
+const Filter = @import("../Filter.zig");
+const buffer = @import("../buffer.zig");
+const path_cmp = @import("../path.zig");
+const records = @import("fsevents_records.zig");
+const trace = @import("../trace.zig");
+const walk = @import("../walk.zig");
+const Waker = @import("../Waker.zig");
 const Record = records.Record;
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 const flag = records.flag;
-const FsEvents = @import("backend/fsevents.zig");
+const FsEvents = @import("fsevents.zig");
 
 const bounds: buffer.Bounds = .{
     .min = 4 * 1024,
@@ -38,7 +38,7 @@ pub const Held = struct {
 
 const Asking = access.Asking;
 const settled = access.settled;
-const access = @import("backend/fsevents.zig").test_access;
+const access = @import("fsevents.zig").test_access;
 const c = access.c;
 const synthesize = access.synthesize;
 
@@ -110,7 +110,7 @@ test "the flags that say the system lost track are one overflow, and the watch g
     defer gpa.free(file);
 
     // The caller's half of the contract: seeded where the watch is taken.
-    var baseline: @import("Baseline.zig") = try .seed(gpa, io, root, .{ .recursive = true });
+    var baseline: @import("../Baseline.zig") = try .seed(gpa, io, root, .{ .recursive = true });
     defer baseline.deinit(gpa);
 
     var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
@@ -333,7 +333,7 @@ test "a rename whose halves arrive in two deliveries is one rename" {
 }
 
 test "the entry budget is one directory's, with every creation delivered" {
-    // The FSEvents half of the claim in src/test_gaps.zig ("the entry
+    // The FSEvents half of the claim in src/gaps_test.zig ("the entry
     // budget is one directory's, not a whole recursive watch's"): twelve
     // directories of a hundred and fifty creations under a budget of 512
     // are twelve directories inside it. Made live, the burst is one
@@ -430,7 +430,7 @@ test "a poll that expires before the replay begins is not the end of it" {
     defer gpa.free(deleted);
 
     var vtable: Io.VTable = undefined;
-    const frozen = @import("test_clock.zig").frozen(&vtable, io);
+    const frozen = @import("../testing/test_clock.zig").frozen(&vtable, io);
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
     var watcher: lookout.Watcher = try .init(gpa, frozen, .{
@@ -615,10 +615,10 @@ test "a checkpoint is unavailable without an unchanged persistent log" {
     defer stream.volume.identity = original;
     try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
     stream.volume.identity = null;
-    try testing.expectEqual(@as(?@import("Checkpoint.zig"), null), try watcher.checkpoint(gpa));
+    try testing.expectEqual(@as(?@import("../Checkpoint.zig"), null), try watcher.checkpoint(gpa));
     stream.volume.identity = original;
     stream.volume.identity.?.log[0] ^= 1;
-    try testing.expectEqual(@as(?@import("Checkpoint.zig"), null), try watcher.checkpoint(gpa));
+    try testing.expectEqual(@as(?@import("../Checkpoint.zig"), null), try watcher.checkpoint(gpa));
 }
 
 test "a recursive mount keeps live coverage and refuses a single-device checkpoint" {
@@ -635,7 +635,7 @@ test "a recursive mount keeps live coverage and refuses a single-device checkpoi
     try synthesize(gpa, backend.streams.get(id).?, &.{.{ .path = root, .flags = 0x40 }});
     try access.drain(backend, &watcher.batch);
     try testing.expectEqual(@as(i32, 0), c.FSEventStreamGetDeviceBeingWatched(backend.streams.get(id).?.ref));
-    try testing.expectEqual(@as(?@import("Checkpoint.zig"), null), try watcher.checkpoint(gpa));
+    try testing.expectEqual(@as(?@import("../Checkpoint.zig"), null), try watcher.checkpoint(gpa));
     try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
     try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
     try testing.expectEqualStrings(root, watcher.batch.events.items[0].path);

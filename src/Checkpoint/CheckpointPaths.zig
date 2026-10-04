@@ -2,8 +2,8 @@
 //! Tombstones stay until no leased revision can see them; ordinary removals
 //! need no allocation. Tokens flatten the revision to the existing wire format.
 const std = @import("std");
-const path = @import("path.zig");
-const WatchId = @import("types.zig").WatchId;
+const path = @import("../path.zig");
+const WatchId = @import("../types.zig").WatchId;
 const Allocator = std.mem.Allocator;
 const History = @This();
 

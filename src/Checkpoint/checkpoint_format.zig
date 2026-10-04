@@ -1,6 +1,6 @@
 //! The private, versioned checkpoint wire format.
 
-const lookout = @import("types.zig");
+const lookout = @import("../types.zig");
 
 /// The serialized format is versioned independently of the package.
 pub const State = struct {
@@ -72,8 +72,8 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {
         var paths = watch.baseline.iterator();
         defer paths.deinit();
         while (paths.next()) |known| {
-            if (!@import("path.zig").within(watch.root, known) or std.mem.indexOfScalar(u8, known, 0) != null) return error.InvalidCheckpoint;
-            var components = std.mem.tokenizeAny(u8, known, @import("path.zig").separators);
+            if (!@import("../path.zig").within(watch.root, known) or std.mem.indexOfScalar(u8, known, 0) != null) return error.InvalidCheckpoint;
+            var components = std.mem.tokenizeAny(u8, known, @import("../path.zig").separators);
             while (components.next()) |component| {
                 if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.InvalidCheckpoint;
             }

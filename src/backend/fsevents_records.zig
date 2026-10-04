@@ -10,7 +10,7 @@
 //!
 //! It lives in a file of its own, compiled on every target rather than
 //! only on Apple ones, because a walk over bytes and a matching over
-//! records are both parsers. They are fuzzed in src/test_fuzz.zig, and
+//! records are both parsers. They are fuzzed in src/fuzz_test.zig, and
 //! a decoder that exists only on macOS can only be fuzzed there.
 
 const std = @import("std");

@@ -869,7 +869,7 @@ test "a persisted baseline loader accepts only intact validated storage" {
 
 fn fuzzBaselineStorage(_: void, smith: *testing.Smith) !void {
     @disableInstrumentation();
-    const format = @import("baseline_format.zig");
+    const format = @import("Baseline/baseline_format.zig");
     const gpa = testing.allocator;
     var buf: [2048]u8 = undefined;
     const bytes = buf[0..smith.slice(&buf)];

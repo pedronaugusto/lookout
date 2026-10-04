@@ -2,7 +2,7 @@
 //! number and the prefix translating its paths into the caller's namespace.
 
 const std = @import("std");
-const format = @import("../checkpoint_format.zig");
+const format = @import("../Checkpoint/checkpoint_format.zig");
 const path = @import("../path.zig");
 const Volume = @This();
 

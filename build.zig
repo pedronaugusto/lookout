@@ -51,7 +51,7 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
     // Tests.
     //
-    // The suite in src/test_suite.zig runs once per backend this target
+    // The suite in src/suite_test.zig runs once per backend this target
     // can execute, so the poll backend is held to the same contract as the
     // kernel one rather than to a weaker one of its own.
     //=====================================================================
@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = darwin,
             .sanitize_thread = if (thread_sanitizer) true else null,
-            // The fuzz targets in src/test_fuzz.zig are the reason: the
+            // The fuzz targets in src/fuzz_test.zig are the reason: the
             // fuzzing runner in Zig 0.16.0 will not build a module that
             // carries error return traces.
             .error_tracing = false,

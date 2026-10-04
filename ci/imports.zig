@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
     defer a.free(findings);
     for (graph.paths()) |path| {
         var owners: usize = 0;
-        for (declared.required) |source| if (std.mem.eql(u8, path, source)) {
+        for (declared.layers) |layer| for (layer.patterns) |pattern| if (gantry.rules.matches(pattern, path)) {
             owners += 1;
         };
         if (owners > 1) {

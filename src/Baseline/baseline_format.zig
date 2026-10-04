@@ -1,8 +1,8 @@
 //! Portable baseline storage. The checksum is checked before JSON is read.
 const std = @import("std");
 const builtin = @import("builtin");
-const Snapshot = @import("Snapshot.zig");
-const path = @import("path.zig");
+const Snapshot = @import("../Snapshot.zig");
+const path = @import("../path.zig");
 
 pub const State = struct {
     platform: []const u8,
