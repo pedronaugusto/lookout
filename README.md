@@ -83,8 +83,13 @@ Keep the file outside the watched tree. Corrupt files return `InvalidBaseline`,
 old versions `UnsupportedBaselineVersion`, and mismatched platform, root, scope,
 budget or patterns `ForeignBaseline`. Predicate filters return
 `UnsupportedBaselineFilter`: executable predicates cannot be stored. Replacement
-does not fsync; it promises atomic visibility, not power-loss durability. Neither
-in-memory nor persisted baselines recover transient changes absent from both snapshots.
+does not fsync; it promises atomic visibility. For filesystem durability, use
+`saveWithOptions(gpa, filename, .{ .durable = true })`: POSIX syncs the temporary
+file before replacement and the parent directory afterwards. A directory-sync
+failure returns its error after the new file has become visible. Windows returns
+`UnsupportedBaselineDurability` before writing because the I/O API cannot promise
+a durable directory replacement there. Neither in-memory nor persisted baselines
+recover transient changes absent from both snapshots.
 Each change carries its `target`, file or directory, from the listing that saw it, so a
 removed directory is known for one without a `stat`.
 
@@ -110,7 +115,7 @@ coverage but cannot produce a checkpoint. Other backends return null.
 | API | Result |
 | --- | --- |
 | `Baseline.seed`, `diff`, `deinit` | Own, compare and release a tree snapshot. |
-| `Baseline.save`, `load` | Atomically persist and restore a checked snapshot for any backend. |
+| `Baseline.save`, `saveWithOptions`, `load` | Atomically persist and restore a checked snapshot for any backend. |
 | `Watcher.checkpoint`, `Checkpoint.token`, `parse`, `deinit` | Own, persist and resume FSEvents log cursors and known path baselines. |
 | `Watcher.capabilities(id)` | The backend and filesystem fact for one watch; null for an unknown id. |
 

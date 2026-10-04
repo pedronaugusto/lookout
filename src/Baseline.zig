@@ -151,7 +151,8 @@ pub fn diff(b: *Baseline, gpa: Allocator) Error![]const Change {
 }
 
 pub const SaveError = Allocator.Error || Io.Dir.CreateFileAtomicError || Io.File.WritePositionalError ||
-    Io.File.Atomic.ReplaceError || error{UnsupportedBaselineFilter};
+    Io.File.Atomic.ReplaceError || Io.Dir.OpenError || Io.File.SyncError ||
+    error{ UnsupportedBaselineFilter, UnsupportedBaselineDurability };
 pub const LoadError = format.ParseError || Io.Dir.ReadFileAllocError || Io.Dir.RealPathFileAllocError ||
     error{UnsupportedBaselineFilter};
 
@@ -160,7 +161,21 @@ pub const LoadError = format.ParseError || Io.Dir.ReadFileAllocError || Io.Dir.R
 /// be serialized and return UnsupportedBaselineFilter. Replacement is atomic;
 /// this does not promise power-loss durability (no fsync).
 pub fn save(b: *const Baseline, gpa: Allocator, filename: []const u8) SaveError!void {
+    return b.saveWithOptions(gpa, filename, .{});
+}
+
+pub const SaveOptions = struct {
+    /// Sync the temporary file before replacement and its parent directory
+    /// afterwards. Windows returns UnsupportedBaselineDurability before writing:
+    /// std.Io cannot promise a durable directory replacement there.
+    durable: bool = false,
+};
+
+/// Saves with optional filesystem durability. A failure of the directory sync
+/// happens after replacement, so the new file may already be visible.
+pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8, options: SaveOptions) SaveError!void {
     if (b.filter.allow != null) return error.UnsupportedBaselineFilter;
+    if (options.durable and @import("builtin").os.tag == .windows) return error.UnsupportedBaselineDurability;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -171,10 +186,22 @@ pub fn save(b: *const Baseline, gpa: Allocator, filename: []const u8) SaveError!
         dir.* = .{ .path = path, .truncated = remembered.snapshot.truncated, .check_contents = remembered.snapshot.check_contents, .entries = entries };
     }
     const bytes = try format.encode(a, .{ .platform = format.platform, .root = b.root, .recursive = b.recursive, .max_dir_entries = b.max_dir_entries, .ignore = b.filter.ignore, .only = b.filter.only, .dirs = dirs });
-    var file = try Io.Dir.cwd().createFileAtomic(b.io, filename, .{ .replace = true });
+    // An explicit parent handle is needed for fsync even for a relative name;
+    // cwd may be the POSIX AT_FDCWD sentinel rather than an open descriptor.
+    const parent: ?Io.Dir = if (options.durable)
+        try Io.Dir.cwd().openDir(b.io, std.fs.path.dirname(filename) orelse ".", .{})
+    else
+        null;
+    defer if (parent) |dir| dir.close(b.io);
+    var file = try (parent orelse Io.Dir.cwd()).createFileAtomic(b.io, if (parent != null) std.fs.path.basename(filename) else filename, .{ .replace = true });
     defer file.deinit(b.io);
     try file.file.writePositionalAll(b.io, bytes, 0);
+    if (options.durable) try file.file.sync(b.io);
     try file.replace(b.io);
+    if (parent) |dir| {
+        const directory: Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+        try directory.sync(b.io);
+    }
 }
 
 /// Loads an owned baseline without walking. The root, scope, budget and
@@ -918,4 +945,63 @@ test "baseline storage validates checksummed paths before trusting them" {
     const bytes = try format.encode(gpa, state);
     defer gpa.free(bytes);
     try testing.expectError(error.InvalidBaseline, format.parse(gpa, bytes));
+}
+
+test "durable baseline saves sync before and after replacement and preserve named failures" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "tree");
+    const root = try tmp.dir.realPathFileAlloc(io, "tree", gpa);
+    defer gpa.free(root);
+    const parent = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(parent);
+    const filename = try std.fs.path.join(gpa, &.{ parent, "saved" });
+    defer gpa.free(filename);
+    var b = try seed(gpa, io, root, .{});
+    defer b.deinit(gpa);
+    try b.save(gpa, filename);
+    const original = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
+    defer gpa.free(original);
+    try tmp.dir.writeFile(io, .{ .sub_path = "tree/new", .data = "one" });
+    _ = try b.diff(gpa);
+    if (@import("builtin").os.tag == .windows) {
+        try testing.expectError(error.UnsupportedBaselineDurability, b.saveWithOptions(gpa, filename, .{ .durable = true }));
+        const after = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
+        defer gpa.free(after);
+        try testing.expectEqualSlices(u8, original, after);
+        return;
+    }
+    const Sync = struct {
+        var calls: usize = 0;
+        var fail_at: usize = 0;
+        fn sync(context: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
+            calls += 1;
+            if (calls == fail_at) return error.NoSpaceLeft;
+            return testing.io.vtable.fileSync(context, file);
+        }
+    };
+    var vtable = io.vtable.*;
+    vtable.fileSync = Sync.sync;
+    b.io = .{ .userdata = io.userdata, .vtable = &vtable };
+    Sync.calls = 0;
+    Sync.fail_at = 1;
+    try testing.expectError(error.NoSpaceLeft, b.saveWithOptions(gpa, filename, .{ .durable = true }));
+    const unchanged = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
+    defer gpa.free(unchanged);
+    try testing.expectEqualSlices(u8, original, unchanged);
+    Sync.calls = 0;
+    Sync.fail_at = 2;
+    try testing.expectError(error.NoSpaceLeft, b.saveWithOptions(gpa, filename, .{ .durable = true }));
+    var replaced = try load(gpa, io, filename, root, .{});
+    defer replaced.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), (try replaced.diff(gpa)).len);
+    Sync.calls = 0;
+    Sync.fail_at = 0;
+    try b.saveWithOptions(gpa, filename, .{ .durable = true });
+    try testing.expectEqual(@as(usize, 2), Sync.calls);
+    Sync.calls = 0;
+    try b.save(gpa, filename);
+    try testing.expectEqual(@as(usize, 0), Sync.calls);
 }

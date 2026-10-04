@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `Baseline.saveWithOptions` can fsync the file and parent directory on POSIX; Windows refuses durable replacement by name before writing.
+
 - Checkpoints retain a shared path revision instead of copying the tree on each capture; tokens keep the full resume baseline.
 
 - `Watcher.capabilities(id)` reports the filesystem fact and backend per watch; `.auto` uses polling on network and FUSE mounts, while explicit backend choices are kept.
