@@ -810,7 +810,7 @@ fn fuzzCheckpoint(_: void, smith: *testing.Smith) !void {
     const absolute = if (builtin.os.tag == .windows) "\"C:\\\\w\"" else "\"/w\"";
     const pieces = [_][]const u8{
         "{\"version\":2,\"backend\":\"fsevents\",\"watches\":[",                                                             "]}",
-        "{\"root\":" ++ absolute ++ ",\"cursor\":1,\"recursive\":true,\"identity\":{\"volume\":[",                           "],\"log\":[",
+        "{\"root\":" ++ absolute ++ ",\"cursor\":1,\"recursive\":true,\"baseline\":[],\"identity\":{\"volume\":[",           "],\"log\":[",
         "]}",                                                                                                                "}",
         "48,",                                                                                                               "48",
         ",\"changes\":[{\"path\":" ++ absolute ++ ",\"kind\":\"renamed\",\"from\":" ++ absolute ++ ",\"target\":\"file\"}]", ",\"half\":{\"path\":" ++ absolute ++ ",\"flags\":2048,\"event\":3}",

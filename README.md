@@ -106,6 +106,7 @@ coverage but cannot produce a checkpoint. Other backends return null.
 | --- | --- |
 | `Baseline.seed`, `diff`, `deinit` | Own, compare and release a tree snapshot. |
 | `Baseline.save`, `load` | Atomically persist and restore a checked snapshot for any backend. |
+| `Watcher.checkpoint`, `Checkpoint.token`, `parse`, `deinit` | Own, persist and resume FSEvents log cursors and known path baselines. |
 | `Watcher.capabilities(id)` | The backend and filesystem fact for one watch; null for an unknown id. |
 
 ## Scope
