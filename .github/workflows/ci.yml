@@ -13,7 +13,8 @@ on:
   schedule:
     - cron: '17 4 * * 1'
 concurrency:
-  group: ci-${{ github.head_ref || github.ref }}
+  # Main status runs must not share the replaceable branch queue.
+  group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-status-{0}', github.run_id) || github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 permissions:
   contents: read
