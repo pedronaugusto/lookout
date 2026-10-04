@@ -23,6 +23,7 @@ const Io = std.Io;
 const lookout = @import("types.zig");
 const Filter = @import("Filter.zig");
 const Snapshot = @import("Snapshot.zig");
+const format = @import("baseline_format.zig");
 const Kind = lookout.Kind;
 const Target = lookout.Target;
 
@@ -147,6 +148,76 @@ pub fn deinit(b: *Baseline, gpa: Allocator) void {
 pub fn diff(b: *Baseline, gpa: Allocator) Error![]const Change {
     try b.scan(gpa, true);
     return b.changes.items;
+}
+
+pub const SaveError = Allocator.Error || Io.Dir.CreateFileAtomicError || Io.File.WritePositionalError ||
+    Io.File.Atomic.ReplaceError || error{UnsupportedBaselineFilter};
+pub const LoadError = format.ParseError || Io.Dir.ReadFileAllocError || Io.Dir.RealPathFileAllocError ||
+    error{UnsupportedBaselineFilter};
+
+/// Atomically replaces the caller-named file with this baseline, without
+/// walking again. Keep it outside the watched tree. Predicate filters cannot
+/// be serialized and return UnsupportedBaselineFilter. Replacement is atomic;
+/// this does not promise power-loss durability (no fsync).
+pub fn save(b: *const Baseline, gpa: Allocator, filename: []const u8) SaveError!void {
+    if (b.filter.allow != null) return error.UnsupportedBaselineFilter;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dirs = try a.alloc(format.Directory, b.dirs.count());
+    for (b.dirs.keys(), b.dirs.values(), dirs) |path, remembered, *dir| {
+        const entries = try a.alloc(format.Entry, remembered.snapshot.entries.count());
+        for (remembered.snapshot.entries.keys(), remembered.snapshot.entries.values(), entries) |name, meta, *entry| entry.* = .{ .name = name, .meta = meta };
+        dir.* = .{ .path = path, .truncated = remembered.snapshot.truncated, .check_contents = remembered.snapshot.check_contents, .entries = entries };
+    }
+    const bytes = try format.encode(a, .{ .root = b.root, .recursive = b.recursive, .max_dir_entries = b.max_dir_entries, .ignore = b.filter.ignore, .only = b.filter.only, .dirs = dirs });
+    var file = try Io.Dir.cwd().createFileAtomic(b.io, filename, .{ .replace = true });
+    defer file.deinit(b.io);
+    try file.file.writePositionalAll(b.io, bytes, 0);
+    try file.replace(b.io);
+}
+
+/// Loads an owned baseline without walking. The root, scope, budget and
+/// pattern filters must match those supplied by the caller. Corrupt, foreign
+/// and old-version files return InvalidBaseline, ForeignBaseline and
+/// UnsupportedBaselineVersion respectively. A later diff costs one walk.
+pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, options: Options) LoadError!Baseline {
+    if (options.filter.allow != null) return error.UnsupportedBaselineFilter;
+    const bytes = try Io.Dir.cwd().readFileAlloc(io, filename, gpa, .limited(format.file_limit));
+    defer gpa.free(bytes);
+    var parsed = try format.parse(gpa, bytes);
+    defer parsed.deinit();
+    const state = parsed.value;
+    const real = Io.Dir.cwd().realPathFileAlloc(io, root, gpa) catch |err| switch (err) {
+        error.FileNotFound => if (std.fs.path.isAbsolute(root)) try gpa.dupeZ(u8, root) else return err,
+        else => return err,
+    };
+    defer gpa.free(real);
+    if (!@import("path.zig").eql(real, state.root) or options.recursive != state.recursive or
+        options.max_dir_entries != state.max_dir_entries or !samePatterns(options.filter.ignore, state.ignore) or
+        !samePatterns(options.filter.only, state.only)) return error.ForeignBaseline;
+    var b: Baseline = .{ .io = io, .root = try gpa.dupe(u8, state.root), .recursive = state.recursive, .max_dir_entries = state.max_dir_entries, .filter = .none, .dirs = .empty, .changes = .empty, .scratch = .empty };
+    errdefer b.deinit(gpa);
+    b.filter = try options.filter.dupe(gpa);
+    for (state.dirs) |dir| {
+        const owned = try gpa.dupe(u8, dir.path);
+        errdefer gpa.free(owned);
+        var snapshot: Snapshot = .{ .entries = .empty, .truncated = dir.truncated, .check_contents = dir.check_contents };
+        errdefer snapshot.deinit(gpa);
+        for (dir.entries) |entry| {
+            const name = try gpa.dupe(u8, entry.name);
+            errdefer gpa.free(name);
+            try snapshot.entries.put(gpa, name, entry.meta);
+        }
+        try b.dirs.put(gpa, owned, .{ .snapshot = snapshot });
+    }
+    return b;
+}
+
+fn samePatterns(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| if (!std.mem.eql(u8, left, right)) return false;
+    return true;
 }
 
 /// Walks the tree, refreshing every directory's listing. With `report`
@@ -730,4 +801,68 @@ test "a truncated baseline keeps remembered subtrees until a complete scan" {
     const complete = try base.diff(gpa);
     try testing.expect(try holds(complete, root, "sub/deep/kept", .removed));
     try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+}
+
+test "a saved baseline reports changes since last run and replaces its file" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "tree/sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "tree/sub/gone", .data = "one" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tree/kept", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(io, "tree", gpa);
+    defer gpa.free(root);
+    const parent = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(parent);
+    const file = try std.fs.path.join(gpa, &.{ parent, "baseline" });
+    defer gpa.free(file);
+    const options: Options = .{ .recursive = true, .filter = .{ .ignore = &.{"*.tmp"} } };
+    {
+        var base = try seed(gpa, io, root, options);
+        defer base.deinit(gpa);
+        try base.save(gpa, file);
+    }
+    try tmp.dir.deleteTree(io, "tree/sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "tree/kept", .data = "changed size" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tree/new", .data = "new" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tree/ignore.tmp", .data = "new" });
+    var loaded = try load(gpa, io, file, root, options);
+    defer loaded.deinit(gpa);
+    const changes = try loaded.diff(gpa);
+    try testing.expectEqual(@as(usize, 4), changes.len);
+    try testing.expect(try holds(changes, root, "sub/gone", .removed));
+    try testing.expectEqual(Target.file, try targetOf(changes, root, "sub/gone"));
+    try testing.expect(try holds(changes, root, "sub", .removed));
+    try testing.expect(try holds(changes, root, "kept", .modified));
+    try testing.expect(try holds(changes, root, "new", .created));
+    try loaded.save(gpa, file);
+    var again = try load(gpa, io, file, root, options);
+    defer again.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), (try again.diff(gpa)).len);
+    try testing.expectError(error.ForeignBaseline, load(gpa, io, file, parent, options));
+    try testing.expectError(error.ForeignBaseline, load(gpa, io, file, root, .{}));
+    try tmp.dir.deleteTree(io, "tree");
+    var missing = try load(gpa, io, file, root, options);
+    defer missing.deinit(gpa);
+    try testing.expectEqual(@as(usize, 1), (try missing.diff(gpa)).len);
+    try testing.expectEqual(@as(usize, 0), (try missing.diff(gpa)).len);
+}
+
+test "baseline storage refuses corrupt foreign and old files by name" {
+    const gpa = testing.allocator;
+    const root = if (@import("builtin").os.tag == .windows) "C:\\tree" else "/tree";
+    const state: format.State = .{ .root = root, .recursive = false, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{} };
+    const bytes = try format.encode(gpa, state);
+    defer gpa.free(bytes);
+    bytes[bytes.len - 1] ^= 1;
+    try testing.expectError(error.InvalidBaseline, format.parse(gpa, bytes));
+    bytes[bytes.len - 1] ^= 1;
+    bytes[8] = 0;
+    try testing.expectError(error.UnsupportedBaselineVersion, format.parse(gpa, bytes));
+    var foreign = state;
+    foreign.platform = "foreign";
+    const other = try format.encode(gpa, foreign);
+    defer gpa.free(other);
+    try testing.expectError(error.ForeignBaseline, format.parse(gpa, other));
 }

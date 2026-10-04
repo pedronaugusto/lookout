@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `Baseline.save` and `load` atomically persist versioned, checksummed tree snapshots on every backend and refuse corrupt, foreign and old-version files by name.
+
 - The kqueue and poll backends find a watched path's node in one lookup and drop a removed directory at the cost of what was below it: adding a tree checked every file against every node, and each removal and rescan passed over every node and registration, quadratic in the tree (50,000 files took minutes to add). A name that comes back as another kind replaces its node.
 
 - Hash folded paths in blocks rather than one code point at a time; the values are unchanged.

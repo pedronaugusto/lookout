@@ -853,7 +853,7 @@ test "the path, pattern, baseline and checkpoint properties hold over seeded rou
             7, 8 => prng.random().uintLessThan(u8, 16),
             else => prng.random().int(u8),
         };
-        inline for (.{ fuzzPaths, fuzzFilter, fuzzBaseline, fuzzCheckpoint }) |property| {
+        inline for (.{ fuzzPaths, fuzzFilter, fuzzBaseline, fuzzCheckpoint, fuzzBaselineStorage }) |property| {
             var smith: testing.Smith = .{ .in = &bytes };
             property({}, &smith) catch |err| {
                 std.debug.print("seeded round {d}: {t}\n", .{ i, err });
@@ -861,4 +861,34 @@ test "the path, pattern, baseline and checkpoint properties hold over seeded rou
             };
         }
     }
+}
+
+test "a persisted baseline loader accepts only intact validated storage" {
+    try testing.fuzz({}, fuzzBaselineStorage, .{});
+}
+
+fn fuzzBaselineStorage(_: void, smith: *testing.Smith) !void {
+    @disableInstrumentation();
+    const format = @import("baseline_format.zig");
+    const gpa = testing.allocator;
+    var buf: [2048]u8 = undefined;
+    const bytes = buf[0..smith.slice(&buf)];
+    var parsed = format.parse(gpa, bytes) catch |err| {
+        try testing.expect(err == error.InvalidBaseline or err == error.UnsupportedBaselineVersion or err == error.ForeignBaseline);
+        // Exercise the JSON parser behind a valid checksum as well.
+        const wrapped = try gpa.alloc(u8, 44 + bytes.len);
+        defer gpa.free(wrapped);
+        @memcpy(wrapped[0..8], "LOOKBASE");
+        std.mem.writeInt(u32, wrapped[8..12], 1, .little);
+        std.crypto.hash.sha2.Sha256.hash(bytes, wrapped[12..44], .{});
+        @memcpy(wrapped[44..], bytes);
+        var inner = format.parse(gpa, wrapped) catch return;
+        defer inner.deinit();
+        return;
+    };
+    defer parsed.deinit();
+    const encoded = try format.encode(gpa, parsed.value);
+    defer gpa.free(encoded);
+    var again = try format.parse(gpa, encoded);
+    defer again.deinit();
 }

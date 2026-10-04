@@ -63,7 +63,15 @@ Every change within a watch's scope and filters made after `add` returns is repo
 contents to stop changing. `debounce_ms` holds ordinary changes until the path is quiet
 and reports the last kind; it takes precedence over the other windows. Overflow and
 unwatched notices bypass these waits. A seeded `Baseline` can diff the current tree
-after an overflow, but cannot recover transient changes absent from both snapshots.
+after an overflow. `save(gpa, filename)` atomically replaces a versioned, SHA-256
+checksummed file; `Baseline.load(gpa, io, filename, root, options)` restores it on
+every backend, and `diff` answers what changed since the last run with one walk.
+Keep the file outside the watched tree. Corrupt files return `InvalidBaseline`,
+old versions `UnsupportedBaselineVersion`, and mismatched platform, root, scope,
+budget or patterns `ForeignBaseline`. Predicate filters return
+`UnsupportedBaselineFilter`: executable predicates cannot be stored. Replacement
+does not fsync; it promises atomic visibility, not power-loss durability. Neither
+in-memory nor persisted baselines recover transient changes absent from both snapshots.
 Each change carries its `target`, file or directory, from the listing that saw it, so a
 removed directory is known for one without a `stat`.
 
@@ -78,12 +86,20 @@ volume or log yields `InvalidCheckpoint`; watches spanning mounted volumes keep 
 coverage but cannot produce a checkpoint. Other backends return null.
 [examples/since.zig](examples/since.zig) exercises checkpoint tokens and resuming.
 
+## API
+
+| API | Result |
+| --- | --- |
+| `Baseline.seed`, `diff`, `deinit` | Own, compare and release a tree snapshot. |
+| `Baseline.save`, `load` | Atomically persist and restore a checked snapshot for any backend. |
+
 ## Scope
 
 - It does not guarantee delivery of every intermediate write or rename.
 - It does not turn overflow recovery into a complete history of transient changes.
-- It does not follow symbolic links during recursive tree walks.
-- It does not resume history on backends without a persistent log.
+- It does not follow symbolic links during recursive tree walks: loops and overlapping paths would produce duplicate reports.
+- It does not read gitignore syntax: use a predicate with the repository matcher, which owns anchoring, negation and directory rules.
+- It does not recover transient history on backends without a persistent log.
 - It does not supply an application event loop or rebuild policy.
 
 <!-- performance: quiet pass -->
