@@ -16,8 +16,8 @@
     },
     .dependencies = .{
         .preflight = .{
-            .url = "https://codeload.github.com/pedronaugusto/preflight/tar.gz/9cdff538384c14e7f268cbb4942c5075caf0ed42",
-            .hash = "preflight-0.1.0-LX1Zwla7AQAYN_Odjiy2TNK_2XgEz-7JsyFg85Ggw2at",
+            .url = "https://codeload.github.com/pedronaugusto/preflight/tar.gz/8422cd19dbdb335d2b030138c4167f6166cd397a",
+            .hash = "preflight-0.1.0-LX1ZwnS_AQA0LPM2m7eY3jL1b_wdytWRckIUWrTJKLAW",
             .lazy = true,
         },
         .gantry = .{

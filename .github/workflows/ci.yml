@@ -20,8 +20,8 @@ permissions:
   actions: read
 jobs:
   gate:
-    uses: pedronaugusto/preflight/.github/workflows/zig.yml@9cdff538384c14e7f268cbb4942c5075caf0ed42
+    uses: pedronaugusto/preflight/.github/workflows/zig.yml@8422cd19dbdb335d2b030138c4167f6166cd397a
     with:
-      preflight-ref: 9cdff538384c14e7f268cbb4942c5075caf0ed42
+      preflight-ref: 8422cd19dbdb335d2b030138c4167f6166cd397a
       full: ${{ github.event_name != 'workflow_dispatch' || inputs.full }}
       attest: ${{ github.event_name == 'push' }}
