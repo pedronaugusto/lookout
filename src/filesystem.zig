@@ -55,7 +55,7 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
 fn linuxType(number: usize) Kind {
     return switch (number) {
         0x65735546 => .fuse,
-        0x6969, 0x517B, 0xff534d42, 0xfe534d42, 0x73757245, 0x5346414f, 0x9fa0, 0x01021997 => .network,
+        0x6969, 0x517B, 0xff534d42, 0xfe534d42, 0x73757245, 0x5346414f, 0x6B414653, 0x564c, 0x01021997 => .network,
         else => .local,
     };
 }
@@ -137,4 +137,10 @@ test "a real scratch filesystem is local on each supported host" {
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
     defer gpa.free(root);
     try std.testing.expectEqual(Kind.local, read(gpa, std.testing.io, root));
+}
+
+test "procfs is local while the legacy network filesystem types require polling" {
+    try std.testing.expectEqual(Kind.local, linuxType(0x9fa0));
+    try std.testing.expectEqual(Kind.network, linuxType(0x564c));
+    try std.testing.expectEqual(Kind.network, linuxType(0x6B414653));
 }

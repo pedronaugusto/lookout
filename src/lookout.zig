@@ -1275,6 +1275,7 @@ test {
     _ = Poll;
     _ = Tree;
     _ = Waker;
+    _ = fs_type;
     _ = @import("Snapshot.zig");
     _ = @import("Budget.zig");
     _ = @import("Deadline.zig");
