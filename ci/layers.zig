@@ -105,6 +105,7 @@ pub const required = [_][]const u8{
     "src/backend/fsevents/volume.zig",
     "src/options.zig",
     "src/Batch.zig",
+    "src/Links.zig",
     "src/Tree.zig",
     "src/watch_contract.zig",
     "src/backend/fsevents.zig",
@@ -120,6 +121,7 @@ pub const required = [_][]const u8{
     "src/testing/gaps_test.zig",
     "src/testing/resources_test.zig",
     "src/testing/suite_test.zig",
+    "src/Links_test.zig",
     "src/tests.zig",
 };
 

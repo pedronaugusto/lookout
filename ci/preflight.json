@@ -9,61 +9,21 @@
     "src/testing/*"
   ],
   "function_exceptions": {
-    "src/test_fuzz.zig:fuzzBaseline": {
+    "src/testing/fuzz_test.zig:fuzzBaseline": {
       "lines": 137,
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     }
   },
   "layout_exceptions": {
-    "src/baseline": {
-      "files": [
-        "src/Baseline.zig",
-        "src/baseline_format.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/backend/windows": {
-      "files": [
-        "src/backend/windows.zig",
-        "src/backend/windows_records.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/checkpoint": {
-      "files": [
-        "src/Checkpoint.zig",
-        "src/checkpoint_format.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/backend/fsevents": {
-      "files": [
-        "src/backend/fsevents.zig",
-        "src/backend/fsevents_records.zig",
-        "src/backend/fsevents_volume.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
-    "src/backend/inotify": {
-      "files": [
-        "src/backend/inotify.zig",
-        "src/backend/inotify_records.zig"
-      ],
-      "reason": "Existing namespace at adoption; these exact members are retained until its layout branch lands."
-    },
     "src/backend": {
       "files": [
         "src/backend/fsevents.zig",
-        "src/backend/fsevents_records.zig",
-        "src/backend/fsevents_volume.zig",
         "src/backend/inotify.zig",
-        "src/backend/inotify_records.zig",
         "src/backend/kqueue.zig",
         "src/backend/poll.zig",
-        "src/backend/windows.zig",
-        "src/backend/windows_records.zig"
+        "src/backend/windows.zig"
       ],
-      "reason": "Existing grouped implementation at adoption; this exact member set cannot grow before its namespace entry is introduced."
+      "reason": "Existing grouped platform implementation retained at adoption; these exact members cannot grow before a common entry is introduced."
     }
   },
   "docs": {
