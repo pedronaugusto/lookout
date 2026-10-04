@@ -116,6 +116,59 @@ const dragonfly = struct {
     extern "c" fn statfs([*:0]const u8, *DragonflyStatfs) c_int;
 };
 
+/// What a directory is, rather than what it is called: two paths with one
+/// identity reach one directory. The device and inode number on POSIX, the
+/// volume serial number and file id on Windows.
+pub const Identity = struct {
+    device: u64,
+    file: u128,
+
+    pub fn eql(a: Identity, b: Identity) bool {
+        return a.device == b.device and a.file == b.file;
+    }
+};
+
+/// The identity of what `path` names, symbolic links followed. Null when it
+/// cannot be read, or on a target with no way to ask.
+pub fn identity(io: std.Io, path: []const u8) ?Identity {
+    if (builtin.os.tag == .windows) return identityWindows(io, path);
+    const name = std.posix.toPosixPath(path) catch return null;
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        var stat: linux.Statx = undefined;
+        const rc = linux.statx(linux.AT.FDCWD, &name, 0, .{ .INO = true }, &stat);
+        if (linux.errno(rc) != .SUCCESS) return null;
+        return .{ .device = @as(u64, stat.dev_major) << 32 | stat.dev_minor, .file = stat.ino };
+    }
+    switch (builtin.os.tag) {
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => {
+            var stat: std.c.Stat = undefined;
+            if (std.c.fstatat(std.c.AT.FDCWD, &name, &stat, 0) != 0) return null;
+            return .{ .device = unsigned(stat.dev), .file = unsigned(stat.ino) };
+        },
+        else => return null,
+    }
+}
+
+/// A device or inode number of whatever width and sign the C library
+/// gives it, as the bits it holds.
+fn unsigned(value: anytype) u64 {
+    const Bits = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(value)));
+    return @as(Bits, @bitCast(value));
+}
+
+fn identityWindows(io: std.Io, path: []const u8) ?Identity {
+    const w = std.os.windows;
+    var dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return null;
+    defer dir.close(io);
+    // FILE_ID_INFO: the volume serial number and a 128-bit file id, which
+    // ReFS needs and NTFS fills the low half of.
+    var info: extern struct { volume: u64, file: [16]u8 } = undefined;
+    var status: w.IO_STATUS_BLOCK = undefined;
+    if (w.ntdll.NtQueryInformationFile(dir.handle, &status, &info, @sizeOf(@TypeOf(info)), .Id) != .SUCCESS) return null;
+    return .{ .device = info.volume, .file = std.mem.readInt(u128, &info.file, .little) };
+}
+
 extern "kernel32" fn GetVolumePathNameW([*:0]const u16, [*]u16, u32) callconv(.winapi) std.os.windows.BOOL;
 extern "kernel32" fn GetDriveTypeW([*:0]const u16) callconv(.winapi) u32;
 
@@ -143,4 +196,28 @@ test "procfs is local while the legacy network filesystem types require polling"
     try std.testing.expectEqual(Kind.local, linuxType(0x9fa0));
     try std.testing.expectEqual(Kind.network, linuxType(0x564c));
     try std.testing.expectEqual(Kind.network, linuxType(0x6B414653));
+}
+
+test "one directory has one identity by every name, and another has its own" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "one/inner");
+    try tmp.dir.createDirPath(io, "two");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const one = try std.fs.path.join(gpa, &.{ root, "one" });
+    defer gpa.free(one);
+    const again = try std.fs.path.join(gpa, &.{ root, "one", "inner", ".." });
+    defer gpa.free(again);
+    const two = try std.fs.path.join(gpa, &.{ root, "two" });
+    defer gpa.free(two);
+    const missing = try std.fs.path.join(gpa, &.{ root, "missing" });
+    defer gpa.free(missing);
+
+    const first = identity(io, one) orelse return error.SkipZigTest;
+    try std.testing.expect(first.eql(identity(io, again).?));
+    try std.testing.expect(!first.eql(identity(io, two).?));
+    try std.testing.expect(identity(io, missing) == null);
 }

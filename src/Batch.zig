@@ -60,6 +60,23 @@ deferred: std.ArrayList(Deferred),
 /// their roots -- the batch knows it had to stop, and only the watcher
 /// knows what to say so against.
 dropped: std.AutoArrayHashMapUnmanaged(WatchId, void),
+/// Registrations on the directories followed links lead to, by the id
+/// the backend knows each one by. Their changes are spelled under the
+/// link and recorded as the watch's the link is in. Borrowed: the
+/// watcher owns each alias and takes it out of here before freeing it.
+/// See `@import("options.zig").AddOptions.follow_symlinks`.
+aliases: std.AutoArrayHashMapUnmanaged(WatchId, *const Alias) = .empty,
+/// The watches that follow links. A change to a name under one of them is
+/// noted for the watcher, which looks for links appearing, changing and
+/// going there.
+noting: std.AutoArrayHashMapUnmanaged(WatchId, void) = .empty,
+/// What has changed under `noting` watches since the watcher last took
+/// the notes. Paths owned here.
+notes: std.ArrayList(Note) = .empty,
+/// A note could not be kept, or there were too many to be worth reading
+/// one by one, or a watch lost changes: which names changed is not
+/// known, and the watcher looks at every link again.
+notes_lost: bool = false,
 /// Counts every push, whether it produced an event or was held back.
 ///
 /// A backend waits until the batch has changed, not until it has grown:
@@ -77,6 +94,71 @@ const Deferred = struct {
     kind: Kind,
     from: ?[]u8,
 };
+
+/// A watch registered on the directory a followed link leads to.
+pub const Alias = struct {
+    /// The watch the link is in, which its changes are reported as.
+    owner: WatchId,
+    /// That watch's root, which `Kind.overflow` is reported against.
+    root: []const u8,
+    /// That watch's filter, asked of each path spelled under the link.
+    filter: *const lookout.Filter,
+    /// Where the registration is: the directory the link leads to,
+    /// canonical, as the backend reports it.
+    physical: []const u8,
+    /// The link's own path, which everything below `physical` is spelled
+    /// under.
+    logical: []const u8,
+
+    /// `subject`, which is at or below `physical`, spelled under the link
+    /// into `buffer`. Null when it is not below `physical` or does not fit.
+    pub fn spell(alias: *const Alias, buffer: []u8, subject: []const u8) ?[]const u8 {
+        const rest = path_cmp.relative(alias.physical, subject) orelse return null;
+        const length = alias.logical.len + @as(usize, if (rest.len == 0) 0 else 1 + rest.len);
+        if (length > buffer.len) return null;
+        @memcpy(buffer[0..alias.logical.len], alias.logical);
+        if (rest.len != 0) {
+            buffer[alias.logical.len] = std.fs.path.sep;
+            @memcpy(buffer[alias.logical.len + 1 ..][0..rest.len], rest);
+        }
+        return buffer[0..length];
+    }
+
+    /// `spell`, allocated. The caller owns the result.
+    fn spellAlloc(alias: *const Alias, gpa: Allocator, subject: []const u8) Allocator.Error!?[]u8 {
+        const rest = path_cmp.relative(alias.physical, subject) orelse return null;
+        if (rest.len == 0) return try gpa.dupe(u8, alias.logical);
+        return try std.fs.path.join(gpa, &.{ alias.logical, rest });
+    }
+
+    fn keeps(alias: *const Alias, subject: []const u8) bool {
+        return !alias.filter.excludes(alias.root, subject);
+    }
+};
+
+/// A change to a name under a watch that follows links. See `noting`.
+pub const Note = struct {
+    id: WatchId,
+    /// Absolute path, owned by the batch until taken.
+    path: []u8,
+    kind: Kind,
+};
+
+/// The notes the batch held, now the caller's. See `takeNotes`.
+pub const Notes = struct {
+    items: std.ArrayList(Note),
+    /// See `notes_lost`.
+    lost: bool,
+
+    pub fn deinit(n: *Notes, gpa: Allocator) void {
+        for (n.items.items) |item| gpa.free(item.path);
+        n.items.deinit(gpa);
+    }
+};
+
+/// More notes than this between two takes are not worth reading one by
+/// one: the watcher looks at every link instead.
+const notes_limit = 4096;
 
 const Held = struct {
     id: WatchId,
@@ -158,6 +240,10 @@ pub fn deinit(b: *Batch, gpa: Allocator) void {
     }
     b.deferred.deinit(gpa);
     b.dropped.deinit(gpa);
+    b.aliases.deinit(gpa);
+    b.noting.deinit(gpa);
+    var notes = b.takeNotes();
+    notes.deinit(gpa);
     b.* = undefined;
 }
 
@@ -208,12 +294,75 @@ pub fn pushDetail(
     from: ?[]const u8,
     target: Target,
 ) Allocator.Error!void {
+    if (b.aliases.get(id)) |alias| return b.pushAliased(gpa, alias, subject, kind, from, target);
+    if (b.noting.contains(id)) b.note(gpa, id, subject, kind, from);
     const source = if (kind == .renamed and from != null and !path_cmp.eql(subject, from.?)) from else null;
     const replaced_hold: usize = if (source) |path| @intFromBool(b.held.contains(.{ .id = id, .path = path })) else 0;
     try b.pushAtPath(gpa, id, subject, kind, from, target, replaced_hold);
     // Only a successfully recorded destination ends the source's hold.
     // This applies to native renames and restored deferred changes alike.
     if (source) |path| b.release(gpa, id, path);
+}
+
+/// Records a change to the directory a followed link leads to as the
+/// change it is to the watch the link is in: spelled under the link, and
+/// kept or dropped by that watch's filter, a rename half outside it being
+/// what it is everywhere else. See `pairsRenames`.
+fn pushAliased(b: *Batch, gpa: Allocator, alias: *const Alias, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) Allocator.Error!void {
+    if (kind == .overflow) return b.pushDetail(gpa, alias.owner, alias.root, .overflow, null, .directory);
+    const here = try alias.spellAlloc(gpa, subject) orelse return;
+    defer gpa.free(here);
+    const there = if (from) |source| try alias.spellAlloc(gpa, source) else null;
+    defer if (there) |spelled| gpa.free(spelled);
+    const keeps = alias.keeps(here);
+    if (kind == .renamed and there != null) {
+        const keeps_from = alias.keeps(there.?);
+        if (keeps and keeps_from) return b.pushDetail(gpa, alias.owner, here, .renamed, there, target);
+        if (keeps) return b.pushDetail(gpa, alias.owner, here, .created, null, target);
+        if (keeps_from) return b.pushDetail(gpa, alias.owner, there.?, .removed, null, target);
+        return;
+    }
+    if (keeps) try b.pushDetail(gpa, alias.owner, here, kind, null, target);
+}
+
+/// Notes a change for the watcher to look for links in. Allocation
+/// failure loses the note and says so: the change itself is still
+/// recorded, and the watcher looks at every link instead.
+fn note(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8) void {
+    switch (kind) {
+        .closed, .unwatched => return,
+        .overflow => {
+            b.notes_lost = true;
+            return;
+        },
+        else => {},
+    }
+    b.noteOne(gpa, id, subject, kind);
+    if (from) |source| b.noteOne(gpa, id, source, .removed);
+}
+
+fn noteOne(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8, kind: Kind) void {
+    if (b.notes_lost) return;
+    if (b.notes.items.len >= notes_limit) {
+        b.notes_lost = true;
+        return;
+    }
+    const owned = gpa.dupe(u8, subject) catch {
+        b.notes_lost = true;
+        return;
+    };
+    b.notes.append(gpa, .{ .id = id, .path = owned, .kind = kind }) catch {
+        gpa.free(owned);
+        b.notes_lost = true;
+    };
+}
+
+/// Hands the notes over to the caller and starts again with none.
+pub fn takeNotes(b: *Batch) Notes {
+    const taken: Notes = .{ .items = b.notes, .lost = b.notes_lost };
+    b.notes = .empty;
+    b.notes_lost = false;
+    return taken;
 }
 
 fn pushAtPath(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target, replaced_hold: usize) Allocator.Error!void {
@@ -433,6 +582,15 @@ pub fn trouble(
 /// Queues a change produced while add runs. It cannot join a slice the
 /// previous poll already handed out; flush transfers it after poll resets.
 pub fn deferChange(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) Allocator.Error!void {
+    if (b.aliases.get(id)) |alias| {
+        if (kind == .overflow) return b.deferChange(gpa, alias.owner, alias.root, .overflow, null, .directory);
+        const here = try alias.spellAlloc(gpa, subject) orelse return;
+        defer gpa.free(here);
+        const there = if (from) |source| try alias.spellAlloc(gpa, source) else null;
+        defer if (there) |spelled| gpa.free(spelled);
+        if (!alias.keeps(here)) return;
+        return b.deferChange(gpa, alias.owner, here, kind, there, target);
+    }
     const owned = try gpa.dupe(u8, subject);
     errdefer gpa.free(owned);
     const owned_from = if (from) |source| try gpa.dupe(u8, source) else null;
@@ -1166,4 +1324,68 @@ test "a failed rename leaves its source hold available for retry" {
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
     try b.pushRename(gpa, id, "/watch/new", "/watch/old", .file);
     try testing.expectEqual(@as(usize, 0), b.held.count());
+}
+
+test "a change below a followed link is its watch's, spelled under the link" {
+    const gpa = testing.allocator;
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{});
+    defer b.deinit(gpa);
+    const sep = std.fs.path.sep_str;
+    const filter: lookout.Filter = .{ .ignore = &.{"*.tmp"} };
+    const alias: Alias = .{
+        .owner = @enumFromInt(0),
+        .root = sep ++ "watch",
+        .filter = &filter,
+        .physical = sep ++ "elsewhere" ++ sep ++ "target",
+        .logical = sep ++ "watch" ++ sep ++ "link",
+    };
+    const registration: WatchId = @enumFromInt(9);
+    try b.aliases.put(gpa, registration, &alias);
+    try b.noting.put(gpa, alias.owner, {});
+
+    try b.push(gpa, registration, alias.physical ++ sep ++ "a.txt", .created, .file);
+    try b.push(gpa, registration, alias.physical ++ sep ++ "skip.tmp", .created, .file);
+    try b.pushRename(gpa, registration, alias.physical ++ sep ++ "b.txt", alias.physical ++ sep ++ "skip.tmp", .file);
+    try b.push(gpa, registration, alias.physical, .attributes, .directory);
+    try b.push(gpa, registration, alias.physical, .overflow, .directory);
+    // Outside the target: not this registration's to report.
+    try b.push(gpa, registration, sep ++ "elsewhere" ++ sep ++ "other", .created, .file);
+
+    const expected = [_]struct { []const u8, Kind }{
+        .{ alias.logical ++ sep ++ "a.txt", .created },
+        .{ alias.logical ++ sep ++ "b.txt", .created },
+        .{ alias.logical, .attributes },
+        .{ alias.root, .overflow },
+    };
+    try testing.expectEqual(expected.len, b.events.items.len);
+    for (expected, b.events.items) |want, event| {
+        try testing.expectEqual(alias.owner, event.id);
+        try testing.expectEqualStrings(want[0], event.path);
+        try testing.expectEqual(want[1], event.kind);
+    }
+    // The watcher reads the names back to look for links; the overflow
+    // says it cannot know which names changed.
+    var notes = b.takeNotes();
+    defer notes.deinit(gpa);
+    try testing.expectEqual(@as(usize, 3), notes.items.items.len);
+    try testing.expect(notes.lost);
+    try testing.expectEqualStrings(alias.logical ++ sep ++ "a.txt", notes.items.items[0].path);
+}
+
+test "a lost note is said to be lost, and the change is still recorded" {
+    const gpa = testing.allocator;
+    var vtable: Io.VTable = undefined;
+    var b = Batch.init(@import("test_clock.zig").frozen(&vtable, testing.io), .{});
+    defer b.deinit(gpa);
+    const id: WatchId = @enumFromInt(0);
+    try b.noting.put(gpa, id, {});
+    var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    b.note(failing.allocator(), id, "/watch/link", .created, null);
+    try b.push(gpa, id, "/watch/link", .created, .file);
+    try testing.expectEqual(@as(usize, 1), b.events.items.len);
+    var notes = b.takeNotes();
+    defer notes.deinit(gpa);
+    try testing.expect(notes.lost);
+    try testing.expectEqual(@as(usize, 0), notes.items.items.len);
 }

@@ -154,8 +154,48 @@ pub const AddOptions = struct {
     ///   it finds as `created`, which closes the race for files that still
     ///   exist, not for files already gone again.
     /// * Symbolic links are not followed, so a link into a watched tree
-    ///   does not silently widen it.
+    ///   does not silently widen it, unless `follow_symlinks` asks for it.
     recursive: bool = false,
+    /// Follow symbolic links to directories inside a recursive watch.
+    /// Off by default, and ignored without `recursive` or on a watch of a
+    /// file.
+    ///
+    /// A followed link is watched as if the directory it leads to were
+    /// there, and what happens below it is reported under the link's
+    /// path, never the target's, with the watch's own id and filter.
+    /// Links are followed wherever they lead, outside the watched root as
+    /// well: that is what turning this on asks for, and why it is off.
+    ///
+    /// A link is not followed into a directory the watch already reaches:
+    /// the root or anything below it, a directory another followed link
+    /// reached first, or one that holds either -- a link back to an
+    /// ancestor is the usual case. This is decided by what the directory
+    /// is, its device and inode or its volume and file id on Windows,
+    /// never by how its path is spelled, so a cycle is never walked and
+    /// one watch never reports a directory under two names. Such a link
+    /// is an entry, as every link is without this option; when the link
+    /// that reached its directory first goes, it is followed instead.
+    ///
+    /// A link is looked at again whenever its own path changes. One that
+    /// leads elsewhere is reported on its path, and what the old
+    /// directory held stops being watched while the new one is walked;
+    /// neither is reported entry by entry. A link that leads nowhere is an
+    /// entry until it changes. A directory a followed link leads to that is
+    /// removed is `Kind.removed` on the link's path, and the link is an
+    /// entry from then on.
+    ///
+    /// Each followed link is a registration of its own on the directory
+    /// it leads to -- one more descriptor, kernel watch, stream or handle
+    /// -- and `add` walks the tree once more to find the links. A watch
+    /// follows at most `max_followed_links`; a link past that is
+    /// `Kind.unwatched` and is not followed. A watch that follows a link
+    /// produces no checkpoint: see `Watcher.checkpoint`. Where a
+    /// directory's identity cannot be read, no link is followed.
+    follow_symlinks: bool = false,
+    /// The most links one watch follows with `follow_symlinks`, those
+    /// found inside followed directories included. It bounds the depth of
+    /// a chain of links as well as their number.
+    max_followed_links: usize = 64,
     /// What of this path the watch is about. The default excludes
     /// nothing.
     ///

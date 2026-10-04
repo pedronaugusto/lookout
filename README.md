@@ -72,6 +72,17 @@ pruned where the backend supports it; other backends discard their events.
 
 Every change within a watch's scope and filters made after `add` returns is reported, subject to coalescing.
 
+Recursive watches do not follow symbolic links unless `follow_symlinks` is set. With it,
+a link to a directory is watched as if the directory were there, wherever it leads,
+including outside the root, and changes below it are reported under the link's path
+with the watch's id and filter. A link into a directory the watch already reaches, or
+into one holding such a directory, is not followed; this is decided by device and inode,
+or volume and file id on Windows, not by path. Each followed link is a registration of its
+own, and `add` walks the tree once more to find the links. A link changed to lead
+elsewhere is reported on its own path and the watch moves to the new directory; a
+dangling link is an entry until it changes. A watch follows at most `max_followed_links`
+links and reports a link past that as `unwatched`. Such a watch produces no checkpoint.
+
 `latency_ms` combines events collected together. `settle_ms` waits for modified file
 contents to stop changing. `debounce_ms` holds ordinary changes until the path is quiet
 and reports the last kind; it takes precedence over the other windows. Overflow and
@@ -123,7 +134,7 @@ coverage but cannot produce a checkpoint. Other backends return null.
 
 - It does not guarantee delivery of every intermediate write or rename.
 - It does not turn overflow recovery into a complete history of transient changes.
-- It does not follow symbolic links during recursive tree walks: loops and overlapping paths would produce duplicate reports.
+- It does not follow symbolic links during recursive tree walks unless `follow_symlinks` asks for it, and never into a directory the watch already reaches: loops and overlapping paths would produce duplicate reports.
 - It does not read gitignore syntax: use a predicate with the repository matcher, which owns anchoring, negation and directory rules.
 - It does not recover transient history on backends without a persistent log.
 - It does not supply an application event loop or rebuild policy.

@@ -24,6 +24,7 @@ const Io = std.Io;
 
 const Batch = @import("Batch.zig");
 const Deadline = @import("Deadline.zig");
+const Links = @import("Links.zig");
 const Tree = @import("Tree.zig");
 const Waker = @import("Waker.zig");
 const walk = @import("walk.zig");
@@ -260,6 +261,10 @@ pub const Watcher = struct {
     table: std.AutoArrayHashMapUnmanaged(WatchId, Held),
     /// Watches whose path does not exist yet. See `AddOptions.pending`.
     pending: std.ArrayList(*Pending),
+    /// The links each watch with `AddOptions.follow_symlinks` follows.
+    /// Heap-allocated: the registrations on the links' targets point
+    /// into them.
+    following: std.ArrayList(*Links),
     /// Set by `wake` and cleared by the `poll` that answers it. One of
     /// the two fields of a `Watcher` another thread may touch.
     woken: std.atomic.Value(bool),
@@ -329,6 +334,10 @@ pub const Watcher = struct {
         next: []const u8,
         /// `AddOptions.recursive`, applied at the promotion.
         recursive: bool,
+        /// `AddOptions.follow_symlinks` and `max_followed_links`, applied
+        /// at the promotion.
+        follow: bool,
+        max_followed_links: usize,
         /// `AddOptions.filter`, copied: the patterns it borrowed are long
         /// gone by the time the watch is promoted.
         filter: Filter,
@@ -431,6 +440,7 @@ pub const Watcher = struct {
             .polling = Poll.init(gpa, io, options) catch unreachable,
             .table = .empty,
             .pending = .empty,
+            .following = .empty,
             .woken = .init(false),
             .waker = switch (impl) {
                 inline else => |*backend_impl| backend_impl.waker(),
@@ -442,6 +452,8 @@ pub const Watcher = struct {
     /// Releases every watch, every descriptor, and the events handed out
     /// by the last `poll`.
     pub fn deinit(w: *Watcher) void {
+        while (w.following.items.len != 0) w.stopFollowing(w.following.items[0].owner);
+        w.following.deinit(w.gpa);
         w.polling.deinit();
         switch (w.impl) {
             inline else => |*impl| impl.deinit(),
@@ -516,6 +528,13 @@ pub const Watcher = struct {
         errdefer _ = w.table.swapRemove(id);
         try w.addBackend(id, abs, abs, options);
         w.next_id += 1;
+        if (options.follow_symlinks and options.recursive and stat.kind == .directory) {
+            w.follow(id, abs, options.filter, options.max_followed_links, false) catch |err| {
+                w.removeBackend(id);
+                w.batch.discardFuture(w.gpa, id);
+                return err;
+            };
+        }
         return id;
     }
 
@@ -610,6 +629,8 @@ pub const Watcher = struct {
             .anchor = null,
             .next = target,
             .recursive = options.recursive,
+            .follow = options.follow_symlinks,
+            .max_followed_links = options.max_followed_links,
             .filter = filter,
         };
         try w.pending.append(w.gpa, p);
@@ -808,6 +829,9 @@ pub const Watcher = struct {
                 held.target = target;
             } else w.gpa.free(mirror);
         }
+        if (p.follow and p.recursive and target == .directory) {
+            try w.follow(p.id, p.target, p.filter, p.max_followed_links, true);
+        }
         try w.batch.pushDetail(w.gpa, p.id, p.target, .created, null, target);
         if (target == .directory) try w.reportMade(p);
         w.destroyPending(p);
@@ -874,6 +898,7 @@ pub const Watcher = struct {
     /// Removing an id that is not currently watched — one already
     /// removed — does nothing.
     pub fn remove(w: *Watcher, id: WatchId) void {
+        w.stopFollowing(id);
         w.removeBackend(id);
         if (w.table.fetchSwapRemove(id)) |entry| {
             var held = entry.value;
@@ -923,6 +948,7 @@ pub const Watcher = struct {
         } else switch (w.impl) {
             inline else => |*impl| try impl.refilter(id, filter, &w.batch),
         }
+        if (w.followingOf(id)) |links| try w.refollow(links, filter);
         w.batch.refilter(w.gpa, id, w.table.get(id).?.path, filter, w.handed_out);
     }
 
@@ -1094,6 +1120,7 @@ pub const Watcher = struct {
         try w.batch.flush(w.gpa);
         try w.batch.promote(w.gpa);
         try w.settlePending();
+        try w.followNoted();
         while (w.batch.dropped.count() != 0) {
             const id = w.batch.dropped.keys()[0];
             // The batch knows it had to stop holding names; only the
@@ -1158,14 +1185,16 @@ pub const Watcher = struct {
     /// replaying the delivery represented by this checkpoint.
     ///
     /// Call Checkpoint.deinit to free it. null means the backend has no
-    /// persistent log, a watched volume has no unchanged persistent log, or
-    /// a failed delivery must first be retried by poll.
+    /// persistent log, a watched volume has no unchanged persistent log, a
+    /// watch follows a symbolic link, or a failed delivery must first be
+    /// retried by poll.
     /// Persist the token after processing the returned events. A crash
     /// before persistence replays work since the previously saved snapshot;
     /// processing and persistence need a caller transaction for exactly once.
     pub fn checkpoint(w: *const Watcher, gpa: Allocator) Allocator.Error!?Checkpoint {
         if (w.batch.dropped.count() != 0 or w.polling.registrationCount() != 0) return null;
         for (w.table.values()) |held| if (held.incomplete) return null;
+        for (w.following.items) |links| if (links.followed.items.len != 0) return null;
         if (comptime @hasField(Impl, "fsevents")) {
             if (w.impl == .fsevents) {
                 const roots = try w.watches(gpa);
@@ -1175,6 +1204,104 @@ pub const Watcher = struct {
         }
         return null;
     }
+
+    /// Starts following the links of a recursive watch on a directory,
+    /// in place of any it followed before. See `AddOptions.follow_symlinks`.
+    ///
+    /// An allocation failure while walking leaves the links to the next
+    /// `poll` to look at again when `keep` is set, as for a watch already
+    /// handed out, and stops following otherwise.
+    fn follow(w: *Watcher, id: WatchId, root: []const u8, filter: Filter, max: usize, keep: bool) Allocator.Error!void {
+        w.stopFollowing(id);
+        const links = try Links.create(w.gpa, w.io, id, root, filter, max) orelse return;
+        {
+            errdefer links.destroy(LinkHost{ .w = w });
+            try w.following.ensureUnusedCapacity(w.gpa, 1);
+            try w.batch.noting.put(w.gpa, id, {});
+            w.following.appendAssumeCapacity(links);
+        }
+        links.followBelow(LinkHost{ .w = w }, &w.batch, links.root) catch |err| {
+            if (keep) links.stale = true else w.stopFollowing(id);
+            return err;
+        };
+    }
+
+    /// Lets go of every link `id` follows, and of what they lead to.
+    fn stopFollowing(w: *Watcher, id: WatchId) void {
+        for (w.following.items, 0..) |links, i| {
+            if (links.owner != id) continue;
+            _ = w.following.swapRemove(i);
+            _ = w.batch.noting.swapRemove(id);
+            links.destroy(LinkHost{ .w = w });
+            return;
+        }
+    }
+
+    fn followingOf(w: *const Watcher, id: WatchId) ?*Links {
+        for (w.following.items) |links| if (links.owner == id) return links;
+        return null;
+    }
+
+    /// Judges the links of a watch by its new filter: the registrations
+    /// on their targets are reconciled with it, and the links it now
+    /// prunes are let go while those it now admits are followed.
+    fn refollow(w: *Watcher, links: *Links, filter: Filter) RefilterError!void {
+        errdefer links.stale = true;
+        try links.refilter(filter);
+        const host: LinkHost = .{ .w = w };
+        for (links.followed.items) |link| try host.refilter(link);
+        try links.refresh(host, &w.batch);
+    }
+
+    /// Follows what changed under the watches that follow links.
+    fn followNoted(w: *Watcher) Allocator.Error!void {
+        if (w.following.items.len == 0) return;
+        var notes = w.batch.takeNotes();
+        defer notes.deinit(w.gpa);
+        // Notes taken and not read are gone: every link is looked at
+        // again on the next round instead.
+        errdefer for (w.following.items) |links| {
+            links.stale = true;
+        };
+        for (w.following.items) |links| {
+            if (notes.lost) links.stale = true;
+            try links.settle(LinkHost{ .w = w }, &w.batch, notes.items.items);
+        }
+    }
+
+    /// What `Links` asks of the watcher: ids for, and registrations on,
+    /// the directories followed links lead to.
+    const LinkHost = struct {
+        w: *Watcher,
+
+        pub fn issue(h: LinkHost) WatchId {
+            const id: WatchId = @enumFromInt(h.w.next_id);
+            h.w.next_id += 1;
+            return id;
+        }
+
+        /// The alias goes in first: a backend may report while it
+        /// registers, and what it reports is the link's watch's.
+        pub fn register(h: LinkHost, link: *Links.Link) AddError!void {
+            try h.w.batch.aliases.put(h.w.gpa, link.id, &link.alias);
+            errdefer _ = h.w.batch.aliases.swapRemove(link.id);
+            try h.w.addBackend(link.id, link.target, link.target, .{ .recursive = true, .filter = link.filter() });
+        }
+
+        pub fn unregister(h: LinkHost, id: WatchId) void {
+            h.w.removeBackend(id);
+            _ = h.w.batch.aliases.swapRemove(id);
+        }
+
+        fn refilter(h: LinkHost, link: *Links.Link) RefilterError!void {
+            if (h.w.polling.tree.watches.contains(link.id)) {
+                return h.w.polling.refilter(link.id, link.filter(), &h.w.batch);
+            }
+            switch (h.w.impl) {
+                inline else => |*impl| try impl.refilter(link.id, link.filter(), &h.w.batch),
+            }
+        }
+    };
 
     /// Every watch this watcher holds, in the order they were added.
     ///
@@ -1272,6 +1399,7 @@ test {
     _ = Baseline;
     _ = Batch;
     _ = Filter;
+    _ = Links;
     _ = Poll;
     _ = Tree;
     _ = Waker;

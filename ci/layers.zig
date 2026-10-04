@@ -40,6 +40,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/Batch.zig",
     } },
     .{ .name = "watch trees", .patterns = &.{
+        "src/Links.zig",
         "src/Tree.zig",
     } },
     .{ .name = "operation contracts", .patterns = &.{
@@ -61,6 +62,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/test_backend_windows.zig",
         "src/test_fuzz.zig",
         "src/test_gaps.zig",
+        "src/test_links.zig",
         "src/test_resources.zig",
         "src/test_suite.zig",
     } },

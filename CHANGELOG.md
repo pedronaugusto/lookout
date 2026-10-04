@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `AddOptions.follow_symlinks` makes a recursive watch follow links to directories and report changes below a link under the link's path. A link into a directory the watch already reaches is refused by device and inode, or volume and file id; `max_followed_links` bounds each watch and a link past it is reported `unwatched`. Off by default.
+
 - Open the baseline parent with a syncable directory handle on Linux.
 
 - `Baseline.saveWithOptions` can fsync the file and parent directory on POSIX; Windows refuses durable replacement by name before writing.
