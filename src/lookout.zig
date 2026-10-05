@@ -30,6 +30,11 @@ const Waker = @import("Waker.zig");
 const walk = @import("walk.zig");
 const path_cmp = @import("path.zig");
 const fs_type = @import("filesystem.zig");
+const contract = @import("watch_contract.zig");
+const FsEvents = @import("backend/fsevents.zig");
+const Kqueue = @import("backend/kqueue.zig");
+const Inotify = @import("backend/inotify.zig");
+const Windows = @import("backend/windows.zig");
 
 /// The filesystem fact measured at each watch registration.
 pub const Filesystem = fs_type.Kind;
@@ -313,7 +318,7 @@ pub const Watcher = struct {
     }
 
     /// One watch, as `watches` reports it.
-    pub const WatchInfo = @import("watch_contract.zig").WatchInfo;
+    pub const WatchInfo = contract.WatchInfo;
 
     /// A watch waiting for its path to appear.
     ///
@@ -357,20 +362,20 @@ pub const Watcher = struct {
     /// `init`, `supported` and `backend` be one line each.
     const Impl = switch (builtin.os.tag) {
         .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => union(enum) {
-            fsevents: @import("backend/fsevents.zig"),
-            kqueue: @import("backend/kqueue.zig"),
+            fsevents: FsEvents,
+            kqueue: Kqueue,
             poll: Poll,
         },
         .dragonfly, .freebsd, .netbsd, .openbsd => union(enum) {
-            kqueue: @import("backend/kqueue.zig"),
+            kqueue: Kqueue,
             poll: Poll,
         },
         .linux => union(enum) {
-            inotify: @import("backend/inotify.zig"),
+            inotify: Inotify,
             poll: Poll,
         },
         .windows => union(enum) {
-            windows: @import("backend/windows.zig"),
+            windows: Windows,
             poll: Poll,
         },
         else => union(enum) {
@@ -382,14 +387,14 @@ pub const Watcher = struct {
     /// FSEvents also allocates its delivery sink and `Options.buffer_bytes`
     /// buffer here, even with no watches. Allocator failures are
     /// `OutOfMemory`. Other backends allocate as watches are added.
-    pub const InitError = @import("watch_contract.zig").InitError;
+    pub const InitError = contract.InitError;
 
     /// Errors `add` can return, on top of the file-system errors of
     /// resolving and opening the path.
-    pub const AddError = @import("watch_contract.zig").AddError;
+    pub const AddError = contract.AddError;
 
     /// Errors changing a live watch's filter.
-    pub const RefilterError = @import("watch_contract.zig").RefilterError;
+    pub const RefilterError = contract.RefilterError;
 
     /// Errors `poll` can return, on top of the file-system errors of
     /// re-reading watched directories.
@@ -401,12 +406,12 @@ pub const Watcher = struct {
     /// backend would be a set per value of `Options.backend` — and every
     /// backend re-reads directories through `std.Io`, whose file-system
     /// errors carry `error.Canceled` anyway.
-    pub const PollError = @import("watch_contract.zig").PollError;
+    pub const PollError = contract.PollError;
 
     /// A system call failed with a code lookout does not model. This is
     /// the escape hatch every backend shares, so that an error set is a
     /// promise about the whole API rather than about one platform.
-    pub const UnexpectedError = @import("watch_contract.zig").UnexpectedError;
+    pub const UnexpectedError = contract.UnexpectedError;
 
     /// Creates a watcher that holds no watches.
     ///

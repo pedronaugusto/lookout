@@ -352,6 +352,8 @@ const Filter = @import("../Filter.zig");
 const Baseline = @import("../Baseline.zig");
 const Checkpoint = @import("../Checkpoint.zig");
 const builtin = @import("builtin");
+const baseline_format = @import("../Baseline/format.zig");
+const Snapshot = @import("../Snapshot.zig");
 
 /// A path out of the pieces two spellings of one path differ by: case,
 /// composition, both separators and runs of them, the dot components, a
@@ -870,7 +872,6 @@ test "a persisted baseline loader accepts only intact validated storage" {
 
 fn fuzzBaselineStorage(_: void, smith: *testing.Smith) !void {
     @disableInstrumentation();
-    const format = @import("../Baseline/format.zig");
     const gpa = testing.allocator;
     var buf: [2048]u8 = undefined;
     const bytes = buf[0..smith.slice(&buf)];
@@ -878,21 +879,21 @@ fn fuzzBaselineStorage(_: void, smith: *testing.Smith) !void {
     // find a cryptographic checksum or the whole JSON schema.
     if (smith.boolWeighted(1, 1)) {
         const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
-        const meta: @import("../Snapshot.zig").Meta = .{ .size = smith.value(u64), .mtime_ns = smith.value(i96), .ctime_ns = smith.value(i96), .file_kind = .file };
-        const wrapped = try format.encode(gpa, .{ .platform = format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{.{ .path = root, .truncated = false, .check_contents = false, .entries = &.{.{ .name = bytes, .meta = meta }} }} });
+        const meta: Snapshot.Meta = .{ .size = smith.value(u64), .mtime_ns = smith.value(i96), .ctime_ns = smith.value(i96), .file_kind = .file };
+        const wrapped = try baseline_format.encode(gpa, .{ .platform = baseline_format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{.{ .path = root, .truncated = false, .check_contents = false, .entries = &.{.{ .name = bytes, .meta = meta }} }} });
         defer gpa.free(wrapped);
-        var structured = format.parse(gpa, wrapped) catch |err| {
+        var structured = baseline_format.parse(gpa, wrapped) catch |err| {
             try testing.expectEqual(error.InvalidBaseline, err);
             return;
         };
         defer structured.deinit();
-        const encoded = try format.encode(gpa, structured.value);
+        const encoded = try baseline_format.encode(gpa, structured.value);
         defer gpa.free(encoded);
-        var again = try format.parse(gpa, encoded);
+        var again = try baseline_format.parse(gpa, encoded);
         defer again.deinit();
         return;
     }
-    var parsed = format.parse(gpa, bytes) catch |err| {
+    var parsed = baseline_format.parse(gpa, bytes) catch |err| {
         try testing.expect(err == error.InvalidBaseline or err == error.UnsupportedBaselineVersion or err == error.ForeignBaseline);
         // Exercise the JSON parser behind a valid checksum as well.
         const wrapped = try gpa.alloc(u8, 44 + bytes.len);
@@ -901,13 +902,13 @@ fn fuzzBaselineStorage(_: void, smith: *testing.Smith) !void {
         std.mem.writeInt(u32, wrapped[8..12], 1, .little);
         std.crypto.hash.sha2.Sha256.hash(bytes, wrapped[12..44], .{});
         @memcpy(wrapped[44..], bytes);
-        var inner = format.parse(gpa, wrapped) catch return;
+        var inner = baseline_format.parse(gpa, wrapped) catch return;
         defer inner.deinit();
         return;
     };
     defer parsed.deinit();
-    const encoded = try format.encode(gpa, parsed.value);
+    const encoded = try baseline_format.encode(gpa, parsed.value);
     defer gpa.free(encoded);
-    var again = try format.parse(gpa, encoded);
+    var again = try baseline_format.parse(gpa, encoded);
     defer again.deinit();
 }

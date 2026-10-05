@@ -5,6 +5,7 @@ const std = @import("std");
 const path = @import("../path.zig");
 const WatchId = @import("../types.zig").WatchId;
 const Allocator = std.mem.Allocator;
+const builtin = @import("builtin");
 const History = @This();
 
 gpa: Allocator,
@@ -219,7 +220,7 @@ pub const Iterator = struct {
 test "path revisions survive removal, recreation and owner release" {
     const gpa = std.testing.allocator;
     const h = try init(gpa);
-    const root = if (@import("builtin").os.tag == .windows) "C:\\tree" else "/tree";
+    const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
     const first = try h.prepare(@enumFromInt(1), root);
     h.publish(first);
     const before = try h.snapshot(gpa, @enumFromInt(1), root);
@@ -248,7 +249,7 @@ test "releasing the oldest revision compacts obsolete paths" {
     const gpa = std.testing.allocator;
     const h = try init(gpa);
     defer h.release();
-    const root = if (@import("builtin").os.tag == .windows) "C:\\tree" else "/tree";
+    const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
     const node = try h.prepare(@enumFromInt(1), root);
     h.publish(node);
     const before = try h.snapshot(gpa, @enumFromInt(1), root);

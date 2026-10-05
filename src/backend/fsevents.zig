@@ -48,6 +48,11 @@ const records = @import("fsevents/records.zig");
 const trace = @import("../trace.zig");
 const walk = @import("../walk.zig");
 const Waker = @import("../Waker.zig");
+const Checkpoint = @import("../Checkpoint.zig");
+const Options = @import("../options.zig").Options;
+const contract = @import("../watch_contract.zig");
+const AddOptions = @import("../options.zig").AddOptions;
+const builtin = @import("builtin");
 const Record = records.Record;
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
@@ -74,7 +79,7 @@ staging_overflowed: bool = false,
 budget: Budget,
 /// Owned restarting state, copied at init. Each stream consumes its matching
 /// watch only after registration and restoration succeed.
-restarting: ?@import("../Checkpoint.zig"),
+restarting: ?Checkpoint,
 resume_used: []bool,
 /// Every path each watch believes exists, seeded by walking the watch
 /// when it is added and kept current from what it reports. Path keys are
@@ -309,7 +314,7 @@ const lost_track: u32 = flag.must_scan_sub_dirs | flag.user_dropped | flag.kerne
 
 /// Creates the delivery queue, the buffer it fills, and the pipe the
 /// watcher is woken through.
-pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) @import("../watch_contract.zig").InitError!FsEvents {
+pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!FsEvents {
     var fds: [2]posix.fd_t = undefined;
     if (std.c.pipe(&fds) != 0) return switch (posix.errno(@as(c_int, -1))) {
         .MFILE => error.ProcessFdQuotaExceeded,
@@ -348,7 +353,7 @@ pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) 
         return error.SystemResources;
 
     errdefer c.dispatch_release(queue);
-    var restarting: ?@import("../Checkpoint.zig") = if (options.checkpoint) |checkpoint|
+    var restarting: ?Checkpoint = if (options.checkpoint) |checkpoint|
         .{ .state = try checkpoint_format.copy(gpa, checkpoint.state.value) }
     else
         null;
@@ -407,7 +412,7 @@ pub fn fd(f: *const FsEvents) ?posix.fd_t {
 /// Copies only polling-thread state. Callback bytes are still in the log
 /// beyond each stream's cursor and need no snapshot copy. A retained failed
 /// drain has not committed its cursor and must be retried first.
-pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_ready: bool, roots: []const @import("../watch_contract.zig").WatchInfo) Allocator.Error!?@import("../Checkpoint.zig") {
+pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_ready: bool, roots: []const contract.WatchInfo) Allocator.Error!?Checkpoint {
     if (f.staging.items.len != 0 or f.staging_overflowed) return null;
     var watches: std.ArrayList(checkpoint_format.Watch) = .empty;
     defer watches.deinit(gpa);
@@ -497,15 +502,15 @@ pub fn add(
     f: *FsEvents,
     id: WatchId,
     abs_path: []const u8,
-    options: @import("../options.zig").AddOptions,
+    options: AddOptions,
     batch: *Batch,
-) @import("../watch_contract.zig").AddError!void {
+) contract.AddError!void {
     return f.addFor(id, abs_path, abs_path, options, batch);
 }
 
 /// The caller's root identifies a resume watch even when its registration
 /// is parked on an ancestor while that root is absent.
-pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: @import("../options.zig").AddOptions, batch: *Batch) @import("../watch_contract.zig").AddError!void {
+pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: AddOptions, batch: *Batch) contract.AddError!void {
     try f.streams.ensureUnusedCapacity(f.gpa, 1);
     var stream = try f.startStream(id, abs_path, requested, options, false);
     // The table owns the started stream and its initial state. If the
@@ -555,7 +560,7 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
 
 /// Creates and starts a stream, transferring ownership only on success.
 /// Seeding happens after start so changes during the walk stay queued.
-fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: @import("../options.zig").AddOptions, force_live: bool) @import("../watch_contract.zig").AddError!*Stream {
+fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: AddOptions, force_live: bool) contract.AddError!*Stream {
     const stat = try Io.Dir.cwd().statFile(f.io, abs_path, .{});
     const scope: Stream.Scope = if (stat.kind != .directory)
         .file
@@ -635,7 +640,7 @@ fn createStream(
     subject: []const u8,
     since: u64,
     latency: f64,
-) @import("../watch_contract.zig").AddError!c.FSEventStreamRef {
+) contract.AddError!c.FSEventStreamRef {
     const cf_path = c.CFStringCreateWithBytes(
         null,
         subject.ptr,
@@ -671,7 +676,7 @@ fn createStream(
 /// A tree crossing a mount needs the host's live namespace. A host cursor
 /// cannot be persisted safely. The caller reports the registration gap as
 /// loss in its own delivery phase; checkpoints stay unavailable for this watch.
-fn useLiveStream(f: *FsEvents, id: WatchId) @import("../watch_contract.zig").AddError!void {
+fn useLiveStream(f: *FsEvents, id: WatchId) contract.AddError!void {
     const old = f.streams.get(id).?;
     if (!old.persistent) return;
     const next = try f.startStream(id, old.root, old.root, .{ .recursive = old.scope == .tree, .filter = old.filter }, true);
@@ -720,7 +725,7 @@ fn withoutStream(bytes: []u8, id: WatchId) usize {
 
 /// Replaces the delivery filter, retaining the stream unless newly reached
 /// mounts require the host namespace.
-pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) @import("../watch_contract.zig").RefilterError!void {
+pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     const stream = f.streams.get(id) orelse return error.UnknownWatch;
     const replacement = try next.dupe(f.gpa);
     var previous = stream.filter;
@@ -840,7 +845,7 @@ fn deliver(
 
 /// Waits on the wake pipe until the drain produces something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
+pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     // A drain takes the delivery thread's records and decides what each
     // one was, asking the file system as it goes, so nothing in here is a
     // place to stop: see `Watcher.poll`. The wait itself is out of
@@ -853,7 +858,7 @@ pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) @import("../watch_con
     try f.resolveHeld(batch);
 }
 
-fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
+fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     const before = batch.revision;
     const deadline: Deadline = .start(f.io, timeout_ms);
 
@@ -899,7 +904,7 @@ fn readable(f: *FsEvents, timeout: i32) bool {
 
 /// Takes everything the delivery thread has left and turns it into
 /// events.
-fn drain(f: *FsEvents, batch: *Batch) @import("../watch_contract.zig").PollError!void {
+fn drain(f: *FsEvents, batch: *Batch) contract.PollError!void {
     // A failed drain keeps its bytes. Replaying can repeat bookkeeping,
     // which Watcher.poll covers with its conservative recovery notice.
     errdefer f.budget.reread({}, everyDirectory);
@@ -1036,7 +1041,7 @@ fn everyDirectory(_: void, _: []const u8) bool {
 
 /// Joins the half held from the last drain to its partner in this one,
 /// or gives up on it.
-fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) @import("../watch_contract.zig").PollError!void {
+fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) contract.PollError!void {
     const taken = f.pairing.take(delivered, used, Asking{ .f = f }) orelse return;
     errdefer {
         f.pairing.held = taken.half;
@@ -1047,7 +1052,7 @@ fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) 
 }
 
 /// The pairing owns the half until reporting it and its partner succeeds.
-fn reportTaken(f: *FsEvents, batch: *Batch, delivered: []const Record, taken: records.Pairing.Taken) @import("../watch_contract.zig").PollError!void {
+fn reportTaken(f: *FsEvents, batch: *Batch, delivered: []const Record, taken: records.Pairing.Taken) contract.PollError!void {
     const at = taken.partner orelse return f.reportHalf(batch, taken.half);
     const stream = f.streams.get(taken.half.id) orelse return f.reportHalf(batch, taken.half);
 
@@ -1093,7 +1098,7 @@ fn report(
     used: []bool,
     at: usize,
     losses: *std.ArrayList(Loss),
-) @import("../watch_contract.zig").PollError!void {
+) contract.PollError!void {
     const record = delivered[at];
     const stream = f.streams.get(record.id) orelse {
         trace.log("fsevents drop no-stream watch={d} path={s}", .{ @intFromEnum(record.id), record.path });
@@ -1197,7 +1202,7 @@ fn reportPlain(
     batch: *Batch,
     record: Record,
     stream: *const Stream,
-) @import("../watch_contract.zig").PollError!void {
+) contract.PollError!void {
     const seen = f.known.contains(.{ .id = record.id, .path = record.path });
     // A known path with no removal or rename flag, and a newly-created
     // path with neither, are present as far as this record can say. A
@@ -1315,7 +1320,7 @@ fn adopt(
     id: WatchId,
     root: []const u8,
     stream: *const Stream,
-) @import("../watch_contract.zig").PollError!void {
+) contract.PollError!void {
     try f.budget.begin(root);
     defer f.budget.end();
     const Adopting = struct {
@@ -1365,7 +1370,7 @@ fn joined(
     to: []const u8,
     from: []const u8,
     target: Target,
-) @import("../watch_contract.zig").PollError!void {
+) contract.PollError!void {
     const id = stream.id;
     const keeps_to = !stream.filter.excludes(stream.root, to);
     const keeps_from = !stream.filter.excludes(stream.root, from);
@@ -1397,7 +1402,7 @@ fn joined(
 
 /// Holds an unpaired rename until the next delivery arrives. Anything
 /// already held has waited as long as it is going to.
-fn hold(f: *FsEvents, batch: *Batch, record: Record) @import("../watch_contract.zig").PollError!void {
+fn hold(f: *FsEvents, batch: *Batch, record: Record) contract.PollError!void {
     // Copied first: the buffer the record points into is emptied before
     // the next delivery is read, and a dupe that fails must leave what
     // is already held where it was.
@@ -1415,7 +1420,7 @@ fn hold(f: *FsEvents, batch: *Batch, record: Record) @import("../watch_contract.
 
 /// Gives up on a half that never found its partner, at the end of the
 /// whole wait rather than at the end of one delivery.
-fn resolveHeld(f: *FsEvents, batch: *Batch) @import("../watch_contract.zig").PollError!void {
+fn resolveHeld(f: *FsEvents, batch: *Batch) contract.PollError!void {
     const half = f.pairing.held orelse return;
     try f.reportHalf(batch, half);
     f.pairing.held = null;
@@ -1426,7 +1431,7 @@ fn resolveHeld(f: *FsEvents, batch: *Batch) @import("../watch_contract.zig").Pol
 /// out of the watch, or renamed and then deleted, and what is left is
 /// the removal or the creation the other backends would give. A half on
 /// a name the filter excludes is never held -- see `report`.
-fn reportHalf(f: *FsEvents, batch: *Batch, half: records.Half) @import("../watch_contract.zig").PollError!void {
+fn reportHalf(f: *FsEvents, batch: *Batch, half: records.Half) contract.PollError!void {
     const stream = f.streams.get(half.id) orelse return;
     trace.log("fsevents unpaired renamed path={s}", .{half.path});
     try f.reportPlain(batch, half.record(), stream);
@@ -1529,7 +1534,7 @@ fn refreshKnown(
     id: WatchId,
     root: []const u8,
     stream: *const Stream,
-) @import("../watch_contract.zig").PollError!void {
+) contract.PollError!void {
     f.forgetSubtree(id, root);
     try f.remember(id, root);
 
@@ -1773,7 +1778,7 @@ fn recount(
     subject: []const u8,
     move: Budget.Move,
     stream: *const Stream,
-) @import("../watch_contract.zig").PollError!void {
+) contract.PollError!void {
     const change: Change = .{
         .dir = std.fs.path.dirname(subject) orelse return,
         .subject = subject,
@@ -2040,7 +2045,7 @@ test "a file stream accepts the replay sentinel outside its event scope" {
 }
 
 // Integration fixtures use the adapter’s own callback and native declarations.
-pub const test_access = if (@import("builtin").is_test) struct {
+pub const test_access = if (builtin.is_test) struct {
     pub const Asking = AskingFixture;
     pub const append = Sink.append;
     pub const signal = Sink.signal;

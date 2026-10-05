@@ -17,7 +17,7 @@ pub const Watch = struct {
     identity: Identity,
     recursive: bool,
     /// The path baseline at this cursor, persisted with the checkpoint.
-    baseline: @import("paths.zig").Paths,
+    baseline: Paths,
     changes: []const Change = &.{},
     half: ?Half = null,
 };
@@ -44,6 +44,7 @@ pub const Half = struct {
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const path_cmp = @import("../path.zig");
+const Paths = @import("paths.zig").Paths;
 pub const ParseError = error{ OutOfMemory, InvalidCheckpoint };
 
 pub const Owned = struct {
@@ -79,8 +80,8 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {
         var paths = watch.baseline.iterator();
         defer paths.deinit();
         while (paths.next()) |known| {
-            if (!@import("../path.zig").within(watch.root, known) or std.mem.indexOfScalar(u8, known, 0) != null) return error.InvalidCheckpoint;
-            var components = std.mem.tokenizeAny(u8, known, @import("../path.zig").separators);
+            if (!path_cmp.within(watch.root, known) or std.mem.indexOfScalar(u8, known, 0) != null) return error.InvalidCheckpoint;
+            var components = std.mem.tokenizeAny(u8, known, path_cmp.separators);
             while (components.next()) |component| {
                 if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.InvalidCheckpoint;
             }

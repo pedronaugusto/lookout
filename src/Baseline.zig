@@ -23,6 +23,8 @@ const Io = std.Io;
 const lookout = @import("types.zig");
 const Filter = @import("Filter.zig");
 const Snapshot = @import("Snapshot.zig");
+const builtin = @import("builtin");
+const path_cmp = @import("path.zig");
 const format = @import("Baseline/format.zig");
 const Kind = lookout.Kind;
 const Target = lookout.Target;
@@ -175,7 +177,7 @@ pub const SaveOptions = struct {
 /// happens after replacement, so the new file may already be visible.
 pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8, options: SaveOptions) Baseline.SaveError!void {
     if (b.filter.allow != null) return error.UnsupportedBaselineFilter;
-    if (options.durable and @import("builtin").os.tag == .windows) return error.UnsupportedBaselineDurability;
+    if (options.durable and builtin.os.tag == .windows) return error.UnsupportedBaselineDurability;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -224,7 +226,7 @@ pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, opti
         else => return err,
     };
     defer gpa.free(real);
-    if (!@import("path.zig").eql(real, state.root) or options.recursive != state.recursive or
+    if (!path_cmp.eql(real, state.root) or options.recursive != state.recursive or
         options.max_dir_entries != state.max_dir_entries or !samePatterns(options.filter.ignore, state.ignore) or
         !samePatterns(options.filter.only, state.only)) return error.ForeignBaseline;
     var b: Baseline = .{ .io = io, .root = try gpa.dupe(u8, state.root), .recursive = state.recursive, .max_dir_entries = state.max_dir_entries, .filter = .none, .dirs = .empty, .changes = .empty, .scratch = .empty };
@@ -883,7 +885,7 @@ test "a saved baseline reports changes since last run and replaces its file" {
 
 test "baseline storage refuses corrupt foreign and old files by name" {
     const gpa = testing.allocator;
-    const root = if (@import("builtin").os.tag == .windows) "C:\\tree" else "/tree";
+    const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
     const state: format.State = .{ .platform = format.platform, .root = root, .recursive = false, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{} };
     const bytes = try format.encode(gpa, state);
     defer gpa.free(bytes);
@@ -939,7 +941,7 @@ test "a failed baseline replacement leaves the previous file intact" {
 
 test "baseline storage validates checksummed paths before trusting them" {
     const gpa = testing.allocator;
-    const root = if (@import("builtin").os.tag == .windows) "C:\\tree" else "/tree";
+    const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
     const bad = try std.fs.path.join(gpa, &.{ root, "..", "outside" });
     defer gpa.free(bad);
     const directory: format.Directory = .{ .path = bad, .truncated = false, .check_contents = false, .entries = &.{} };
@@ -968,7 +970,7 @@ test "durable baseline saves sync before and after replacement and preserve name
     defer gpa.free(original);
     try tmp.dir.writeFile(io, .{ .sub_path = "tree/new", .data = "one" });
     _ = try b.diff(gpa);
-    if (@import("builtin").os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         try testing.expectError(error.UnsupportedBaselineDurability, b.saveWithOptions(gpa, filename, .{ .durable = true }));
         const after = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
         defer gpa.free(after);

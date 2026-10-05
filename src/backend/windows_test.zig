@@ -28,11 +28,12 @@ const grace_ms = 25;
 const grace_rounds = 4;
 
 const access = @import("windows.zig").test_access;
+const builtin = @import("builtin");
 const c = access.c;
 const wants = access.wants;
 
 test "a read that completes with nothing is an overflow, and the watch reads on" {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     // ReadDirectoryChangesW: "If the number of changes exceeds the
     // buffer size, the entire contents of the buffer are discarded, the
     // lpBytesReturned parameter contains zero". Through a completion
@@ -106,7 +107,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
 }
 
 test "a lost read reads the entry counts again, so the budget holds after it" {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     // Three creations, read and counted; then the count set back to what
     // it would have been had the kernel discarded them, which is what a
     // read it could not hold does ("the entire contents of the buffer
@@ -179,7 +180,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
 }
 
 test "allocation failure during delivery releases a removed Windows completion" {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();

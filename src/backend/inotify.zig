@@ -36,6 +36,10 @@ const path_cmp = @import("../path.zig");
 const records = @import("inotify/records.zig");
 const walk = @import("../walk.zig");
 const Waker = @import("../Waker.zig");
+const Options = @import("../options.zig").Options;
+const contract = @import("../watch_contract.zig");
+const AddOptions = @import("../options.zig").AddOptions;
+const builtin = @import("builtin");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
@@ -122,7 +126,7 @@ const base_mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
 const read_buffer_len = 8192;
 
 /// Creates the inotify descriptor and the pipe `wake` pokes.
-pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) @import("../watch_contract.zig").InitError!Inotify {
+pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!Inotify {
     // `linux.errno`, not `posix.errno`: these are raw syscalls, and on a
     // target that links libc `posix.errno` reads libc's thread-local
     // variable, which a raw syscall never writes.
@@ -214,9 +218,9 @@ pub fn add(
     n: *Inotify,
     id: WatchId,
     abs_path: []const u8,
-    options: @import("../options.zig").AddOptions,
+    options: AddOptions,
     batch: *Batch,
-) @import("../watch_contract.zig").AddError!void {
+) contract.AddError!void {
     const stat = try Io.Dir.cwd().statFile(n.io, abs_path, .{});
 
     const root = try n.gpa.dupe(u8, abs_path);
@@ -290,7 +294,7 @@ pub fn remove(n: *Inotify, id: WatchId) void {
 
 /// Reconciles this watch's directory registrations with a new filter.
 /// New directories are registered before excluded ones are released.
-pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) @import("../watch_contract.zig").RefilterError!void {
+pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     const watch = n.watches.getPtr(id) orelse return error.UnknownWatch;
     const replacement = try next.dupe(n.gpa);
     var previous = watch.filter;
@@ -382,7 +386,7 @@ fn pruned(n: *const Inotify, id: WatchId, subject: []const u8) bool {
 
 /// Waits on the inotify descriptor until it reports something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
+pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     // A read takes records off the descriptor, and a directory that
     // appears is registered below it one directory at a time, so nothing
     // in here is a place to stop: see `Watcher.poll`. The wait itself is
@@ -395,7 +399,7 @@ pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) @import("../watch_cont
     try n.flushRenames(batch);
 }
 
-fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) @import("../watch_contract.zig").PollError!void {
+fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     const before = batch.revision;
     const deadline: Deadline = .start(n.io, timeout_ms);
 
@@ -445,7 +449,7 @@ fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) @import("../watch_contr
 
 /// Reads one buffer of kernel events and turns them into lookout events.
 /// `false` when there was nothing to read.
-fn read(n: *Inotify, batch: *Batch) @import("../watch_contract.zig").PollError!bool {
+fn read(n: *Inotify, batch: *Batch) contract.PollError!bool {
     if (n.read_len == 0) {
         n.read_len = posix.read(n.ifd, &n.read_buffer) catch |err| switch (err) {
             error.WouldBlock => return false,
@@ -467,12 +471,12 @@ fn read(n: *Inotify, batch: *Batch) @import("../watch_contract.zig").PollError!b
 /// the overflow record, because the records after that one are changes
 /// made since: counted from their records and then taken in again by a
 /// re-read made before them, they would be counted twice.
-fn handleRead(n: *Inotify, bytes: []const u8, batch: *Batch) @import("../watch_contract.zig").PollError!void {
+fn handleRead(n: *Inotify, bytes: []const u8, batch: *Batch) contract.PollError!void {
     var offset: usize = 0;
     try n.consume(bytes, &offset, batch);
 }
 
-fn consume(n: *Inotify, bytes: []const u8, offset: *usize, batch: *Batch) @import("../watch_contract.zig").PollError!void {
+fn consume(n: *Inotify, bytes: []const u8, offset: *usize, batch: *Batch) contract.PollError!void {
     // Partial bookkeeping can no longer supply reliable entry counts.
     errdefer n.budget.reread({}, everyDirectory);
     var lost = false;
@@ -533,7 +537,7 @@ const Change = struct {
 
 /// Turns one kernel event into lookout events: read the flags, pair what
 /// can be paired, report, then keep the books.
-fn handle(n: *Inotify, event: records.Record, batch: *Batch) @import("../watch_contract.zig").PollError!void {
+fn handle(n: *Inotify, event: records.Record, batch: *Batch) contract.PollError!void {
     if (event.mask & linux.IN.Q_OVERFLOW != 0) {
         // The kernel does not say what was lost, so every watch is suspect.
         for (n.watches.keys(), n.watches.values()) |id, watch| {
@@ -597,7 +601,7 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) @import("../watch_c
 /// Reads the flags, and answers everything that is over before an entry
 /// is named: the queue overflowing, a watch going away, and the watched
 /// path itself being deleted or moved.
-fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u8) @import("../watch_contract.zig").PollError!?Change {
+fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u8) contract.PollError!?Change {
     const base = try n.gpa.dupe(u8, watched);
     errdefer n.gpa.free(base);
 
@@ -642,7 +646,7 @@ fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u
 /// excludes is then treated exactly as a name outside the watch: both
 /// names kept is `renamed`; only the new one kept is `created` there;
 /// only the old one kept is `removed` there; neither is nothing.
-fn pair(n: *Inotify, change: *const Change, batch: *Batch) @import("../watch_contract.zig").PollError!bool {
+fn pair(n: *Inotify, change: *const Change, batch: *Batch) contract.PollError!bool {
     if (change.moved_from) {
         const owned = try n.gpa.dupe(u8, change.path);
         errdefer n.gpa.free(owned);
@@ -682,7 +686,7 @@ fn pair(n: *Inotify, change: *const Change, batch: *Batch) @import("../watch_con
 
 /// Reports what happened to the entry, for everything a pairing did not
 /// already answer.
-fn emit(n: *Inotify, change: Change, paired: bool, batch: *Batch) @import("../watch_contract.zig").PollError!void {
+fn emit(n: *Inotify, change: Change, paired: bool, batch: *Batch) contract.PollError!void {
     if (n.excluded(change.watch, change.path)) return;
     const target = change.target();
     if (change.appeared and !paired) {
@@ -710,7 +714,7 @@ fn bookkeep(
     change: Change,
     paired: bool,
     batch: *Batch,
-) @import("../watch_contract.zig").PollError!void {
+) contract.PollError!void {
     // Checked on every event for the directory rather than only on the
     // ones that move the count, so that a watch added to a directory
     // that is already too big says so at the first sign of life, which
@@ -749,7 +753,7 @@ fn targetOfWatchPath(n: *const Inotify, id: WatchId, subject: []const u8) Target
 /// from inside the watch is indistinguishable from a deletion. A half on
 /// a name the filter excludes is held only so that its partner can be
 /// told apart from a rename in, and is not reported.
-fn flushRenames(n: *Inotify, batch: *Batch) @import("../watch_contract.zig").PollError!void {
+fn flushRenames(n: *Inotify, batch: *Batch) contract.PollError!void {
     while (n.pending_renames.count() != 0) {
         const key = n.pending_renames.keys()[0];
         const half = n.pending_renames.values()[0];
@@ -773,7 +777,7 @@ fn flushRenames(n: *Inotify, batch: *Batch) @import("../watch_contract.zig").Pol
 /// reports whatever is already inside them as created -- a directory can
 /// be populated before the watch on it exists, and those events would
 /// otherwise be lost.
-fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) @import("../watch_contract.zig").PollError!void {
+fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) contract.PollError!void {
     n.register(id, try n.gpa.dupe(u8, root)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -813,7 +817,7 @@ fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) @import("../
 }
 
 /// Asks the kernel for a watch on `path`, taking ownership of it.
-fn register(n: *Inotify, id: WatchId, watched: []u8) @import("../watch_contract.zig").AddError!void {
+fn register(n: *Inotify, id: WatchId, watched: []u8) contract.AddError!void {
     if (n.ownsPath(id, watched)) {
         n.gpa.free(watched);
         return;
@@ -929,7 +933,7 @@ fn removeOwner(n: *Inotify, registration_index: usize, id: WatchId) bool {
     return false;
 }
 
-pub const test_access = if (@import("builtin").is_test) struct {
+pub const test_access = if (builtin.is_test) struct {
     pub const handleRead = handleReadFixture;
 } else struct {};
 const handleReadFixture = handleRead;

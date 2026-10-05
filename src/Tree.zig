@@ -18,6 +18,7 @@ const Batch = @import("Batch.zig");
 const Filter = @import("Filter.zig");
 const Snapshot = @import("Snapshot.zig");
 const path_cmp = @import("path.zig");
+const AddOptions = @import("options.zig").AddOptions;
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
@@ -173,7 +174,7 @@ pub fn addWatch(
     t: *Tree,
     id: WatchId,
     abs_path: []const u8,
-    options: @import("options.zig").AddOptions,
+    options: AddOptions,
     added: *std.ArrayList(NodeId),
     batch: *Batch,
 ) Tree.AddError!void {

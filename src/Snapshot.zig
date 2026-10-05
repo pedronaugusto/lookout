@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const lookout = @import("types.zig");
+const builtin = @import("builtin");
 const Kind = lookout.Kind;
 
 const Snapshot = @This();
@@ -85,7 +86,7 @@ fn hashContent(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat) ?u64 {
     // Zig 0.16's std.Io.Threaded.dirOpenFileWtf16 opens no-follow handles
     // asynchronously but returns nonblocking = false. Match the handle so
     // positional reads wait for completion; remove when std fixes the flag.
-    if (@import("builtin").os.tag == .windows) file.flags.nonblocking = true;
+    if (builtin.os.tag == .windows) file.flags.nonblocking = true;
     defer file.close(io);
     var hash = std.hash.Wyhash.init(0);
     var buffer: [8192]u8 = undefined;

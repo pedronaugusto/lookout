@@ -24,6 +24,7 @@ const filesystem = @import("filesystem.zig");
 const path_cmp = @import("path.zig");
 const types = @import("types.zig");
 const walk = @import("walk.zig");
+const builtin = @import("builtin");
 const Identity = filesystem.Identity;
 const WatchId = types.WatchId;
 
@@ -484,7 +485,7 @@ test "a link is followed only into a directory the watch does not reach" {
         defer gpa.free(at);
         tmp.dir.symLink(io, target, at, .{ .is_directory = case.verdict != .idle }) catch |err| {
             // Windows asks for a privilege to make a symbolic link.
-            if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+            if (builtin.os.tag == .windows) return error.SkipZigTest;
             return err;
         };
     }

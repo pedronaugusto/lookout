@@ -39,6 +39,9 @@ pub const Held = struct {
 const Asking = access.Asking;
 const settled = access.settled;
 const access = @import("fsevents.zig").test_access;
+const Baseline = @import("../Baseline.zig");
+const clock = @import("../testing/clock.zig");
+const Checkpoint = @import("../Checkpoint.zig");
 const c = access.c;
 const synthesize = access.synthesize;
 
@@ -110,7 +113,7 @@ test "the flags that say the system lost track are one overflow, and the watch g
     defer gpa.free(file);
 
     // The caller's half of the contract: seeded where the watch is taken.
-    var baseline: @import("../Baseline.zig") = try .seed(gpa, io, root, .{ .recursive = true });
+    var baseline: Baseline = try .seed(gpa, io, root, .{ .recursive = true });
     defer baseline.deinit(gpa);
 
     var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
@@ -430,7 +433,7 @@ test "a poll that expires before the replay begins is not the end of it" {
     defer gpa.free(deleted);
 
     var vtable: Io.VTable = undefined;
-    const frozen = @import("../testing/clock.zig").frozen(&vtable, io);
+    const frozen = clock.frozen(&vtable, io);
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
     var watcher: lookout.Watcher = try .init(gpa, frozen, .{
@@ -615,10 +618,10 @@ test "a checkpoint is unavailable without an unchanged persistent log" {
     defer stream.volume.identity = original;
     try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
     stream.volume.identity = null;
-    try testing.expectEqual(@as(?@import("../Checkpoint.zig"), null), try watcher.checkpoint(gpa));
+    try testing.expectEqual(@as(?Checkpoint, null), try watcher.checkpoint(gpa));
     stream.volume.identity = original;
     stream.volume.identity.?.log[0] ^= 1;
-    try testing.expectEqual(@as(?@import("../Checkpoint.zig"), null), try watcher.checkpoint(gpa));
+    try testing.expectEqual(@as(?Checkpoint, null), try watcher.checkpoint(gpa));
 }
 
 test "a recursive mount keeps live coverage and refuses a single-device checkpoint" {
@@ -635,7 +638,7 @@ test "a recursive mount keeps live coverage and refuses a single-device checkpoi
     try synthesize(gpa, backend.streams.get(id).?, &.{.{ .path = root, .flags = 0x40 }});
     try access.drain(backend, &watcher.batch);
     try testing.expectEqual(@as(i32, 0), c.FSEventStreamGetDeviceBeingWatched(backend.streams.get(id).?.ref));
-    try testing.expectEqual(@as(?@import("../Checkpoint.zig"), null), try watcher.checkpoint(gpa));
+    try testing.expectEqual(@as(?Checkpoint, null), try watcher.checkpoint(gpa));
     try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
     try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
     try testing.expectEqualStrings(root, watcher.batch.events.items[0].path);
