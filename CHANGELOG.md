@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A checkpoint token that names one root twice is refused as `error.InvalidCheckpoint`: a watcher never writes one, and resuming it could reach an unreachable after a refused registration. The poll backend's `init` has an empty error set.
+
 - `Watcher.LinkHost`, the adapter followed links register through, is public, as are the key and hash context types of the event batch, the polling tree and the FSEvents backend that their public methods take. `Baseline`, `Snapshot`, `Tree` and `Checkpoint` signatures name their public error sets qualified, and the baseline and checkpoint `ParseError` sets are spelled out; their members are unchanged.
 
 - Share the Zig CI gate through preflight, with requested fast runs and full merge checks.

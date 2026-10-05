@@ -19,6 +19,9 @@ const Batch = @import("../Batch.zig");
 const Deadline = @import("../Deadline.zig");
 const Tree = @import("../Tree.zig");
 const Waker = @import("../Waker.zig");
+const Options = @import("../options.zig").Options;
+const AddOptions = @import("../options.zig").AddOptions;
+const contract = @import("../watch_contract.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
@@ -34,10 +37,11 @@ tree: Tree,
 /// minutes.
 const slice_ms = 100;
 
-/// Creates a backend that watches nothing. Never actually fails -- this
-/// backend holds no kernel resource -- and returns the error union every
-/// backend returns, so that `lookout.Watcher.init` can treat them alike.
-pub fn init(gpa: Allocator, io: Io, options: @import("../options.zig").Options) @import("../watch_contract.zig").InitError!Poll {
+/// Creates a backend that watches nothing. It holds no kernel resource
+/// and allocates nothing, so its error set is empty: `lookout.Watcher.init`
+/// still treats it as every other backend's init, and a watcher building
+/// one beside its native backend needs no error path for it.
+pub fn init(gpa: Allocator, io: Io, options: Options) error{}!Poll {
     var tree: Tree = .init(gpa, io, options.max_dir_entries, false);
     tree.check_contents = true;
     return .{
@@ -161,9 +165,9 @@ pub fn add(
     p: *Poll,
     id: WatchId,
     abs_path: []const u8,
-    options: @import("../options.zig").AddOptions,
+    options: AddOptions,
     batch: *Batch,
-) @import("../watch_contract.zig").AddError!void {
+) contract.AddError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(p.gpa);
     try p.tree.addWatch(id, abs_path, options, &added, batch);
@@ -175,7 +179,7 @@ pub fn remove(p: *Poll, id: WatchId) void {
 }
 
 /// Changes a watch's filter while retaining its root and snapshots.
-pub fn refilter(p: *Poll, id: WatchId, filter: lookout.Filter, batch: *Batch) @import("../watch_contract.zig").RefilterError!void {
+pub fn refilter(p: *Poll, id: WatchId, filter: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(p.gpa);
     try p.tree.refilter(id, filter, &added, batch);
@@ -192,7 +196,7 @@ pub fn wait(
     batch: *Batch,
     timeout_ms: ?u32,
     woken: *const std.atomic.Value(bool),
-) @import("../watch_contract.zig").PollError!void {
+) contract.PollError!void {
     const before = batch.revision;
     const deadline: Deadline = .start(p.io, timeout_ms);
 

@@ -239,8 +239,14 @@ pub fn misread(b: *Budget, dir: []const u8, forget_real: bool, made_up: usize) A
             names.swapRemoveAt(i);
         } else i += 1;
     }
+    const prefix = "\x00made-up ";
     var buf: [32]u8 = undefined;
-    for (0..made_up) |k| try addName(b.gpa, names, std.fmt.bufPrint(&buf, "\x00made-up {d}", .{k}) catch unreachable);
+    comptime std.debug.assert(prefix.len + std.fmt.count("{d}", .{std.math.maxInt(usize)}) <= buf.len);
+    for (0..made_up) |k| {
+        // unreachable: the assertion above sizes the buffer for the prefix and any usize
+        const name = std.fmt.bufPrint(&buf, prefix ++ "{d}", .{k}) catch unreachable;
+        try addName(b.gpa, names, name);
+    }
 }
 
 /// Reads again from disk the entries of every directory `stale(context,

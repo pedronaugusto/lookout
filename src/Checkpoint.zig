@@ -6,6 +6,7 @@ const lookout = @import("types.zig");
 const Checkpoint = @This();
 const Allocator = std.mem.Allocator;
 const format = @import("Checkpoint/format.zig");
+const builtin = @import("builtin");
 
 state: format.Owned,
 
@@ -33,7 +34,7 @@ pub fn parse(gpa: Allocator, text: []const u8) Checkpoint.ParseError!Checkpoint 
 test "checkpoint tokens own their paths and refuse unknown formats" {
     const testing = std.testing;
     const gpa = testing.allocator;
-    const root = if (@import("builtin").os.tag == .windows) "C:\\watch" else "/watch";
+    const root = if (builtin.os.tag == .windows) "C:\\watch" else "/watch";
     var original: Checkpoint = .{ .state = try format.copy(gpa, .{ .version = 2, .backend = .fsevents, .watches = &.{.{
         .root = root,
         .baseline = .{ .flat = &.{root} },
@@ -56,7 +57,7 @@ test "checkpoint tokens own their paths and refuse unknown formats" {
 
 // A host cursor alone cannot identify the volume or its current log.
 test "checkpoint tokens require volume and log identity" {
-    const root = if (@import("builtin").os.tag == .windows) "C:\\watch" else "/watch";
+    const root = if (builtin.os.tag == .windows) "C:\\watch" else "/watch";
     const text = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":2,\"backend\":\"fsevents\",\"watches\":[{{\"root\":{f},\"baseline\":[],\"recursive\":true,\"cursor\":1234}}]}}", .{std.json.fmt(root, .{})});
     defer std.testing.allocator.free(text);
     if (parse(std.testing.allocator, text)) |value| {
@@ -68,7 +69,7 @@ test "checkpoint tokens require volume and log identity" {
 
 test "checkpoint paths cannot omit their baseline or escape the root" {
     const gpa = std.testing.allocator;
-    const root = if (@import("builtin").os.tag == .windows) "C:\\watch" else "/watch";
+    const root = if (builtin.os.tag == .windows) "C:\\watch" else "/watch";
     const escaped = try std.fs.path.join(gpa, &.{ root, "..", "outside" });
     defer gpa.free(escaped);
     const identity: format.Identity = .{ .volume = .{'1'} ** 32, .log = .{'2'} ** 32 };
@@ -78,4 +79,18 @@ test "checkpoint paths cannot omit their baseline or escape the root" {
     const missing = try std.json.Stringify.valueAlloc(gpa, .{ .version = 2, .backend = "fsevents", .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true }} }, .{});
     defer gpa.free(missing);
     try std.testing.expectError(error.InvalidCheckpoint, parse(gpa, missing));
+}
+
+test "a checkpoint token naming one root twice is refused" {
+    const gpa = std.testing.allocator;
+    const root = if (builtin.os.tag == .windows) "C:\\watch" else "/watch";
+    const identity: format.Identity = .{ .volume = .{'1'} ** 32, .log = .{'2'} ** 32 };
+    const watch: format.Watch = .{ .root = root, .cursor = 1, .identity = identity, .recursive = true, .baseline = .{ .flat = &.{root} } };
+    const once = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 2, .backend = .fsevents, .watches = &.{watch} }, .{});
+    defer gpa.free(once);
+    var parsed = try parse(gpa, once);
+    parsed.deinit();
+    const twice = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 2, .backend = .fsevents, .watches = &.{ watch, watch } }, .{});
+    defer gpa.free(twice);
+    try std.testing.expectError(error.InvalidCheckpoint, parse(gpa, twice));
 }

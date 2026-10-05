@@ -437,7 +437,7 @@ pub const Watcher = struct {
             .batch = .init(io, options),
             .next_id = 0,
             .impl = impl,
-            .polling = Poll.init(gpa, io, options) catch unreachable,
+            .polling = Poll.init(gpa, io, options) catch |err| switch (err) {},
             .table = .empty,
             .pending = .empty,
             .following = .empty,
@@ -714,6 +714,7 @@ pub const Watcher = struct {
     fn reanchorPending(w: *Watcher, p: *Pending) PollError!void {
         w.anchorPending(p) catch {
             try w.resetCheckpoint(p);
+            // unreachable: a token names a root once (Checkpoint.parse), and resetCheckpoint used it
             w.anchorPending(p) catch unreachable;
         };
     }

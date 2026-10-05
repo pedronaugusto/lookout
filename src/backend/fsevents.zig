@@ -708,7 +708,7 @@ fn withoutStream(bytes: []u8, id: WatchId) usize {
     var kept: usize = 0;
     while (true) {
         const start = it.offset;
-        // Sink only appends complete records while holding its lock.
+        // unreachable: Sink appends only whole records, under the lock its callers hold
         const record = (it.next() catch unreachable) orelse break;
         if (record.id == id) continue;
         const len = it.offset - start;

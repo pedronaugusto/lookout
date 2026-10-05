@@ -43,6 +43,7 @@ pub const Half = struct {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const path_cmp = @import("../path.zig");
 pub const ParseError = error{ OutOfMemory, InvalidCheckpoint };
 
 pub const Owned = struct {
@@ -65,8 +66,14 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {
     errdefer state.deinit();
     if (state.value.version != 2 or state.value.backend != .fsevents) return error.InvalidCheckpoint;
     var halves: usize = 0;
-    for (state.value.watches) |watch| {
+    for (state.value.watches, 0..) |watch, index| {
         if (!std.fs.path.isAbsolute(watch.root)) return error.InvalidCheckpoint;
+        // One watcher watches a root once, so a token naming one twice
+        // was not written by a watcher, and a resume could not say which
+        // of the two a refused registration used.
+        for (state.value.watches[0..index]) |earlier| {
+            if (path_cmp.eql(earlier.root, watch.root)) return error.InvalidCheckpoint;
+        }
         var names: std.StringHashMapUnmanaged(void) = .empty;
         defer names.deinit(gpa);
         var paths = watch.baseline.iterator();

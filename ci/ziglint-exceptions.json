@@ -161,27 +161,6 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z028",
-    "path": "src/Checkpoint.zig",
-    "source": "const root = if (@import(\"builtin\").os.tag == .windows) \"C:\\\\watch\" else \"/watch\";",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/Checkpoint.zig",
-    "source": "const root = if (@import(\"builtin\").os.tag == .windows) \"C:\\\\watch\" else \"/watch\";",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/Checkpoint.zig",
-    "source": "const root = if (@import(\"builtin\").os.tag == .windows) \"C:\\\\watch\" else \"/watch\";",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z017",
     "path": "src/Batch.zig",
     "source": "if (rest.len == 0) return try gpa.dupe(u8, alias.logical);",
@@ -1733,48 +1712,6 @@
     "path": "src/backend/poll.zig",
     "source": "//! The portable backend: re-stat and re-list the watched paths on a timer.",
     "detail": "file 'poll.zig' has top-level fields and should be PascalCase",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/backend/poll.zig",
-    "source": "pub fn init(gpa: Allocator, io: Io, options: @import(\"../options.zig\").Options) @import(\"../watch_contract.zig\").InitError!Poll {",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/backend/poll.zig",
-    "source": "pub fn init(gpa: Allocator, io: Io, options: @import(\"../options.zig\").Options) @import(\"../watch_contract.zig\").InitError!Poll {",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/backend/poll.zig",
-    "source": "options: @import(\"../options.zig\").AddOptions,",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/backend/poll.zig",
-    "source": ") @import(\"../watch_contract.zig\").AddError!void {",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/backend/poll.zig",
-    "source": "pub fn refilter(p: *Poll, id: WatchId, filter: lookout.Filter, batch: *Batch) @import(\"../watch_contract.zig\").RefilterError!void {",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/backend/poll.zig",
-    "source": ") @import(\"../watch_contract.zig\").PollError!void {",
-    "detail": "inline @import; assign to a top-level const",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
