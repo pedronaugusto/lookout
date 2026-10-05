@@ -395,6 +395,7 @@ const Spelled = struct {
     fn deinit(s: *Spelled, gpa: std.mem.Allocator) void {
         s.points.deinit(gpa);
         s.cuts.deinit(gpa);
+        s.* = undefined;
     }
 };
 

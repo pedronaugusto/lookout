@@ -58,6 +58,7 @@ const Fixture = struct {
         f.watcher.deinit();
         gpa.free(f.root);
         f.tmp.cleanup();
+        f.* = undefined;
     }
 
     /// The absolute path of `sub_path`, spelled as an event spells it.

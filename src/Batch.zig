@@ -127,8 +127,11 @@ pub const Alias = struct {
     /// `spell`, allocated. The caller owns the result.
     fn spellAlloc(alias: *const Alias, gpa: Allocator, subject: []const u8) Allocator.Error!?[]u8 {
         const rest = path_cmp.relative(alias.physical, subject) orelse return null;
-        if (rest.len == 0) return try gpa.dupe(u8, alias.logical);
-        return try std.fs.path.join(gpa, &.{ alias.logical, rest });
+        const spelled = if (rest.len == 0)
+            try gpa.dupe(u8, alias.logical)
+        else
+            try std.fs.path.join(gpa, &.{ alias.logical, rest });
+        return spelled;
     }
 
     fn keeps(alias: *const Alias, subject: []const u8) bool {
@@ -153,6 +156,7 @@ pub const Notes = struct {
     pub fn deinit(n: *Notes, gpa: Allocator) void {
         for (n.items.items) |item| gpa.free(item.path);
         n.items.deinit(gpa);
+        n.* = undefined;
     }
 };
 

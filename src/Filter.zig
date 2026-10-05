@@ -132,7 +132,7 @@ fn freeList(list: []const []const u8, gpa: Allocator) void {
 pub fn deinit(f: *Filter, gpa: Allocator) void {
     freeList(f.ignore, gpa);
     freeList(f.only, gpa);
-    f.* = .none;
+    f.* = undefined;
 }
 
 /// Whether `subject` is outside the part of `root` this watch is about,

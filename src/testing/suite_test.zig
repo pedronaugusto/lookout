@@ -91,6 +91,7 @@ const Fixture = struct {
         if (f.seen_from) |from| std.testing.allocator.free(from);
         std.testing.allocator.free(f.root);
         f.tmp.cleanup();
+        f.* = undefined;
     }
 
     fn write(f: *Fixture, sub_path: []const u8, data: []const u8) !void {
@@ -1900,6 +1901,7 @@ const Ledger = struct {
     fn deinit(l: *Ledger) void {
         for (l.seen.items) |key| std.testing.allocator.free(key.path);
         l.seen.deinit(std.testing.allocator);
+        l.* = undefined;
     }
 
     fn note(l: *Ledger, events: []const lookout.Event) !void {

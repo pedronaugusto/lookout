@@ -27,6 +27,7 @@ pub fn read(gpa: std.mem.Allocator, root: []const u8) !Volume {
 
 pub fn deinit(v: *Volume, gpa: std.mem.Allocator) void {
     gpa.free(v.prefix);
+    v.* = undefined;
 }
 
 pub fn relative(v: Volume, absolute: []const u8) []const u8 {

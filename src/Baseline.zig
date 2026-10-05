@@ -285,6 +285,7 @@ const Scan = struct {
         s.dirs.deinit(gpa);
         for (s.changes.items) |change| gpa.free(change.path);
         s.changes.deinit(gpa);
+        s.* = undefined;
     }
 
     fn run(s: *Scan, gpa: Allocator, report: bool) Error!void {

@@ -56,13 +56,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z030",
-    "path": "src/Baseline.zig",
-    "source": "fn deinit(s: *Scan, gpa: Allocator) void {",
-    "detail": "deinit should set s.* = undefined",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z028",
     "path": "src/Baseline.zig",
     "source": "if (options.durable and @import(\"builtin\").os.tag == .windows) return error.UnsupportedBaselineDurability;",
@@ -159,27 +152,6 @@
     "source": "const lookout = @import(\"types.zig\");",
     "detail": "unused import 'lookout'",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z017",
-    "path": "src/Batch.zig",
-    "source": "if (rest.len == 0) return try gpa.dupe(u8, alias.logical);",
-    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try gpa.dupe(u8, alias.logical); return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z017",
-    "path": "src/Batch.zig",
-    "source": "return try std.fs.path.join(gpa, &.{ alias.logical, rest });",
-    "detail": "avoid try in return; hoist it to preserve payload coercion: `const value = try std.fs.path.join(gpa, &.{; return value;`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/Batch.zig",
-    "source": "pub fn deinit(n: *Notes, gpa: Allocator) void {",
-    "detail": "deinit should set n.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
     "rule": "Z028",
@@ -1722,13 +1694,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z030",
-    "path": "src/backend/fsevents/volume.zig",
-    "source": "pub fn deinit(v: *Volume, gpa: std.mem.Allocator) void {",
-    "detail": "deinit should set v.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z023",
     "path": "src/Budget.zig",
     "source": "comptime counted: fn (@TypeOf(context), []const u8) bool,",
@@ -1790,20 +1755,6 @@
     "source": "fn reads(change: @This(), watch: Watch) bool {",
     "detail": "inline @This(); assign it to `const Self = @This();`",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/testing/suite_test.zig",
-    "source": "fn deinit(f: *Fixture) void {",
-    "detail": "deinit should set f.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/testing/suite_test.zig",
-    "source": "fn deinit(l: *Ledger) void {",
-    "detail": "deinit should set l.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
     "rule": "Z023",
@@ -1925,13 +1876,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z030",
-    "path": "src/testing/fuzz_test.zig",
-    "source": "fn deinit(s: *Spelled, gpa: std.mem.Allocator) void {",
-    "detail": "deinit should set s.* = undefined",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/testing/fuzz_test.zig",
     "source": "while (std.mem.indexOfAnyPos(u8, subject, end, path_cmp.separators)) |at| : (end = at + 1) {",
@@ -1978,13 +1922,6 @@
     "path": "src/testing/clock.zig",
     "source": "pub fn frozen(vtable: *Io.VTable, source: Io) Io {",
     "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/Links_test.zig",
-    "source": "fn deinit(f: *Fixture) void {",
-    "detail": "deinit should set f.* = undefined",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2041,13 +1978,6 @@
     "path": "src/Filter.zig",
     "source": "fn freeList(list: []const []const u8, gpa: Allocator) void {",
     "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z030",
-    "path": "src/Filter.zig",
-    "source": "pub fn deinit(f: *Filter, gpa: Allocator) void {",
-    "detail": "deinit should set f.* = undefined",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
