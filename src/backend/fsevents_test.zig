@@ -13,7 +13,7 @@ const Record = records.Record;
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 const flag = records.flag;
-const FsEvents = @import("fsevents.zig");
+const FsEvents = @import("FsEvents.zig");
 
 const bounds: buffer.Bounds = .{
     .min = 4 * 1024,
@@ -31,7 +31,7 @@ pub const Held = struct {
 
 const Asking = access.Asking;
 const settled = access.settled;
-const access = @import("fsevents.zig").test_access;
+const access = @import("FsEvents.zig").test_access;
 const Baseline = @import("../Baseline.zig");
 const clock = @import("../testing/clock.zig");
 const Checkpoint = @import("../Checkpoint.zig");

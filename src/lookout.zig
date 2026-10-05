@@ -31,10 +31,7 @@ const walk = @import("walk.zig");
 const path_cmp = @import("path.zig");
 const fs_type = @import("filesystem.zig");
 const contract = @import("watch_contract.zig");
-const FsEvents = @import("backend/fsevents.zig");
-const Kqueue = @import("backend/kqueue.zig");
-const Inotify = @import("backend/inotify.zig");
-const Windows = @import("backend/windows.zig");
+const backends = @import("backend.zig");
 
 /// The filesystem fact measured at each watch registration.
 pub const Filesystem = fs_type.Kind;
@@ -193,7 +190,7 @@ pub const default_backend = @import("types.zig").default_backend;
 
 /// The backend every target has. Named here rather than inside `Impl`
 /// because every one of that union's shapes has it.
-const Poll = @import("backend/poll.zig");
+const Poll = backends.Poll;
 
 /// Where a watcher had got to, so that a later one can carry on from
 /// there.
@@ -356,32 +353,8 @@ pub const Watcher = struct {
     };
 
     /// Every backend this target was built with, and the one the watcher
-    /// chose. Written out per target rather than generated, because the
-    /// set really is different per target and a reader should be able to
-    /// see which. The tag names match `Backend`'s, which is what lets
-    /// `init`, `supported` and `backend` be one line each.
-    const Impl = switch (builtin.os.tag) {
-        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => union(enum) {
-            fsevents: FsEvents,
-            kqueue: Kqueue,
-            poll: Poll,
-        },
-        .dragonfly, .freebsd, .netbsd, .openbsd => union(enum) {
-            kqueue: Kqueue,
-            poll: Poll,
-        },
-        .linux => union(enum) {
-            inotify: Inotify,
-            poll: Poll,
-        },
-        .windows => union(enum) {
-            windows: Windows,
-            poll: Poll,
-        },
-        else => union(enum) {
-            poll: Poll,
-        },
-    };
+    /// chose. See `backend.zig`.
+    const Impl = backends.Impl;
 
     /// Errors `init` can return when creating the backend's resources.
     /// FSEvents also allocates its delivery sink and `Options.buffer_bytes`
@@ -1408,7 +1381,6 @@ test {
     _ = Batch;
     _ = Filter;
     _ = Links;
-    _ = Poll;
     _ = Tree;
     _ = Waker;
     _ = fs_type;
@@ -1418,8 +1390,7 @@ test {
     _ = @import("buffer.zig");
     _ = @import("path.zig");
     _ = @import("walk.zig");
-    // Held-event transfers use no Windows calls and are tested on every host.
-    _ = @import("backend/windows.zig");
+    _ = backends;
     _ = @import("trace.zig");
     // The backends this target was built with, each of which carries
     // tests of its own. They are found when the backend is analysed,

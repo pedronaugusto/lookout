@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Name each backend and struct file after its type, with `src/backend.zig` choosing the backends per target and asserting at compile time that the choice matches `supported`.
+
 - `LOOKOUT_TRACE` lines go to `std.log` under the `lookout` scope at the info level instead of straight to standard error, so the program's log function and level decide where they land. The examples print through a buffered standard output writer.
 
 - A checkpoint token that names one root twice is refused as `error.InvalidCheckpoint`: a watcher never writes one, and resuming it could reach an unreachable after a refused registration. The poll backend's `init` has an empty error set.

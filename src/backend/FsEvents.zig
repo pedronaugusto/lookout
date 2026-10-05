@@ -36,8 +36,8 @@ const posix = std.posix;
 
 const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
-const Volume = @import("fsevents/volume.zig");
-const CheckpointPaths = @import("../Checkpoint/paths.zig");
+const Volume = @import("fsevents/Volume.zig");
+const CheckpointPaths = @import("../Checkpoint/History.zig");
 const checkpoint_format = @import("../Checkpoint/format.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");

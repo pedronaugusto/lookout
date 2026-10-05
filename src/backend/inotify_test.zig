@@ -9,7 +9,7 @@ const Filter = @import("../Filter.zig");
 const records = @import("inotify/records.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
-const Inotify = @import("inotify.zig");
+const Inotify = @import("Inotify.zig");
 const Watch = struct {
     /// Absolute, canonical path, owned by the backend.
     root: []u8,

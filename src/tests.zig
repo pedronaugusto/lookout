@@ -9,8 +9,8 @@ test {
     _ = @import("testing/resources_test.zig");
     _ = @import("testing/gaps_test.zig");
     _ = @import("testing/fuzz_test.zig");
-    _ = @import("Links_test.zig");
-    _ = @import("Checkpoint/paths.zig");
-    if (comptime lookout.supported(.kqueue)) _ = @import("backend/kqueue.zig");
+    _ = @import("links_test.zig");
+    _ = @import("Checkpoint/History.zig");
+    if (comptime lookout.supported(.kqueue)) _ = @import("backend/Kqueue.zig");
     _ = @import("backend/windows/records.zig");
 }

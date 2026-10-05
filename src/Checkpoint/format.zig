@@ -44,7 +44,7 @@ pub const Half = struct {
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const path_cmp = @import("../path.zig");
-const Paths = @import("paths.zig").Paths;
+const Paths = @import("History.zig").Paths;
 pub const ParseError = error{ OutOfMemory, InvalidCheckpoint };
 
 pub const Owned = struct {

@@ -14,18 +14,7 @@
       "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
     }
   },
-  "layout_exceptions": {
-    "src/backend": {
-      "files": [
-        "src/backend/fsevents.zig",
-        "src/backend/inotify.zig",
-        "src/backend/kqueue.zig",
-        "src/backend/poll.zig",
-        "src/backend/windows.zig"
-      ],
-      "reason": "Existing grouped platform implementation retained at adoption; these exact members cannot grow before a common entry is introduced."
-    }
-  },
+  "layout_exceptions": {},
   "docs": {
     "zig build docs -- usage": {
       "source": "examples/usage.zig",

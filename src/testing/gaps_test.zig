@@ -349,7 +349,7 @@ test "a burst of renames is paired across the reads it is split over" {
     // FSEvents does. fseventsd, between the kernel and every client,
     // dropped part of this burst in 13 of 20 runs on a machine building
     // beside it, and nothing on lookout's side changes that. So FSEvents
-    // is held to this claim in src/backend/fsevents.zig ("a rename whose
+    // is held to this claim in src/backend/FsEvents.zig ("a rename whose
     // halves arrive in two deliveries is one rename"), where every pair
     // is split across two deliveries by hand through the callback the
     // system calls, rather than a burst being hoped to split them and

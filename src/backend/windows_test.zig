@@ -18,7 +18,7 @@ const wake_key: usize = std.math.maxInt(usize);
 const grace_ms = 25;
 const grace_rounds = 4;
 
-const access = @import("windows.zig").test_access;
+const access = @import("Windows.zig").test_access;
 const builtin = @import("builtin");
 const c = access.c;
 const wants = access.wants;
