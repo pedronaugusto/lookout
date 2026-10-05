@@ -8,12 +8,7 @@
   "test_support": [
     "src/testing/*"
   ],
-  "function_exceptions": {
-    "src/testing/fuzz_test.zig:fuzzBaseline": {
-      "lines": 137,
-      "reason": "Existing implementation at adoption; this exact bound cannot grow and shrinks when the function is split."
-    }
-  },
+  "function_exceptions": {},
   "layout_exceptions": {},
   "docs": {
     "zig build docs -- usage": {

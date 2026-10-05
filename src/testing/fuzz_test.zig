@@ -665,6 +665,13 @@ fn fuzzedIo() void {
     if (builtin.fuzz) testing.io_instance.deinit();
 }
 
+/// Names that stay distinct on a volume that folds case and composition,
+/// so the model and the disk agree on what is there.
+const model_names = [_][]const u8{ "a", "b", "c d", "\u{65e5}", "e.txt" };
+
+/// What `Baseline.diff` says about one path, as the models predict it.
+const Expected = struct { kind: lookout.Kind, target: lookout.Target };
+
 fn fuzzBaseline(_: void, smith: *testing.Smith) !void {
     @disableInstrumentation();
     fuzzingIo();
@@ -678,79 +685,98 @@ fn fuzzBaseline(_: void, smith: *testing.Smith) !void {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", a);
 
-    // Names that stay distinct on a volume that folds case and
-    // composition, so the model and the disk agree on what is there.
-    const names = [_][]const u8{ "a", "b", "c d", "\u{65e5}", "e.txt" };
-    var before: Model = .empty;
-    var generated: usize = 0;
-    while (generated < 12 and !smith.eosWeightedSimple(3, 1)) : (generated += 1) {
-        // Below an existing directory or at the top.
-        const dirs = blk: {
-            var list: std.ArrayList([]const u8) = .empty;
-            try list.append(a, "");
-            for (before.keys(), before.values()) |key, value| if (value == null) try list.append(a, key);
-            break :blk list.items;
-        };
-        const parent = dirs[smith.index(dirs.len)];
-        const name = names[smith.index(names.len)];
-        const key = if (parent.len == 0) try a.dupe(u8, name) else try std.fs.path.join(a, &.{ parent, name });
-        if (before.contains(key)) continue;
-        const contents: ?[]const u8 = if (smith.boolWeighted(1, 2)) null else try a.dupe(u8, "x" ** 3);
-        try before.put(a, key, contents);
-    }
+    const before = try generateModel(a, smith);
     try applyModel(tmp.dir, &before);
 
     const recursive = smith.boolWeighted(1, 3);
     var base = try Baseline.seed(gpa, io, root, .{ .recursive = recursive });
     defer base.deinit(gpa);
 
-    // Change some of it: remove a path (and what is below it), rewrite a
-    // file to another length, turn one kind into the other, add new ones.
     var after: Model = .empty;
     for (before.keys(), before.values()) |key, value| try after.put(a, key, value);
+    try changeModel(a, smith, tmp.dir, &after);
+
+    const expected = try expectDiff(a, &before, &after, recursive);
+    const found = try base.diff(gpa);
+    try matchDiff(root, &expected, found);
+    // And the tree is now the baseline: nothing more to say.
+    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+}
+
+/// Up to a dozen paths, each a file or a directory below an existing
+/// directory or at the top.
+fn generateModel(a: std.mem.Allocator, smith: *testing.Smith) !Model {
+    @disableInstrumentation();
+    var model: Model = .empty;
+    var generated: usize = 0;
+    while (generated < 12 and !smith.eosWeightedSimple(3, 1)) : (generated += 1) {
+        const dirs = blk: {
+            var list: std.ArrayList([]const u8) = .empty;
+            try list.append(a, "");
+            for (model.keys(), model.values()) |key, value| if (value == null) try list.append(a, key);
+            break :blk list.items;
+        };
+        const parent = dirs[smith.index(dirs.len)];
+        const name = model_names[smith.index(model_names.len)];
+        const key = if (parent.len == 0) try a.dupe(u8, name) else try std.fs.path.join(a, &.{ parent, name });
+        if (model.contains(key)) continue;
+        const contents: ?[]const u8 = if (smith.boolWeighted(1, 2)) null else try a.dupe(u8, "x" ** 3);
+        try model.put(a, key, contents);
+    }
+    return model;
+}
+
+/// Changes some of the tree in `dir` and in `model` alike: removes a path
+/// and what is below it, rewrites a file to another length, turns one kind
+/// into the other, adds new ones.
+fn changeModel(a: std.mem.Allocator, smith: *testing.Smith, dir: std.Io.Dir, model: *Model) !void {
+    @disableInstrumentation();
+    const io = testing.io;
     var changes: usize = 0;
-    while (changes < 6 and after.count() != 0 and !smith.eosWeightedSimple(2, 1)) : (changes += 1) {
-        const at = smith.index(after.count());
-        const key = after.keys()[at];
+    while (changes < 6 and model.count() != 0 and !smith.eosWeightedSimple(2, 1)) : (changes += 1) {
+        const at = smith.index(model.count());
+        const key = model.keys()[at];
         switch (smith.valueRangeAtMost(u8, 0, 3)) {
             0, 2 => {
                 // Gone, with everything below it; or gone and back as the
                 // other kind.
-                const was_dir = after.values()[at] == null;
-                if (was_dir) try tmp.dir.deleteTree(io, key) else try tmp.dir.deleteFile(io, key);
+                const was_dir = model.values()[at] == null;
+                if (was_dir) try dir.deleteTree(io, key) else try dir.deleteFile(io, key);
                 var i: usize = 0;
-                while (i < after.count()) {
-                    const other = after.keys()[i];
+                while (i < model.count()) {
+                    const other = model.keys()[i];
                     if (std.mem.eql(u8, other, key) or (std.mem.startsWith(u8, other, key) and path_cmp.isSep(other[key.len]))) {
-                        after.swapRemoveAt(i);
+                        model.swapRemoveAt(i);
                     } else i += 1;
                 }
                 if (smith.boolWeighted(1, 1)) {
                     const contents: ?[]const u8 = if (was_dir) "y" else null;
-                    try after.put(a, key, contents);
-                    if (contents) |c| try tmp.dir.writeFile(io, .{ .sub_path = key, .data = c }) else try tmp.dir.createDirPath(io, key);
+                    try model.put(a, key, contents);
+                    if (contents) |c| try dir.writeFile(io, .{ .sub_path = key, .data = c }) else try dir.createDirPath(io, key);
                 }
             },
-            1 => if (after.values()[at]) |old| {
+            1 => if (model.values()[at]) |old| {
                 const contents = try std.mem.concat(a, u8, &.{ old, "z" });
-                after.values()[at] = contents;
-                try tmp.dir.writeFile(io, .{ .sub_path = key, .data = contents });
+                model.values()[at] = contents;
+                try dir.writeFile(io, .{ .sub_path = key, .data = contents });
             },
-            else => if (after.values()[at] == null) {
-                const name = names[smith.index(names.len)];
+            else => if (model.values()[at] == null) {
+                const name = model_names[smith.index(model_names.len)];
                 const child = try std.fs.path.join(a, &.{ key, name });
-                if (!after.contains(child)) {
-                    try after.put(a, child, "new");
-                    try tmp.dir.writeFile(io, .{ .sub_path = child, .data = "new" });
+                if (!model.contains(child)) {
+                    try model.put(a, child, "new");
+                    try dir.writeFile(io, .{ .sub_path = child, .data = "new" });
                 }
             },
         }
     }
+}
 
-    // The diff, against the two models: what is in one and not the other,
-    // and the files whose contents changed. A path below the root is in
-    // a non-recursive baseline's view only when it is the root's child.
-    const Expected = struct { kind: lookout.Kind, target: lookout.Target };
+/// The diff, against the two models: what is in one and not the other,
+/// and the files whose contents changed. A path below the root is in a
+/// non-recursive baseline's view only when it is the root's child.
+fn expectDiff(a: std.mem.Allocator, before: *const Model, after: *const Model, recursive: bool) !std.array_hash_map.String(Expected) {
+    @disableInstrumentation();
     var expected: std.array_hash_map.String(Expected) = .empty;
     const visible = struct {
         fn f(key: []const u8, deep: bool) bool {
@@ -779,8 +805,13 @@ fn fuzzBaseline(_: void, smith: *testing.Smith) !void {
         if (!visible(key, recursive) or after.contains(key) or expected.contains(key)) continue;
         try expected.put(a, key, .{ .kind = .removed, .target = if (value == null) .directory else .file });
     }
+    return expected;
+}
 
-    const found = try base.diff(gpa);
+/// Whether `found` is exactly `expected`: every change predicted, of the
+/// predicted kind and target, and none missed.
+fn matchDiff(root: []const u8, expected: *const std.array_hash_map.String(Expected), found: []const Baseline.Change) !void {
+    @disableInstrumentation();
     for (found) |change| {
         const rel = path_cmp.relative(root, change.path) orelse return error.TestChangeOutsideRoot;
         const wanted = expected.get(rel) orelse {
@@ -799,8 +830,6 @@ fn fuzzBaseline(_: void, smith: *testing.Smith) !void {
         }
     }
     try testing.expectEqual(expected.count(), found.len);
-    // And the tree is now the baseline: nothing more to say.
-    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
 }
 
 test "a checkpoint token reads back as itself or not at all" {
