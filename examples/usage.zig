@@ -16,7 +16,7 @@ pub fn main() !void {
 
     // A scratch directory beside the executable, remade on every run.
     const cwd = std.Io.Dir.cwd();
-    cwd.deleteTree(io, "lookout-example") catch {};
+    try cwd.deleteTree(io, "lookout-example");
     defer cwd.deleteTree(io, "lookout-example") catch {};
     var scratch = try cwd.createDirPathOpen(io, "lookout-example", .{});
     defer scratch.close(io);

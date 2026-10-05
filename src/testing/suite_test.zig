@@ -38,6 +38,15 @@ const backends: []const lookout.Backend = all: {
 /// polls until the event arrives or this expires.
 const timeout_ms = 5_000;
 
+/// Sleeps `ms` on the test I/O from a thread the test started. Only a
+/// cancellation cuts a sleep short, and nothing cancels these threads; a
+/// nap cut short would only make its loop look at its condition sooner.
+fn nap(ms: i64) void {
+    std.testing.io.sleep(.fromMilliseconds(ms), .awake) catch |err| switch (err) {
+        error.Canceled => {},
+    };
+}
+
 /// A temporary directory, a watcher, and the plumbing to ask it questions.
 const Fixture = struct {
     tmp: std.testing.TmpDir,
@@ -907,7 +916,7 @@ test "writes after refilter are reported while a writer runs through the change"
                     return;
                 };
                 self.progress.store(i + 1, .release);
-                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+                nap(1);
             }
             for (0..4) |j| {
                 var keep_buf: [40]u8 = undefined;
@@ -1065,14 +1074,14 @@ test "a folder appearing under a newly admitted path during refilter is reached"
                 !gate.go.swap(true, .acq_rel))
             {
                 while (!gate.done.load(.acquire))
-                    std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+                    nap(1);
             }
             return true;
         }
 
         fn create(gate: *@This(), dir: std.Io.Dir) void {
             while (!gate.go.load(.acquire))
-                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+                nap(1);
             dir.createDirPath(std.testing.io, "new/racing") catch {
                 gate.failed.store(true, .release);
                 gate.done.store(true, .release);
@@ -1641,14 +1650,14 @@ test "removing a watch discards events held for a quiet window" {
         while (f.watcher.stats().held == 0 and waited < timeout_ms) : (waited += 20) {
             _ = try f.watcher.poll(0);
             if (f.watcher.stats().held == 0) {
-                std.testing.io.sleep(.fromMilliseconds(20), .awake) catch {};
+                try std.testing.io.sleep(.fromMilliseconds(20), .awake);
             }
         }
         try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().held);
 
         f.watcher.remove(id);
         try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().held);
-        std.testing.io.sleep(.fromMilliseconds(350), .awake) catch {};
+        try std.testing.io.sleep(.fromMilliseconds(350), .awake);
         try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
     }
 }
@@ -2722,7 +2731,7 @@ test "a watcher can be woken from another thread" {
             watcher: *Watcher,
             calls: std.atomic.Value(usize) = .init(0),
             fn run(self: *@This()) void {
-                std.testing.io.sleep(.fromMilliseconds(100), .awake) catch {};
+                nap(100);
                 _ = self.calls.fetchAdd(1, .release);
                 self.watcher.wake();
             }
@@ -2760,7 +2769,7 @@ fn Held(comptime Result: type, comptime then: anytype) type {
 
         /// Lets the task go from another thread, after `delay_ms`.
         fn release(self: *@This(), delay_ms: i64) void {
-            std.testing.io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};
+            nap(delay_ms);
             self.go.store(true, .release);
         }
     };
@@ -2826,16 +2835,26 @@ test "a cancellation that arrives while a poll waits costs no event" {
         // is what ends the wait, and the poll that reports the
         // cancellation has already read it.
         const Writer = struct {
-            fn run(dir: std.Io.Dir) void {
-                std.testing.io.sleep(.fromMilliseconds(150), .awake) catch {};
-                dir.writeFile(std.testing.io, .{ .sub_path = "late.txt", .data = "x" }) catch {};
+            dir: std.Io.Dir,
+            failed: ?std.Io.Dir.WriteFileError = null,
+
+            const Self = @This();
+
+            fn run(writer: *Self) void {
+                nap(150);
+                writer.dir.writeFile(std.testing.io, .{ .sub_path = "late.txt", .data = "x" }) catch |err| {
+                    writer.failed = err;
+                };
             }
         };
-        std.testing.io.sleep(.fromMilliseconds(30), .awake) catch {};
-        const thread = try std.Thread.spawn(.{}, Writer.run, .{f.tmp.dir});
-        defer thread.join();
-
-        try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
+        try std.testing.io.sleep(.fromMilliseconds(30), .awake);
+        var writer: Writer = .{ .dir = f.tmp.dir };
+        {
+            const thread = try std.Thread.spawn(.{}, Writer.run, .{&writer});
+            defer thread.join();
+            try std.testing.expectError(error.Canceled, future.cancel(std.testing.io));
+        }
+        if (writer.failed) |err| return err;
         // Handed out by the next poll rather than dropped with the one
         // that was canceled.
         try f.expectEvent("late.txt", .created);

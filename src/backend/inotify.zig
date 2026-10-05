@@ -781,7 +781,7 @@ fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) @import("../
             return;
         },
     };
-    n.budget.seed(root) catch {};
+    try n.budget.seed(root);
 
     const Adopting = struct {
         n: *Inotify,
@@ -801,7 +801,7 @@ fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) @import("../
                     return .over;
                 },
             };
-            a.n.budget.seed(entry.path) catch {};
+            try a.n.budget.seed(entry.path);
             return .into;
         }
     };

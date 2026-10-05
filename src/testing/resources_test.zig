@@ -96,6 +96,7 @@ test "poll reports each change from another thread" {
         const Toucher = struct {
             dir: std.Io.Dir,
             round: usize = 0,
+            failed: ?std.Io.Dir.WriteFileError = null,
 
             fn run(self: *@This()) void {
                 const w_io = std.testing.io;
@@ -105,7 +106,9 @@ test "poll reports each change from another thread" {
                 self.dir.writeFile(w_io, .{
                     .sub_path = std.fmt.bufPrint(&name, "w{d}.txt", .{self.round}) catch unreachable,
                     .data = "x",
-                }) catch {};
+                }) catch |err| {
+                    self.failed = err;
+                };
             }
         };
 
@@ -125,6 +128,7 @@ test "poll reports each change from another thread" {
                 }
             }
             thread.join();
+            if (toucher.failed) |err| return err;
             try std.testing.expect(seen);
             observed += 1;
         }

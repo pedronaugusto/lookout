@@ -1617,13 +1617,6 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z026",
-    "path": "src/backend/windows.zig",
-    "source": "if (is_dir) w.budget.seed(dir_path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z009",
     "path": "src/backend/inotify.zig",
     "source": "//! The Linux backend: `inotify`.",
@@ -1782,20 +1775,6 @@
     "path": "src/backend/inotify.zig",
     "source": "pub const test_access = if (@import(\"builtin\").is_test) struct {",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/backend/inotify.zig",
-    "source": "n.budget.seed(root) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/backend/inotify.zig",
-    "source": "a.n.budget.seed(entry.path) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
@@ -2219,76 +2198,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z026",
-    "path": "src/testing/suite_test.zig",
-    "source": "std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/testing/suite_test.zig",
-    "source": "std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/testing/suite_test.zig",
-    "source": "std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/testing/suite_test.zig",
-    "source": "std.testing.io.sleep(.fromMilliseconds(20), .awake) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/testing/suite_test.zig",
-    "source": "std.testing.io.sleep(.fromMilliseconds(350), .awake) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/testing/suite_test.zig",
-    "source": "std.testing.io.sleep(.fromMilliseconds(100), .awake) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/testing/suite_test.zig",
-    "source": "std.testing.io.sleep(.fromMilliseconds(delay_ms), .awake) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/testing/suite_test.zig",
-    "source": "std.testing.io.sleep(.fromMilliseconds(150), .awake) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/testing/suite_test.zig",
-    "source": "dir.writeFile(std.testing.io, .{ .sub_path = \"late.txt\", .data = \"x\" }) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/testing/suite_test.zig",
-    "source": "std.testing.io.sleep(.fromMilliseconds(30), .awake) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z020",
     "path": "src/testing/gaps_test.zig",
     "source": "fn run(self: *@This()) void {",
@@ -2363,13 +2272,6 @@
     "path": "src/testing/resources_test.zig",
     "source": "fn run(self: *@This()) void {",
     "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z026",
-    "path": "src/testing/resources_test.zig",
-    "source": "}) catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -2580,20 +2482,6 @@
     "path": "src/walk.zig",
     "source": "fn visit(c: *@This(), entry: Entry) anyerror!Step {",
     "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z026",
-    "path": "examples/since.zig",
-    "source": "cwd.deleteTree(io, \"lookout-since\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z026",
-    "path": "examples/usage.zig",
-    "source": "cwd.deleteTree(io, \"lookout-example\") catch {};",
-    "detail": "empty catch block suppresses errors: `catch {}`",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   }
 ]

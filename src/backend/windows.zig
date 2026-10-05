@@ -294,7 +294,7 @@ pub fn add(
         .accepted_len = w.buffer_len,
         .retiring_next = null,
     };
-    if (is_dir) w.budget.seed(dir_path) catch {};
+    if (is_dir) try w.budget.seed(dir_path);
 
     if (c.CreateIoCompletionPort(handle, w.port, @intFromEnum(id), 0) == null)
         return error.WatchLimitReached;
