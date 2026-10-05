@@ -101,7 +101,7 @@ pub const Error = Allocator.Error || Io.Dir.OpenError ||
 /// `path` must be a directory and must exist; a file has no listing to
 /// compare and `error.NotDir` says so. Call this where the watch is
 /// taken, so that the two cover the same tree from the same moment.
-pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Error!Baseline {
+pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Baseline.Error!Baseline {
     const real = try Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
     defer gpa.free(real);
 
@@ -145,7 +145,7 @@ pub fn deinit(b: *Baseline, gpa: Allocator) void {
 /// code. Calling it twice in a row returns nothing the second time.
 /// An error leaves the remembered tree unchanged, so retrying reports
 /// changes that have not yet been returned.
-pub fn diff(b: *Baseline, gpa: Allocator) Error![]const Change {
+pub fn diff(b: *Baseline, gpa: Allocator) Baseline.Error![]const Change {
     try b.scan(gpa, true);
     return b.changes.items;
 }
@@ -160,7 +160,7 @@ pub const LoadError = format.ParseError || Io.Dir.ReadFileAllocError || Io.Dir.R
 /// walking again. Keep it outside the watched tree. Predicate filters cannot
 /// be serialized and return UnsupportedBaselineFilter. Replacement is atomic;
 /// this does not promise power-loss durability (no fsync).
-pub fn save(b: *const Baseline, gpa: Allocator, filename: []const u8) SaveError!void {
+pub fn save(b: *const Baseline, gpa: Allocator, filename: []const u8) Baseline.SaveError!void {
     return b.saveWithOptions(gpa, filename, .{});
 }
 
@@ -173,7 +173,7 @@ pub const SaveOptions = struct {
 
 /// Saves with optional filesystem durability. A failure of the directory sync
 /// happens after replacement, so the new file may already be visible.
-pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8, options: SaveOptions) SaveError!void {
+pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8, options: SaveOptions) Baseline.SaveError!void {
     if (b.filter.allow != null) return error.UnsupportedBaselineFilter;
     if (options.durable and @import("builtin").os.tag == .windows) return error.UnsupportedBaselineDurability;
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -209,7 +209,7 @@ pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8,
 /// pattern filters must match those supplied by the caller. Corrupt, foreign
 /// and old-version files return InvalidBaseline, ForeignBaseline and
 /// UnsupportedBaselineVersion respectively. A later diff costs one walk.
-pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, options: Options) LoadError!Baseline {
+pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, options: Options) Baseline.LoadError!Baseline {
     if (options.filter.allow != null) return error.UnsupportedBaselineFilter;
     const bytes = Io.Dir.cwd().readFileAlloc(io, filename, gpa, .limited(format.file_limit)) catch |err| switch (err) {
         error.StreamTooLong => return error.InvalidBaseline,

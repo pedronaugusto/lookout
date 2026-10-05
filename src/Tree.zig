@@ -68,12 +68,12 @@ changes: std.ArrayList(Snapshot.Change),
 /// stale kernel event naming a freed node simply finds nothing.
 pub const NodeId = enum(u64) { _ };
 
-const Key = struct {
+pub const Key = struct {
     watch: WatchId,
     path: []const u8,
 };
 
-const KeyContext = struct {
+pub const KeyContext = struct {
     pub fn hash(_: KeyContext, key: Key) u32 {
         const mixed = path_cmp.hash(key.path) ^
             (@as(u64, @intFromEnum(key.watch)) *% 0x9e3779b97f4a7c15);
@@ -176,7 +176,7 @@ pub fn addWatch(
     options: @import("options.zig").AddOptions,
     added: *std.ArrayList(NodeId),
     batch: *Batch,
-) AddError!void {
+) Tree.AddError!void {
     const taken_ns = Io.Clock.real.now(t.io).nanoseconds;
     const stat = try Io.Dir.cwd().statFile(t.io, abs_path, .{});
     const recursive = options.recursive;
@@ -482,7 +482,7 @@ pub fn removeWatch(t: *Tree, id: WatchId) void {
 /// Reconciles the nodes of one watch with a new filter. The root remains
 /// registered while newly admitted descendants are opened and then old
 /// excluded descendants are released.
-pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeId), batch: *Batch) AddError!void {
+pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeId), batch: *Batch) Tree.AddError!void {
     const watch = t.watches.getPtr(id) orelse return;
     const replacement = try next.dupe(t.gpa);
     var previous = watch.filter;
@@ -608,7 +608,7 @@ pub fn rescanDirectory(
     id: NodeId,
     batch: *Batch,
     added: *std.ArrayList(NodeId),
-) ScanError!void {
+) Tree.ScanError!void {
     const node = t.nodes.getPtr(id) orelse return;
     if (node.role != .directory) return;
     const watch = node.watch;
@@ -767,7 +767,7 @@ fn adopt(
 
 /// Re-stats the file node `id` and pushes what changed into `batch`. Used
 /// by the `poll` backend, which is told nothing by the kernel.
-pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {
+pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) Tree.ScanError!void {
     const node = t.nodes.getPtr(id) orelse return;
     if (node.role != .file) return;
 

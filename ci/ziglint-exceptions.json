@@ -35,13 +35,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/Checkpoint/format.zig",
-    "source": "pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {",
-    "detail": "public function exposes private error set 'ParseError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z028",
     "path": "src/Checkpoint/format.zig",
     "source": "baseline: @import(\"paths.zig\").Paths,",
@@ -61,41 +54,6 @@
     "source": "var components = std.mem.tokenizeAny(u8, known, @import(\"../path.zig\").separators);",
     "detail": "inline @import; assign to a top-level const",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Baseline.zig",
-    "source": "pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Error!Baseline {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Baseline.zig",
-    "source": "pub fn diff(b: *Baseline, gpa: Allocator) Error![]const Change {",
-    "detail": "public function exposes private error set 'Error'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Baseline.zig",
-    "source": "pub fn save(b: *const Baseline, gpa: Allocator, filename: []const u8) SaveError!void {",
-    "detail": "public function exposes private error set 'SaveError'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Baseline.zig",
-    "source": "pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8, options: SaveOptions) SaveError!void {",
-    "detail": "public function exposes private error set 'SaveError'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Baseline.zig",
-    "source": "pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, options: Options) LoadError!Baseline {",
-    "detail": "public function exposes private error set 'LoadError'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
     "rule": "Z030",
@@ -137,27 +95,6 @@
     "path": "src/Baseline.zig",
     "source": "if (@import(\"builtin\").os.tag == .windows) {",
     "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Snapshot.zig",
-    "source": "pub fn refresh(",
-    "detail": "public function exposes private error set 'RefreshError'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Snapshot.zig",
-    "source": "pub fn prepare(s: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize, changes: *std.ArrayList(Change)) RefreshError!Snapshot {",
-    "detail": "public function exposes private error set 'RefreshError'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Snapshot.zig",
-    "source": "pub fn read(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize) RefreshError!Snapshot {",
-    "detail": "public function exposes private error set 'RefreshError'",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
@@ -217,13 +154,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z015",
-    "path": "src/Checkpoint.zig",
-    "source": "pub fn parse(gpa: Allocator, text: []const u8) ParseError!Checkpoint {",
-    "detail": "public function exposes private error set 'ParseError'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z013",
     "path": "src/Checkpoint.zig",
     "source": "const lookout = @import(\"types.zig\");",
@@ -271,76 +201,6 @@
     "source": "pub fn deinit(n: *Notes, gpa: Allocator) void {",
     "detail": "deinit should set n.* = undefined",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Batch.zig",
-    "source": "pub fn hash(_: EventKeyContext, key: EventKey) u64 {",
-    "detail": "public function exposes private type 'EventKeyContext'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Batch.zig",
-    "source": "pub fn hash(_: EventKeyContext, key: EventKey) u64 {",
-    "detail": "public function exposes private type 'EventKey'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Batch.zig",
-    "source": "pub fn eql(_: EventKeyContext, a: EventKey, b: EventKey) bool {",
-    "detail": "public function exposes private type 'EventKeyContext'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Batch.zig",
-    "source": "pub fn eql(_: EventKeyContext, a: EventKey, b: EventKey) bool {",
-    "detail": "public function exposes private type 'EventKey'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Batch.zig",
-    "source": "pub fn eql(_: EventKeyContext, a: EventKey, b: EventKey) bool {",
-    "detail": "public function exposes private type 'EventKey'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Batch.zig",
-    "source": "pub fn hash(_: EventKeyArrayContext, key: EventKey) u32 {",
-    "detail": "public function exposes private type 'EventKeyArrayContext'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Batch.zig",
-    "source": "pub fn hash(_: EventKeyArrayContext, key: EventKey) u32 {",
-    "detail": "public function exposes private type 'EventKey'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Batch.zig",
-    "source": "pub fn eql(_: EventKeyArrayContext, a: EventKey, b: EventKey, _: usize) bool {",
-    "detail": "public function exposes private type 'EventKeyArrayContext'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Batch.zig",
-    "source": "pub fn eql(_: EventKeyArrayContext, a: EventKey, b: EventKey, _: usize) bool {",
-    "detail": "public function exposes private type 'EventKey'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Batch.zig",
-    "source": "pub fn eql(_: EventKeyArrayContext, a: EventKey, b: EventKey, _: usize) bool {",
-    "detail": "public function exposes private type 'EventKey'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
     "rule": "Z028",
@@ -539,34 +399,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z012",
-    "path": "src/lookout.zig",
-    "source": "pub fn issue(h: LinkHost) WatchId {",
-    "detail": "public function exposes private type 'LinkHost'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/lookout.zig",
-    "source": "pub fn register(h: LinkHost, link: *Links.Link) AddError!void {",
-    "detail": "public function exposes private error set 'AddError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/lookout.zig",
-    "source": "pub fn register(h: LinkHost, link: *Links.Link) AddError!void {",
-    "detail": "public function exposes private type 'LinkHost'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/lookout.zig",
-    "source": "pub fn unregister(h: LinkHost, id: WatchId) void {",
-    "detail": "public function exposes private type 'LinkHost'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z020",
     "path": "src/lookout.zig",
     "source": "fn visit(m: @This(), entry: walk.Entry) anyerror!walk.Step {",
@@ -649,13 +481,6 @@
     "source": "pub const UnexpectedError = @import(\"watch_contract.zig\").UnexpectedError;",
     "detail": "inline @import; assign to a top-level const",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Baseline/format.zig",
-    "source": "pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!std.json.Parsed(State) {",
-    "detail": "public function exposes private error set 'ParseError'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
     "rule": "Z013",
@@ -809,55 +634,6 @@
     "path": "src/backend/fsevents.zig",
     "source": "//! The Apple backend: FSEvents.",
     "detail": "file 'fsevents.zig' has top-level fields and should be PascalCase",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/backend/fsevents.zig",
-    "source": "pub fn hash(_: KnownKeyContext, key: KnownKey) u32 {",
-    "detail": "public function exposes private type 'KnownKeyContext'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/backend/fsevents.zig",
-    "source": "pub fn hash(_: KnownKeyContext, key: KnownKey) u32 {",
-    "detail": "public function exposes private type 'KnownKey'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/backend/fsevents.zig",
-    "source": "pub fn eql(_: KnownKeyContext, a: KnownKey, b: KnownKey, _: usize) bool {",
-    "detail": "public function exposes private type 'KnownKeyContext'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/backend/fsevents.zig",
-    "source": "pub fn eql(_: KnownKeyContext, a: KnownKey, b: KnownKey, _: usize) bool {",
-    "detail": "public function exposes private type 'KnownKey'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/backend/fsevents.zig",
-    "source": "pub fn eql(_: KnownKeyContext, a: KnownKey, b: KnownKey, _: usize) bool {",
-    "detail": "public function exposes private type 'KnownKey'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/backend/fsevents.zig",
-    "source": "pub fn wanted(a: Asking, id: WatchId, subject: []const u8) bool {",
-    "detail": "public function exposes private type 'Asking'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/backend/fsevents.zig",
-    "source": "pub fn exists(a: Asking, subject: []const u8) ?bool {",
-    "detail": "public function exposes private type 'Asking'",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
@@ -2212,20 +1988,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z012",
-    "path": "src/testing/fuzz_test.zig",
-    "source": "pub fn wanted(f: Fake, id: WatchId, subject: []const u8) bool {",
-    "detail": "public function exposes private type 'Fake'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/testing/fuzz_test.zig",
-    "source": "pub fn exists(f: Fake, subject: []const u8) bool {",
-    "detail": "public function exposes private type 'Fake'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z030",
     "path": "src/testing/fuzz_test.zig",
     "source": "fn deinit(s: *Spelled, gpa: std.mem.Allocator) void {",
@@ -2321,69 +2083,6 @@
     "path": "src/watch_contract.zig",
     "source": "const Filter = @import(\"Filter.zig\");",
     "detail": "unused import 'Filter'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Tree.zig",
-    "source": "pub fn hash(_: KeyContext, key: Key) u32 {",
-    "detail": "public function exposes private type 'KeyContext'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Tree.zig",
-    "source": "pub fn hash(_: KeyContext, key: Key) u32 {",
-    "detail": "public function exposes private type 'Key'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Tree.zig",
-    "source": "pub fn eql(_: KeyContext, a: Key, b: Key, _: usize) bool {",
-    "detail": "public function exposes private type 'KeyContext'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Tree.zig",
-    "source": "pub fn eql(_: KeyContext, a: Key, b: Key, _: usize) bool {",
-    "detail": "public function exposes private type 'Key'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z012",
-    "path": "src/Tree.zig",
-    "source": "pub fn eql(_: KeyContext, a: Key, b: Key, _: usize) bool {",
-    "detail": "public function exposes private type 'Key'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Tree.zig",
-    "source": "pub fn addWatch(",
-    "detail": "public function exposes private error set 'AddError'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Tree.zig",
-    "source": "pub fn refilter(t: *Tree, id: WatchId, next: Filter, added: *std.ArrayList(NodeId), batch: *Batch) AddError!void {",
-    "detail": "public function exposes private error set 'AddError'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Tree.zig",
-    "source": "pub fn rescanDirectory(",
-    "detail": "public function exposes private error set 'ScanError'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z015",
-    "path": "src/Tree.zig",
-    "source": "pub fn rescanFile(t: *Tree, id: NodeId, batch: *Batch) ScanError!void {",
-    "detail": "public function exposes private error set 'ScanError'",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {

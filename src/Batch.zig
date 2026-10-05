@@ -178,12 +178,12 @@ const Held = struct {
     size: ?u64,
 };
 
-const EventKey = struct {
+pub const EventKey = struct {
     id: WatchId,
     path: []const u8,
 };
 
-const EventKeyContext = struct {
+pub const EventKeyContext = struct {
     pub fn hash(_: EventKeyContext, key: EventKey) u64 {
         return path_cmp.hash(key.path) ^ (@as(u64, @intFromEnum(key.id)) *% 0x9e3779b97f4a7c15);
     }
@@ -193,7 +193,7 @@ const EventKeyContext = struct {
     }
 };
 
-const EventKeyArrayContext = struct {
+pub const EventKeyArrayContext = struct {
     pub fn hash(_: EventKeyArrayContext, key: EventKey) u32 {
         return @truncate(EventKeyContext.hash(.{}, key));
     }

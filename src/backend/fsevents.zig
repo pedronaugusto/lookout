@@ -106,13 +106,13 @@ stream_latency: f64,
 /// it with an `lstat`, which reports the same fields for an unchanged entry.
 const Initial = walk.Meta;
 
-const KnownKey = struct {
+pub const KnownKey = struct {
     id: WatchId,
     path: []const u8,
     history: ?*CheckpointPaths.Node = null,
 };
 
-const KnownKeyContext = struct {
+pub const KnownKeyContext = struct {
     pub fn hash(_: KnownKeyContext, key: KnownKey) u32 {
         const mixed = path_cmp.hash(key.path) ^
             (@as(u64, @intFromEnum(key.id)) *% 0x9e3779b97f4a7c15);
@@ -1071,7 +1071,7 @@ fn reportTaken(f: *FsEvents, batch: *Batch, delivered: []const Record, taken: re
 /// excluded half here left the kept one to be read on its flags alone,
 /// and a file saved by renaming an excluded temporary over a watched
 /// name carries nothing in them that says it changed.
-const Asking = struct {
+pub const Asking = struct {
     f: *FsEvents,
 
     pub fn wanted(a: Asking, id: WatchId, subject: []const u8) bool {

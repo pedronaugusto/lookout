@@ -319,7 +319,7 @@ fn fuzzCarry(_: void, smith: *testing.Smith) !void {
 /// symmetry it is held to would be a property of the order it asked
 /// its questions in. A hash of the path gives the same answer however
 /// often it is asked.
-const Fake = struct {
+pub const Fake = struct {
     seed: u32,
 
     pub fn wanted(f: Fake, id: WatchId, subject: []const u8) bool {

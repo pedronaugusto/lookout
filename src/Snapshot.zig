@@ -147,14 +147,14 @@ pub fn refresh(
     dir: Io.Dir,
     max_entries: usize,
     changes: *std.ArrayList(Change),
-) RefreshError!void {
+) Snapshot.RefreshError!void {
     var next = try s.prepare(gpa, io, dir, max_entries, changes);
     s.accept(gpa, &next);
 }
 
 /// Prepares a listing and its changes without advancing the baseline.
 /// The caller owns the result until every change has been accounted for.
-pub fn prepare(s: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize, changes: *std.ArrayList(Change)) RefreshError!Snapshot {
+pub fn prepare(s: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize, changes: *std.ArrayList(Change)) Snapshot.RefreshError!Snapshot {
     var next = try s.readListing(gpa, io, dir, max_entries);
     errdefer next.deinit(gpa);
     try next.compare(s, gpa, changes);
@@ -177,7 +177,7 @@ pub fn accept(s: *Snapshot, gpa: Allocator, next: *Snapshot) void {
 /// Reads a listing without advancing the snapshot it will be compared to.
 /// If it is truncated, keeps the remembered entries: an omitted name is
 /// not evidence of a removal. The caller owns the result.
-pub fn read(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize) RefreshError!Snapshot {
+pub fn read(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize) Snapshot.RefreshError!Snapshot {
     var next = try before.readListing(gpa, io, dir, max_entries);
     errdefer next.deinit(gpa);
     if (next.truncated and before.entries.count() != 0) {

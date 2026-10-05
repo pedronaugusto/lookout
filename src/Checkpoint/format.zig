@@ -43,7 +43,7 @@ pub const Half = struct {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-pub const ParseError = Allocator.Error || error{InvalidCheckpoint};
+pub const ParseError = error{ OutOfMemory, InvalidCheckpoint };
 
 pub const Owned = struct {
     value: State,

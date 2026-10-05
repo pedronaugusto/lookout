@@ -21,12 +21,12 @@ pub fn token(p: Checkpoint, gpa: Allocator) Allocator.Error![]u8 {
     return std.json.Stringify.valueAlloc(gpa, p.state.value, .{});
 }
 
-pub const ParseError = Allocator.Error || error{InvalidCheckpoint};
+pub const ParseError = error{ OutOfMemory, InvalidCheckpoint };
 
 /// Reads an owned snapshot. The input is borrowed only during this call.
 /// Tokens without the current baseline format, volume and log identity are refused. Call deinit when
 /// the snapshot is no longer needed.
-pub fn parse(gpa: Allocator, text: []const u8) ParseError!Checkpoint {
+pub fn parse(gpa: Allocator, text: []const u8) Checkpoint.ParseError!Checkpoint {
     return .{ .state = try format.parse(gpa, text) };
 }
 

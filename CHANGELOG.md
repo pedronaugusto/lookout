@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `Watcher.LinkHost`, the adapter followed links register through, is public, as are the key and hash context types of the event batch, the polling tree and the FSEvents backend that their public methods take. `Baseline`, `Snapshot`, `Tree` and `Checkpoint` signatures name their public error sets qualified, and the baseline and checkpoint `ParseError` sets are spelled out; their members are unchanged.
+
 - Share the Zig CI gate through preflight, with requested fast runs and full merge checks.
 
 - `AddOptions.follow_symlinks` makes a recursive watch follow links to directories and report changes below a link under the link's path. A link into a directory the watch already reaches is refused by device and inode, or volume and file id; `max_followed_links` bounds each watch and a link past it is reported `unwatched`. Off by default.

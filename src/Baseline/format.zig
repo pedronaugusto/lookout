@@ -20,7 +20,7 @@ pub const Directory = struct {
     entries: []const Entry,
 };
 pub const Entry = struct { name: []const u8, meta: Snapshot.Meta };
-pub const ParseError = std.mem.Allocator.Error || error{ InvalidBaseline, UnsupportedBaselineVersion, ForeignBaseline };
+pub const ParseError = error{ OutOfMemory, InvalidBaseline, UnsupportedBaselineVersion, ForeignBaseline };
 const magic = "LOOKBASE";
 const header_size = 44;
 pub const platform = @tagName(builtin.os.tag);

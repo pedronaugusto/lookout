@@ -1271,10 +1271,10 @@ pub const Watcher = struct {
 
     /// What `Links` asks of the watcher: ids for, and registrations on,
     /// the directories followed links lead to.
-    const LinkHost = struct {
+    pub const LinkHost = struct {
         w: *Watcher,
 
-        pub fn issue(h: LinkHost) WatchId {
+        pub fn issue(h: Watcher.LinkHost) WatchId {
             const id: WatchId = @enumFromInt(h.w.next_id);
             h.w.next_id += 1;
             return id;
@@ -1282,18 +1282,18 @@ pub const Watcher = struct {
 
         /// The alias goes in first: a backend may report while it
         /// registers, and what it reports is the link's watch's.
-        pub fn register(h: LinkHost, link: *Links.Link) AddError!void {
+        pub fn register(h: Watcher.LinkHost, link: *Links.Link) Watcher.AddError!void {
             try h.w.batch.aliases.put(h.w.gpa, link.id, &link.alias);
             errdefer _ = h.w.batch.aliases.swapRemove(link.id);
             try h.w.addBackend(link.id, link.target, link.target, .{ .recursive = true, .filter = link.filter() });
         }
 
-        pub fn unregister(h: LinkHost, id: WatchId) void {
+        pub fn unregister(h: Watcher.LinkHost, id: WatchId) void {
             h.w.removeBackend(id);
             _ = h.w.batch.aliases.swapRemove(id);
         }
 
-        fn refilter(h: LinkHost, link: *Links.Link) RefilterError!void {
+        fn refilter(h: Watcher.LinkHost, link: *Links.Link) RefilterError!void {
             if (h.w.polling.tree.watches.contains(link.id)) {
                 return h.w.polling.refilter(link.id, link.filter(), &h.w.batch);
             }
