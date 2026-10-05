@@ -174,7 +174,7 @@ fn outside(f: Filter, root: []const u8, subject: []const u8, purpose: Purpose) b
 
     var end: usize = 0;
     while (end < rest.len) {
-        end = if (std.mem.indexOfAnyPos(u8, rest, end + 1, path.separators)) |next|
+        end = if (std.mem.findAnyPos(u8, rest, end + 1, path.separators)) |next|
             next
         else
             rest.len;

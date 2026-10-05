@@ -153,8 +153,7 @@ pub fn identity(io: std.Io, path: []const u8) ?Identity {
 /// A device or inode number of whatever width and sign the C library
 /// gives it, as the bits it holds.
 fn unsigned(value: anytype) u64 {
-    const Bits = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(value)));
-    return @as(Bits, @bitCast(value));
+    return @as(@Int(.unsigned, @bitSizeOf(@TypeOf(value))), @bitCast(value));
 }
 
 fn identityWindows(io: std.Io, path: []const u8) ?Identity {

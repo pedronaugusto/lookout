@@ -1,12 +1,5 @@
 [
   {
-    "rule": "Z011",
-    "path": "src/path.zig",
-    "source": "const cp = std.unicode.utf8Decode(f.bytes[f.at..][0..len]) catch {",
-    "detail": "'utf8Decode' is deprecated: Deprecated. This function has an awkward API that is too easy to use incorrectly.",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z009",
     "path": "src/Checkpoint/paths.zig",
     "source": "//! Shared path history. A checkpoint leases a revision, not a copy of the tree.",
@@ -18,62 +11,6 @@
     "path": "src/Checkpoint/paths.zig",
     "source": "const History = @This();",
     "detail": "@This() alias 'History' should match filename 'paths' or be 'Self'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/filesystem.zig",
-    "source": "const Bits = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(value)));",
-    "detail": "'Int' is deprecated: Deprecated: use @Int",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/Checkpoint.zig",
-    "source": "const lookout = @import(\"types.zig\");",
-    "detail": "unused import 'lookout'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/inotify_test.zig",
-    "source": "const path_cmp = @import(\"../path.zig\");",
-    "detail": "unused import 'path_cmp'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/inotify_test.zig",
-    "source": "const Budget = @import(\"../Budget.zig\");",
-    "detail": "unused import 'Budget'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/inotify_test.zig",
-    "source": "const Deadline = @import(\"../Deadline.zig\");",
-    "detail": "unused import 'Deadline'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/inotify_test.zig",
-    "source": "const Waker = @import(\"../Waker.zig\");",
-    "detail": "unused import 'Waker'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/inotify_test.zig",
-    "source": "const Batch = @import(\"../Batch.zig\");",
-    "detail": "unused import 'Batch'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/inotify_test.zig",
-    "source": "const walk = @import(\"../walk.zig\");",
-    "detail": "unused import 'walk'",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -462,125 +399,6 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z004",
-    "path": "src/backend/fsevents_test.zig",
-    "source": "var used = [_]bool{};",
-    "detail": "prefer type annotation '[_]bool' with an anonymous initializer for 'used'; preserve the declaration kind, modifiers, and fields",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/fsevents_test.zig",
-    "source": "const trace = @import(\"../trace.zig\");",
-    "detail": "unused import 'trace'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/fsevents_test.zig",
-    "source": "const Waker = @import(\"../Waker.zig\");",
-    "detail": "unused import 'Waker'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/fsevents_test.zig",
-    "source": "const Volume = @import(\"fsevents/volume.zig\");",
-    "detail": "unused import 'Volume'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/fsevents_test.zig",
-    "source": "const Budget = @import(\"../Budget.zig\");",
-    "detail": "unused import 'Budget'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/fsevents_test.zig",
-    "source": "const Filter = @import(\"../Filter.zig\");",
-    "detail": "unused import 'Filter'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/fsevents_test.zig",
-    "source": "const Batch = @import(\"../Batch.zig\");",
-    "detail": "unused import 'Batch'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/fsevents_test.zig",
-    "source": "const walk = @import(\"../walk.zig\");",
-    "detail": "unused import 'walk'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/windows_test.zig",
-    "source": "const path_cmp = @import(\"../path.zig\");",
-    "detail": "unused import 'path_cmp'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/windows_test.zig",
-    "source": "const Windows = @import(\"windows.zig\");",
-    "detail": "unused import 'Windows'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/windows_test.zig",
-    "source": "const Budget = @import(\"../Budget.zig\");",
-    "detail": "unused import 'Budget'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/windows_test.zig",
-    "source": "const records = @import(\"windows/records.zig\");",
-    "detail": "unused import 'records'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/windows_test.zig",
-    "source": "const trace = @import(\"../trace.zig\");",
-    "detail": "unused import 'trace'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/windows_test.zig",
-    "source": "const Deadline = @import(\"../Deadline.zig\");",
-    "detail": "unused import 'Deadline'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/windows_test.zig",
-    "source": "const Filter = @import(\"../Filter.zig\");",
-    "detail": "unused import 'Filter'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/windows_test.zig",
-    "source": "const Waker = @import(\"../Waker.zig\");",
-    "detail": "unused import 'Waker'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/backend/windows_test.zig",
-    "source": "const Batch = @import(\"../Batch.zig\");",
-    "detail": "unused import 'Batch'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z009",
     "path": "src/backend/poll.zig",
     "source": "//! The portable backend: re-stat and re-list the watched paths on a timer.",
@@ -593,40 +411,5 @@
     "source": "//! The volume a device-relative stream uses: stable identity, current device",
     "detail": "file 'volume.zig' has top-level fields and should be PascalCase",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/testing/fuzz_test.zig",
-    "source": "while (std.mem.indexOfAnyPos(u8, subject, end, path_cmp.separators)) |at| : (end = at + 1) {",
-    "detail": "'indexOfAnyPos' is deprecated: Deprecated in favor of `findAnyPos`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/testing/fuzz_test.zig",
-    "source": "const Model = std.StringArrayHashMapUnmanaged(?[]const u8);",
-    "detail": "'StringArrayHashMapUnmanaged' is deprecated: Deprecated; use `array_hash_map.String`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/testing/fuzz_test.zig",
-    "source": "var expected: std.StringArrayHashMapUnmanaged(Expected) = .empty;",
-    "detail": "'StringArrayHashMapUnmanaged' is deprecated: Deprecated; use `array_hash_map.String`.",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z013",
-    "path": "src/watch_contract.zig",
-    "source": "const Filter = @import(\"Filter.zig\");",
-    "detail": "unused import 'Filter'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z011",
-    "path": "src/Filter.zig",
-    "source": "end = if (std.mem.indexOfAnyPos(u8, rest, end + 1, path.separators)) |next|",
-    "detail": "'indexOfAnyPos' is deprecated: Deprecated in favor of `findAnyPos`.",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   }
 ]

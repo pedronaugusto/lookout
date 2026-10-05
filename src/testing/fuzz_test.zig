@@ -626,7 +626,7 @@ fn fuzzFilter(_: void, smith: *testing.Smith) !void {
         try testing.expect(!only.excludes(root, subject));
     }
     var end: usize = root.len + 1;
-    while (std.mem.indexOfAnyPos(u8, subject, end, path_cmp.separators)) |at| : (end = at + 1) {
+    while (std.mem.findAnyPos(u8, subject, end, path_cmp.separators)) |at| : (end = at + 1) {
         const ancestor = subject[0..at];
         // An excluded directory takes everything below it.
         if (ignore.excludes(root, ancestor)) try testing.expect(ignore.excludes(root, subject));
@@ -643,7 +643,7 @@ test "a baseline of an arbitrary tree diffs to what changed in it" {
 }
 
 /// A tree: relative path to a file's contents, or to null for a directory.
-const Model = std.StringArrayHashMapUnmanaged(?[]const u8);
+const Model = std.array_hash_map.String(?[]const u8);
 
 fn applyModel(dir: std.Io.Dir, model: *const Model) !void {
     const io = testing.io;
@@ -751,7 +751,7 @@ fn fuzzBaseline(_: void, smith: *testing.Smith) !void {
     // and the files whose contents changed. A path below the root is in
     // a non-recursive baseline's view only when it is the root's child.
     const Expected = struct { kind: lookout.Kind, target: lookout.Target };
-    var expected: std.StringArrayHashMapUnmanaged(Expected) = .empty;
+    var expected: std.array_hash_map.String(Expected) = .empty;
     const visible = struct {
         fn f(key: []const u8, deep: bool) bool {
             return deep or std.mem.indexOfAny(u8, key, path_cmp.separators) == null;

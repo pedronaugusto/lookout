@@ -4,7 +4,6 @@ const Io = std.Io;
 const Tree = @import("Tree.zig");
 const types = @import("types.zig");
 const WatchId = types.WatchId;
-const Filter = @import("Filter.zig");
 
 /// Errors `init` can return when creating the backend's resources.
 /// FSEvents also allocates its delivery sink and `Options.buffer_bytes`

@@ -227,7 +227,15 @@ pub const Folder = struct {
             f.at += 1;
             return raw(first);
         }
-        const cp = std.unicode.utf8Decode(f.bytes[f.at..][0..len]) catch {
+        const sequence = f.bytes[f.at..][0..len];
+        const decoded = switch (len) {
+            2 => std.unicode.utf8Decode2(sequence[0..2].*),
+            3 => std.unicode.utf8Decode3(sequence[0..3].*),
+            4 => std.unicode.utf8Decode4(sequence[0..4].*),
+            // A lead byte at or above 0x80 starts a sequence of two to four.
+            else => unreachable,
+        };
+        const cp = decoded catch {
             f.at += 1;
             return raw(first);
         };

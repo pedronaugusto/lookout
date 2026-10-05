@@ -4,18 +4,11 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
 const lookout = @import("../lookout.zig");
-const Batch = @import("../Batch.zig");
-const Volume = @import("fsevents/volume.zig");
 const checkpoint_format = @import("../Checkpoint/format.zig");
-const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
-const Filter = @import("../Filter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("fsevents/records.zig");
-const trace = @import("../trace.zig");
-const walk = @import("../walk.zig");
-const Waker = @import("../Waker.zig");
 const Record = records.Record;
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
@@ -808,7 +801,7 @@ fn expectHeldRenameFailure(comptime transfer: enum { resolve, replace, rejoin })
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = if (transfer == .replace) 1 else 0 });
     backend.gpa = failing.allocator();
     defer backend.gpa = testing.allocator;
-    var used = [_]bool{};
+    var used: [0]bool = .{};
     const result = switch (transfer) {
         .resolve => access.resolveHeld(backend, &watcher.batch),
         .replace => access.hold(backend, &watcher.batch, record),
