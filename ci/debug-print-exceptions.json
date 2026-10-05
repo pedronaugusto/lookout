@@ -1,0 +1,93 @@
+[
+  {
+    "rule": "debug-print",
+    "path": "src/trace.zig",
+    "source": "std.debug.print(\"lookout: \" ++ fmt ++ \"\\n\", args);",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/since.zig",
+    "source": "std.debug.print(",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/since.zig",
+    "source": "std.debug.print(\"first run: {s} {s}\\n\", .{ @tagName(event.kind), event.path });",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/since.zig",
+    "source": "std.debug.print(\"checkpoint: {s}\\n\", .{token});",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/since.zig",
+    "source": "std.debug.print(\"since: {s} {s}\\n\", .{ @tagName(event.kind), event.path });",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/usage.zig",
+    "source": "std.debug.print(\"{s} {s}\\n\", .{ @tagName(event.kind), event.path });",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/usage.zig",
+    "source": "std.debug.print(\"filtered: {s} {s}\\n\", .{ @tagName(event.kind), event.path });",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/usage.zig",
+    "source": "std.debug.print(\"pending: {s} {s}\\n\", .{ @tagName(event.kind), event.path });",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/usage.zig",
+    "source": "std.debug.print(\"baseline: {s} {s}\\n\", .{ @tagName(change.kind), change.path });",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/usage.zig",
+    "source": "std.debug.print(\"backend: {s}\\n\", .{@tagName(watcher.backend())});",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/usage.zig",
+    "source": "std.debug.print(\"prunes ignored: {}\\n\", .{lookout.prunesIgnored(watcher.backend())});",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/usage.zig",
+    "source": "std.debug.print(\"{s} {s} (from {s})\\n\", .{ @tagName(event.kind), event.path, from });",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "debug-print",
+    "path": "examples/usage.zig",
+    "source": "std.debug.print(\"{s} {s}\\n\", .{ @tagName(event.kind), event.path });",
+    "detail": "std.debug.print outside tests and src/testing/",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  }
+]

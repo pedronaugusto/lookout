@@ -1,0 +1,58 @@
+[
+  {
+    "rule": "file-name-case",
+    "path": "src/Checkpoint/paths.zig",
+    "source": "top-level fields",
+    "detail": "struct file must use TitleCase",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "file-name-case",
+    "path": "src/Links_test.zig",
+    "source": "no top-level fields",
+    "detail": "namespace file must use snake_case/lowercase",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "file-name-case",
+    "path": "src/backend/fsevents.zig",
+    "source": "top-level fields",
+    "detail": "struct file must use TitleCase",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "file-name-case",
+    "path": "src/backend/fsevents/volume.zig",
+    "source": "top-level fields",
+    "detail": "struct file must use TitleCase",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "file-name-case",
+    "path": "src/backend/inotify.zig",
+    "source": "top-level fields",
+    "detail": "struct file must use TitleCase",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "file-name-case",
+    "path": "src/backend/kqueue.zig",
+    "source": "top-level fields",
+    "detail": "struct file must use TitleCase",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "file-name-case",
+    "path": "src/backend/poll.zig",
+    "source": "top-level fields",
+    "detail": "struct file must use TitleCase",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "file-name-case",
+    "path": "src/backend/windows.zig",
+    "source": "top-level fields",
+    "detail": "struct file must use TitleCase",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  }
+]

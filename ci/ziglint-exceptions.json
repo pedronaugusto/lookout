@@ -7,20 +7,6 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z028",
-    "path": "src/tests.zig",
-    "source": "if (comptime @import(\"lookout.zig\").supported(.inotify)) _ = @import(\"backend/inotify_test.zig\");",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z028",
-    "path": "src/tests.zig",
-    "source": "if (comptime @import(\"lookout.zig\").supported(.fsevents)) _ = @import(\"backend/fsevents_test.zig\");",
-    "detail": "inline @import; assign to a top-level const",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z009",
     "path": "src/Checkpoint/paths.zig",
     "source": "//! Shared path history. A checkpoint leases a revision, not a copy of the tree.",

@@ -1,0 +1,30 @@
+[
+  {
+    "rule": "catch-unreachable",
+    "path": "src/Budget.zig",
+    "source": "for (0..made_up) |k| try addName(b.gpa, names, std.fmt.bufPrint(&buf, \"\\x00made-up {d}\", .{k}) catch unreachable);",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/backend/fsevents.zig",
+    "source": "const record = (it.next() catch unreachable) orelse break;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/lookout.zig",
+    "source": ".polling = Poll.init(gpa, io, options) catch unreachable,",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  },
+  {
+    "rule": "catch-unreachable",
+    "path": "src/lookout.zig",
+    "source": "w.anchorPending(p) catch unreachable;",
+    "detail": "catch unreachable needs // unreachable: <why> on the same or previous line",
+    "reason": "existing at gate adoption; burned down in the cleanup pass"
+  }
+]
