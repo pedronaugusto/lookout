@@ -119,7 +119,7 @@ const Watch = struct {
     /// to leave a directory out, so here the filter drops the events
     /// rather than saving the work -- see `lookout.prunesIgnored`.
     filter: Filter,
-    overlapped: c.OVERLAPPED,
+    overlapped: c.Overlapped,
     /// Where the kernel writes the change records. Owned by the watch,
     /// and not released until its outstanding read has completed, which
     /// is why `remove` retires a watch rather than freeing it.
@@ -291,7 +291,7 @@ pub fn add(
         .root_target = .of(stat.kind),
         .recursive = options.recursive and is_dir,
         .filter = filter,
-        .overlapped = std.mem.zeroes(c.OVERLAPPED),
+        .overlapped = std.mem.zeroes(c.Overlapped),
         .buffer = bytes,
         .pending_rename = null,
         .held_removal = null,
@@ -317,20 +317,20 @@ fn open(gpa: Allocator, path: []const u8) contract.AddError!windows.HANDLE {
 
     const handle = c.CreateFileW(
         wide.ptr,
-        c.FILE_LIST_DIRECTORY,
+        c.file_list_directory,
         // FILE_SHARE_DELETE is the one that matters: without it, watching
         // a directory would stop anyone else from deleting or renaming
         // it, which is not what a watcher is for.
-        c.FILE_SHARE_READ | c.FILE_SHARE_WRITE | c.FILE_SHARE_DELETE,
+        c.file_share_read | c.file_share_write | c.file_share_delete,
         null,
-        c.OPEN_EXISTING,
-        c.FILE_FLAG_BACKUP_SEMANTICS | c.FILE_FLAG_OVERLAPPED,
+        c.open_existing,
+        c.file_flag_backup_semantics | c.file_flag_overlapped,
         null,
     );
     if (handle == windows.INVALID_HANDLE_VALUE) return switch (c.GetLastError()) {
-        c.ERROR_FILE_NOT_FOUND, c.ERROR_PATH_NOT_FOUND => error.FileNotFound,
-        c.ERROR_ACCESS_DENIED => error.AccessDenied,
-        c.ERROR_TOO_MANY_OPEN_FILES => error.ProcessFdQuotaExceeded,
+        c.error_file_not_found, c.error_path_not_found => error.FileNotFound,
+        c.error_access_denied => error.AccessDenied,
+        c.error_too_many_open_files => error.ProcessFdQuotaExceeded,
         else => error.Unexpected,
     };
     return handle;
@@ -340,11 +340,11 @@ fn open(gpa: Allocator, path: []const u8) contract.AddError!windows.HANDLE {
 /// because a change that arrives while no read is outstanding is a change
 /// the kernel has to buffer.
 fn arm(w: *Windows, watch: *Watch) contract.AddError!void {
-    watch.overlapped = std.mem.zeroes(c.OVERLAPPED);
-    const filter: u32 = c.FILE_NOTIFY_CHANGE_FILE_NAME | c.FILE_NOTIFY_CHANGE_DIR_NAME |
-        c.FILE_NOTIFY_CHANGE_ATTRIBUTES | c.FILE_NOTIFY_CHANGE_SIZE |
-        c.FILE_NOTIFY_CHANGE_LAST_WRITE | c.FILE_NOTIFY_CHANGE_CREATION |
-        c.FILE_NOTIFY_CHANGE_SECURITY;
+    watch.overlapped = std.mem.zeroes(c.Overlapped);
+    const filter: u32 = c.file_notify_change_file_name | c.file_notify_change_dir_name |
+        c.file_notify_change_attributes | c.file_notify_change_size |
+        c.file_notify_change_last_write | c.file_notify_change_creation |
+        c.file_notify_change_security;
     if (c.ReadDirectoryChangesW(
         watch.handle,
         watch.buffer.ptr,
@@ -355,12 +355,12 @@ fn arm(w: *Windows, watch: *Watch) contract.AddError!void {
         &watch.overlapped,
         null,
     ) == 0) return switch (c.GetLastError()) {
-        c.ERROR_IO_PENDING => {},
-        c.ERROR_NOT_ENOUGH_MEMORY, c.ERROR_OUTOFMEMORY => error.SystemResources,
+        c.error_io_pending => {},
+        c.error_not_enough_memory, c.error_outofmemory => error.SystemResources,
         // A remote directory refuses a buffer over 64 KiB outright
         // rather than clamping it. Coming down to what a share takes is
         // the difference between a smaller buffer and a dead watch.
-        c.ERROR_INVALID_PARAMETER => {
+        c.error_invalid_parameter => {
             if (watch.accepted_len <= share_buffer_len) return error.Unexpected;
             watch.accepted_len = share_buffer_len;
             return w.arm(watch);
@@ -455,7 +455,7 @@ fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) contract.PollError!void
     while (true) {
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still takes one look at the port.
-        const timeout: u32 = if (timeout_ms == null) c.INFINITE else deadline.windowsMs();
+        const timeout: u32 = if (timeout_ms == null) c.infinite else deadline.windowsMs();
         switch (try w.take(batch, timeout)) {
             .woken => return,
             // A finite timeout may have been clamped to what this API
@@ -519,11 +519,11 @@ fn take(w: *Windows, batch: *Batch, timeout: u32) contract.PollError!Taken {
     }
     var transferred: u32 = 0;
     var key: usize = 0;
-    var overlapped: ?*c.OVERLAPPED = null;
+    var overlapped: ?*c.Overlapped = null;
     const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, timeout);
     const failure: ?u32 = if (ok == 0) c.GetLastError() else null;
     if (overlapped == null and ok == 0) {
-        if (failure.? != c.WAIT_TIMEOUT) return error.Unexpected;
+        if (failure.? != c.wait_timeout) return error.Unexpected;
         return .quiet;
     }
     if (key == wake_key) return .woken;
@@ -544,7 +544,7 @@ fn complete(w: *Windows, watch: *Watch, batch: *Batch) contract.PollError!void {
     if (!watch.reported) {
         if (completion.failure) |err| {
             try w.resolveRemoval(watch, batch);
-            if (err != c.ERROR_NOTIFY_ENUM_DIR) {
+            if (err != c.error_notify_enum_dir) {
                 try batch.push(w.gpa, id, watch.root, .removed, .directory);
                 w.discard(id);
                 return;
@@ -687,14 +687,14 @@ fn discard(w: *Windows, id: WatchId) void {
 /// just been opened and reported the path the caller was waiting for as
 /// removed. Each `Watch` is heap-allocated and never moved, so the
 /// address of its `overlapped` tells the two apart.
-fn live(w: *Windows, id: WatchId, overlapped: ?*c.OVERLAPPED) ?*Watch {
+fn live(w: *Windows, id: WatchId, overlapped: ?*c.Overlapped) ?*Watch {
     const watch = w.watches.get(id) orelse return null;
     if (overlapped != &watch.overlapped) return null;
     return watch;
 }
 
 /// Frees a retiring watch once its cancelled read has been accounted for.
-fn retire(w: *Windows, overlapped: ?*c.OVERLAPPED) void {
+fn retire(w: *Windows, overlapped: ?*c.Overlapped) void {
     const completed = overlapped orelse return;
     var link = &w.retiring;
     while (link.*) |watch| {
@@ -757,10 +757,10 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) contract.
         // names of a rename are the exception: they are paired first and
         // the filter is applied to the pair -- see `reportRename`.
         switch (record.action) {
-            c.FILE_ACTION_RENAMED_OLD_NAME, c.FILE_ACTION_RENAMED_NEW_NAME => {
+            c.file_action_renamed_old_name, c.file_action_renamed_new_name => {
                 try w.reportRename(watch, record.action, path, batch);
             },
-            c.FILE_ACTION_REMOVED => if (wants(watch, path)) {
+            c.file_action_removed => if (wants(watch, path)) {
                 try w.reportRemoval(watch, it, dir, path, batch);
             },
             else => if (wants(watch, path)) {
@@ -806,7 +806,7 @@ fn reportRemoval(w: *Windows, watch: *Watch, rest: records.Iterator, dir: []cons
             return w.recount(watch, path, .vanished, batch);
         },
     }
-    try w.reportOne(watch, c.FILE_ACTION_REMOVED, path, batch);
+    try w.reportOne(watch, c.file_action_removed, path, batch);
 }
 
 /// Whether `record`, read on `dir`, names `path`.
@@ -821,11 +821,11 @@ fn sameName(w: *Windows, record: records.Record, dir: []const u8, path: []const 
 /// A record's action as the documentation spells it, for the trace.
 fn actionName(action: u32) []const u8 {
     return switch (action) {
-        c.FILE_ACTION_ADDED => "ADDED",
-        c.FILE_ACTION_REMOVED => "REMOVED",
-        c.FILE_ACTION_MODIFIED => "MODIFIED",
-        c.FILE_ACTION_RENAMED_OLD_NAME => "RENAMED_OLD_NAME",
-        c.FILE_ACTION_RENAMED_NEW_NAME => "RENAMED_NEW_NAME",
+        c.file_action_added => "ADDED",
+        c.file_action_removed => "REMOVED",
+        c.file_action_modified => "MODIFIED",
+        c.file_action_renamed_old_name => "RENAMED_OLD_NAME",
+        c.file_action_renamed_new_name => "RENAMED_NEW_NAME",
         else => "unknown",
     };
 }
@@ -850,7 +850,7 @@ fn wants(watch: *const Watch, subject: []const u8) bool {
 /// nothing.
 fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) contract.PollError!void {
     const wanted = wants(watch, subject);
-    if (action == c.FILE_ACTION_RENAMED_OLD_NAME) {
+    if (action == c.file_action_renamed_old_name) {
         // Copied before the one it replaces is freed, so a copy that
         // fails leaves the watch holding what it held.
         const owned = try w.gpa.dupe(u8, subject);
@@ -903,17 +903,17 @@ fn targetOf(w: *const Windows, subject: []const u8) Target {
 fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) contract.PollError!void {
     var move: Budget.Move = .unchanged;
     switch (action) {
-        c.FILE_ACTION_ADDED => {
+        c.file_action_added => {
             const target = w.targetOf(subject);
             watch.noteRoot(target);
             try batch.push(w.gpa, watch.id, subject, .created, target);
             move = .appeared;
         },
-        c.FILE_ACTION_REMOVED => {
+        c.file_action_removed => {
             try batch.push(w.gpa, watch.id, subject, .removed, watch.goneTarget());
             move = .vanished;
         },
-        c.FILE_ACTION_MODIFIED => {
+        c.file_action_modified => {
             // A directory's own times move whenever anything inside it
             // moves, and no other backend reports that. The record does
             // not say which this is, so the file system is asked.
@@ -977,105 +977,105 @@ const Change = struct {
 /// written out here. Hand-written rather than `@cImport`ed, for the same
 /// reason as everywhere else in this package: no C compilation step.
 const c = struct {
-    const HANDLE = windows.HANDLE;
-    const DWORD = windows.DWORD;
-    const WCHAR = windows.WCHAR;
-    const BOOL = c_int;
+    // Win32's names, in Zig's casing: `ERROR_IO_PENDING` is
+    // `error_io_pending` and `OVERLAPPED` is `Overlapped`. Functions keep
+    // their symbol names and parameters their documented ones.
+    const Bool = c_int;
 
-    const INFINITE: DWORD = 0xFFFF_FFFF;
-    const WAIT_TIMEOUT: DWORD = 258;
+    const infinite: windows.DWORD = 0xFFFF_FFFF;
+    const wait_timeout: windows.DWORD = 258;
 
-    const ERROR_FILE_NOT_FOUND: DWORD = 2;
-    const ERROR_PATH_NOT_FOUND: DWORD = 3;
-    const ERROR_ACCESS_DENIED: DWORD = 5;
-    const ERROR_NOT_ENOUGH_MEMORY: DWORD = 8;
-    const ERROR_OUTOFMEMORY: DWORD = 14;
-    const ERROR_TOO_MANY_OPEN_FILES: DWORD = 4;
-    const ERROR_INVALID_PARAMETER: DWORD = 87;
-    const ERROR_IO_PENDING: DWORD = 997;
+    const error_file_not_found: windows.DWORD = 2;
+    const error_path_not_found: windows.DWORD = 3;
+    const error_access_denied: windows.DWORD = 5;
+    const error_not_enough_memory: windows.DWORD = 8;
+    const error_outofmemory: windows.DWORD = 14;
+    const error_too_many_open_files: windows.DWORD = 4;
+    const error_invalid_parameter: windows.DWORD = 87;
+    const error_io_pending: windows.DWORD = 997;
     /// The kernel could not hold everything that changed between two
     /// reads: the buffer overflowed and the tree must be re-read.
-    const ERROR_NOTIFY_ENUM_DIR: DWORD = 1022;
+    const error_notify_enum_dir: windows.DWORD = 1022;
 
-    const FILE_LIST_DIRECTORY: DWORD = 0x0001;
-    const FILE_SHARE_READ: DWORD = 0x0001;
-    const FILE_SHARE_WRITE: DWORD = 0x0002;
-    const FILE_SHARE_DELETE: DWORD = 0x0004;
-    const OPEN_EXISTING: DWORD = 3;
-    const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x0200_0000;
-    const FILE_FLAG_OVERLAPPED: DWORD = 0x4000_0000;
+    const file_list_directory: windows.DWORD = 0x0001;
+    const file_share_read: windows.DWORD = 0x0001;
+    const file_share_write: windows.DWORD = 0x0002;
+    const file_share_delete: windows.DWORD = 0x0004;
+    const open_existing: windows.DWORD = 3;
+    const file_flag_backup_semantics: windows.DWORD = 0x0200_0000;
+    const file_flag_overlapped: windows.DWORD = 0x4000_0000;
 
-    const FILE_NOTIFY_CHANGE_FILE_NAME: DWORD = 0x001;
-    const FILE_NOTIFY_CHANGE_DIR_NAME: DWORD = 0x002;
-    const FILE_NOTIFY_CHANGE_ATTRIBUTES: DWORD = 0x004;
-    const FILE_NOTIFY_CHANGE_SIZE: DWORD = 0x008;
-    const FILE_NOTIFY_CHANGE_LAST_WRITE: DWORD = 0x010;
-    const FILE_NOTIFY_CHANGE_CREATION: DWORD = 0x040;
-    const FILE_NOTIFY_CHANGE_SECURITY: DWORD = 0x100;
+    const file_notify_change_file_name: windows.DWORD = 0x001;
+    const file_notify_change_dir_name: windows.DWORD = 0x002;
+    const file_notify_change_attributes: windows.DWORD = 0x004;
+    const file_notify_change_size: windows.DWORD = 0x008;
+    const file_notify_change_last_write: windows.DWORD = 0x010;
+    const file_notify_change_creation: windows.DWORD = 0x040;
+    const file_notify_change_security: windows.DWORD = 0x100;
 
-    const FILE_ACTION_ADDED: DWORD = records.Action.added;
-    const FILE_ACTION_REMOVED: DWORD = records.Action.removed;
-    const FILE_ACTION_MODIFIED: DWORD = records.Action.modified;
-    const FILE_ACTION_RENAMED_OLD_NAME: DWORD = records.Action.renamed_old_name;
-    const FILE_ACTION_RENAMED_NEW_NAME: DWORD = records.Action.renamed_new_name;
+    const file_action_added: windows.DWORD = records.Action.added;
+    const file_action_removed: windows.DWORD = records.Action.removed;
+    const file_action_modified: windows.DWORD = records.Action.modified;
+    const file_action_renamed_old_name: windows.DWORD = records.Action.renamed_old_name;
+    const file_action_renamed_new_name: windows.DWORD = records.Action.renamed_new_name;
 
-    const OVERLAPPED = extern struct {
+    const Overlapped = extern struct {
         Internal: usize,
         InternalHigh: usize,
-        Offset: DWORD,
-        OffsetHigh: DWORD,
-        hEvent: ?HANDLE,
+        Offset: windows.DWORD,
+        OffsetHigh: windows.DWORD,
+        hEvent: ?windows.HANDLE,
     };
 
-    const SECURITY_ATTRIBUTES = extern struct {
-        nLength: DWORD,
+    const SecurityAttributes = extern struct {
+        nLength: windows.DWORD,
         lpSecurityDescriptor: ?*anyopaque,
-        bInheritHandle: BOOL,
+        bInheritHandle: Bool,
     };
 
-    const OVERLAPPED_COMPLETION_ROUTINE = *const fn (DWORD, DWORD, *OVERLAPPED) callconv(.winapi) void;
+    const OverlappedCompletionRoutine = *const fn (windows.DWORD, windows.DWORD, *Overlapped) callconv(.winapi) void;
 
     extern "kernel32" fn CreateFileW(
-        lpFileName: [*:0]const WCHAR,
-        dwDesiredAccess: DWORD,
-        dwShareMode: DWORD,
-        lpSecurityAttributes: ?*SECURITY_ATTRIBUTES,
-        dwCreationDisposition: DWORD,
-        dwFlagsAndAttributes: DWORD,
-        hTemplateFile: ?HANDLE,
-    ) callconv(.winapi) HANDLE;
-    extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) BOOL;
-    extern "kernel32" fn CancelIoEx(hFile: HANDLE, lpOverlapped: ?*OVERLAPPED) callconv(.winapi) BOOL;
-    extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
+        lpFileName: [*:0]const windows.WCHAR,
+        dwDesiredAccess: windows.DWORD,
+        dwShareMode: windows.DWORD,
+        lpSecurityAttributes: ?*SecurityAttributes,
+        dwCreationDisposition: windows.DWORD,
+        dwFlagsAndAttributes: windows.DWORD,
+        hTemplateFile: ?windows.HANDLE,
+    ) callconv(.winapi) windows.HANDLE;
+    extern "kernel32" fn CloseHandle(hObject: windows.HANDLE) callconv(.winapi) Bool;
+    extern "kernel32" fn CancelIoEx(hFile: windows.HANDLE, lpOverlapped: ?*Overlapped) callconv(.winapi) Bool;
+    extern "kernel32" fn GetLastError() callconv(.winapi) windows.DWORD;
     extern "kernel32" fn CreateIoCompletionPort(
-        FileHandle: HANDLE,
-        ExistingCompletionPort: ?HANDLE,
+        FileHandle: windows.HANDLE,
+        ExistingCompletionPort: ?windows.HANDLE,
         CompletionKey: usize,
-        NumberOfConcurrentThreads: DWORD,
-    ) callconv(.winapi) ?HANDLE;
+        NumberOfConcurrentThreads: windows.DWORD,
+    ) callconv(.winapi) ?windows.HANDLE;
     extern "kernel32" fn PostQueuedCompletionStatus(
-        CompletionPort: HANDLE,
-        dwNumberOfBytesTransferred: DWORD,
+        CompletionPort: windows.HANDLE,
+        dwNumberOfBytesTransferred: windows.DWORD,
         dwCompletionKey: usize,
-        lpOverlapped: ?*OVERLAPPED,
-    ) callconv(.winapi) BOOL;
+        lpOverlapped: ?*Overlapped,
+    ) callconv(.winapi) Bool;
     extern "kernel32" fn GetQueuedCompletionStatus(
-        CompletionPort: HANDLE,
-        lpNumberOfBytesTransferred: *DWORD,
+        CompletionPort: windows.HANDLE,
+        lpNumberOfBytesTransferred: *windows.DWORD,
         lpCompletionKey: *usize,
-        lpOverlapped: *?*OVERLAPPED,
-        dwMilliseconds: DWORD,
-    ) callconv(.winapi) BOOL;
+        lpOverlapped: *?*Overlapped,
+        dwMilliseconds: windows.DWORD,
+    ) callconv(.winapi) Bool;
     extern "kernel32" fn ReadDirectoryChangesW(
-        hDirectory: HANDLE,
+        hDirectory: windows.HANDLE,
         lpBuffer: *anyopaque,
-        nBufferLength: DWORD,
-        bWatchSubtree: BOOL,
-        dwNotifyFilter: DWORD,
-        lpBytesReturned: ?*DWORD,
-        lpOverlapped: ?*OVERLAPPED,
-        lpCompletionRoutine: ?OVERLAPPED_COMPLETION_ROUTINE,
-    ) callconv(.winapi) BOOL;
+        nBufferLength: windows.DWORD,
+        bWatchSubtree: Bool,
+        dwNotifyFilter: windows.DWORD,
+        lpBytesReturned: ?*windows.DWORD,
+        lpOverlapped: ?*Overlapped,
+        lpCompletionRoutine: ?OverlappedCompletionRoutine,
+    ) callconv(.winapi) Bool;
 };
 
 test "a failed Windows removal transfer keeps its held path" {
@@ -1129,7 +1129,7 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     const result = switch (transfer) {
         .removal => backend.resolveRemoval(&watch, &batch),
         .flush => backend.flushRenames(&batch),
-        .pair => backend.reportRename(&watch, c.FILE_ACTION_RENAMED_NEW_NAME, new_path, &batch),
+        .pair => backend.reportRename(&watch, c.file_action_renamed_new_name, new_path, &batch),
     };
     try testing.expectError(error.OutOfMemory, result);
     const kept = if (transfer == .removal) watch.held_removal else watch.pending_rename;
@@ -1140,7 +1140,7 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     switch (transfer) {
         .removal => try backend.resolveRemoval(&watch, &batch),
         .flush => try backend.flushRenames(&batch),
-        .pair => try backend.reportRename(&watch, c.FILE_ACTION_RENAMED_NEW_NAME, new_path, &batch),
+        .pair => try backend.reportRename(&watch, c.file_action_renamed_new_name, new_path, &batch),
     }
     try testing.expectEqual(@as(usize, 1), batch.events.items.len);
     try testing.expectEqual(if (transfer == .pair) lookout.Kind.renamed else .removed, batch.events.items[0].kind);
@@ -1159,7 +1159,7 @@ const wantsFixture = wants;
 const cAccess = struct {
     pub const CancelIoEx = c.CancelIoEx;
     pub const GetQueuedCompletionStatus = c.GetQueuedCompletionStatus;
-    pub const OVERLAPPED = c.OVERLAPPED;
+    pub const Overlapped = c.Overlapped;
     pub const PostQueuedCompletionStatus = c.PostQueuedCompletionStatus;
 };
 

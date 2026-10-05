@@ -224,7 +224,7 @@ const Sink = struct {
 const Stream = struct {
     id: WatchId,
     sink: *Sink,
-    ref: c.FSEventStreamRef,
+    ref: c.FsEventStreamRef,
     volume: Volume,
     /// False for host streams covering scopes with more than one device.
     persistent: bool,
@@ -328,9 +328,9 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!FsEvent
     // Both ends non-blocking: the delivery thread must never block on a
     // full pipe, and the drain must never block on an empty one.
     for (fds) |end| {
-        const flags = std.c.fcntl(end, c.F_GETFL, @as(c_int, 0));
+        const flags = std.c.fcntl(end, c.f_getfl, @as(c_int, 0));
         if (flags < 0) return error.Unexpected;
-        if (std.c.fcntl(end, c.F_SETFL, flags | c.O_NONBLOCK) < 0) return error.Unexpected;
+        if (std.c.fcntl(end, c.f_setfl, flags | c.o_nonblock) < 0) return error.Unexpected;
     }
 
     const sink = try gpa.create(Sink);
@@ -640,31 +640,31 @@ fn createStream(
     subject: []const u8,
     since: u64,
     latency: f64,
-) contract.AddError!c.FSEventStreamRef {
+) contract.AddError!c.FsEventStreamRef {
     const cf_path = c.CFStringCreateWithBytes(
         null,
         subject.ptr,
         @intCast(subject.len),
-        c.kCFStringEncodingUTF8,
+        c.cf_string_encoding_utf8,
         0,
     ) orelse return error.SystemResources;
     defer c.CFRelease(cf_path);
 
     const values: [1]?*const anyopaque = .{cf_path};
-    const paths = c.CFArrayCreate(null, &values, 1, &c.kCFTypeArrayCallBacks) orelse
+    const paths = c.CFArrayCreate(null, &values, 1, c.cf_type_array_call_backs) orelse
         return error.SystemResources;
     defer c.CFRelease(paths);
 
-    var context: c.FSEventStreamContext = .{ .info = stream };
+    var context: c.FsEventStreamContext = .{ .info = stream };
     // `kFSEventStreamCreateFlagFileEvents` is what makes FSEvents name
     // files rather than only the directories containing them.
     // `NoDefer` makes the first event of a burst arrive at once rather
     // than after the latency window, which is what a caller expects from
     // something that already has its own coalescing. `WatchRoot` is what
     // reports the watched path itself being moved.
-    const flags: u32 = c.kFSEventStreamCreateFlagFileEvents |
-        c.kFSEventStreamCreateFlagNoDefer |
-        c.kFSEventStreamCreateFlagWatchRoot;
+    const flags: u32 = c.stream_create_flag_file_events |
+        c.stream_create_flag_no_defer |
+        c.stream_create_flag_watch_root;
     // NoDefer makes the first event immediate; this latency controls how
     // long later events may be collected, matching lookout's own tail.
     return (if (stream.persistent)
@@ -809,7 +809,7 @@ fn settled(_: ?*anyopaque) callconv(.c) void {}
 /// allocation, no parsing, no lookout logic on a thread lookout does not
 /// own.
 fn deliver(
-    ref: c.FSEventStreamRef,
+    ref: c.FsEventStreamRef,
     info: ?*anyopaque,
     count: usize,
     paths: ?*anyopaque,
@@ -1875,24 +1875,27 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
 /// handful of constants against a stable system ABI, and declaring them
 /// here keeps the package free of a C compilation step.
 const c = struct {
-    const CFAllocatorRef = ?*anyopaque;
-    const CFStringRef = *anyopaque;
-    const CFArrayRef = *anyopaque;
-    const FSEventStreamRef = *anyopaque;
+    // Apple's names, in Zig's casing: `CFStringRef` is `CfStringRef` and
+    // `kFSEventStreamCreateFlagNoDefer` is `stream_create_flag_no_defer`.
+    // Functions keep their symbol names.
+    const CfAllocatorRef = ?*anyopaque;
+    const CfStringRef = *anyopaque;
+    const CfArrayRef = *anyopaque;
+    const FsEventStreamRef = *anyopaque;
     const dispatch_queue_t = *anyopaque;
 
-    const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+    const cf_string_encoding_utf8: u32 = 0x0800_0100;
 
-    const kFSEventStreamCreateFlagNoDefer: u32 = 0x00000002;
-    const kFSEventStreamCreateFlagWatchRoot: u32 = 0x00000004;
-    const kFSEventStreamCreateFlagFileEvents: u32 = 0x00000010;
+    const stream_create_flag_no_defer: u32 = 0x00000002;
+    const stream_create_flag_watch_root: u32 = 0x00000004;
+    const stream_create_flag_file_events: u32 = 0x00000010;
 
-    /// The replay a past `since_when` asked for has reached the present.
-    const F_GETFL: c_int = 3;
-    const F_SETFL: c_int = 4;
-    const O_NONBLOCK: c_int = 0x0004;
+    /// Darwin's `fcntl` commands and flag, for the delivery pipe.
+    const f_getfl: c_int = 3;
+    const f_setfl: c_int = 4;
+    const o_nonblock: c_int = 0x0004;
 
-    const FSEventStreamContext = extern struct {
+    const FsEventStreamContext = extern struct {
         version: c_long = 0,
         info: ?*anyopaque = null,
         retain: ?*const anyopaque = null,
@@ -1900,8 +1903,8 @@ const c = struct {
         copyDescription: ?*const anyopaque = null,
     };
 
-    const FSEventStreamCallback = *const fn (
-        stream: FSEventStreamRef,
+    const FsEventStreamCallback = *const fn (
+        stream: FsEventStreamRef,
         info: ?*anyopaque,
         num_events: usize,
         event_paths: ?*anyopaque,
@@ -1909,47 +1912,47 @@ const c = struct {
         event_ids: [*]const u64,
     ) callconv(.c) void;
 
-    extern var kCFTypeArrayCallBacks: anyopaque;
+    const cf_type_array_call_backs = @extern(*const anyopaque, .{ .name = "kCFTypeArrayCallBacks" });
 
     extern "c" fn CFStringCreateWithBytes(
-        alloc: CFAllocatorRef,
+        alloc: CfAllocatorRef,
         bytes: [*]const u8,
         num_bytes: c_long,
         encoding: u32,
         is_external_representation: u8,
-    ) ?CFStringRef;
+    ) ?CfStringRef;
     extern "c" fn CFArrayCreate(
-        allocator: CFAllocatorRef,
+        allocator: CfAllocatorRef,
         values: [*]const ?*const anyopaque,
         num_values: c_long,
         call_backs: ?*const anyopaque,
-    ) ?CFArrayRef;
+    ) ?CfArrayRef;
     extern "c" fn CFRelease(cf: *anyopaque) void;
 
     extern "c" fn FSEventStreamCreate(
-        allocator: CFAllocatorRef,
-        callback: FSEventStreamCallback,
-        context: ?*FSEventStreamContext,
-        paths_to_watch: CFArrayRef,
+        allocator: CfAllocatorRef,
+        callback: FsEventStreamCallback,
+        context: ?*FsEventStreamContext,
+        paths_to_watch: CfArrayRef,
         since_when: u64,
         latency: f64,
         flags: u32,
-    ) ?FSEventStreamRef;
-    extern "c" fn FSEventStreamSetDispatchQueue(stream: FSEventStreamRef, q: ?dispatch_queue_t) void;
-    extern "c" fn FSEventStreamStart(stream: FSEventStreamRef) u8;
-    extern "c" fn FSEventStreamGetLatestEventId(stream: FSEventStreamRef) u64;
-    extern "c" fn FSEventStreamGetDeviceBeingWatched(stream: FSEventStreamRef) i32;
+    ) ?FsEventStreamRef;
+    extern "c" fn FSEventStreamSetDispatchQueue(stream: FsEventStreamRef, q: ?dispatch_queue_t) void;
+    extern "c" fn FSEventStreamStart(stream: FsEventStreamRef) u8;
+    extern "c" fn FSEventStreamGetLatestEventId(stream: FsEventStreamRef) u64;
+    pub extern "c" fn FSEventStreamGetDeviceBeingWatched(stream: FsEventStreamRef) i32;
     extern "c" fn FSEventsGetCurrentEventId() u64;
     extern "c" fn FSEventsGetLastEventIdForDeviceBeforeTime(device: i32, time: f64) u64;
     extern "c" fn CFAbsoluteTimeGetCurrent() f64;
-    extern "c" fn FSEventStreamCreateRelativeToDevice(allocator: CFAllocatorRef, callback: FSEventStreamCallback, context: ?*FSEventStreamContext, device: i32, paths: CFArrayRef, since: u64, latency: f64, flags: u32) ?FSEventStreamRef;
-    extern "c" fn FSEventStreamStop(stream: FSEventStreamRef) void;
-    extern "c" fn FSEventStreamInvalidate(stream: FSEventStreamRef) void;
-    extern "c" fn FSEventStreamRelease(stream: FSEventStreamRef) void;
+    extern "c" fn FSEventStreamCreateRelativeToDevice(allocator: CfAllocatorRef, callback: FsEventStreamCallback, context: ?*FsEventStreamContext, device: i32, paths: CfArrayRef, since: u64, latency: f64, flags: u32) ?FsEventStreamRef;
+    pub extern "c" fn FSEventStreamStop(stream: FsEventStreamRef) void;
+    extern "c" fn FSEventStreamInvalidate(stream: FsEventStreamRef) void;
+    extern "c" fn FSEventStreamRelease(stream: FsEventStreamRef) void;
 
     extern "c" fn dispatch_queue_create(label: ?[*:0]const u8, attr: ?*anyopaque) ?dispatch_queue_t;
     extern "c" fn dispatch_release(object: *anyopaque) void;
-    extern "c" fn dispatch_sync_f(
+    pub extern "c" fn dispatch_sync_f(
         queue: dispatch_queue_t,
         context: ?*anyopaque,
         work: *const fn (?*anyopaque) callconv(.c) void,
@@ -2076,11 +2079,7 @@ const AskingFixture = Asking;
 
 const settledFixture = settled;
 
-const cAccess = struct {
-    pub const FSEventStreamGetDeviceBeingWatched = c.FSEventStreamGetDeviceBeingWatched;
-    pub const FSEventStreamStop = c.FSEventStreamStop;
-    pub const dispatch_sync_f = c.dispatch_sync_f;
-};
+const cAccess = c;
 
 const readableFixture = readable;
 

@@ -60,7 +60,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     {
         var transferred: u32 = 0;
         var key: usize = 0;
-        var overlapped: ?*c.OVERLAPPED = null;
+        var overlapped: ?*c.Overlapped = null;
         while (true) {
             const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, 10_000);
             if (ok == 0 and overlapped == null) return error.TestUnexpectedResult;
@@ -138,7 +138,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     {
         var transferred: u32 = 0;
         var key: usize = 0;
-        var overlapped: ?*c.OVERLAPPED = null;
+        var overlapped: ?*c.Overlapped = null;
         while (true) {
             const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, 10_000);
             if (ok == 0 and overlapped == null) return error.TestUnexpectedResult;
