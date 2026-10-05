@@ -57,7 +57,7 @@ const clock = @import("testing/clock.zig");
 
 test "no timeout never expires and never clamps" {
     var vtable: Io.VTable = undefined;
-    const io = clock.frozen(&vtable, testing.io);
+    const io = clock.frozen(testing.io, &vtable);
     const d: Deadline = .start(io, null);
     try testing.expectEqual(@as(?u32, null), d.remainingMs());
     try testing.expect(!d.expired());
@@ -67,7 +67,7 @@ test "no timeout never expires and never clamps" {
 
 test "a timeout that has run out clamps to zero rather than going negative" {
     var vtable: Io.VTable = undefined;
-    const io = clock.frozen(&vtable, testing.io);
+    const io = clock.frozen(testing.io, &vtable);
     var d: Deadline = .start(io, 10);
     // Reaching back in time is the same as waiting, and a test that
     // waits on a wall clock is a test that fails on a loaded machine.
@@ -80,7 +80,7 @@ test "a timeout that has run out clamps to zero rather than going negative" {
 
 test "a deadline in the future has time left on it" {
     var vtable: Io.VTable = undefined;
-    const io = clock.frozen(&vtable, testing.io);
+    const io = clock.frozen(testing.io, &vtable);
     const d: Deadline = .start(io, 2_500);
     const left = d.remainingMs().?;
     try testing.expect(left > 0 and left <= 2_500);
@@ -89,7 +89,7 @@ test "a deadline in the future has time left on it" {
 
 test "finite waits are clamped to each operating system API" {
     var vtable: Io.VTable = undefined;
-    const io = clock.frozen(&vtable, testing.io);
+    const io = clock.frozen(testing.io, &vtable);
     const posix_long: Deadline = .start(io, @as(u32, std.math.maxInt(i32)) + 1);
     try testing.expectEqual(std.math.maxInt(i32), posix_long.pollMs());
 

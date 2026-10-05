@@ -21,20 +21,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z023",
-    "path": "src/Snapshot.zig",
-    "source": "pub fn compare(s: *const Snapshot, before: *const Snapshot, gpa: Allocator, changes: *std.ArrayList(Change)) Allocator.Error!void {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/Snapshot.zig",
-    "source": "gpa: Allocator,",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z011",
     "path": "src/filesystem.zig",
     "source": "const Bits = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(value)));",
@@ -609,34 +595,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z023",
-    "path": "src/Budget.zig",
-    "source": "comptime counted: fn (@TypeOf(context), []const u8) bool,",
-    "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/Budget.zig",
-    "source": "comptime stale: fn (@TypeOf(context), []const u8) bool,",
-    "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/Budget.zig",
-    "source": "comptime reads: fn (@TypeOf(context), std.meta.Elem(@TypeOf(watches))) bool,",
-    "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/testing/suite_test.zig",
-    "source": "fn tryCheckpoint(watcher: *const Watcher, gpa: std.mem.Allocator) !lookout.Checkpoint {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z011",
     "path": "src/testing/fuzz_test.zig",
     "source": "while (std.mem.indexOfAnyPos(u8, subject, end, path_cmp.separators)) |at| : (end = at + 1) {",
@@ -658,20 +616,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z023",
-    "path": "src/testing/clock.zig",
-    "source": "pub fn frozen(vtable: *Io.VTable, source: Io) Io {",
-    "detail": "'Io' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/Links_test.zig",
-    "source": "fn appendInt(data: *std.ArrayList(u8), comptime T: type, value: T, endian: std.builtin.Endian) !void {",
-    "detail": "'type' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z013",
     "path": "src/watch_contract.zig",
     "source": "const Filter = @import(\"Filter.zig\");",
@@ -679,59 +623,10 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z023",
-    "path": "src/Filter.zig",
-    "source": "fn dupeList(list: []const []const u8, gpa: Allocator) Allocator.Error![]const []const u8 {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/Filter.zig",
-    "source": "fn freeList(list: []const []const u8, gpa: Allocator) void {",
-    "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z011",
     "path": "src/Filter.zig",
     "source": "end = if (std.mem.indexOfAnyPos(u8, rest, end + 1, path.separators)) |next|",
     "detail": "'indexOfAnyPos' is deprecated: Deprecated in favor of `findAnyPos`.",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/Filter.zig",
-    "source": "fn matchFrom(pattern: path.Folder, name: path.Folder, comptime extent: Extent) bool {",
-    "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/trace.zig",
-    "source": "fn blockHas(block: [*:0]const u16, comptime name: []const u8) bool {",
-    "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/walk.zig",
-    "source": "comptime visit: fn (@TypeOf(context), Entry) anyerror!Step,",
-    "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/walk.zig",
-    "source": "comptime visit: fn (@TypeOf(context), Entry) anyerror!Step,",
-    "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z023",
-    "path": "src/walk.zig",
-    "source": "comptime visit: fn (@TypeOf(context), Entry) anyerror!Step,",
-    "detail": "'comptime' parameter should come before 'other'",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   }
 ]

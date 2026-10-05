@@ -102,13 +102,13 @@ pub fn isEmpty(f: Filter) bool {
 /// A copy owning its pattern lists, for a backend that keeps a filter
 /// past the `add` that was given it.
 pub fn dupe(f: Filter, gpa: Allocator) Allocator.Error!Filter {
-    const ignore = try dupeList(f.ignore, gpa);
-    errdefer freeList(ignore, gpa);
-    const only = try dupeList(f.only, gpa);
+    const ignore = try dupeList(gpa, f.ignore);
+    errdefer freeList(gpa, ignore);
+    const only = try dupeList(gpa, f.only);
     return .{ .ignore = ignore, .only = only, .allow = f.allow, .context = f.context };
 }
 
-fn dupeList(list: []const []const u8, gpa: Allocator) Allocator.Error![]const []const u8 {
+fn dupeList(gpa: Allocator, list: []const []const u8) Allocator.Error![]const []const u8 {
     if (list.len == 0) return &.{};
     const patterns = try gpa.alloc([]const u8, list.len);
     var filled: usize = 0;
@@ -123,15 +123,15 @@ fn dupeList(list: []const []const u8, gpa: Allocator) Allocator.Error![]const []
     return patterns;
 }
 
-fn freeList(list: []const []const u8, gpa: Allocator) void {
+fn freeList(gpa: Allocator, list: []const []const u8) void {
     for (list) |pattern| gpa.free(pattern);
     if (list.len != 0) gpa.free(list);
 }
 
 /// Releases a copy made by `dupe`.
 pub fn deinit(f: *Filter, gpa: Allocator) void {
-    freeList(f.ignore, gpa);
-    freeList(f.only, gpa);
+    freeList(gpa, f.ignore);
+    freeList(gpa, f.only);
     f.* = undefined;
 }
 
@@ -238,7 +238,7 @@ fn wanted(only: []const []const u8, relative: []const u8, absolute: []const u8, 
 /// written -- `a**/c` crosses `ax/y` to reach `ax/y/c` -- so from a `**`
 /// every directory is on the way.
 fn leadsTo(pattern: []const u8, subject: []const u8) bool {
-    return matchFrom(.init(pattern), .init(subject), .prefix);
+    return matchFrom(.prefix, .init(pattern), .init(subject));
 }
 
 /// Whether `pattern` matches `name`.
@@ -247,7 +247,7 @@ fn leadsTo(pattern: []const u8, subject: []const u8) bool {
 /// and the depth is therefore the number of wildcards in the pattern
 /// rather than the length of either string.
 fn matches(pattern: []const u8, name: []const u8) bool {
-    return matchFrom(.init(pattern), .init(name), .whole);
+    return matchFrom(.whole, .init(pattern), .init(name));
 }
 
 /// Whether the pattern has to match the whole name, or only a name that
@@ -267,7 +267,7 @@ fn opensDirectory(pattern: path.Folder) bool {
     return false;
 }
 
-fn matchFrom(pattern: path.Folder, name: path.Folder, comptime extent: Extent) bool {
+fn matchFrom(comptime extent: Extent, pattern: path.Folder, name: path.Folder) bool {
     var p = pattern;
     var n = name;
     while (true) {
@@ -286,19 +286,19 @@ fn matchFrom(pattern: path.Folder, name: path.Folder, comptime extent: Extent) b
                     // separator that follows it is optional.
                     var skipped = after;
                     if (skipped.peek() == '/') _ = skipped.next();
-                    if (matchFrom(after, n, extent) or matchFrom(skipped, n, extent)) return true;
+                    if (matchFrom(extent, after, n) or matchFrom(extent, skipped, n)) return true;
                     while (n.next() != null) {
-                        if (matchFrom(after, n, extent) or matchFrom(skipped, n, extent)) return true;
+                        if (matchFrom(extent, after, n) or matchFrom(extent, skipped, n)) return true;
                     }
                     return false;
                 }
                 // A single `*` names an entry, not a path, so it stops
                 // at a separator.
-                if (matchFrom(after, n, extent)) return true;
+                if (matchFrom(extent, after, n)) return true;
                 while (n.peek()) |c| {
                     if (c == '/') return false;
                     _ = n.next();
-                    if (matchFrom(after, n, extent)) return true;
+                    if (matchFrom(extent, after, n)) return true;
                 }
                 return false;
             },

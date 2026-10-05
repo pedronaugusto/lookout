@@ -373,7 +373,7 @@ fn arm(w: *Windows, watch: *Watch) contract.AddError!void {
 pub fn remove(w: *Windows, id: WatchId) void {
     const entry = w.watches.fetchSwapRemove(id) orelse return;
     const watch = entry.value;
-    w.budget.release(watch.root, w, stillCounted);
+    w.budget.release(*const Windows, stillCounted, watch.root, w);
     _ = c.CancelIoEx(watch.handle, &watch.overlapped);
     _ = c.CloseHandle(watch.handle);
     // A retained completion has already ended the kernel's ownership.
@@ -641,7 +641,7 @@ fn lost(w: *Windows, watch: *const Watch) void {
             return Budget.restsOn(loss.w.watches.values(), loss.watch, dir);
         }
     };
-    w.budget.reread(Loss{ .w = w, .watch = watch }, Loss.stale);
+    w.budget.reread(Loss, Loss.stale, .{ .w = w, .watch = watch });
 }
 
 /// Posts the next read, and says so when it cannot be posted.
@@ -947,7 +947,7 @@ fn recount(w: *Windows, watch: *Watch, subject: []const u8, move: Budget.Move, b
         .dir = std.fs.path.dirname(subject) orelse return,
         .subject = subject,
     };
-    if (Budget.counter(w.watches.values(), change, Change.reaches) != watch) return;
+    if (Budget.counter(*Watch, Change, Change.reaches, w.watches.values(), change) != watch) return;
     if (!try w.budget.note(change.dir, std.fs.path.basename(subject), move)) return;
     for (w.watches.values()) |other| {
         if (!change.reaches(other)) continue;

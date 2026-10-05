@@ -50,12 +50,12 @@ pub fn enabled() bool {
 /// ended by a zero and the whole ended by an empty one. Names are
 /// compared without case, as Windows compares them.
 fn windowsHas(comptime name: []const u8) bool {
-    return blockHas(std.os.windows.peb().ProcessParameters.Environment, name);
+    return blockHas(name, std.os.windows.peb().ProcessParameters.Environment);
 }
 
 /// Whether the environment block `block`, laid out as `windowsHas` says,
 /// names `name`. `name` is upper case.
-fn blockHas(block: [*:0]const u16, comptime name: []const u8) bool {
+fn blockHas(comptime name: []const u8, block: [*:0]const u16) bool {
     var entry: [*:0]const u16 = block;
     while (entry[0] != 0) {
         const len = std.mem.len(entry);
@@ -84,17 +84,17 @@ pub fn log(comptime fmt: []const u8, args: anytype) void {
 
 test "an environment block names a variable in any case, by its whole name, and only before its value" {
     const block = std.unicode.utf8ToUtf16LeStringLiteral("Path=C:\\x\x00LOOKOUT_TRACEX=1\x00lookout_trace=\x00OTHER=LOOKOUT_TRACE=1\x00\x00");
-    try std.testing.expect(blockHas(block, "LOOKOUT_TRACE"));
-    try std.testing.expect(blockHas(block, "PATH"));
+    try std.testing.expect(blockHas("LOOKOUT_TRACE", block));
+    try std.testing.expect(blockHas("PATH", block));
     // a longer name that starts the same way, and the name inside a value
     const without = std.unicode.utf8ToUtf16LeStringLiteral("LOOKOUT_TRACEX=1\x00OTHER=LOOKOUT_TRACE=1\x00\x00");
-    try std.testing.expect(!blockHas(without, "LOOKOUT_TRACE"));
+    try std.testing.expect(!blockHas("LOOKOUT_TRACE", without));
     // a unit past ASCII never matches a letter of the name
     const wide = [_:0]u16{ 0x00cc, '=', '1', 0, 0 };
-    try std.testing.expect(!blockHas(&wide, "I"));
+    try std.testing.expect(!blockHas("I", &wide));
     // an empty block
     const empty = [_:0]u16{0};
-    try std.testing.expect(!blockHas(&empty, "LOOKOUT_TRACE"));
+    try std.testing.expect(!blockHas("LOOKOUT_TRACE", &empty));
 }
 
 test "tracing is read once and remembered" {

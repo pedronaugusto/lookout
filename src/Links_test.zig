@@ -215,16 +215,16 @@ fn junction(at: []const u8, target: []const u8) !void {
     var data: std.ArrayList(u8) = .empty;
     defer data.deinit(gpa);
     const little = std.builtin.Endian.little;
-    try appendInt(&data, u32, 0xA000_0003, little);
-    try appendInt(&data, u16, @intCast(8 + names), little);
-    try appendInt(&data, u16, 0, little);
-    try appendInt(&data, u16, 0, little);
-    try appendInt(&data, u16, @intCast(substitute.len * 2), little);
-    try appendInt(&data, u16, @intCast((substitute.len + 1) * 2), little);
-    try appendInt(&data, u16, @intCast(print.len * 2), little);
+    try appendInt(u32, &data, 0xA000_0003, little);
+    try appendInt(u16, &data, @intCast(8 + names), little);
+    try appendInt(u16, &data, 0, little);
+    try appendInt(u16, &data, 0, little);
+    try appendInt(u16, &data, @intCast(substitute.len * 2), little);
+    try appendInt(u16, &data, @intCast((substitute.len + 1) * 2), little);
+    try appendInt(u16, &data, @intCast(print.len * 2), little);
     for ([_][]const u16{ substitute, print }) |name| {
-        for (name) |unit| try appendInt(&data, u16, unit, little);
-        try appendInt(&data, u16, 0, little);
+        for (name) |unit| try appendInt(u16, &data, unit, little);
+        try appendInt(u16, &data, 0, little);
     }
     switch (w.ntdll.NtFsControlFile(handle, null, null, null, &iosb, .SET_REPARSE_POINT, data.items.ptr, @intCast(data.items.len), null, 0)) {
         .SUCCESS => {},
@@ -232,7 +232,7 @@ fn junction(at: []const u8, target: []const u8) !void {
     }
 }
 
-fn appendInt(data: *std.ArrayList(u8), comptime T: type, value: T, endian: std.builtin.Endian) !void {
+fn appendInt(comptime T: type, data: *std.ArrayList(u8), value: T, endian: std.builtin.Endian) !void {
     var bytes: [@sizeOf(T)]u8 = undefined;
     std.mem.writeInt(T, &bytes, value, endian);
     try data.appendSlice(gpa, &bytes);

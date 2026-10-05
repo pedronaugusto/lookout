@@ -687,7 +687,7 @@ fn useLiveStream(f: *FsEvents, id: WatchId) contract.AddError!void {
 /// Stops watching `id`.
 pub fn remove(f: *FsEvents, id: WatchId) void {
     const entry = f.streams.fetchSwapRemove(id) orelse return;
-    f.budget.release(entry.value.root, f, stillCounted);
+    f.budget.release(*const FsEvents, stillCounted, entry.value.root, f);
     f.forgetWatch(id);
     f.destroy(entry.value);
     // destroy waits for callbacks already running. Only then can the
@@ -757,7 +757,7 @@ pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) 
                 !r.stream.filter.prunes(r.stream.root, dir);
         }
     };
-    f.budget.reread(NewlyReached{ .stream = stream, .old = previous }, NewlyReached.includes);
+    f.budget.reread(NewlyReached, NewlyReached.includes, .{ .stream = stream, .old = previous });
     if (cross_device) {
         try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
         try f.useLiveStream(id);
@@ -909,7 +909,7 @@ fn readable(f: *FsEvents, timeout: i32) bool {
 fn drain(f: *FsEvents, batch: *Batch) contract.PollError!void {
     // A failed drain keeps its bytes. Replaying can repeat bookkeeping,
     // which Watcher.poll covers with its conservative recovery notice.
-    errdefer f.budget.reread({}, everyDirectory);
+    errdefer f.budget.reread(void, everyDirectory, {});
     var overflowed = f.staging_overflowed;
     var deliveries: usize = 0;
     var dropped: usize = 0;
@@ -993,9 +993,9 @@ fn drain(f: *FsEvents, batch: *Batch) contract.PollError!void {
     // in and then count them again from their records.
     if (overflowed) {
         // A delivery that did not fit was every watch's.
-        f.budget.reread({}, everyDirectory);
+        f.budget.reread(void, everyDirectory, {});
     } else if (losses.items.len != 0) {
-        f.budget.reread(Losses{ .f = f, .items = losses.items }, Losses.stale);
+        f.budget.reread(Losses, Losses.stale, .{ .f = f, .items = losses.items });
     }
     // Mount records belong to the old stream, as do loss pointers above.
     // Replace it only after the delivery and budget rereads finish.
@@ -1346,7 +1346,7 @@ fn adopt(
         }
     };
     var adopting: Adopting = .{ .f = f, .batch = batch, .id = id, .stream = stream };
-    walk.tree(f.gpa, f.io, root, &adopting, Adopting.visit) catch |err| switch (err) {
+    walk.tree(*Adopting, Adopting.visit, f.gpa, f.io, root, &adopting) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
@@ -1556,7 +1556,7 @@ fn refreshKnown(
         }
     };
     var refreshing: Refreshing = .{ .f = f, .id = id, .stream = stream };
-    walk.tree(f.gpa, f.io, root, &refreshing, Refreshing.visit) catch |err| switch (err) {
+    walk.tree(*Refreshing, Refreshing.visit, f.gpa, f.io, root, &refreshing) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
@@ -1647,7 +1647,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
         }
     };
     var seeding: Seeding = .{ .f = f, .stream = stream };
-    try walk.treeWithMeta(f.gpa, f.io, stream.root, &seeding, Seeding.visit);
+    try walk.treeWithMeta(*Seeding, Seeding.visit, f.gpa, f.io, stream.root, &seeding);
     return seeding.cross_device;
 }
 
@@ -1791,7 +1791,7 @@ fn recount(
         .dir = std.fs.path.dirname(subject) orelse return,
         .subject = subject,
     };
-    const counting = Budget.counter(f.streams.values(), change, Change.reaches) orelse return;
+    const counting = Budget.counter(*Stream, Change, Change.reaches, f.streams.values(), change) orelse return;
     if (counting != stream) return;
     if (!try f.budget.note(change.dir, std.fs.path.basename(subject), move)) return;
     for (f.streams.values()) |other| {

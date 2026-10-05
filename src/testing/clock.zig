@@ -4,8 +4,9 @@
 const std = @import("std");
 const Io = std.Io;
 
-/// The caller owns vtable for the lifetime of the returned Io.
-pub fn frozen(vtable: *Io.VTable, source: Io) Io {
+/// `source` with its clock frozen. The caller owns `vtable` for the lifetime
+/// of the returned Io.
+pub fn frozen(source: Io, vtable: *Io.VTable) Io {
     vtable.* = source.vtable.*;
     vtable.now = now;
     return .{ .userdata = source.userdata, .vtable = vtable };

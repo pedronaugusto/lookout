@@ -68,13 +68,14 @@ pub const Step = enum {
 /// walk: it has gone again, or it is not ours to read, and either way
 /// its parent has already reported what it could.
 pub fn tree(
+    comptime Context: type,
+    comptime visit: fn (Context, Entry) anyerror!Step,
     gpa: Allocator,
     io: Io,
     root: []const u8,
-    context: anytype,
-    comptime visit: fn (@TypeOf(context), Entry) anyerror!Step,
+    context: Context,
 ) !void {
-    return walk(false, gpa, io, root, context, visit);
+    return walk(Context, false, visit, gpa, io, root, context);
 }
 
 /// `tree`, with each entry's metadata read as the directory is listed.
@@ -84,22 +85,24 @@ pub fn tree(
 /// 50,000-file tree, about half the time of a listing and an `lstat` each.
 /// Elsewhere each entry is `lstat`ed.
 pub fn treeWithMeta(
+    comptime Context: type,
+    comptime visit: fn (Context, Entry) anyerror!Step,
     gpa: Allocator,
     io: Io,
     root: []const u8,
-    context: anytype,
-    comptime visit: fn (@TypeOf(context), Entry) anyerror!Step,
+    context: Context,
 ) !void {
-    return walk(true, gpa, io, root, context, visit);
+    return walk(Context, true, visit, gpa, io, root, context);
 }
 
 fn walk(
+    comptime Context: type,
     comptime with_meta: bool,
+    comptime visit: fn (Context, Entry) anyerror!Step,
     gpa: Allocator,
     io: Io,
     root: []const u8,
-    context: anytype,
-    comptime visit: fn (@TypeOf(context), Entry) anyerror!Step,
+    context: Context,
 ) !void {
     var frontier: std.ArrayList([]u8) = .empty;
     defer {
@@ -294,7 +297,7 @@ test "a walk visits every entry it is let into, and nothing below one it is not"
         seen.names.deinit(gpa);
     }
 
-    try tree(gpa, io, root, &seen, Seen.visit);
+    try tree(*Seen, Seen.visit, gpa, io, root, &seen);
     try testing.expect(seen.holds("keep"));
     try testing.expect(seen.holds("deeper"));
     try testing.expect(seen.holds("a.txt"));
@@ -321,12 +324,12 @@ test "a walk of an empty or unreadable tree visits nothing and does not fail" {
         }
     };
     var count: Count = .{};
-    try tree(gpa, io, root, &count, Count.visit);
+    try tree(*Count, Count.visit, gpa, io, root, &count);
     try testing.expectEqual(@as(usize, 0), count.seen);
 
     const absent = try std.fs.path.join(gpa, &.{ root, "not-there" });
     defer gpa.free(absent);
-    try tree(gpa, io, absent, &count, Count.visit);
+    try tree(*Count, Count.visit, gpa, io, absent, &count);
     try testing.expectEqual(@as(usize, 0), count.seen);
 }
 
@@ -360,7 +363,7 @@ test "a walk with metadata reads what lstat reads, across listing batches" {
         }
     };
     var check: Check = .{};
-    try treeWithMeta(gpa, io, root, &check, Check.visit);
+    try treeWithMeta(*Check, Check.visit, gpa, io, root, &check);
     const links: usize = if (builtin.os.tag == .windows) 0 else 1;
     try testing.expectEqual(300 + 2 + links, check.seen);
 }
@@ -372,6 +375,6 @@ test "a failed walk frontier allocation releases its root" {
         }
     };
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
-    try testing.expectError(error.OutOfMemory, tree(failing.allocator(), testing.io, "/unused", {}, Visitor.visit));
+    try testing.expectError(error.OutOfMemory, tree(void, Visitor.visit, failing.allocator(), testing.io, "/unused", {}));
     try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }

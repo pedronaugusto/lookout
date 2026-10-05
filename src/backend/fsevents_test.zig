@@ -433,7 +433,7 @@ test "a poll that expires before the replay begins is not the end of it" {
     defer gpa.free(deleted);
 
     var vtable: Io.VTable = undefined;
-    const frozen = clock.frozen(&vtable, io);
+    const frozen = clock.frozen(io, &vtable);
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
     var watcher: lookout.Watcher = try .init(gpa, frozen, .{

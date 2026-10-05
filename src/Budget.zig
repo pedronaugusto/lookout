@@ -201,9 +201,10 @@ pub fn forget(b: *Budget, dir: []const u8) void {
 /// their way.
 pub fn release(
     b: *Budget,
+    comptime Context: type,
+    comptime counted: fn (Context, []const u8) bool,
     dir: []const u8,
-    context: anytype,
-    comptime counted: fn (@TypeOf(context), []const u8) bool,
+    context: Context,
 ) void {
     var i: usize = 0;
     while (i < b.counts.count()) {
@@ -263,8 +264,9 @@ pub fn misread(b: *Budget, dir: []const u8, forget_real: bool, made_up: usize) A
 /// until a complete listing establishes the budget again.
 pub fn reread(
     b: *Budget,
-    context: anytype,
-    comptime stale: fn (@TypeOf(context), []const u8) bool,
+    comptime Context: type,
+    comptime stale: fn (Context, []const u8) bool,
+    context: Context,
 ) void {
     for (b.counts.keys(), b.counts.values()) |dir, *remembered| {
         if (!stale(context, dir)) continue;
@@ -327,14 +329,16 @@ pub const Reach = struct {
 /// knowing whether the others have been read yet, so the change is
 /// counted once whatever order the copies are read in.
 ///
-/// `watches` is a slice of anything with an `id` field, an integer or an
-/// enum. `reads(context, watch)` answers for one of them.
+/// `Item` is anything with an `id` field, an integer or an enum.
+/// `reads(context, watch)` answers for one of `watches`.
 pub fn counter(
-    watches: anytype,
-    context: anytype,
-    comptime reads: fn (@TypeOf(context), std.meta.Elem(@TypeOf(watches))) bool,
-) ?std.meta.Elem(@TypeOf(watches)) {
-    var first: ?std.meta.Elem(@TypeOf(watches)) = null;
+    comptime Item: type,
+    comptime Context: type,
+    comptime reads: fn (Context, Item) bool,
+    watches: []const Item,
+    context: Context,
+) ?Item {
+    var first: ?Item = null;
     for (watches) |watch| {
         if (!reads(context, watch)) continue;
         if (first) |so_far| {
@@ -489,7 +493,7 @@ test "a watch removed leaves the counts another watch still holds" {
             return path.eql(left.dir, counted_dir);
         }
     };
-    b.release(root, Left{ .dir = kept }, Left.counts);
+    b.release(Left, Left.counts, root, Left{ .dir = kept });
     try testing.expectEqual(@as(usize, 1), b.counts.count());
     try testing.expectEqual(@as(usize, 1), b.count(kept).?);
 }
@@ -525,7 +529,7 @@ test "a lost read has its counts read again from disk, and only those" {
             return path.eql(l.dir, dir);
         }
     };
-    b.reread(Lost{ .dir = lost }, Lost.stale);
+    b.reread(Lost, Lost.stale, Lost{ .dir = lost });
     try testing.expectEqual(@as(usize, 3), b.count(lost).?);
     try testing.expectEqual(@as(usize, 0), b.count(kept).?);
     // And the next change is measured against what is there.
@@ -682,7 +686,7 @@ test "a change every watch reads its own copy of is counted once" {
             for (order) |i| {
                 const watch = pointers[i];
                 if (!copy.reads(watch)) continue;
-                if (counter(&pointers, copy, Copy.reads) != watch) continue;
+                if (counter(*const Watch, Copy, Copy.reads, &pointers, copy) != watch) continue;
                 if (try b.note(folder, name, .appeared)) passed = true;
             }
         }
@@ -695,7 +699,7 @@ test "a change every watch reads its own copy of is counted once" {
         for (order) |i| {
             const watch = pointers[i];
             if (!copy.reads(watch)) continue;
-            if (counter(&pointers, copy, Copy.reads) != watch) continue;
+            if (counter(*const Watch, Copy, Copy.reads, &pointers, copy) != watch) continue;
             counted += 1;
             try testing.expect(try b.note(folder, "c", .appeared));
         }
@@ -723,12 +727,12 @@ test "a change is counted by the lowest id it reached and was kept by" {
         .{ .id = 3, .reach = .{ .dir = "/w/subway", .recursive = true }, .keeps = true },
         .{ .id = 2, .reach = .{ .dir = "/w/sub", .recursive = true }, .keeps = true },
     };
-    try testing.expectEqual(@as(u32, 1), counter(&watches, Change{ .dir = "/w" }, Change.reads).?.id);
-    try testing.expectEqual(@as(u32, 2), counter(&watches, Change{ .dir = "/w/sub" }, Change.reads).?.id);
-    try testing.expectEqual(@as(u32, 2), counter(&watches, Change{ .dir = "/w/sub/deep" }, Change.reads).?.id);
+    try testing.expectEqual(@as(u32, 1), counter(Watch, Change, Change.reads, &watches, Change{ .dir = "/w" }).?.id);
+    try testing.expectEqual(@as(u32, 2), counter(Watch, Change, Change.reads, &watches, Change{ .dir = "/w/sub" }).?.id);
+    try testing.expectEqual(@as(u32, 2), counter(Watch, Change, Change.reads, &watches, Change{ .dir = "/w/sub/deep" }).?.id);
     // A folder whose name starts the same way is not below `/w/sub`.
-    try testing.expectEqual(@as(u32, 3), counter(&watches, Change{ .dir = "/w/subway/x" }, Change.reads).?.id);
-    try testing.expect(counter(&watches, Change{ .dir = "/elsewhere" }, Change.reads) == null);
+    try testing.expectEqual(@as(u32, 3), counter(Watch, Change, Change.reads, &watches, Change{ .dir = "/w/subway/x" }).?.id);
+    try testing.expect(counter(Watch, Change, Change.reads, &watches, Change{ .dir = "/elsewhere" }) == null);
 }
 
 test "a name reported twice is one entry, and one never counted goes without taking another with it" {
@@ -781,11 +785,11 @@ test "a failed budget reread keeps its names and reports uncertainty until compl
         }
     }.read;
     budget.io = .{ .userdata = io.userdata, .vtable = &vtable };
-    budget.reread({}, struct {
+    budget.reread(void, struct {
         fn stale(_: void, _: []const u8) bool {
             return true;
         }
-    }.stale);
+    }.stale, {});
     try testing.expectEqual(@as(usize, 2), budget.count(root).?);
     try testing.expect(try budget.note(root, "three", .unchanged));
     try testing.expectEqual(@as(usize, 2), budget.count(root).?);

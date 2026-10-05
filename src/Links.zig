@@ -230,7 +230,7 @@ fn discover(l: *const Links, dir: []const u8, found: *std.ArrayList([]u8)) Alloc
             }
         }
     };
-    walk.tree(l.gpa, l.io, dir, Finding{ .l = l, .found = found }, Finding.visit) catch |err| switch (err) {
+    walk.tree(Finding, Finding.visit, l.gpa, l.io, dir, Finding{ .l = l, .found = found }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // gone again, or not ours to read: nothing to follow there
         else => {},

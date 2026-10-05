@@ -866,7 +866,7 @@ pub const Watcher = struct {
                 return if (entry.kind == .directory and m.p.recursive) .into else .over;
             }
         };
-        walk.tree(w.gpa, w.io, p.target, Made{ .w = w, .p = p }, Made.visit) catch |err| switch (err) {
+        walk.tree(Made, Made.visit, w.gpa, w.io, p.target, Made{ .w = w, .p = p }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // gone again, or not ours to read: the watch says the rest
             else => {},

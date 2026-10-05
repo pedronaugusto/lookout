@@ -158,7 +158,7 @@ pub fn refresh(
 pub fn prepare(s: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max_entries: usize, changes: *std.ArrayList(Change)) Snapshot.RefreshError!Snapshot {
     var next = try s.readListing(gpa, io, dir, max_entries);
     errdefer next.deinit(gpa);
-    try next.compare(s, gpa, changes);
+    try next.compare(gpa, s, changes);
     return next;
 }
 
@@ -221,7 +221,7 @@ fn readListing(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max
 
 /// Appends the differences without changing either listing. On error,
 /// nothing is appended and the caller can retry against the same pair.
-pub fn compare(s: *const Snapshot, before: *const Snapshot, gpa: Allocator, changes: *std.ArrayList(Change)) Allocator.Error!void {
+pub fn compare(s: *const Snapshot, gpa: Allocator, before: *const Snapshot, changes: *std.ArrayList(Change)) Allocator.Error!void {
     const start = changes.items.len;
     errdefer {
         for (changes.items[start..]) |change| gpa.free(change.name);
@@ -230,27 +230,27 @@ pub fn compare(s: *const Snapshot, before: *const Snapshot, gpa: Allocator, chan
 
     for (s.entries.keys(), s.entries.values()) |name, meta| {
         const old = before.entries.get(name) orelse {
-            try append(changes, gpa, name, .created, meta.file_kind);
+            try append(gpa, changes, name, .created, meta.file_kind);
             continue;
         };
         if (old.file_kind != meta.file_kind) {
-            try append(changes, gpa, name, .created, meta.file_kind);
+            try append(gpa, changes, name, .created, meta.file_kind);
         } else if (old.size != meta.size or old.mtime_ns != meta.mtime_ns or old.contentChanged(meta)) {
-            try append(changes, gpa, name, .modified, meta.file_kind);
+            try append(gpa, changes, name, .modified, meta.file_kind);
         } else if (old.ctime_ns != meta.ctime_ns) {
-            try append(changes, gpa, name, .attributes, meta.file_kind);
+            try append(gpa, changes, name, .attributes, meta.file_kind);
         }
     }
     if (s.truncated) return;
     for (before.entries.keys(), before.entries.values()) |name, meta| {
         if (s.entries.contains(name)) continue;
-        try append(changes, gpa, name, .removed, meta.file_kind);
+        try append(gpa, changes, name, .removed, meta.file_kind);
     }
 }
 
 fn append(
-    changes: *std.ArrayList(Change),
     gpa: Allocator,
+    changes: *std.ArrayList(Change),
     name: []const u8,
     kind: Kind,
     file_kind: Io.File.Kind,

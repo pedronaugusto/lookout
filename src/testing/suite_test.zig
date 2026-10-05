@@ -3377,7 +3377,7 @@ test "checkpoint allocation failures leave the delivery and snapshot owned" {
     var failures: usize = 0;
     while (true) : (failures += 1) {
         var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = failures });
-        if (tryCheckpoint(&f.watcher, failing.allocator())) |*snapshot| {
+        if (tryCheckpoint(failing.allocator(), &f.watcher)) |*snapshot| {
             var saved = snapshot.*;
             saved.deinit();
             break;
@@ -3408,7 +3408,7 @@ test "checkpoint allocation failures leave the delivery and snapshot owned" {
     try std.testing.expect(failures > 0);
 }
 
-fn tryCheckpoint(watcher: *const Watcher, gpa: std.mem.Allocator) !lookout.Checkpoint {
+fn tryCheckpoint(gpa: std.mem.Allocator, watcher: *const Watcher) !lookout.Checkpoint {
     return (try watcher.checkpoint(gpa)).?;
 }
 

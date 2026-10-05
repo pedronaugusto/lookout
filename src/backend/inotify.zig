@@ -270,7 +270,7 @@ pub fn add(
         }
     };
     var registering: Registering = .{ .n = n, .id = id, .batch = batch };
-    walk.tree(n.gpa, n.io, abs_path, &registering, Registering.visit) catch |err| switch (err) {
+    walk.tree(*Registering, Registering.visit, n.gpa, n.io, abs_path, &registering) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
@@ -280,7 +280,7 @@ pub fn add(
 pub fn remove(n: *Inotify, id: WatchId) void {
     var watch = n.watches.fetchSwapRemove(id) orelse return;
     n.removeWatchDescriptors(id);
-    n.budget.release(watch.value.root, n, stillCounted);
+    n.budget.release(*const Inotify, stillCounted, watch.value.root, n);
     n.gpa.free(watch.value.root);
     watch.value.filter.deinit(n.gpa);
     var i: usize = 0;
@@ -313,7 +313,7 @@ pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) c
                 if (!n.removeOwner(rollback, id)) rollback += 1;
             } else rollback += 1;
         }
-        n.budget.release(watch.root, n, stillCounted);
+        n.budget.release(*const Inotify, stillCounted, watch.root, n);
     }
 
     if (watch.recursive and watch.target == .directory) {
@@ -340,7 +340,7 @@ pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) c
             }
         };
         var registering: Registering = .{ .n = n, .id = id, .batch = batch };
-        walk.tree(n.gpa, n.io, watch.root, &registering, Registering.visit) catch |err| switch (err) {
+        walk.tree(*Registering, Registering.visit, n.gpa, n.io, watch.root, &registering) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.Unexpected,
         };
@@ -352,7 +352,7 @@ pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) c
             if (!n.removeOwner(i, id)) i += 1;
         } else i += 1;
     }
-    n.budget.release(watch.root, n, stillCounted);
+    n.budget.release(*const Inotify, stillCounted, watch.root, n);
     previous.deinit(n.gpa);
 }
 
@@ -482,9 +482,9 @@ fn handleRead(n: *Inotify, bytes: []const u8, batch: *Batch) contract.PollError!
 
 fn consume(n: *Inotify, bytes: []const u8, offset: *usize, batch: *Batch) contract.PollError!void {
     // Partial bookkeeping can no longer supply reliable entry counts.
-    errdefer n.budget.reread({}, everyDirectory);
+    errdefer n.budget.reread(void, everyDirectory, {});
     var lost = false;
-    defer if (lost) n.budget.reread({}, everyDirectory);
+    defer if (lost) n.budget.reread(void, everyDirectory, {});
     var it = records.iterate(bytes);
     it.offset = offset.*;
     while (true) {
@@ -816,7 +816,7 @@ fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) contract.Pol
         }
     };
     var adopting: Adopting = .{ .n = n, .id = id, .batch = batch };
-    walk.tree(n.gpa, n.io, root, &adopting, Adopting.visit) catch |err| switch (err) {
+    walk.tree(*Adopting, Adopting.visit, n.gpa, n.io, root, &adopting) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };

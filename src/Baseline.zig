@@ -327,7 +327,7 @@ const Scan = struct {
             s.dirs.values()[index].snapshot = try before.read(gpa, b.io, dir, b.max_dir_entries);
 
             if (report) {
-                try s.dirs.values()[index].snapshot.compare(before, gpa, &s.scratch);
+                try s.dirs.values()[index].snapshot.compare(gpa, before, &s.scratch);
                 try s.reportChanges(gpa, path, index);
             }
             if (!b.recursive) continue;
