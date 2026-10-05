@@ -1149,12 +1149,8 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
 
 // Integration fixtures use the adapter’s own callback and native declarations.
 pub const test_access = if (builtin.is_test) struct {
-    pub const free = freeFixture;
     pub const c = cAccess;
-    pub const wants = wantsFixture;
 } else struct {};
-const windowsC = c;
-const wantsFixture = wants;
 
 const cAccess = struct {
     pub const CancelIoEx = c.CancelIoEx;
@@ -1162,5 +1158,3 @@ const cAccess = struct {
     pub const Overlapped = c.Overlapped;
     pub const PostQueuedCompletionStatus = c.PostQueuedCompletionStatus;
 };
-
-const freeFixture = free;

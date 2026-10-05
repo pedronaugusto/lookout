@@ -1,27 +1,12 @@
 //! Watcher integration scenarios for windows.
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Io = std.Io;
 const windows = std.os.windows;
 const lookout = @import("../lookout.zig");
-const buffer = @import("../buffer.zig");
 const Target = lookout.Target;
-const WatchId = lookout.WatchId;
-const bounds: buffer.Bounds = .{
-    .min = 4 * 1024,
-    .max = 16 * 1024 * 1024,
-    .default = 64 * 1024,
-};
-const share_buffer_len = 64 * 1024;
-const wake_key: usize = std.math.maxInt(usize);
-
-const grace_ms = 25;
-const grace_rounds = 4;
 
 const access = @import("Windows.zig").test_access;
 const builtin = @import("builtin");
 const c = access.c;
-const wants = access.wants;
 
 test "a read that completes with nothing is an overflow, and the watch reads on" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;

@@ -1,69 +1,12 @@
 //! Watcher integration scenarios for inotify.
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Io = std.Io;
 const posix = std.posix;
 const linux = std.os.linux;
 const lookout = @import("../lookout.zig");
-const Filter = @import("../Filter.zig");
 const records = @import("inotify/records.zig");
 const Target = lookout.Target;
-const WatchId = lookout.WatchId;
 const Inotify = @import("Inotify.zig");
-const Watch = struct {
-    /// Absolute, canonical path, owned by the backend.
-    root: []u8,
-    target: Target,
-    recursive: bool,
-    /// `@import("options.zig").AddOptions.filter`, copied. An excluded directory is
-    /// never registered, so the kernel is never asked for a watch on it.
-    filter: Filter,
-};
-const Pending = struct {
-    /// Absolute path the entry moved from, owned by the backend.
-    path: []u8,
-    is_dir: bool,
-};
-const PendingKey = struct {
-    watch: WatchId,
-    cookie: u32,
-};
-const Registration = struct {
-    /// Absolute path the descriptor stands for, owned by the backend.
-    path: []u8,
-    /// Every caller watch that owns this kernel descriptor.
-    watches: std.ArrayList(WatchId),
-};
-const base_mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
-    linux.IN.ATTRIB | linux.IN.MOVED_FROM | linux.IN.MOVED_TO |
-    linux.IN.DELETE_SELF | linux.IN.MOVE_SELF |
-    linux.IN.EXCL_UNLINK | linux.IN.DONT_FOLLOW;
 const read_buffer_len = 8192;
-const Change = struct {
-    watch: WatchId,
-    /// The kernel watch descriptor the event arrived on.
-    wd: i32,
-    /// The directory the watch descriptor stands for, owned by `handle`.
-    dir: []u8,
-    /// The absolute path of the entry, owned by `handle`.
-    path: []u8,
-    /// Whether the kernel named an entry of `dir`, rather than reporting
-    /// on the watched path itself -- a watched file, say.
-    named: bool,
-    cookie: u32,
-    is_dir: bool,
-    appeared: bool,
-    vanished: bool,
-    moved_from: bool,
-    moved_to: bool,
-    modified: bool,
-    closed: bool,
-    attributes: bool,
-
-    fn target(c: Change) Target {
-        return if (c.is_dir) .directory else .file;
-    }
-};
 
 test "the kernel's queue overflow record is an overflow against every watch" {
     // inotify(7): "IN_Q_OVERFLOW: Event queue overflowed (wd is -1 for

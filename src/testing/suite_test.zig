@@ -2789,10 +2789,6 @@ fn Held(comptime Result: type, comptime then: anytype) type {
     };
 }
 
-fn pollOnce(self: anytype) Watcher.PollError![]const lookout.Event {
-    return self.watcher.poll(timeout_ms);
-}
-
 fn addOnce(self: anytype) Watcher.AddError!lookout.WatchId {
     return self.watcher.add(self.path, .{});
 }

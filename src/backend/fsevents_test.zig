@@ -1,12 +1,9 @@
 //! Watcher integration scenarios for fsevents.
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const posix = std.posix;
 const lookout = @import("../lookout.zig");
 const checkpoint_format = @import("../Checkpoint/format.zig");
 const Deadline = @import("../Deadline.zig");
-const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("fsevents/records.zig");
 const Record = records.Record;
@@ -14,20 +11,6 @@ const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 const flag = records.flag;
 const FsEvents = @import("FsEvents.zig");
-
-const bounds: buffer.Bounds = .{
-    .min = 4 * 1024,
-    .max = 64 * 1024 * 1024,
-    .default = 4 * 1024 * 1024,
-};
-const grace_ms = 25;
-const grace_rounds = 4;
-
-const lost_track: u32 = flag.must_scan_sub_dirs | flag.user_dropped | flag.kernel_dropped;
-pub const Held = struct {
-    bytes: []u8,
-    overflowed: bool,
-};
 
 const Asking = access.Asking;
 const settled = access.settled;

@@ -2072,7 +2072,6 @@ pub const test_access = if (builtin.is_test) struct {
     pub const settled = settledFixture;
     pub const synthesize = synthesizeFixture;
 } else struct {};
-const fseventsC = c;
 const synthesizeFixture = synthesize;
 
 const AskingFixture = Asking;
