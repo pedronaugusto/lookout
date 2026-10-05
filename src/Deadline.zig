@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 
 const Deadline = @This();
 
@@ -32,7 +33,9 @@ pub fn start(io: Io, timeout_ms: ?u32) Deadline {
 pub fn remainingMs(d: Deadline) ?u32 {
     const total = d.total orelse return null;
     const elapsed = d.started.durationTo(Io.Timestamp.now(d.io, .awake)).toMilliseconds();
-    return @intCast(@max(0, @as(i64, total) - elapsed));
+    const left: u32 = @intCast(@max(0, @as(i64, total) - elapsed));
+    assert(left <= total);
+    return left;
 }
 
 /// Whether the timeout has run out. A deadline with no timeout never has.
@@ -49,7 +52,10 @@ pub fn pollMs(d: Deadline) i32 {
 /// What `GetQueuedCompletionStatus` wants: milliseconds, or `INFINITE`.
 pub fn windowsMs(d: Deadline) u32 {
     const remaining = d.remainingMs() orelse return std.math.maxInt(u32);
-    return @min(remaining, std.math.maxInt(u32) - 1);
+    const ms = @min(remaining, std.math.maxInt(u32) - 1);
+    // A timeout, however long, is never the value that means none.
+    assert(ms != std.math.maxInt(u32));
+    return ms;
 }
 
 const testing = std.testing;

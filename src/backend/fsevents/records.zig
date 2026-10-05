@@ -14,6 +14,7 @@
 //! a decoder that exists only on macOS can only be fuzzed there.
 
 const std = @import("std");
+const assert = std.debug.assert;
 
 const lookout = @import("../../types.zig");
 const path_cmp = @import("../../path.zig");
@@ -49,6 +50,11 @@ pub const flag = struct {
 /// follows. Read back with unaligned loads, because the path lengths do
 /// not align.
 pub const header_len = 20;
+
+comptime {
+    // The id, the flags and the path length are 32 bits, the event 64.
+    assert(header_len == 3 * @sizeOf(u32) + @sizeOf(u64));
+}
 
 /// One delivered change.
 pub const Record = struct {
@@ -90,6 +96,7 @@ pub const Iterator = struct {
         if (len > rest.len - header_len) return error.TruncatedRecord;
 
         it.offset += header_len + len;
+        assert(it.offset <= it.bytes.len);
         return .{
             .id = @enumFromInt(std.mem.readInt(u32, rest[0..4], .little)),
             .flags = std.mem.readInt(u32, rest[4..8], .little),
@@ -112,6 +119,7 @@ pub fn encodedLen(path: []const u8) usize {
 /// bytes. Called from the system's delivery thread, so it allocates
 /// nothing and can fail in no way.
 pub fn encode(out: []u8, id: WatchId, flags: u32, event: u64, path: []const u8) usize {
+    assert(out.len >= encodedLen(path));
     encodeHeader(out, id, flags, event, path.len);
     @memcpy(out[header_len..][0..path.len], path);
     return encodedLen(path);
@@ -122,6 +130,7 @@ pub fn encode(out: []u8, id: WatchId, flags: u32, event: u64, path: []const u8) 
 pub fn encodeVolumePath(out: []u8, id: WatchId, flags: u32, event: u64, prefix: []const u8, relative: []const u8) usize {
     const separator: usize = @intFromBool(relative.len != 0 or prefix.len == 0);
     const length = encodedVolumePathLen(prefix, relative);
+    assert(out.len >= length);
     encodeHeader(out, id, flags, event, length - header_len);
     @memcpy(out[header_len..][0..prefix.len], prefix);
     if (separator != 0) out[header_len + prefix.len] = '/';
@@ -135,6 +144,8 @@ pub fn encodedVolumePathLen(prefix: []const u8, relative: []const u8) usize {
 }
 
 fn encodeHeader(out: []u8, id: WatchId, flags: u32, event: u64, length: usize) void {
+    // `Iterator.next` reads the length back as 32 bits.
+    assert(length <= std.math.maxInt(u32));
     std.mem.writeInt(u32, out[0..4], @intFromEnum(id), .little);
     std.mem.writeInt(u32, out[4..8], flags, .little);
     std.mem.writeInt(u32, out[8..12], @intCast(length), .little);
@@ -187,6 +198,8 @@ pub fn partnerOf(
     from: usize,
     ctx: anytype,
 ) ?usize {
+    assert(used.len == records.len);
+    assert(from <= records.len);
     const subject_exists = ctx.exists(subject.path);
     for (records[from..], from..) |record, at| {
         if (used[at]) continue;

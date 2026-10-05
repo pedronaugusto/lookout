@@ -14,6 +14,7 @@
 //! only from the one platform that reaches them.
 
 const std = @import("std");
+const assert = std.debug.assert;
 
 /// The ends of the range a backend will pass on, and what it uses when
 /// the caller asks for nothing.
@@ -32,12 +33,20 @@ pub const Bounds = struct {
 /// of four, because both kernels align the records they write to a
 /// 32-bit word and measure the buffer in whole ones.
 pub fn clamp(asked: usize, bounds: Bounds) usize {
+    assert(bounds.min <= bounds.default);
+    assert(bounds.default <= bounds.max);
+    // A whole number of words at the floor, so rounding down never
+    // takes a size below it.
+    assert(bounds.min % @alignOf(u32) == 0);
     const bounded = std.math.clamp(
         if (asked == 0) bounds.default else asked,
         bounds.min,
         bounds.max,
     );
-    return bounded - bounded % @alignOf(u32);
+    const size = bounded - bounded % @alignOf(u32);
+    assert(size >= bounds.min);
+    assert(size <= bounds.max);
+    return size;
 }
 
 const testing = std.testing;

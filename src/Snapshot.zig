@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const lookout = @import("types.zig");
@@ -216,6 +217,9 @@ fn readListing(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max
         const was_racy = if (before.entries.get(entry.name)) |old| old.racy else false;
         try next.entries.put(gpa, name, capture(io, dir, entry.name, stat, taken_ns, next.check_contents, was_racy));
     }
+    // A listing holds at most its budget, and is cut short only there.
+    assert(next.entries.count() <= max_entries);
+    assert(!next.truncated or next.entries.count() == max_entries);
     return next;
 }
 

@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 const posix = std.posix;
 const linux = std.os.linux;
@@ -462,6 +463,9 @@ fn read(n: *Inotify, batch: *Batch) contract.PollError!bool {
         n.read_offset = 0;
         if (n.read_len == 0) return false;
     }
+    // A read held across calls is resumed where its walk stopped.
+    assert(n.read_len <= n.read_buffer.len);
+    assert(n.read_offset <= n.read_len);
     try n.consume(n.read_buffer[0..n.read_len], &n.read_offset, batch);
     n.read_len = 0;
     return true;
@@ -481,6 +485,7 @@ fn handleRead(n: *Inotify, bytes: []const u8, batch: *Batch) contract.PollError!
 }
 
 fn consume(n: *Inotify, bytes: []const u8, offset: *usize, batch: *Batch) contract.PollError!void {
+    assert(offset.* <= bytes.len);
     // Partial bookkeeping can no longer supply reliable entry counts.
     errdefer n.budget.reread(void, everyDirectory, {});
     var lost = false;

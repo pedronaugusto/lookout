@@ -1,5 +1,6 @@
 //! Portable baseline storage. The checksum is checked before JSON is read.
 const std = @import("std");
+const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Snapshot = @import("../Snapshot.zig");
 const path = @import("../path.zig");
@@ -22,7 +23,17 @@ pub const Directory = struct {
 pub const Entry = struct { name: []const u8, meta: Snapshot.Meta };
 pub const ParseError = error{ OutOfMemory, InvalidBaseline, UnsupportedBaselineVersion, ForeignBaseline };
 const magic = "LOOKBASE";
+/// The layout `encode` writes and `parse` reads: the magic, the version,
+/// then the checksum of the JSON after them.
+const version: u32 = 1;
+const version_at = magic.len;
+const digest_at = version_at + @sizeOf(u32);
+const Sha256 = std.crypto.hash.sha2.Sha256;
 const header_size = 44;
+
+comptime {
+    assert(header_size == digest_at + Sha256.digest_length);
+}
 pub const platform = @tagName(builtin.os.tag);
 pub const file_limit = 256 * 1024 * 1024;
 
@@ -30,19 +41,19 @@ pub fn encode(gpa: std.mem.Allocator, state: State) std.mem.Allocator.Error![]u8
     const payload = try std.json.Stringify.valueAlloc(gpa, state, .{});
     defer gpa.free(payload);
     const bytes = try gpa.alloc(u8, header_size + payload.len);
-    @memcpy(bytes[0..8], magic);
-    std.mem.writeInt(u32, bytes[8..12], 1, .little);
-    std.crypto.hash.sha2.Sha256.hash(payload, bytes[12..44], .{});
+    @memcpy(bytes[0..version_at], magic);
+    std.mem.writeInt(u32, bytes[version_at..digest_at], version, .little);
+    Sha256.hash(payload, bytes[digest_at..header_size], .{});
     @memcpy(bytes[header_size..], payload);
     return bytes;
 }
 
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!std.json.Parsed(State) {
-    if (bytes.len < header_size or bytes.len > file_limit or !std.mem.eql(u8, bytes[0..8], magic)) return error.InvalidBaseline;
-    if (std.mem.readInt(u32, bytes[8..12], .little) != 1) return error.UnsupportedBaselineVersion;
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes[header_size..], &digest, .{});
-    if (!std.mem.eql(u8, &digest, bytes[12..44])) return error.InvalidBaseline;
+    if (bytes.len < header_size or bytes.len > file_limit or !std.mem.eql(u8, bytes[0..version_at], magic)) return error.InvalidBaseline;
+    if (std.mem.readInt(u32, bytes[version_at..digest_at], .little) != version) return error.UnsupportedBaselineVersion;
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(bytes[header_size..], &digest, .{});
+    if (!std.mem.eql(u8, &digest, bytes[digest_at..header_size])) return error.InvalidBaseline;
     var parsed = std.json.parseFromSlice(State, gpa, bytes[header_size..], .{ .allocate = .alloc_always }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidBaseline,

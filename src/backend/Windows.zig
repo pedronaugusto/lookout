@@ -26,6 +26,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 const windows = std.os.windows;
 
@@ -340,6 +341,8 @@ fn open(gpa: Allocator, path: []const u8) contract.AddError!windows.HANDLE {
 /// because a change that arrives while no read is outstanding is a change
 /// the kernel has to buffer.
 fn arm(w: *Windows, watch: *Watch) contract.AddError!void {
+    // The kernel is offered at most the buffer it writes into.
+    assert(watch.accepted_len <= watch.buffer.len);
     watch.overlapped = std.mem.zeroes(c.Overlapped);
     const filter: u32 = c.file_notify_change_file_name | c.file_notify_change_dir_name |
         c.file_notify_change_attributes | c.file_notify_change_size |
@@ -709,6 +712,8 @@ fn retire(w: *Windows, overlapped: ?*c.Overlapped) void {
 
 /// Turns one completed read into events.
 fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) contract.PollError!void {
+    // A completed read wrote no more than `arm` offered.
+    assert(transferred <= watch.accepted_len);
     const dir = watch.dir();
 
     if (watch.cursor == null) {

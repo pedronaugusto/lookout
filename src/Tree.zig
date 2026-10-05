@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const lookout = @import("types.zig");
@@ -376,6 +377,8 @@ fn createFile(t: *Tree, watch: WatchId, parent: ?NodeId, path: []u8, meta: Snaps
 /// object that name no longer names -- a file where a directory was --
 /// and goes first, with everything below it.
 fn insert(t: *Tree, id: NodeId, node: Node) Allocator.Error!void {
+    // Node ids are never reused.
+    assert(!t.nodes.contains(id));
     const key: Key = .{ .watch = node.watch, .path = node.path };
     if (t.index.get(key)) |stale| t.dropSubtree(stale);
     try t.nodes.ensureUnusedCapacity(t.gpa, 1);
@@ -383,6 +386,8 @@ fn insert(t: *Tree, id: NodeId, node: Node) Allocator.Error!void {
     if (node.parent) |parent| try t.nodes.getPtr(parent).?.children.put(t.gpa, id, {});
     t.nodes.putAssumeCapacity(id, node);
     t.index.putAssumeCapacity(key, id);
+    // One index entry per node: a node made where another was replaced it.
+    assert(t.index.count() == t.nodes.count());
 }
 
 /// Takes the node `id` out of the index and out of its parent's
@@ -411,6 +416,7 @@ fn dropAt(t: *Tree, at: usize) void {
     t.destroy(node);
     t.nodes.swapRemoveAt(at);
     t.noteDropped(id);
+    assert(t.index.count() == t.nodes.count());
 }
 
 /// Drops `top` and every node below it, deepest first, at the cost of
@@ -478,6 +484,7 @@ pub fn removeWatch(t: *Tree, id: WatchId) void {
             i += 1;
         }
     }
+    assert(t.index.count() == t.nodes.count());
 }
 
 /// Reconciles the nodes of one watch with a new filter. The root remains

@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const Batch = @import("Batch.zig");
@@ -273,6 +274,8 @@ pub fn follow(l: *Links, host: anytype, batch: *Batch, subject: []const u8) Allo
 
 /// Makes the record of a link about to be followed, taking `target`.
 fn adopt(l: *Links, subject: []const u8, target: []u8, identity: Identity, id: WatchId) Allocator.Error!*Link {
+    // `consider` says `full` at the ceiling, so a link adopted is within it.
+    assert(l.followed.items.len < l.max);
     errdefer l.gpa.free(target);
     try l.followed.ensureUnusedCapacity(l.gpa, 1);
     const link = try l.gpa.create(Link);

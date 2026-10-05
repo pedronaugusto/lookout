@@ -20,6 +20,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const Batch = @import("Batch.zig");
@@ -513,6 +514,9 @@ pub const Watcher = struct {
                 return err;
             };
         }
+        // Issued once: held from here, and below every id still to come.
+        assert(w.table.contains(id));
+        assert(@intFromEnum(id) < w.next_id);
         return id;
     }
 
@@ -616,6 +620,8 @@ pub const Watcher = struct {
         try w.anchorPending(p);
         w.next_id += 1;
         owns_target = false;
+        assert(w.table.contains(id));
+        assert(w.waiting(id));
         return id;
     }
 
@@ -674,7 +680,11 @@ pub const Watcher = struct {
         w.unregister(p.id);
         const present = w.existingPrefix(p.target) orelse return;
         if (present.len == p.target.len) return;
+        // The ancestor and the one step down from it are both the start
+        // of the path the watch waits for, the step the longer.
+        assert(std.mem.startsWith(u8, p.target, present));
         p.next = p.target[0..nextStep(p.target, present.len)];
+        assert(p.next.len > present.len);
         const mirror = w.gpa.dupe(u8, present) catch return;
         w.addBackend(p.id, present, p.target, .{
             .filter = .{ .allow = Pending.onlyNext, .context = p },
@@ -714,6 +724,7 @@ pub const Watcher = struct {
 
     /// Where the component after the prefix of length `at` ends.
     fn nextStep(target: []const u8, at: usize) usize {
+        assert(at <= target.len);
         var i = at;
         while (i < target.len and std.fs.path.isSep(target[i])) i += 1;
         while (i < target.len and !std.fs.path.isSep(target[i])) i += 1;
@@ -892,6 +903,9 @@ pub const Watcher = struct {
             break;
         }
         w.batch.discardFuture(w.gpa, id);
+        assert(!w.table.contains(id));
+        assert(!w.waiting(id));
+        assert(w.followingOf(id) == null);
     }
 
     /// Replaces the filter of a live watch without changing its id, root or

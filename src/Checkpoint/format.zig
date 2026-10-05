@@ -2,6 +2,10 @@
 
 const lookout = @import("../types.zig");
 
+/// The format a watcher writes and the only one `parse` reads, versioned
+/// independently of the package.
+pub const version = 2;
+
 /// The serialized format is versioned independently of the package.
 pub const State = struct {
     version: u8,
@@ -65,7 +69,7 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {
         else => error.InvalidCheckpoint,
     };
     errdefer state.deinit();
-    if (state.value.version != 2 or state.value.backend != .fsevents) return error.InvalidCheckpoint;
+    if (state.value.version != version or state.value.backend != .fsevents) return error.InvalidCheckpoint;
     var halves: usize = 0;
     for (state.value.watches, 0..) |watch, index| {
         if (!std.fs.path.isAbsolute(watch.root)) return error.InvalidCheckpoint;
@@ -134,5 +138,6 @@ pub fn copy(gpa: Allocator, state: State) Allocator.Error!Owned {
         };
         copied += 1;
     }
+    std.debug.assert(copied == state.watches.len);
     return .{ .arena = arena, .value = .{ .version = state.version, .backend = state.backend, .watches = watches } };
 }

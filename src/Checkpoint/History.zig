@@ -5,6 +5,7 @@ const std = @import("std");
 const path = @import("../path.zig");
 const WatchId = @import("../types.zig").WatchId;
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const builtin = @import("builtin");
 const History = @This();
 
@@ -55,10 +56,18 @@ pub fn discard(h: *History, node: *Node) void {
 }
 
 pub fn publish(h: *History, node: *Node) void {
+    // A prepared node is published once, and not linked before.
+    assert(node.born == 0);
+    assert(node.removed == 0);
+    assert(node.prev == null);
+    assert(node.next == null);
     h.acquire();
     defer h.lock.unlock();
     h.revision += 1;
     node.born = h.revision;
+    // The list is in order of birth, which is what lets an iterator stop
+    // at the first node born after its lease.
+    if (h.last) |last| assert(last.born < node.born);
     node.prev = h.last;
     if (h.last) |last| last.next = node else h.first = node;
     h.last = node;
@@ -67,7 +76,8 @@ pub fn publish(h: *History, node: *Node) void {
 pub fn remove(h: *History, node: *Node) void {
     h.acquire();
     defer h.lock.unlock();
-    std.debug.assert(node.removed == 0);
+    assert(node.born != 0);
+    assert(node.removed == 0);
     h.revision += 1;
     node.removed = h.revision;
     if (h.leases == null) {
@@ -98,6 +108,7 @@ fn compact(h: *History) void {
 
 pub fn release(h: *History) void {
     h.acquire();
+    assert(h.refs != 0);
     h.refs -= 1;
     const gone = h.refs == 0;
     h.lock.unlock();
@@ -116,6 +127,9 @@ pub fn snapshot(h: *History, gpa: Allocator, id: WatchId, root: []const u8) Allo
     const owned = try gpa.dupe(u8, root);
     h.acquire();
     defer h.lock.unlock();
+    // Leases are kept newest first: only the last one can hold the oldest
+    // revision, which is what `Lease.release` compacts on.
+    if (h.leases) |newest| assert(newest.revision <= h.revision);
     lease.* = .{ .history = h, .gpa = gpa, .id = id, .root = owned, .revision = h.revision, .next = h.leases };
     if (h.leases) |first| first.prev = lease;
     h.leases = lease;
@@ -136,12 +150,14 @@ const Lease = struct {
     fn retain(l: *Lease) void {
         l.history.acquire();
         defer l.history.lock.unlock();
+        assert(l.refs != 0);
         l.refs += 1;
     }
 
     fn release(l: *Lease) void {
         const h = l.history;
         h.acquire();
+        assert(l.refs != 0);
         l.refs -= 1;
         if (l.refs != 0) {
             h.lock.unlock();

@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const lookout = @import("types.zig");
@@ -299,6 +300,8 @@ pub fn pushDetail(
     from: ?[]const u8,
     target: Target,
 ) Allocator.Error!void {
+    // Only a paired rename says where it came from.
+    assert(from == null or kind == .renamed);
     if (b.aliases.get(id)) |alias| return b.pushAliased(gpa, alias, subject, kind, from, target);
     if (b.noting.contains(id)) b.note(gpa, id, subject, kind, from);
     const source = if (kind == .renamed and from != null and !path_cmp.eql(subject, from.?)) from else null;
@@ -360,6 +363,7 @@ fn noteOne(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8, kind: Ki
         gpa.free(owned);
         b.notes_lost = true;
     };
+    assert(b.notes.items.len <= notes_limit);
 }
 
 /// Hands the notes over to the caller and starts again with none.
@@ -570,6 +574,7 @@ fn rebuildIndex(b: *Batch) void {
     for (b.events.items, 0..) |event, at| {
         b.index.putAssumeCapacity(.{ .id = event.id, .path = event.path }, @intCast(at));
     }
+    assert(b.index.count() == b.events.items.len);
 }
 
 /// Records that `subject` could not be watched, for the next `poll` to
@@ -587,6 +592,7 @@ pub fn trouble(
 /// Queues a change produced while add runs. It cannot join a slice the
 /// previous poll already handed out; flush transfers it after poll resets.
 pub fn deferChange(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) Allocator.Error!void {
+    assert(from == null or kind == .renamed);
     if (b.aliases.get(id)) |alias| {
         if (kind == .overflow) return b.deferChange(gpa, alias.owner, alias.root, .overflow, null, .directory);
         const here = try alias.spellAlloc(gpa, subject) orelse return;
@@ -725,6 +731,8 @@ fn record(
 ) Allocator.Error!void {
     if (b.index.get(.{ .id = id, .path = subject })) |i| {
         const existing = &b.events.items[i];
+        // The index names the event recorded for this watch and path.
+        assert(existing.id == id);
         if (existing.target == .unknown) existing.target = target;
         if (b.hold_all and !isLoss(kind) and !isLoss(existing.kind)) {
             // Debouncing already decided what the window says: the kind
@@ -771,6 +779,7 @@ fn record(
     });
     errdefer _ = b.events.pop();
     try b.index.put(gpa, .{ .id = id, .path = owned_path }, @intCast(b.events.items.len - 1));
+    assert(b.index.count() == b.events.items.len);
 }
 
 fn isLoss(kind: Kind) bool {
@@ -795,6 +804,15 @@ fn rank(kind: Kind) u3 {
         // will ever hear about this path".
         .unwatched => 7,
     };
+}
+
+comptime {
+    // The precedence `lookout.Kind` documents: each kind a rank of its
+    // own, and the two loss notices above every ordinary change.
+    for (std.enums.values(Kind)) |a| {
+        for (std.enums.values(Kind)) |b| assert(a == b or rank(a) != rank(b));
+        assert(isLoss(a) == (rank(a) >= rank(.overflow)));
+    }
 }
 
 const testing = std.testing;

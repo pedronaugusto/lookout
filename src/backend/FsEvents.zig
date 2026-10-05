@@ -30,6 +30,7 @@
 //!   and the two dropped-event flags all become `lookout.Kind.overflow`.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
@@ -212,6 +213,7 @@ const Sink = struct {
             return;
         }
         s.len += records.encode(s.buffer[s.len..], id, flags, event, subject);
+        assert(s.len <= s.buffer.len);
     }
 
     fn signal(s: *Sink) void {
@@ -439,7 +441,7 @@ pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_
         const cursor = stream.cursor;
         try watches.append(gpa, .{ .root = root.path, .recursive = root.recursive, .cursor = cursor, .identity = identity, .changes = changes, .half = half, .baseline = paths });
     }
-    return .{ .state = try checkpoint_format.copy(gpa, .{ .version = 2, .backend = .fsevents, .watches = watches.items }) };
+    return .{ .state = try checkpoint_format.copy(gpa, .{ .version = checkpoint_format.version, .backend = .fsevents, .watches = watches.items }) };
 }
 
 fn resumeIndex(f: *const FsEvents, root: []const u8) ?usize {
@@ -840,6 +842,7 @@ fn deliver(
                 continue;
             }
             stream.sink.len += records.encodeVolumePath(stream.sink.buffer[stream.sink.len..], stream.id, flags[i], ids[i], prefix, tail);
+            assert(stream.sink.len <= stream.sink.buffer.len);
         } else stream.sink.append(stream.id, flags[i], ids[i], subject);
     }
     stream.sink.signal();
