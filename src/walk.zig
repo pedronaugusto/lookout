@@ -274,12 +274,14 @@ test "a walk visits every entry it is let into, and nothing below one it is not"
         gpa: Allocator,
         names: std.ArrayList([]u8),
 
-        fn visit(s: *@This(), entry: Entry) anyerror!Step {
+        const Self = @This();
+
+        fn visit(s: *Self, entry: Entry) anyerror!Step {
             try s.names.append(s.gpa, try s.gpa.dupe(u8, entry.name));
             if (std.mem.eql(u8, entry.name, "skip")) return .over;
             return .into;
         }
-        fn holds(s: *const @This(), name: []const u8) bool {
+        fn holds(s: *const Self, name: []const u8) bool {
             for (s.names.items) |seen| {
                 if (std.mem.eql(u8, seen, name)) return true;
             }
@@ -311,7 +313,9 @@ test "a walk of an empty or unreadable tree visits nothing and does not fail" {
 
     const Count = struct {
         seen: usize = 0,
-        fn visit(c: *@This(), _: Entry) anyerror!Step {
+        const Self = @This();
+
+        fn visit(c: *Self, _: Entry) anyerror!Step {
             c.seen += 1;
             return .into;
         }
@@ -345,7 +349,9 @@ test "a walk with metadata reads what lstat reads, across listing batches" {
 
     const Check = struct {
         seen: usize = 0,
-        fn visit(c: *@This(), entry: Entry) anyerror!Step {
+        const Self = @This();
+
+        fn visit(c: *Self, entry: Entry) anyerror!Step {
             c.seen += 1;
             const stat = try Io.Dir.cwd().statFile(testing.io, entry.path, .{ .follow_symlinks = false });
             try testing.expectEqual(stat.kind, entry.kind);

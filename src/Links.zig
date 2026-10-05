@@ -214,7 +214,9 @@ fn discover(l: *const Links, dir: []const u8, found: *std.ArrayList([]u8)) Alloc
         l: *const Links,
         found: *std.ArrayList([]u8),
 
-        fn visit(f: @This(), entry: walk.Entry) anyerror!walk.Step {
+        const Self = @This();
+
+        fn visit(f: Self, entry: walk.Entry) anyerror!walk.Step {
             if (f.l.filter.prunes(f.l.root, entry.path)) return .over;
             switch (entry.kind) {
                 .directory => return .into,
@@ -491,7 +493,9 @@ test "a link is followed only into a directory the watch does not reach" {
     }
 
     const Host = struct {
-        pub fn unregister(_: @This(), _: WatchId) void {}
+        const Self = @This();
+
+        fn unregister(_: Self, _: WatchId) void {}
     };
     const l = (try create(gpa, io, @enumFromInt(0), root, .none, 64)) orelse return error.SkipZigTest;
     defer l.destroy(Host{});

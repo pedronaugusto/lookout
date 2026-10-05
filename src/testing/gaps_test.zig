@@ -296,7 +296,9 @@ test "a slow write is one event, and it arrives after the writing stops" {
         dir: std.Io.Dir,
         done: std.atomic.Value(bool) = .init(false),
 
-        fn run(self: *@This()) void {
+        const Self = @This();
+
+        fn run(self: *Self) void {
             const w_io = std.testing.io;
             const chunk = "x" ** (64 * 1024);
             var file = self.dir.createFile(w_io, "big.bin", .{ .truncate = false }) catch return;

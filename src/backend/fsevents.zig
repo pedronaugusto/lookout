@@ -750,7 +750,9 @@ pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) 
         stream: *const Stream,
         old: Filter,
 
-        fn includes(r: @This(), dir: []const u8) bool {
+        const Self = @This();
+
+        fn includes(r: Self, dir: []const u8) bool {
             return r.old.prunes(r.stream.root, dir) and
                 !r.stream.filter.prunes(r.stream.root, dir);
         }
@@ -1329,7 +1331,9 @@ fn adopt(
         id: WatchId,
         stream: *const Stream,
 
-        fn visit(a: *@This(), entry: walk.Entry) anyerror!walk.Step {
+        const Self = @This();
+
+        fn visit(a: *Self, entry: walk.Entry) anyerror!walk.Step {
             try a.f.budget.found(entry.dir, entry.name);
             if (entry.kind == .directory) try a.f.budget.begin(entry.path);
             if (a.stream.filter.prunes(a.stream.root, entry.path)) return .over;
@@ -1543,7 +1547,9 @@ fn refreshKnown(
         id: WatchId,
         stream: *const Stream,
 
-        fn visit(r: *@This(), entry: walk.Entry) anyerror!walk.Step {
+        const Self = @This();
+
+        fn visit(r: *Self, entry: walk.Entry) anyerror!walk.Step {
             if (r.stream.filter.prunes(r.stream.root, entry.path)) return .over;
             try r.f.remember(r.id, entry.path);
             return .into;
@@ -1617,7 +1623,9 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
         stream: *const Stream,
         cross_device: bool = false,
 
-        fn visit(s: *@This(), entry: walk.Entry) anyerror!walk.Step {
+        const Self = @This();
+
+        fn visit(s: *Self, entry: walk.Entry) anyerror!walk.Step {
             try s.f.budget.found(entry.dir, entry.name);
             if (entry.kind == .directory) try s.f.budget.begin(entry.path);
             if (s.stream.filter.prunes(s.stream.root, entry.path)) {

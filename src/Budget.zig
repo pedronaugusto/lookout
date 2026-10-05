@@ -483,7 +483,9 @@ test "a watch removed leaves the counts another watch still holds" {
 
     const Left = struct {
         dir: []const u8,
-        fn counts(left: @This(), counted_dir: []const u8) bool {
+        const Self = @This();
+
+        fn counts(left: Self, counted_dir: []const u8) bool {
             return path.eql(left.dir, counted_dir);
         }
     };
@@ -517,7 +519,9 @@ test "a lost read has its counts read again from disk, and only those" {
 
     const Lost = struct {
         dir: []const u8,
-        fn stale(l: @This(), dir: []const u8) bool {
+        const Self = @This();
+
+        fn stale(l: Self, dir: []const u8) bool {
             return path.eql(l.dir, dir);
         }
     };
@@ -531,7 +535,9 @@ test "a lost read has its counts read again from disk, and only those" {
 test "a count rests on the lowest watch that keeps every entry" {
     const Keeps = struct {
         all: bool,
-        fn isEmpty(k: @This()) bool {
+        const Self = @This();
+
+        fn isEmpty(k: Self) bool {
             return k.all;
         }
     };
@@ -539,7 +545,9 @@ test "a count rests on the lowest watch that keeps every entry" {
         id: u32,
         within: ?Reach,
         filter: Keeps,
-        fn reach(w: @This()) ?Reach {
+        const Self = @This();
+
+        fn reach(w: Self) ?Reach {
             return w.within;
         }
     };
@@ -644,7 +652,9 @@ test "a change every watch reads its own copy of is counted once" {
         dir: []const u8,
         name: []const u8,
 
-        fn reads(copy: @This(), watch: *const Watch) bool {
+        const Self = @This();
+
+        fn reads(copy: Self, watch: *const Watch) bool {
             if (!watch.reach.covers(copy.dir)) return false;
             const only = watch.only orelse return true;
             return std.mem.eql(u8, only, copy.name);
@@ -699,7 +709,9 @@ test "a change is counted by the lowest id it reached and was kept by" {
     const Change = struct {
         dir: []const u8,
 
-        fn reads(change: @This(), watch: Watch) bool {
+        const Self = @This();
+
+        fn reads(change: Self, watch: Watch) bool {
             return watch.reach.covers(change.dir) and watch.keeps;
         }
     };

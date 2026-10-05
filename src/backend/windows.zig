@@ -635,7 +635,9 @@ fn lost(w: *Windows, watch: *const Watch) void {
         w: *const Windows,
         watch: *const Watch,
 
-        fn stale(loss: @This(), dir: []const u8) bool {
+        const Self = @This();
+
+        fn stale(loss: Self, dir: []const u8) bool {
             return Budget.restsOn(loss.w.watches.values(), loss.watch, dir);
         }
     };

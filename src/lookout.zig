@@ -856,7 +856,9 @@ pub const Watcher = struct {
             w: *Watcher,
             p: *const Pending,
 
-            fn visit(m: @This(), entry: walk.Entry) anyerror!walk.Step {
+            const Self = @This();
+
+            fn visit(m: Self, entry: walk.Entry) anyerror!walk.Step {
                 if (m.p.filter.prunes(m.p.target, entry.path)) return .over;
                 if (!m.p.filter.excludes(m.p.target, entry.path)) {
                     try m.w.batch.pushDetail(m.w.gpa, m.p.id, entry.path, .created, null, Target.of(entry.kind));

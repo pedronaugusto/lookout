@@ -909,7 +909,9 @@ test "writes after refilter are reported while a writer runs through the change"
         progress: std.atomic.Value(u32) = .init(0),
         failed: std.atomic.Value(bool) = .init(false),
 
-        fn run(self: *@This(), dir: std.Io.Dir) void {
+        const Self = @This();
+
+        fn run(self: *Self, dir: std.Io.Dir) void {
             var i: u32 = 0;
             while (!self.phase.load(.acquire)) : (i += 1) {
                 dir.writeFile(std.testing.io, .{ .sub_path = "keep/live.txt", .data = "x" }) catch {
@@ -1073,8 +1075,10 @@ test "a folder appearing under a newly admitted path during refilter is reached"
         done: std.atomic.Value(bool) = .init(false),
         failed: std.atomic.Value(bool) = .init(false),
 
+        const Self = @This();
+
         fn allow(context: ?*anyopaque, subject: []const u8) bool {
-            const gate: *@This() = @ptrCast(@alignCast(context.?));
+            const gate: *Self = @ptrCast(@alignCast(context.?));
             if (std.mem.eql(u8, std.fs.path.basename(subject), "new") and
                 !gate.go.swap(true, .acq_rel))
             {
@@ -1084,7 +1088,7 @@ test "a folder appearing under a newly admitted path during refilter is reached"
             return true;
         }
 
-        fn create(gate: *@This(), dir: std.Io.Dir) void {
+        fn create(gate: *Self, dir: std.Io.Dir) void {
             while (!gate.go.load(.acquire))
                 nap(1);
             dir.createDirPath(std.testing.io, "new/racing") catch {
@@ -2736,7 +2740,9 @@ test "a watcher can be woken from another thread" {
         const Waker = struct {
             watcher: *Watcher,
             calls: std.atomic.Value(usize) = .init(0),
-            fn run(self: *@This()) void {
+            const Self = @This();
+
+            fn run(self: *Self) void {
                 nap(100);
                 _ = self.calls.fetchAdd(1, .release);
                 self.watcher.wake();
@@ -2768,13 +2774,15 @@ fn Held(comptime Result: type, comptime then: anytype) type {
         path: []const u8 = "",
         go: std.atomic.Value(bool) = .init(false),
 
-        fn run(self: *@This()) Result {
+        const Self = @This();
+
+        fn run(self: *Self) Result {
             while (!self.go.load(.acquire)) std.atomic.spinLoopHint();
             return then(self);
         }
 
         /// Lets the task go from another thread, after `delay_ms`.
-        fn release(self: *@This(), delay_ms: i64) void {
+        fn release(self: *Self, delay_ms: i64) void {
             nap(delay_ms);
             self.go.store(true, .release);
         }
@@ -2900,7 +2908,9 @@ test "a polling task is stopped by a flag and a wake on every backend" {
             polls: usize = 0,
             entered: std.atomic.Value(bool) = .init(false),
 
-            fn run(self: *@This()) Watcher.PollError!void {
+            const Self = @This();
+
+            fn run(self: *Self) Watcher.PollError!void {
                 while (!self.stopping.load(.acquire)) {
                     self.entered.store(true, .release);
                     _ = try self.watcher.poll(null);

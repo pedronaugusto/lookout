@@ -98,7 +98,9 @@ test "poll reports each change from another thread" {
             round: usize = 0,
             failed: ?std.Io.Dir.WriteFileError = null,
 
-            fn run(self: *@This()) void {
+            const Self = @This();
+
+            fn run(self: *Self) void {
                 const w_io = std.testing.io;
                 // The writer runs independently of the polling thread.
                 w_io.sleep(.fromMilliseconds(150), .awake) catch return;

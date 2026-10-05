@@ -49,13 +49,6 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z020",
-    "path": "src/lookout.zig",
-    "source": "fn visit(m: @This(), entry: walk.Entry) anyerror!walk.Step {",
-    "detail": "inline @This() in named struct; use 'Watcher' instead",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z013",
     "path": "src/backend/inotify_test.zig",
     "source": "const path_cmp = @import(\"../path.zig\");",
@@ -221,34 +214,6 @@
     "path": "src/backend/fsevents.zig",
     "source": "pub const FSEventStreamStop = c.FSEventStreamStop;",
     "detail": "acronym in 'FSEventStreamStop' should use standard casing: 'FsEventStreamStop'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/backend/fsevents.zig",
-    "source": "fn includes(r: @This(), dir: []const u8) bool {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/backend/fsevents.zig",
-    "source": "fn visit(a: *@This(), entry: walk.Entry) anyerror!walk.Step {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/backend/fsevents.zig",
-    "source": "fn visit(r: *@This(), entry: walk.Entry) anyerror!walk.Step {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/backend/fsevents.zig",
-    "source": "fn visit(s: *@This(), entry: walk.Entry) anyerror!walk.Step {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
@@ -504,38 +469,10 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z020",
-    "path": "src/backend/windows.zig",
-    "source": "fn stale(loss: @This(), dir: []const u8) bool {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z009",
     "path": "src/backend/inotify.zig",
     "source": "//! The Linux backend: `inotify`.",
     "detail": "file 'inotify.zig' has top-level fields and should be PascalCase",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/backend/inotify.zig",
-    "source": "fn visit(r: *@This(), entry: walk.Entry) anyerror!walk.Step {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/backend/inotify.zig",
-    "source": "fn visit(r: *@This(), entry: walk.Entry) anyerror!walk.Step {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/backend/inotify.zig",
-    "source": "fn visit(a: *@This(), entry: walk.Entry) anyerror!walk.Step {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
@@ -693,108 +630,10 @@
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   },
   {
-    "rule": "Z020",
-    "path": "src/Budget.zig",
-    "source": "fn counts(left: @This(), counted_dir: []const u8) bool {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/Budget.zig",
-    "source": "fn stale(l: @This(), dir: []const u8) bool {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/Budget.zig",
-    "source": "fn isEmpty(k: @This()) bool {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/Budget.zig",
-    "source": "fn reach(w: @This()) ?Reach {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/Budget.zig",
-    "source": "fn reads(copy: @This(), watch: *const Watch) bool {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/Budget.zig",
-    "source": "fn reads(change: @This(), watch: Watch) bool {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
     "rule": "Z023",
     "path": "src/testing/suite_test.zig",
     "source": "fn tryCheckpoint(watcher: *const Watcher, gpa: std.mem.Allocator) !lookout.Checkpoint {",
     "detail": "'Allocator' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/testing/suite_test.zig",
-    "source": "fn run(self: *@This(), dir: std.Io.Dir) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/testing/suite_test.zig",
-    "source": "const gate: *@This() = @ptrCast(@alignCast(context.?));",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/testing/suite_test.zig",
-    "source": "fn create(gate: *@This(), dir: std.Io.Dir) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/testing/suite_test.zig",
-    "source": "fn run(self: *@This()) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/testing/suite_test.zig",
-    "source": "fn run(self: *@This()) Result {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/testing/suite_test.zig",
-    "source": "fn release(self: *@This(), delay_ms: i64) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/testing/suite_test.zig",
-    "source": "fn run(self: *@This()) Watcher.PollError!void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/testing/gaps_test.zig",
-    "source": "fn run(self: *@This()) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -819,13 +658,6 @@
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
-    "rule": "Z020",
-    "path": "src/testing/resources_test.zig",
-    "source": "fn run(self: *@This()) void {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
     "rule": "Z023",
     "path": "src/testing/clock.zig",
     "source": "pub fn frozen(vtable: *Io.VTable, source: Io) Io {",
@@ -837,20 +669,6 @@
     "path": "src/Links_test.zig",
     "source": "fn appendInt(data: *std.ArrayList(u8), comptime T: type, value: T, endian: std.builtin.Endian) !void {",
     "detail": "'type' parameter should come before 'other'",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/Links.zig",
-    "source": "fn visit(f: @This(), entry: walk.Entry) anyerror!walk.Step {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/Links.zig",
-    "source": "pub fn unregister(_: @This(), _: WatchId) void {}",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
     "reason": "Existing declaration on main, moved or retargeted by its layout; this exact finding is retained while landing preflight."
   },
   {
@@ -914,34 +732,6 @@
     "path": "src/walk.zig",
     "source": "comptime visit: fn (@TypeOf(context), Entry) anyerror!Step,",
     "detail": "'comptime' parameter should come before 'other'",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/walk.zig",
-    "source": "fn visit(s: *@This(), entry: Entry) anyerror!Step {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/walk.zig",
-    "source": "fn holds(s: *const @This(), name: []const u8) bool {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/walk.zig",
-    "source": "fn visit(c: *@This(), _: Entry) anyerror!Step {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
-    "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
-  },
-  {
-    "rule": "Z020",
-    "path": "src/walk.zig",
-    "source": "fn visit(c: *@This(), entry: Entry) anyerror!Step {",
-    "detail": "inline @This(); assign it to `const Self = @This();`",
     "reason": "Existing finding at migration; this exact source and diagnostic are retained until the owning code is revised."
   }
 ]
