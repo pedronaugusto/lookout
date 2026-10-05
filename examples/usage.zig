@@ -13,6 +13,9 @@ pub fn main() !void {
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    var display_buffer: [4096]u8 = undefined;
+    var display = std.Io.File.stdout().writer(io, &display_buffer);
+    const output = &display.interface;
 
     // A scratch directory beside the executable, remade on every run.
     const cwd = std.Io.Dir.cwd();
@@ -34,26 +37,26 @@ pub fn main() !void {
     try scratch.writeFile(io, .{ .sub_path = "notes.txt", .data = "hello" });
 
     for (try watcher.poll(1_000)) |event| {
-        std.debug.print("{s} {s}\n", .{ @tagName(event.kind), event.path });
+        try output.print("{s} {s}\n", .{ @tagName(event.kind), event.path });
     }
     // --- README:usage ---
 
     // The rest of the run shows the other kinds, one change at a time so
     // that each one is a poll of its own.
     try scratch.writeFile(io, .{ .sub_path = "notes.txt", .data = "hello, again" });
-    try report(&watcher);
+    try report(&watcher, output);
 
     try scratch.rename("notes.txt", scratch, "renamed.txt", io);
-    try report(&watcher);
+    try report(&watcher, output);
 
     try scratch.createDirPath(io, "sub");
-    try report(&watcher);
+    try report(&watcher, output);
 
     try scratch.writeFile(io, .{ .sub_path = "sub/inside.txt", .data = "deep" });
-    try report(&watcher);
+    try report(&watcher, output);
 
     try scratch.deleteFile(io, "renamed.txt");
-    try report(&watcher);
+    try report(&watcher, output);
 
     // A second watcher, with a filter: the ignore list keeps part of the
     // tree out of the watch entirely. Where lookout does the recursion
@@ -72,7 +75,7 @@ pub fn main() !void {
     try scratch.writeFile(io, .{ .sub_path = "draft.tmp", .data = "ignored" });
     try scratch.writeFile(io, .{ .sub_path = "kept.txt", .data = "reported" });
     for (try filtered.poll(2_000)) |event| {
-        std.debug.print("filtered: {s} {s}\n", .{ @tagName(event.kind), event.path });
+        try output.print("filtered: {s} {s}\n", .{ @tagName(event.kind), event.path });
     }
 
     // A watch on a path that is not there yet. It is parked on the
@@ -86,7 +89,7 @@ pub fn main() !void {
 
     try scratch.createDirPath(io, "later/inside");
     for (try pending.poll(2_000)) |event| {
-        std.debug.print("pending: {s} {s}\n", .{ @tagName(event.kind), event.path });
+        try output.print("pending: {s} {s}\n", .{ @tagName(event.kind), event.path });
     }
 
     // `Kind.overflow` says the watcher's record is incomplete without
@@ -97,21 +100,22 @@ pub fn main() !void {
 
     try scratch.writeFile(io, .{ .sub_path = "written-while-away.txt", .data = "missed" });
     for (try baseline.diff(gpa)) |change| {
-        std.debug.print("baseline: {s} {s}\n", .{ @tagName(change.kind), change.path });
+        try output.print("baseline: {s} {s}\n", .{ @tagName(change.kind), change.path });
     }
 
-    std.debug.print("backend: {s}\n", .{@tagName(watcher.backend())});
-    std.debug.print("prunes ignored: {}\n", .{lookout.prunesIgnored(watcher.backend())});
+    try output.print("backend: {s}\n", .{@tagName(watcher.backend())});
+    try output.print("prunes ignored: {}\n", .{lookout.prunesIgnored(watcher.backend())});
+    try output.flush();
 }
 
-/// Polls once and prints whatever came back, including where a renamed
+/// Polls once and writes whatever came back to `output`, including where a renamed
 /// path came from on the backends that can say.
-fn report(watcher: *lookout.Watcher) !void {
+fn report(watcher: *lookout.Watcher, output: *std.Io.Writer) !void {
     for (try watcher.poll(2_000)) |event| {
         if (event.from) |from| {
-            std.debug.print("{s} {s} (from {s})\n", .{ @tagName(event.kind), event.path, from });
+            try output.print("{s} {s} (from {s})\n", .{ @tagName(event.kind), event.path, from });
         } else {
-            std.debug.print("{s} {s}\n", .{ @tagName(event.kind), event.path });
+            try output.print("{s} {s}\n", .{ @tagName(event.kind), event.path });
         }
     }
 }

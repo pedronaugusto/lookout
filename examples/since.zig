@@ -19,6 +19,9 @@ pub fn main() !void {
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    var display_buffer: [4096]u8 = undefined;
+    var display = std.Io.File.stdout().writer(io, &display_buffer);
+    const output = &display.interface;
 
     const cwd = std.Io.Dir.cwd();
     try cwd.deleteTree(io, "lookout-since");
@@ -29,10 +32,11 @@ pub fn main() !void {
     defer gpa.free(dir_path);
 
     if (!lookout.tracksCheckpoint(lookout.default_backend)) {
-        std.debug.print(
+        try output.print(
             "{s} keeps no log to resume from, so there is no checkpoint to take\n",
             .{@tagName(lookout.default_backend)},
         );
+        try output.flush();
         return;
     }
 
@@ -46,13 +50,13 @@ pub fn main() !void {
         _ = try watcher.add(dir_path, .{ .recursive = true });
         try scratch.writeFile(io, .{ .sub_path = "seen.txt", .data = "while watching" });
         for (try watcher.poll(2_000)) |event| {
-            std.debug.print("first run: {s} {s}\n", .{ @tagName(event.kind), event.path });
+            try output.print("first run: {s} {s}\n", .{ @tagName(event.kind), event.path });
         }
 
         var checkpoint = (try watcher.checkpoint(gpa)).?;
         defer checkpoint.deinit();
         token = try checkpoint.token(gpa);
-        std.debug.print("checkpoint: {s}\n", .{token});
+        try output.print("checkpoint: {s}\n", .{token});
     }
 
     // Nothing is watching now, which is when the interesting changes
@@ -70,6 +74,7 @@ pub fn main() !void {
     // A replayed change is reported against the tree as it is now, so
     // what matters is the path, not which of the kinds it arrives as.
     for (try watcher.poll(2_000)) |event| {
-        std.debug.print("since: {s} {s}\n", .{ @tagName(event.kind), event.path });
+        try output.print("since: {s} {s}\n", .{ @tagName(event.kind), event.path });
     }
+    try output.flush();
 }

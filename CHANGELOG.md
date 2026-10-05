@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `LOOKOUT_TRACE` lines go to `std.log` under the `lookout` scope at the info level instead of straight to standard error, so the program's log function and level decide where they land. The examples print through a buffered standard output writer.
+
 - A checkpoint token that names one root twice is refused as `error.InvalidCheckpoint`: a watcher never writes one, and resuming it could reach an unreachable after a refused registration. The poll backend's `init` has an empty error set.
 
 - `Watcher.LinkHost`, the adapter followed links register through, is public, as are the key and hash context types of the event batch, the polling tree and the FSEvents backend that their public methods take. `Baseline`, `Snapshot`, `Tree` and `Checkpoint` signatures name their public error sets qualified, and the baseline and checkpoint `ParseError` sets are spelled out; their members are unchanged.

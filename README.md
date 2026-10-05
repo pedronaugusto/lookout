@@ -13,8 +13,9 @@ settings.
 
 ## Usage
 
-[examples/usage.zig](examples/usage.zig) watches an absolute `dir_path` and writes
-through an open scratch directory with the supplied `std.Io`.
+[examples/usage.zig](examples/usage.zig) watches an absolute `dir_path`, writes
+through an open scratch directory with the supplied `std.Io`, and prints to a
+buffered standard output writer, `output`.
 
 <!-- BEGIN GENERATED zig build docs -- usage -->
 ```zig
@@ -29,7 +30,7 @@ defer watcher.remove(id);
 try scratch.writeFile(io, .{ .sub_path = "notes.txt", .data = "hello" });
 
 for (try watcher.poll(1_000)) |event| {
-    std.debug.print("{s} {s}\n", .{ @tagName(event.kind), event.path });
+    try output.print("{s} {s}\n", .{ @tagName(event.kind), event.path });
 }
 ```
 <!-- END GENERATED -->

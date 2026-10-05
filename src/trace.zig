@@ -8,12 +8,18 @@
 //! Every Apple target links libc. The Apple and Windows backends are the
 //! ones whose kernels speak in records that need a trace to follow.
 //!
-//! Lines go to standard error, one per decision, prefixed so that a run
-//! can be grepped for one path. Nothing here is on a path a caller takes
-//! when the variable is unset: the check is one relaxed load.
+//! Lines go to `std.log` under the `lookout` scope at the info level, one
+//! per decision, so the program's log function decides where they land
+//! and a run can be grepped for one path. A build whose log level is
+//! below info -- ReleaseFast and ReleaseSmall by default, and a test run
+//! -- drops them unless the program raises it. Nothing here is on a path
+//! a caller takes when the variable is unset: the check is one relaxed
+//! load.
 
 const std = @import("std");
 const builtin = @import("builtin");
+
+const scoped = std.log.scoped(.lookout);
 
 const unknown: u8 = 0;
 const off: u8 = 1;
@@ -73,7 +79,7 @@ fn blockHas(block: [*:0]const u16, comptime name: []const u8) bool {
 /// is off.
 pub fn log(comptime fmt: []const u8, args: anytype) void {
     if (!enabled()) return;
-    std.debug.print("lookout: " ++ fmt ++ "\n", args);
+    scoped.info(fmt, args);
 }
 
 test "an environment block names a variable in any case, by its whole name, and only before its value" {
