@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- lookout's own gate pins preflight 9e72aac: `ci/layers.zig` orders production sources only, and the test clock left the `primitives` layer. The manifest no longer lists gantry, which nothing in lookout's build reads; the consumer check is preflight's `addConsumerCheck` with the program in `ci/consumer.zig`.
+- lookout's own gate pins preflight 9e72aac: `ci/layers.zig` orders production sources only, and the test clock left the `primitives` layer. The manifest no longer lists gantry, which nothing in lookout's build reads; the consumer check is preflight's `addConsumerCheck` with the program in `ci/consumer.zig`, and `zig build ci-linux` uses preflight's Debian image in place of an identical `ci/linux.Dockerfile`.
 
 - A project that depends on lookout builds again: `build.zig` reaches its lazy `preflight` dependency through `b.lazyImport`, and only in lookout's own tree, rather than with a top-level `@import` no consumer could compile. `zig build check-consumer`, run by lint, builds one with no packages fetched.
 
