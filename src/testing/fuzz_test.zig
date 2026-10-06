@@ -547,6 +547,77 @@ fn referenceMatches(gpa: std.mem.Allocator, pattern: []const u8, name: []const u
     return can[0];
 }
 
+/// `Filter.excludes` for an ignore list of one pattern, said the long
+/// way round: the pattern names the path or a directory above it,
+/// relative to the root or absolute as the pattern is, or names the last
+/// component of one of them when it holds no separator.
+fn referenceExcludes(gpa: std.mem.Allocator, root: []const u8, pattern: []const u8, subject: []const u8) !bool {
+    @disableInstrumentation();
+    if (pattern.len == 0) return false;
+    const rest = path_cmp.relative(root, subject) orelse return false;
+    const base = subject.len - rest.len;
+    const bare = std.mem.indexOfAny(u8, pattern, path_cmp.separators) == null;
+    var end: usize = 0;
+    while (end < rest.len) {
+        end = std.mem.findAnyPos(u8, rest, end + 1, path_cmp.separators) orelse rest.len;
+        const named = if (std.fs.path.isAbsolute(pattern)) subject[0 .. base + end] else rest[0..end];
+        if (try referenceMatches(gpa, pattern, named)) return true;
+        if (bare and try referenceMatches(gpa, pattern, std.fs.path.basename(named))) return true;
+    }
+    return false;
+}
+
+test "an ignore list agrees with the reference over every short pattern and path" {
+    const gpa = testing.allocator;
+    const root = if (builtin.os.tag == .windows) "C:\\w" else "/w";
+    const pieces = [_][]const u8{ "a", "*", "**", "?", "/" };
+    // `/` is the digit 0, which a number never ends in, and no path ends
+    // in a separator.
+    const letters = "/ab";
+    var pattern_buf: [8]u8 = undefined;
+    var native_buf: [8]u8 = undefined;
+    var subject_buf: [16]u8 = undefined;
+    // Every pattern of up to three pieces, by counting in base 6 with 0
+    // for no piece.
+    var code: usize = 0;
+    while (code < 6 * 6 * 6) : (code += 1) {
+        var len: usize = 0;
+        var rest = code;
+        while (rest != 0) : (rest /= 6) {
+            const digit = rest % 6;
+            if (digit == 0) continue;
+            const piece = pieces[digit - 1];
+            @memcpy(pattern_buf[len..][0..piece.len], piece);
+            len += piece.len;
+        }
+        const pattern = native(&native_buf, pattern_buf[0..len]);
+        // Every path below the root of up to four characters, with no
+        // empty component.
+        var name: usize = 0;
+        while (name < 3 * 3 * 3 * 3) : (name += 1) {
+            @memcpy(subject_buf[0..root.len], root);
+            subject_buf[root.len] = std.fs.path.sep;
+            var end = root.len + 1;
+            var digits = name;
+            var valid = true;
+            while (digits != 0) : (digits /= 3) {
+                const c = letters[digits % 3];
+                const previous = subject_buf[end - 1];
+                if (c == '/' and (previous == std.fs.path.sep or end == root.len + 1)) valid = false;
+                subject_buf[end] = if (c == '/') std.fs.path.sep else c;
+                end += 1;
+            }
+            if (!valid or end == root.len + 1 or subject_buf[end - 1] == std.fs.path.sep) continue;
+            const subject = subject_buf[0..end];
+            const ignore: Filter = .{ .ignore = &.{pattern} };
+            testing.expectEqual(try referenceExcludes(gpa, root, pattern, subject), ignore.excludes(root, subject)) catch |err| {
+                std.debug.print("pattern '{s}' subject '{s}'\n", .{ pattern, subject });
+                return err;
+            };
+        }
+    }
+}
+
 /// A pattern built from wildcards, separators and the letters the paths
 /// below are made of.
 fn generatePattern(smith: *testing.Smith, buf: []u8) []u8 {
@@ -613,6 +684,10 @@ fn fuzzFilter(_: void, smith: *testing.Smith) !void {
     const bare = std.mem.indexOfAny(u8, pattern, path_cmp.separators) == null;
     const named = pattern.len != 0 and (try referenceMatches(gpa, pattern, rel) or
         (bare and try referenceMatches(gpa, pattern, std.fs.path.basename(rel))));
+
+    // An ignore list excludes exactly what the reference names, on the
+    // path or on any directory above it.
+    try testing.expectEqual(try referenceExcludes(gpa, root, pattern, subject), ignore.excludes(root, subject));
 
     // The root is what was asked for, whatever the patterns say.
     try testing.expect(!ignore.excludes(root, root));

@@ -242,10 +242,6 @@ fn leadsTo(pattern: []const u8, subject: []const u8) bool {
 }
 
 /// Whether `pattern` matches `name`.
-///
-/// Recursive, and only ever at a `*`: the loops inside walk the name,
-/// and the depth is therefore the number of wildcards in the pattern
-/// rather than the length of either string.
 fn matches(pattern: []const u8, name: []const u8) bool {
     return matchFrom(.whole, .init(pattern), .init(name));
 }
@@ -267,50 +263,85 @@ fn opensDirectory(pattern: path.Folder) bool {
     return false;
 }
 
+/// Where a wildcard was met: the pattern just after it, and the name
+/// where the next attempt resumes once the wildcard takes one more
+/// character.
+const Resume = struct { pattern: path.Folder, name: path.Folder };
+
+/// The matcher, in time proportional to the pattern times the name
+/// however many wildcards the pattern holds: the name is a string anyone
+/// who can write in the watched tree chooses, and this runs for every
+/// event on the watcher's thread.
+///
+/// A mismatch never goes back further than two places: the last `*`, and
+/// the last `**`. The pieces of pattern between wildcards are each
+/// placed as early in the name as they fit, and the earliest is never
+/// worse for what follows -- a later `*` or `**` can take up whatever an
+/// earlier placement left. A `*` cannot take a separator, so one that
+/// reaches a separator gives up to the last `**`, which can; and once
+/// the last `**` has taken the rest of the name, nothing earlier could
+/// do better.
 fn matchFrom(comptime extent: Extent, pattern: path.Folder, name: path.Folder) bool {
     var p = pattern;
     var n = name;
+    var star: ?Resume = null;
+    var deep: ?Resume = null;
     while (true) {
-        if (extent == .prefix and n.peek() == null and n.settled()) return opensDirectory(p);
-        const want = p.next() orelse return n.peek() == null;
-        switch (want) {
-            '*' => {
-                var after = p;
-                if (after.peek() == '*') {
+        const mismatch = step: {
+            if (extent == .prefix and n.peek() == null and n.settled()) {
+                if (opensDirectory(p)) return true;
+                break :step true;
+            }
+            const want = p.next() orelse {
+                if (n.peek() == null) return true;
+                break :step true;
+            };
+            switch (want) {
+                '*' => if (p.peek() == '*') {
                     // The rest of the name, a separator and whatever the
                     // rest of the pattern wants are all one run.
                     if (extent == .prefix) return true;
-                    _ = after.next();
+                    _ = p.next();
                     // `**` crosses separators. Between two of them it
                     // also stands for no directory at all, so the
-                    // separator that follows it is optional.
-                    var skipped = after;
-                    if (skipped.peek() == '/') _ = skipped.next();
-                    if (matchFrom(extent, after, n) or matchFrom(extent, skipped, n)) return true;
-                    while (n.next() != null) {
-                        if (matchFrom(extent, after, n) or matchFrom(extent, skipped, n)) return true;
-                    }
-                    return false;
-                }
-                // A single `*` names an entry, not a path, so it stops
-                // at a separator.
-                if (matchFrom(extent, after, n)) return true;
-                while (n.peek()) |c| {
-                    if (c == '/') return false;
-                    _ = n.next();
-                    if (matchFrom(extent, after, n)) return true;
-                }
-                return false;
-            },
-            '?' => {
-                const c = n.next() orelse return false;
-                if (c == '/') return false;
-            },
-            else => {
-                const c = n.next() orelse return false;
-                if (c != want) return false;
-            },
+                    // separator that follows it is optional -- and a run
+                    // that may end in a separator already covers it.
+                    if (p.peek() == '/') _ = p.next();
+                    deep = .{ .pattern = p, .name = n };
+                    star = null;
+                } else {
+                    star = .{ .pattern = p, .name = n };
+                },
+                '?' => {
+                    const c = n.next() orelse break :step true;
+                    if (c == '/') break :step true;
+                },
+                else => {
+                    const c = n.next() orelse break :step true;
+                    if (c != want) break :step true;
+                },
+            }
+            break :step false;
+        };
+        if (!mismatch) continue;
+        // A single `*` names an entry, not a path, so it stops at a
+        // separator.
+        if (star) |*s| {
+            if (s.name.next()) |c| if (c != '/') {
+                p = s.pattern;
+                n = s.name;
+                continue;
+            };
+            star = null;
         }
+        if (deep) |*d| {
+            if (d.name.next() != null) {
+                p = d.pattern;
+                n = d.name;
+                continue;
+            }
+        }
+        return false;
     }
 }
 
@@ -429,6 +460,24 @@ test "two stars inside a name lead through the directories they cross" {
     const found: Filter = .{ .only = &.{sep("a*?a/**a**/")} };
     try testing.expect(!found.excludes(sep("/w"), sep("/w/aba/b/a.b")));
     try testing.expect(!found.prunes(sep("/w"), sep("/w/aba/b")));
+}
+
+test "a name built against the wildcards costs no more than its length" {
+    // Each `*` once tried every place in the name for the rest of the
+    // pattern, so k of them cost the name's length to the k-th power: a
+    // file named by whoever can write in the tree stalled the watcher for
+    // most of a minute on `*a*a*a*a*b`. A run of `a` up to a component's
+    // limit is the worst case, and a path of many is the worst for `**`.
+    const name = "a" ** 255;
+    const deep = ("a" ** 60 ++ "/") ** 60;
+    inline for (.{ "*a*a*a*a*a*a*a*a*b", "*a*a*a*a*a*a*a*a*" }, .{ false, true }) |pattern, expected| {
+        const f: Filter = .{ .ignore = &.{pattern} };
+        try testing.expectEqual(expected, f.excludes(sep("/w"), sep("/w/" ++ name)));
+    }
+    const g: Filter = .{ .ignore = &.{"**a**a**a**a**a**a**b"} };
+    try testing.expect(!g.excludes(sep("/w"), sep("/w/" ++ deep ++ "a")));
+    const h: Filter = .{ .only = &.{sep("**a*a*a*a*a*a*/b")} };
+    try testing.expect(h.excludes(sep("/w"), sep("/w/" ++ deep ++ "a")));
 }
 
 test "an include list and an ignore list together, with the ignore winning" {
