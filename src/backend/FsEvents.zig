@@ -250,6 +250,11 @@ const Stream = struct {
     /// When `HistoryDone` arrived, or `null` while the system is still
     /// reading its log. The persisted path baseline closes the resume gap.
     replayed: ?Io.Timestamp,
+    /// The paths the checkpoint's baseline held, borrowed from it, until
+    /// the log has been read back. The walk that seeds a resumed stream
+    /// already knows what was made while nobody watched, and a record
+    /// from the log for such a path is its creation, not a modification.
+    before: ?path_cmp.Set(void) = null,
     /// Set, with release, once the fields the delivery thread reads are
     /// written, and read with acquire by every delivery. FSEvents orders
     /// its start before its first callback, but inside the framework,
@@ -265,6 +270,12 @@ const Stream = struct {
         /// directory, because FSEvents watches directories.
         file,
     };
+
+    /// Whether an event at `subject` is one this watch reports: in its
+    /// scope, and not excluded by its filter.
+    fn keeps(st: *const Stream, subject: []const u8) bool {
+        return st.wants(subject) and !st.filter.excludes(st.root, subject);
+    }
 
     fn wants(st: *const Stream, subject: []const u8) bool {
         const rest = path_cmp.relative(st.root, subject) orelse return false;
@@ -439,7 +450,17 @@ pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_
         const paths = try f.paths.snapshot(gpa, root.id, root.path);
         errdefer paths.release();
         const cursor = stream.cursor;
-        try watches.append(gpa, .{ .root = root.path, .recursive = root.recursive, .cursor = cursor, .identity = identity, .changes = changes, .half = half, .baseline = paths });
+        try watches.append(gpa, .{
+            .root = root.path,
+            .recursive = root.recursive,
+            .cursor = cursor,
+            .identity = identity,
+            .changes = changes,
+            .half = half,
+            .baseline = paths,
+            .ignore = stream.filter.ignore,
+            .only = stream.filter.only,
+        });
     }
     return .{ .state = try checkpoint_format.copy(gpa, .{ .version = checkpoint_format.version, .backend = .fsevents, .watches = watches.items }) };
 }
@@ -536,10 +557,15 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
         // Compare the persisted baseline with the walk just taken. A gone
         // path is a deletion even if the daemon never delivers its record.
         // Remembered live names already cover changes racing the walk.
+        // The same paths are kept until the log has been read back. See
+        // `Stream.before`.
+        var before: path_cmp.Set(void) = .empty;
+        errdefer before.deinit(f.gpa);
         var saved_paths = saved.baseline.iterator();
         defer saved_paths.deinit();
         while (saved_paths.next()) |subject| {
-            if (!stream.wants(subject) or stream.filter.excludes(stream.root, subject)) continue;
+            try before.put(f.gpa, subject, {});
+            if (!stream.keeps(subject)) continue;
             if (f.known.contains(.{ .id = id, .path = subject })) continue;
             const there = f.exists(subject) orelse {
                 try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
@@ -547,17 +573,40 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
             };
             if (!there) try batch.deferChange(f.gpa, id, subject, .removed, null, .unknown);
         }
-        for (saved.changes) |change| {
-            try batch.deferChange(f.gpa, id, change.path, change.kind, change.from, change.target);
-        }
-        if (saved.half) |half| {
+        for (saved.changes) |change| try restoreChange(f.gpa, batch, stream, change);
+        if (saved.half) |half| if (stream.keeps(half.path)) {
             try f.resolveHeld(batch);
             const owned = try f.gpa.dupe(u8, half.path);
             f.pairing.held = .{ .id = id, .path = owned, .flags = half.flags, .event = half.event };
-        }
+        };
+        stream.before = before;
         f.resume_used[index] = true;
     }
     trace.log("fsevents seeded watch={d} known={d}", .{ @intFromEnum(id), f.known.count() });
+}
+
+/// Queues a change a checkpoint carried, as the watch resuming it would
+/// have reported it: a path outside its scope or excluded by its filter
+/// is left out, and a rename with one side left out is the creation or
+/// removal of the other, as in live pairing. A token is a file anyone may
+/// have edited, and its patterns may not be the ones this watch has.
+fn restoreChange(gpa: Allocator, batch: *Batch, stream: *const Stream, change: checkpoint_format.Change) Allocator.Error!void {
+    const keeps = stream.keeps(change.path);
+    if (change.from) |from| {
+        const keeps_from = stream.keeps(from);
+        if (keeps and keeps_from) return batch.deferChange(gpa, stream.id, change.path, .renamed, from, change.target);
+        if (keeps) return batch.deferChange(gpa, stream.id, change.path, .created, null, change.target);
+        if (keeps_from) return batch.deferChange(gpa, stream.id, from, .removed, null, change.target);
+        return;
+    }
+    if (keeps) try batch.deferChange(gpa, stream.id, change.path, change.kind, null, change.target);
+}
+
+/// Whether two pattern lists are the same patterns in the same order.
+fn samePatterns(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (!std.mem.eql(u8, x, y)) return false;
+    return true;
 }
 
 /// Creates and starts a stream, transferring ownership only on success.
@@ -582,7 +631,13 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     errdefer volume.deinit(f.gpa);
     const resumed = if (force_live) null else f.resumeIndex(requested);
     if (resumed) |index| {
-        if (path_cmp.eql(abs_path, requested) and f.restarting.?.state.value.watches[index].recursive != options.recursive) return error.InvalidCheckpoint;
+        const saved = f.restarting.?.state.value.watches[index];
+        // A watch parked on an ancestor registers it with a filter of its
+        // own; the caller's scope and patterns apply once it is promoted.
+        if (path_cmp.eql(abs_path, requested)) {
+            if (saved.recursive != options.recursive) return error.InvalidCheckpoint;
+            if (!samePatterns(saved.ignore, options.filter.ignore) or !samePatterns(saved.only, options.filter.only)) return error.InvalidCheckpoint;
+        }
         const identity = volume.identity orelse return error.InvalidCheckpoint;
         if (!Volume.matches(identity, f.restarting.?.state.value.watches[index].identity)) return error.InvalidCheckpoint;
     }
@@ -799,6 +854,7 @@ fn destroy(f: *FsEvents, stream: *Stream) void {
     // has finished.
     c.dispatch_sync_f(f.queue, null, settled);
     stream.volume.deinit(f.gpa);
+    if (stream.before) |*before| before.deinit(f.gpa);
     f.gpa.free(stream.root);
     stream.filter.deinit(f.gpa);
     f.gpa.destroy(stream);
@@ -1126,6 +1182,8 @@ fn report(
     // arrival time, establishes which missing paths must be reported.
     if (record.flags & flag.history_done != 0) {
         if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
+        if (stream.before) |*before| before.deinit(f.gpa);
+        stream.before = null;
         trace.log("fsevents history done root={s}", .{stream.root});
         return;
     }
@@ -1208,7 +1266,11 @@ fn reportPlain(
     record: Record,
     stream: *const Stream,
 ) contract.PollError!void {
-    const seen = f.known.contains(.{ .id = record.id, .path = record.path });
+    // While the log is read back after a resume, a path is new if the
+    // checkpoint's baseline did not hold it, whatever the walk that seeded
+    // the stream found since.
+    const recalled = if (stream.before) |before| before.contains(record.path) else true;
+    const seen = recalled and f.known.contains(.{ .id = record.id, .path = record.path });
     // A known path with no removal or rename flag, and a newly-created
     // path with neither, are present as far as this record can say. A
     // later removal races any `stat` made here in exactly the same way

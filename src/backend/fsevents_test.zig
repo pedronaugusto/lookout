@@ -897,3 +897,169 @@ test "a shared checkpoint token keeps its revision after the watch is removed" {
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqual(lookout.Kind.removed, events[0].kind);
 }
+
+/// A checkpoint of one recursive watch on `root`, holding `changes` and
+/// nothing unread, as a token.
+fn tokenWith(gpa: std.mem.Allocator, root: []const u8, filter: lookout.Filter, changes: []const checkpoint_format.Change) ![]u8 {
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true, .filter = filter });
+    stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(id).?);
+    for (changes) |change| try watcher.batch.deferChange(gpa, id, change.path, change.kind, change.from, change.target);
+    var checkpoint = (try watcher.checkpoint(gpa)).?;
+    defer checkpoint.deinit();
+    return checkpoint.token(gpa);
+}
+
+test "a resumed checkpoint restores only the changes its watch reports" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const filter: lookout.Filter = .{ .ignore = &.{"*.tmp"} };
+    const at = struct {
+        fn join(a: std.mem.Allocator, r: []const u8, name: []const u8) ![]u8 {
+            return std.fs.path.join(a, &.{ r, name });
+        }
+    }.join;
+    const kept = try at(gpa, root, "kept.txt");
+    defer gpa.free(kept);
+    const excluded = try at(gpa, root, "x.tmp");
+    defer gpa.free(excluded);
+    const moved_in = try at(gpa, root, "in.txt");
+    defer gpa.free(moved_in);
+    const moved_out = try at(gpa, root, "out.txt");
+    defer gpa.free(moved_out);
+    const elsewhere = try at(gpa, std.fs.path.dirname(root).?, "elsewhere.txt");
+    defer gpa.free(elsewhere);
+
+    // What a token edited by hand, or written under a broader filter,
+    // could carry: a path outside the watch, a path the filter excludes,
+    // and renames with one side excluded.
+    const token = try tokenWith(gpa, root, filter, &.{
+        .{ .path = kept, .kind = .modified, .target = .file },
+        .{ .path = excluded, .kind = .modified, .target = .file },
+        .{ .path = elsewhere, .kind = .modified, .target = .file },
+        .{ .path = moved_in, .kind = .renamed, .from = excluded, .target = .file },
+        .{ .path = excluded, .kind = .renamed, .from = moved_out, .target = .file },
+    });
+    defer gpa.free(token);
+
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency_ms = 0 });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true, .filter = filter });
+    stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(id).?);
+    const events = try watcher.poll(0);
+    try testing.expectEqual(@as(usize, 3), events.len);
+    for (events) |event| {
+        try testing.expect(event.from == null);
+        if (path_cmp.eql(event.path, kept)) {
+            try testing.expectEqual(lookout.Kind.modified, event.kind);
+        } else if (path_cmp.eql(event.path, moved_in)) {
+            try testing.expectEqual(lookout.Kind.created, event.kind);
+        } else if (path_cmp.eql(event.path, moved_out)) {
+            try testing.expectEqual(lookout.Kind.removed, event.kind);
+        } else return error.TestUnexpectedResult;
+    }
+}
+
+test "a checkpoint resumes only under the patterns it was taken with" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const token = try tokenWith(gpa, root, .{ .ignore = &.{"*.tmp"} }, &.{});
+    defer gpa.free(token);
+
+    for ([_]lookout.Filter{ .{}, .{ .ignore = &.{"*.log"} }, .{ .ignore = &.{"*.tmp"}, .only = &.{"*.zig"} } }) |other| {
+        var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+        defer checkpoint.deinit();
+        var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint });
+        defer watcher.deinit();
+        try testing.expectError(error.InvalidCheckpoint, watcher.add(root, .{ .recursive = true, .filter = other }));
+    }
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint });
+    defer watcher.deinit();
+    _ = try watcher.add(root, .{ .recursive = true, .filter = .{ .ignore = &.{"*.tmp"} } });
+}
+
+test "a token whose changes name a path through a dot component is refused" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const climbing = try std.fs.path.join(gpa, &.{ root, "..", "x" });
+    defer gpa.free(climbing);
+    const inside = try std.fs.path.join(gpa, &.{ root, "x" });
+    defer gpa.free(inside);
+    for ([_]checkpoint_format.Change{
+        .{ .path = climbing, .kind = .modified, .target = .file },
+        .{ .path = inside, .kind = .renamed, .from = climbing, .target = .file },
+    }) |change| {
+        const token = try tokenWith(gpa, root, .{}, &.{change});
+        defer gpa.free(token);
+        try testing.expectError(error.InvalidCheckpoint, lookout.Checkpoint.parse(gpa, token));
+    }
+}
+
+test "a path made while nobody watched is created when the log names it" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "old.txt", .data = "one" });
+    const token = try tokenWith(gpa, root, .{}, &.{});
+    defer gpa.free(token);
+    try tmp.dir.writeFile(io, .{ .sub_path = "missed.txt", .data = "while away" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "old.txt", .data = "two" });
+    const missed = try std.fs.path.join(gpa, &.{ root, "missed.txt" });
+    defer gpa.free(missed);
+    const old = try std.fs.path.join(gpa, &.{ root, "old.txt" });
+    defer gpa.free(old);
+
+    var checkpoint = try lookout.Checkpoint.parse(gpa, token);
+    defer checkpoint.deinit();
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency_ms = 0 });
+    defer watcher.deinit();
+    const id = try watcher.add(root, .{ .recursive = true });
+    const stream = watcher.impl.fsevents.streams.get(id).?;
+    stopDeliveries(&watcher.impl.fsevents, stream);
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+
+    // The log read back: the walk that seeded the stream found the new
+    // file, and the baseline in the token says it was not there.
+    const both = flag.item_created | flag.item_modified;
+    try synthesize(gpa, stream, &.{
+        .{ .path = missed, .flags = both },
+        .{ .path = old, .flags = flag.item_modified },
+    });
+    const replayed = try watcher.poll(0);
+    try testing.expectEqual(@as(usize, 2), replayed.len);
+    for (replayed) |event| {
+        const expected: lookout.Kind = if (path_cmp.eql(event.path, missed)) .created else .modified;
+        try testing.expectEqual(expected, event.kind);
+    }
+    // Live, after the log: the file is one lookout knows.
+    try synthesize(gpa, stream, &.{.{ .path = root, .flags = flag.history_done }});
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    try synthesize(gpa, stream, &.{.{ .path = missed, .flags = both }});
+    const live = try watcher.poll(0);
+    try testing.expectEqual(@as(usize, 1), live.len);
+    try testing.expectEqual(lookout.Kind.modified, live[0].kind);
+}

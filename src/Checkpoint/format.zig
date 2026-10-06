@@ -24,6 +24,11 @@ pub const Watch = struct {
     baseline: Paths,
     changes: []const Change = &.{},
     half: ?Half = null,
+    /// `Filter.ignore` and `Filter.only` as the watch had them. A resume
+    /// under other patterns would read the baseline and the changes as
+    /// though they covered paths they never did, so it is refused.
+    ignore: []const []const u8 = &.{},
+    only: []const []const u8 = &.{},
 };
 
 /// Stable volume identity and the identity of its current FSEvents log.
@@ -72,7 +77,7 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {
     if (state.value.version != version or state.value.backend != .fsevents) return error.InvalidCheckpoint;
     var halves: usize = 0;
     for (state.value.watches, 0..) |watch, index| {
-        if (!std.fs.path.isAbsolute(watch.root)) return error.InvalidCheckpoint;
+        if (!sound(watch.root)) return error.InvalidCheckpoint;
         // One watcher watches a root once, so a token naming one twice
         // was not written by a watcher, and a resume could not say which
         // of the two a refused registration used.
@@ -84,25 +89,37 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {
         var paths = watch.baseline.iterator();
         defer paths.deinit();
         while (paths.next()) |known| {
-            if (!path_cmp.within(watch.root, known) or std.mem.indexOfScalar(u8, known, 0) != null) return error.InvalidCheckpoint;
-            var components = std.mem.tokenizeAny(u8, known, path_cmp.separators);
-            while (components.next()) |component| {
-                if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.InvalidCheckpoint;
-            }
+            if (!path_cmp.within(watch.root, known) or !sound(known)) return error.InvalidCheckpoint;
             const entry = try names.getOrPut(gpa, known);
             if (entry.found_existing) return error.InvalidCheckpoint;
         }
+        // A change and a held half are spelled as the baseline is. Which
+        // of them the watch still wants -- its root may be parked on an
+        // ancestor, and an overflow is reported there -- is the resuming
+        // backend's to decide against the registration it makes.
         for (watch.changes) |change| {
-            if (!std.fs.path.isAbsolute(change.path)) return error.InvalidCheckpoint;
+            if (!sound(change.path)) return error.InvalidCheckpoint;
             if ((change.kind == .renamed) != (change.from != null)) return error.InvalidCheckpoint;
-            if (change.from) |from| if (!std.fs.path.isAbsolute(from)) return error.InvalidCheckpoint;
+            if (change.from) |from| if (!sound(from)) return error.InvalidCheckpoint;
         }
         if (watch.half) |half| {
             halves += 1;
-            if (halves > 1 or !std.fs.path.isAbsolute(half.path) or half.flags & 0x800 == 0) return error.InvalidCheckpoint;
+            if (halves > 1 or !sound(half.path) or half.flags & 0x800 == 0) return error.InvalidCheckpoint;
         }
     }
     return .{ .value = state.value, .arena = state.arena };
+}
+
+/// Whether a path in a token is one a watcher could have written: absolute,
+/// without a NUL, and without `.` or `..` components that would let it
+/// name something other than what it spells.
+fn sound(subject: []const u8) bool {
+    if (!std.fs.path.isAbsolute(subject) or std.mem.indexOfScalar(u8, subject, 0) != null) return false;
+    var components = std.mem.tokenizeAny(u8, subject, path_cmp.separators);
+    while (components.next()) |component| {
+        if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return false;
+    }
+    return true;
 }
 
 /// Copies borrowed internal state into an owned snapshot.
@@ -127,6 +144,8 @@ pub fn copy(gpa: Allocator, state: State) Allocator.Error!Owned {
             if (change.from) |from| out.from = try a.dupe(u8, from);
         }
         owned.changes = changes;
+        owned.ignore = try dupeList(a, watch.ignore);
+        owned.only = try dupeList(a, watch.only);
         if (watch.half) |half| owned.half = .{ .path = try a.dupe(u8, half.path), .flags = half.flags, .event = half.event };
         owned.baseline = switch (watch.baseline) {
             .flat => |names| blk: {
@@ -140,4 +159,10 @@ pub fn copy(gpa: Allocator, state: State) Allocator.Error!Owned {
     }
     std.debug.assert(copied == state.watches.len);
     return .{ .arena = arena, .value = .{ .version = state.version, .backend = state.backend, .watches = watches } };
+}
+
+fn dupeList(a: Allocator, list: []const []const u8) Allocator.Error![]const []const u8 {
+    const copied = try a.alloc([]const u8, list.len);
+    for (list, copied) |pattern, *out| out.* = try a.dupe(u8, pattern);
+    return copied;
 }

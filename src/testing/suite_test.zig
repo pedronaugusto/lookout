@@ -3418,7 +3418,11 @@ test "checkpoint restoration rolls back a failed add and preserves prior slices"
     const later = try f.path("later");
     defer gpa.free(later);
     const id = try f.watcher.add(later, .{});
-    try f.watcher.batch.deferChange(gpa, id, later, .renamed, f.root, .directory);
+    const moved_to = try f.path("later/new");
+    defer gpa.free(moved_to);
+    const moved_from = try f.path("later/old");
+    defer gpa.free(moved_from);
+    try f.watcher.batch.deferChange(gpa, id, moved_to, .renamed, moved_from, .file);
     var saved = (try f.watcher.checkpoint(gpa)).?;
     defer saved.deinit();
     var failures: usize = 0;
@@ -3443,8 +3447,8 @@ test "checkpoint restoration rolls back a failed add and preserves prior slices"
             if (answer) |_| {
                 var saw = false;
                 for (try resumed.poll(0)) |event| {
-                    if (std.mem.eql(u8, event.path, later) and event.kind == .renamed) {
-                        try std.testing.expectEqualStrings(f.root, event.from.?);
+                    if (std.mem.eql(u8, event.path, moved_to) and event.kind == .renamed) {
+                        try std.testing.expectEqualStrings(moved_from, event.from.?);
                         saw = true;
                     }
                 }
