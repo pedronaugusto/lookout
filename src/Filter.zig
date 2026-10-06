@@ -468,16 +468,35 @@ test "a name built against the wildcards costs no more than its length" {
     // file named by whoever can write in the tree stalled the watcher for
     // most of a minute on `*a*a*a*a*b`. A run of `a` up to a component's
     // limit is the worst case, and a path of many is the worst for `**`.
-    const name = "a" ** 255;
-    const deep = ("a" ** 60 ++ "/") ** 60;
+    // Spelled at run time: these are too long to respell at compile time.
+    const root = sep("/w");
+    var name_buf: [512]u8 = undefined;
+    const name = spellRun(&name_buf, root, 1, 255);
+    var deep_buf: [4096]u8 = undefined;
+    const deep = spellRun(&deep_buf, root, 60, 60);
+    deep_buf[deep.len] = 'a';
+    const deep_file = deep_buf[0 .. deep.len + 1];
     inline for (.{ "*a*a*a*a*a*a*a*a*b", "*a*a*a*a*a*a*a*a*" }, .{ false, true }) |pattern, expected| {
         const f: Filter = .{ .ignore = &.{pattern} };
-        try testing.expectEqual(expected, f.excludes(sep("/w"), sep("/w/" ++ name)));
+        try testing.expectEqual(expected, f.excludes(root, name));
     }
     const g: Filter = .{ .ignore = &.{"**a**a**a**a**a**a**b"} };
-    try testing.expect(!g.excludes(sep("/w"), sep("/w/" ++ deep ++ "a")));
+    try testing.expect(!g.excludes(root, deep_file));
     const h: Filter = .{ .only = &.{sep("**a*a*a*a*a*a*/b")} };
-    try testing.expect(h.excludes(sep("/w"), sep("/w/" ++ deep ++ "a")));
+    try testing.expect(h.excludes(root, deep_file));
+}
+
+/// `root`, then `count` components of `len` letters `a`, each after a
+/// separator.
+fn spellRun(buf: []u8, root: []const u8, count: usize, len: usize) []u8 {
+    @memcpy(buf[0..root.len], root);
+    var end = root.len;
+    for (0..count) |_| {
+        buf[end] = std.fs.path.sep;
+        @memset(buf[end + 1 ..][0..len], 'a');
+        end += 1 + len;
+    }
+    return buf[0..end];
 }
 
 test "an include list and an ignore list together, with the ignore winning" {
