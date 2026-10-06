@@ -6,10 +6,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- lookout's own gate pins preflight 9e72aac: `ci/layers.zig` orders production sources only, and the test clock left the `primitives` layer. The manifest no longer lists gantry, which nothing in lookout's build reads; the consumer check is preflight's `addConsumerCheck` with the program in `ci/consumer.zig`, and `zig build ci-linux` uses preflight's Debian image in place of an identical `ci/linux.Dockerfile`.
-
-- A project that depends on lookout builds again: `build.zig` reaches its lazy `preflight` dependency through `b.lazyImport`, and only in lookout's own tree, rather than with a top-level `@import` no consumer could compile. `zig build check-consumer`, run by lint, builds one with no packages fetched.
-
 - Glob patterns match in time proportional to the pattern and the name, however many `*` and `**` they hold. Each `*` used to retry the rest of the pattern at every position, so a file name chosen against a pattern such as `*a*a*a*a*b` could stall the watcher's thread for most of a minute.
 
 - Resuming an FSEvents checkpoint reports only what the watch would report live: a saved change outside the watch or excluded by its filter is dropped, and a saved rename with one side left out is the creation or removal of the other. Token paths must be absolute, without NUL or `.`/`..` components, or the token is `error.InvalidCheckpoint`.
@@ -73,8 +69,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The README usage excerpt keeps the example calls without the surrounding commentary.
 
 - Breaking: checkpoints require volume and FSEvents log identities and use per-device history; `add` returns `InvalidCheckpoint` for a changed identity or unavailable history, and mounted volumes need separate watches for resumable history.
-
-- Move wake, orphan-rename and cancellation speed limits out of the unit suite into an opt-in quiet-machine harness; unit tests count delivered changes and cancellation work instead, retaining their hang bounds.
 
 - Breaking: replace `Watcher.position`, `Position`, `Options.since` and `tracksPosition` with owned `Watcher.checkpoint(gpa)`, `Checkpoint`, `Options.checkpoint` and `tracksCheckpoint`; tokens keep per-watch cursors and unhanded changes, and old scalar tokens are refused.
 

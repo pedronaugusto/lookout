@@ -110,13 +110,9 @@ pub const required = [_][]const u8{
 /// Tokens only their owners may spell: each backend alone speaks to its
 /// kernel interface.
 pub const owned: []const gantry.rules.TokenRule = &.{
-    .{ .name = "inotify backend", .token = "inotify_init1", .owners = &.{ "src/backend/Inotify.zig", "src/backend/inotify/**" } },
-    .{ .name = "inotify backend", .token = "inotify_add_watch", .owners = &.{ "src/backend/Inotify.zig", "src/backend/inotify/**" } },
-    .{ .name = "inotify backend", .token = "inotify_rm_watch", .owners = &.{ "src/backend/Inotify.zig", "src/backend/inotify/**" } },
-    .{ .name = "fsevents backend", .token = "FSEventStreamCreate", .owners = &.{ "src/backend/FsEvents.zig", "src/backend/fsevents/**" } },
-    .{ .name = "fsevents backend", .token = "FSEventStreamStart", .owners = &.{ "src/backend/FsEvents.zig", "src/backend/fsevents/**" } },
-    .{ .name = "kqueue backend", .token = "kevent", .owners = &.{"src/backend/Kqueue.zig"} },
-    .{ .name = "windows backend", .token = "ReadDirectoryChangesW", .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**" } },
-    .{ .name = "windows backend", .token = "CreateFileW", .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**" } },
-    .{ .name = "windows backend", .kind = .string, .token = "kernel32", .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**", "src/filesystem.zig" } },
+    .{ .name = "inotify backend", .tokens = &.{ "inotify_init1", "inotify_add_watch", "inotify_rm_watch" }, .owners = &.{ "src/backend/Inotify.zig", "src/backend/inotify/**" } },
+    .{ .name = "fsevents backend", .tokens = &.{ "FSEventStreamCreate", "FSEventStreamStart" }, .owners = &.{ "src/backend/FsEvents.zig", "src/backend/fsevents/**" } },
+    .{ .name = "kqueue backend", .tokens = &.{"kevent"}, .owners = &.{"src/backend/Kqueue.zig"} },
+    .{ .name = "windows backend", .tokens = &.{ "ReadDirectoryChangesW", "CreateFileW" }, .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**" } },
+    .{ .name = "windows backend", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**", "src/filesystem.zig" } },
 };

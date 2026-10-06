@@ -159,7 +159,8 @@ pub fn build(b: *std.Build) void {
 
     if (b.pkg_hash.len != 0) return;
     if (b.lazyImport(@This(), "preflight")) |preflight| {
-        preflight.addCi(b, .{ .tests = test_step, .portable_tests = true });
+        // What `LOOKOUT_TRACE` prints is at the info level.
+        preflight.addCi(b, .{ .tests = test_step, .portable_tests = true, .test_log_level = .info });
         // The build a consumer gets: nothing lookout fetches for itself.
         preflight.addConsumerCheck(b, .{ .package = "lookout", .program = b.path("ci/consumer.zig") });
     }

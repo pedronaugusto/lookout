@@ -76,8 +76,6 @@ const Fixture = struct {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         errdefer gpa.free(root);
 
-        // A test run logs below warn only when asked; a traced run asks.
-        if (trace.enabled()) std.testing.log_level = .info;
         trace.log("suite fixture open backend={s} root={s}", .{ @tagName(options.backend), root });
         return .{
             .tmp = tmp,

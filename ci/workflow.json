@@ -15,6 +15,5 @@
   "portable_hosts": [
     "windows-latest"
   ],
-  "test_timeout": "",
   "sanitizer": "test"
 }
