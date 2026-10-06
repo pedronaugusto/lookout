@@ -1245,12 +1245,12 @@ pub const Watcher = struct {
         w.stopFollowing(id);
         const links = try Links.create(w.gpa, w.io, id, root, filter, max) orelse return;
         {
-            errdefer links.destroy(LinkHost{ .w = w });
+            errdefer links.destroy(w.linkHost());
             try w.following.ensureUnusedCapacity(w.gpa, 1);
             try w.batch.noting.put(w.gpa, id, {});
             w.following.appendAssumeCapacity(links);
         }
-        links.followBelow(LinkHost{ .w = w }, &w.batch, links.root) catch |err| {
+        links.followBelow(w.linkHost(), &w.batch, links.root) catch |err| {
             if (keep) links.stale = true else w.stopFollowing(id);
             return err;
         };
@@ -1262,7 +1262,7 @@ pub const Watcher = struct {
             if (links.owner != id) continue;
             _ = w.following.swapRemove(i);
             _ = w.batch.noting.swapRemove(id);
-            links.destroy(LinkHost{ .w = w });
+            links.destroy(w.linkHost());
             return;
         }
     }
@@ -1278,9 +1278,8 @@ pub const Watcher = struct {
     fn refollow(w: *Watcher, links: *Links, filter: Filter) RefilterError!void {
         errdefer links.stale = true;
         try links.refilter(filter);
-        const host: LinkHost = .{ .w = w };
-        for (links.followed.items) |link| try host.refilter(link);
-        try links.refresh(host, &w.batch);
+        for (links.followed.items) |link| try w.refilterLink(link);
+        try links.refresh(w.linkHost(), &w.batch);
     }
 
     /// Follows what changed under the watches that follow links.
@@ -1295,43 +1294,61 @@ pub const Watcher = struct {
         };
         for (w.following.items) |links| {
             if (notes.lost) links.stale = true;
-            try links.settle(LinkHost{ .w = w }, &w.batch, notes.items.items);
+            try links.settle(w.linkHost(), &w.batch, notes.items.items);
         }
     }
 
     /// What `Links` asks of the watcher: ids for, and registrations on,
-    /// the directories followed links lead to.
-    pub const LinkHost = struct {
-        w: *Watcher,
+    /// the directories followed links lead to. See `Links.Host`.
+    fn linkHost(w: *Watcher) Links.Host {
+        return .{
+            .context = w,
+            .issue_fn = LinkHost.issue,
+            .register_fn = LinkHost.register,
+            .unregister_fn = LinkHost.unregister,
+        };
+    }
 
-        pub fn issue(h: Watcher.LinkHost) WatchId {
-            const id: WatchId = @enumFromInt(h.w.next_id);
-            h.w.next_id += 1;
+    /// The functions behind `linkHost`, private to the watcher.
+    const LinkHost = struct {
+        fn of(context: *anyopaque) *Watcher {
+            return @ptrCast(@alignCast(context)); // safe: linkHost passes the watcher itself as the context
+        }
+
+        fn issue(context: *anyopaque) WatchId {
+            const w = of(context);
+            const id: WatchId = @enumFromInt(w.next_id);
+            w.next_id += 1;
             return id;
         }
 
         /// The alias goes in first: a backend may report while it
         /// registers, and what it reports is the link's watch's.
-        pub fn register(h: Watcher.LinkHost, link: *Links.Link) Watcher.AddError!void {
-            try h.w.batch.aliases.put(h.w.gpa, link.id, &link.alias);
-            errdefer _ = h.w.batch.aliases.swapRemove(link.id);
-            try h.w.addBackend(link.id, link.target, link.target, .{ .recursive = true, .filter = link.filter() });
+        fn register(context: *anyopaque, link: *Links.Link) Links.Host.RegisterError!void {
+            const w = of(context);
+            try w.batch.aliases.put(w.gpa, link.id, &link.alias);
+            errdefer _ = w.batch.aliases.swapRemove(link.id);
+            w.addBackend(link.id, link.target, link.target, .{ .recursive = true, .filter = link.filter() }) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.Refused,
+            };
         }
 
-        pub fn unregister(h: Watcher.LinkHost, id: WatchId) void {
-            h.w.removeBackend(id);
-            _ = h.w.batch.aliases.swapRemove(id);
-        }
-
-        fn refilter(h: Watcher.LinkHost, link: *Links.Link) RefilterError!void {
-            if (h.w.polling.tree.watches.contains(link.id)) {
-                return h.w.polling.refilter(link.id, link.filter(), &h.w.batch);
-            }
-            switch (h.w.impl) {
-                inline else => |*impl| try impl.refilter(link.id, link.filter(), &h.w.batch),
-            }
+        fn unregister(context: *anyopaque, id: WatchId) void {
+            const w = of(context);
+            w.removeBackend(id);
+            _ = w.batch.aliases.swapRemove(id);
         }
     };
+
+    fn refilterLink(w: *Watcher, link: *Links.Link) RefilterError!void {
+        if (w.polling.tree.watches.contains(link.id)) {
+            return w.polling.refilter(link.id, link.filter(), &w.batch);
+        }
+        switch (w.impl) {
+            inline else => |*impl| try impl.refilter(link.id, link.filter(), &w.batch),
+        }
+    }
 
     /// Every watch this watcher holds, in the order they were added.
     ///

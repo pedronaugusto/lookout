@@ -29,6 +29,36 @@ const builtin = @import("builtin");
 const Identity = filesystem.Identity;
 const WatchId = types.WatchId;
 
+/// What `Links` asks of the watcher that owns it: an id for, and a
+/// registration on, each directory a followed link leads to. Spelled out
+/// here rather than taken as a type of the watcher's, so that the
+/// watcher can answer with functions of its own that nobody else can
+/// call: issuing an id and registering under it outside `add` would break
+/// what every id promises.
+pub const Host = struct {
+    context: *anyopaque,
+    issue_fn: *const fn (context: *anyopaque) WatchId,
+    /// Registers the link's target under the link's id.
+    register_fn: *const fn (context: *anyopaque, link: *Link) RegisterError!void,
+    unregister_fn: *const fn (context: *anyopaque, id: WatchId) void,
+
+    fn issue(h: Host) WatchId {
+        return h.issue_fn(h.context);
+    }
+
+    /// All a refusal means here is a hole in the watch: the link is
+    /// reported `Kind.unwatched`, whatever the system's reason.
+    pub const RegisterError = Allocator.Error || error{Refused};
+
+    fn register(h: Host, link: *Link) RegisterError!void {
+        return h.register_fn(h.context, link);
+    }
+
+    fn unregister(h: Host, id: WatchId) void {
+        h.unregister_fn(h.context, id);
+    }
+};
+
 const Links = @This();
 
 gpa: Allocator,
@@ -107,7 +137,7 @@ pub fn create(gpa: Allocator, io: Io, owner: WatchId, root: []const u8, filter: 
 }
 
 /// Lets go of every followed link through `host`, and frees the set.
-pub fn destroy(l: *Links, host: anytype) void {
+pub fn destroy(l: *Links, host: Host) void {
     while (l.followed.items.len != 0) l.unfollow(host, l.followed.items[l.followed.items.len - 1]);
     l.followed.deinit(l.gpa);
     for (l.idle.items) |item| l.gpa.free(item);
@@ -193,7 +223,7 @@ pub fn find(l: *const Links, subject: []const u8) ?*Link {
 /// Follows every link below `dir` that leads somewhere new, and every
 /// link below the directories those lead to. `dir` is spelled as the
 /// watch reaches it.
-pub fn followBelow(l: *Links, host: anytype, batch: *Batch, dir: []const u8) Allocator.Error!void {
+pub fn followBelow(l: *Links, host: Host, batch: *Batch, dir: []const u8) Allocator.Error!void {
     var found: std.ArrayList([]u8) = .empty;
     defer {
         for (found.items) |item| l.gpa.free(item);
@@ -246,7 +276,7 @@ fn discover(l: *const Links, dir: []const u8, found: *std.ArrayList([]u8)) Alloc
 /// is a hole in the watch and is reported `Kind.unwatched`. A link that
 /// leads to no directory, or to one the watch reaches another way, is
 /// remembered as idle.
-pub fn follow(l: *Links, host: anytype, batch: *Batch, subject: []const u8) Allocator.Error!?*Link {
+pub fn follow(l: *Links, host: Host, batch: *Batch, subject: []const u8) Allocator.Error!?*Link {
     if (l.filter.prunes(l.root, subject)) return null;
     switch (try l.consider(subject)) {
         .none => return null,
@@ -306,7 +336,7 @@ fn forget(l: *Links, link: *Link) void {
 }
 
 /// Lets go of `link` and of every link followed below it.
-fn unfollow(l: *Links, host: anytype, link: *Link) void {
+fn unfollow(l: *Links, host: Host, link: *Link) void {
     var i: usize = l.followed.items.len;
     while (i > 0) {
         i -= 1;
@@ -360,7 +390,7 @@ fn stands(l: *const Links, link: *const Link) bool {
 /// Looks again at the followed links at `subject`, or at and below it:
 /// one that is gone, or leads somewhere else now, is let go with what it
 /// led to, and followed again where it leads now. Whether any went.
-fn recheck(l: *Links, host: anytype, batch: *Batch, subject: []const u8, below: bool) Allocator.Error!bool {
+fn recheck(l: *Links, host: Host, batch: *Batch, subject: []const u8, below: bool) Allocator.Error!bool {
     var went = false;
     var i: usize = 0;
     while (i < l.followed.items.len) {
@@ -383,7 +413,7 @@ fn recheck(l: *Links, host: anytype, batch: *Batch, subject: []const u8, below: 
 }
 
 /// Follows, where they can be now, the idle links.
-fn retry(l: *Links, host: anytype, batch: *Batch) Allocator.Error!void {
+fn retry(l: *Links, host: Host, batch: *Batch) Allocator.Error!void {
     var waited = l.idle;
     l.idle = .empty;
     defer {
@@ -399,7 +429,7 @@ fn retry(l: *Links, host: anytype, batch: *Batch) Allocator.Error!void {
 /// appeared, links that changed or went, and directories that arrived
 /// with links in them. `notes` may hold other watches' notes, which are
 /// passed over.
-pub fn settle(l: *Links, host: anytype, batch: *Batch, notes: []const Batch.Note) Allocator.Error!void {
+pub fn settle(l: *Links, host: Host, batch: *Batch, notes: []const Batch.Note) Allocator.Error!void {
     errdefer l.stale = true;
     if (l.stale) {
         l.stale = false;
@@ -415,7 +445,7 @@ pub fn settle(l: *Links, host: anytype, batch: *Batch, notes: []const Batch.Note
 
 /// Looks at every link again: the ones followed, the idle ones, and
 /// every link anywhere under the root.
-pub fn refresh(l: *Links, host: anytype, batch: *Batch) Allocator.Error!void {
+pub fn refresh(l: *Links, host: Host, batch: *Batch) Allocator.Error!void {
     errdefer l.stale = true;
     _ = try l.recheck(host, batch, l.root, true);
     try l.retry(host, batch);
@@ -423,7 +453,7 @@ pub fn refresh(l: *Links, host: anytype, batch: *Batch) Allocator.Error!void {
 }
 
 /// What one change means for the links. Whether a followed link went.
-fn noted(l: *Links, host: anytype, batch: *Batch, item: Batch.Note) Allocator.Error!bool {
+fn noted(l: *Links, host: Host, batch: *Batch, item: Batch.Note) Allocator.Error!bool {
     switch (item.kind) {
         // Retargeting a link in place shows as a change to its metadata
         // on the backends that compare listings.
@@ -495,13 +525,20 @@ test "a link is followed only into a directory the watch does not reach" {
         };
     }
 
-    const Host = struct {
-        const Self = @This();
-
-        fn unregister(_: Self, _: WatchId) void {}
+    // Nothing is followed here, so nothing is registered or let go.
+    const Idle = struct {
+        fn issue(_: *anyopaque) WatchId {
+            unreachable;
+        }
+        fn register(_: *anyopaque, _: *Link) Host.RegisterError!void {
+            unreachable;
+        }
+        fn unregister(_: *anyopaque, _: WatchId) void {}
     };
+    var nothing: u8 = 0;
+    const idle: Host = .{ .context = &nothing, .issue_fn = Idle.issue, .register_fn = Idle.register, .unregister_fn = Idle.unregister };
     const l = (try create(gpa, io, @enumFromInt(0), root, .none, 64)) orelse return error.SkipZigTest;
-    defer l.destroy(Host{});
+    defer l.destroy(idle);
     for (cases) |case| {
         const subject = try std.fs.path.join(gpa, &.{ root, case.link });
         defer gpa.free(subject);

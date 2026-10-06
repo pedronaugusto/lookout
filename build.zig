@@ -167,6 +167,11 @@ pub fn build(b: *std.Build) void {
     // reached. It is the build a consumer gets.
     const consumer = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--system" });
     consumer.addDirectoryArg(b.addWriteFiles().add("README", "No packages.\n").dirname());
+    // Its cache and output stay in lookout's cache, out of the tree the
+    // source checks read.
+    const cache = b.cache_root.join(b.allocator, &.{"consumer"}) catch @panic("OOM");
+    const out = b.cache_root.join(b.allocator, &.{"consumer-out"}) catch @panic("OOM");
+    consumer.addArgs(&.{ "--cache-dir", b.pathFromRoot(cache), "--prefix", b.pathFromRoot(out) });
     consumer.setCwd(b.path("ci/consumer"));
     consumer.has_side_effects = true;
     consumer.expectExitCode(0);
