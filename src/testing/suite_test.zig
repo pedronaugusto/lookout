@@ -3477,3 +3477,26 @@ test "checkpoint restoration rolls back a failed add and preserves prior slices"
     }
     try std.testing.expect(failures > 0);
 }
+
+test "the watches are listed in the order they were added, after a removal too" {
+    const gpa = std.testing.allocator;
+    var f = try Fixture.init(.poll);
+    defer f.deinit();
+    var ids: [4]lookout.WatchId = undefined;
+    var paths: [4][]u8 = undefined;
+    for (&ids, &paths, 0..) |*id, *slot, i| {
+        const name = [_]u8{'a' + @as(u8, @intCast(i))};
+        try f.tmp.dir.createDirPath(std.testing.io, &name);
+        slot.* = try f.path(&name);
+        id.* = try f.watcher.add(slot.*, .{});
+    }
+    defer for (paths) |p| gpa.free(p);
+    f.watcher.remove(ids[0]);
+    const held = try f.watcher.watches(gpa);
+    defer gpa.free(held);
+    try std.testing.expectEqual(@as(usize, 3), held.len);
+    for (held, ids[1..], paths[1..]) |info, id, p| {
+        try std.testing.expectEqual(id, info.id);
+        try std.testing.expectEqualStrings(p, info.path);
+    }
+}

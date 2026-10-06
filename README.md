@@ -89,7 +89,8 @@ links and reports a link past that as `unwatched`. Such a watch produces no chec
 contents to stop changing. `debounce_ms` holds ordinary changes until the path is quiet
 and reports the last kind; it takes precedence over the other windows. Overflow and
 unwatched notices bypass these waits. A seeded `Baseline` can diff the current tree
-after an overflow. `save(gpa, filename)` atomically replaces a versioned, SHA-256
+after an overflow. A baseline does not follow symbolic links, so for a watch with
+`follow_symlinks` it answers for the tree itself and not for what lies below its links. `save(gpa, filename)` atomically replaces a versioned, SHA-256
 checksummed file; `Baseline.load(gpa, io, filename, root, options)` restores it on
 every backend, and `diff` answers what changed since the last run with one walk.
 Keep the file outside the watched tree. Corrupt files return `InvalidBaseline`,
@@ -118,7 +119,10 @@ to a self-contained baseline. Paths removed since a retained revision are reclai
 when that revision is released. On resume a path in that
 baseline that is gone is reported as a deletion once, independent of event ids
 and replay arrival time. The replay has no time window or id-space barrier;
-version-1 checkpoint tokens are refused. Resume with matching canonical roots, scopes and filters. A changed
+version-1 checkpoint tokens are refused. Resume with matching canonical roots, scopes and filters: a
+token records its ignore and include patterns and is refused under others, while a predicate
+filter cannot be recorded and is the caller's to keep the same. Saved changes a resumed watch
+would not report live are dropped. A changed
 volume or log yields `InvalidCheckpoint`; watches spanning mounted volumes keep live
 coverage but cannot produce a checkpoint. Other backends return null.
 [examples/since.zig](examples/since.zig) exercises checkpoint tokens and resuming.
@@ -145,12 +149,11 @@ coverage but cannot produce a checkpoint. Other backends return null.
 
 ## Testing
 
-Local build scripts clear `.zig-cache/{o,h,z,tmp}` above the measured cap through preflight; run `zig build cache` before direct Zig builds (only a rebuild is lost).
-
 `zig build test` runs the suite and examples in Debug by default, exercising the
 backends available on the host. Tests cover filters, pending paths, renames, overflow,
 cancellation, settling, checkpoints and resource cleanup. `zig build examples` runs the
-examples separately. CI also runs `zig build lint`.
+examples separately. CI also runs `zig build lint`, which includes `zig build check-consumer`:
+a project that depends on lookout by path, built with no packages fetched.
 
 Full [CI](.github/workflows/ci.yml) runs tests and examples in Debug and ReleaseSafe on
 `ubuntu-latest`, `macos-latest` and `windows-latest`, plus ReleaseFast on Ubuntu.

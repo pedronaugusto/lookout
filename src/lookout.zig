@@ -927,7 +927,9 @@ pub const Watcher = struct {
     pub fn remove(w: *Watcher, id: WatchId) void {
         w.stopFollowing(id);
         w.removeBackend(id);
-        if (w.table.fetchSwapRemove(id)) |entry| {
+        // Ordered, so that `watches` lists what is left in the order it
+        // was added.
+        if (w.table.fetchOrderedRemove(id)) |entry| {
             var held = entry.value;
             w.release(&held);
         }
@@ -1388,7 +1390,7 @@ pub const Watcher = struct {
         /// This is the number that runs into the limits — the per-user
         /// cap on `inotify` watches, the per-process cap on descriptors —
         /// and the reason a recursive watch on a deep tree is not free on
-        /// every backend. See the per-backend table in README.md.
+        /// every backend.
         registrations: usize,
         /// Paths held back by `Options.settle_ms` or
         /// `Options.debounce_ms` and not yet reported.

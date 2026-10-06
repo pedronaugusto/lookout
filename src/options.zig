@@ -98,12 +98,18 @@ pub const Options = struct {
     /// Resume from an earlier Watcher.checkpoint. Borrowed only by init,
     /// which copies what it keeps. Recreate the same watched paths, scopes
     /// and filters. Watches are matched by their canonical requested roots.
-    /// add returns InvalidCheckpoint if the volume or its log has changed.
+    /// add returns InvalidCheckpoint if the volume or its log has changed,
+    /// or if the watch's ignore or include patterns differ from the ones
+    /// the checkpoint was taken with; a predicate filter cannot be
+    /// recorded, and keeping it the same is the caller's.
     /// Each persistent stream follows one device. Scopes crossing mounted
     /// volumes keep live coverage but cannot produce checkpoints; watch
     /// those volumes separately to retain resumable history.
-    /// Pending changes are restored and new log records are resolved against
-    /// the current tree. Backends without a persistent log ignore this.
+    /// Pending changes are restored as the watch would report them live --
+    /// what is outside it or excluded by its filter is dropped -- and new
+    /// log records are resolved against the current tree, a path the
+    /// checkpoint's baseline did not hold being `created`. Backends without
+    /// a persistent log ignore this.
     checkpoint: ?Checkpoint = null,
     /// The most events one `poll` will hold, past which it stops
     /// collecting names and says `Kind.overflow` against the watch roots

@@ -6,15 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- Name each backend and struct file after its type, with `src/backend.zig` choosing the backends per target and asserting at compile time that the choice matches `supported`.
+- A project that depends on lookout builds again: `build.zig` reaches its lazy `preflight` dependency through `b.lazyImport`, and only in lookout's own tree, rather than with a top-level `@import` no consumer could compile. `zig build check-consumer`, run by lint, builds one with no packages fetched.
+
+- Glob patterns match in time proportional to the pattern and the name, however many `*` and `**` they hold. Each `*` used to retry the rest of the pattern at every position, so a file name chosen against a pattern such as `*a*a*a*a*b` could stall the watcher's thread for most of a minute.
+
+- Resuming an FSEvents checkpoint reports only what the watch would report live: a saved change outside the watch or excluded by its filter is dropped, and a saved rename with one side left out is the creation or removal of the other. Token paths must be absolute, without NUL or `.`/`..` components, or the token is `error.InvalidCheckpoint`.
+
+- Checkpoint tokens record the watch's `ignore` and `only` patterns, and a watch resumed under other patterns is refused with `error.InvalidCheckpoint`. A predicate filter (`allow`) cannot be recorded and is not compared.
+
+- After an FSEvents resume, a path the checkpoint's baseline did not hold is reported `created` when the log names it, not `modified`.
+
+- A pending watch whose ancestor the backend refuses to register fails its `add` with that error instead of returning an id that waits on nothing. Refused later, while stepping down to a folder that appeared, the watch stops waiting and reports `unwatched` against its path. An allocation failure while parking is returned rather than swallowed.
+
+- A pending promotion whose checkpoint is refused no longer frees its path twice when resetting the checkpoint or parking again runs out of memory.
+
+- The FSEvents wake pipe is closed on exec, as the other backends' descriptors are.
+
+- `Watcher.LinkHost` is no longer public: followed links reach the watcher through `Links.Host`, an interface of private functions, so nothing outside `add` can issue an id or register under one.
+
+- Reading or writing a checkpoint token holds the path history's lock for one step at a time, not for the whole token, and releasing a checkpoint on another thread no longer frees through the watcher's allocator while the watcher runs; the watcher's thread frees what released revisions held on its next change.
+
+- `Watcher.watches` lists the watches in the order they were added after a `remove` as well; removal reordered them.
 
 - `LOOKOUT_TRACE` lines go to `std.log` under the `lookout` scope at the info level instead of straight to standard error, so the program's log function and level decide where they land. The examples print through a buffered standard output writer.
 
 - A checkpoint token that names one root twice is refused as `error.InvalidCheckpoint`: a watcher never writes one, and resuming it could reach an unreachable after a refused registration. The poll backend's `init` has an empty error set.
 
-- `Watcher.LinkHost`, the adapter followed links register through, is public, as are the key and hash context types of the event batch, the polling tree and the FSEvents backend that their public methods take. `Baseline`, `Snapshot`, `Tree` and `Checkpoint` signatures name their public error sets qualified, and the baseline and checkpoint `ParseError` sets are spelled out; their members are unchanged.
-
-- Share the Zig CI gate through preflight, with requested fast runs and full merge checks.
+- The key and hash context types of the event batch, the polling tree and the FSEvents backend that their public methods take. `Baseline`, `Snapshot`, `Tree` and `Checkpoint` signatures name their public error sets qualified, and the baseline and checkpoint `ParseError` sets are spelled out; their members are unchanged.
 
 - `AddOptions.follow_symlinks` makes a recursive watch follow links to directories and report changes below a link under the link's path. A link into a directory the watch already reaches is refused by device and inode, or volume and file id; `max_followed_links` bounds each watch and a link past it is reported `unwatched`. Off by default.
 
@@ -48,25 +66,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Capture the FSEvents registration boundary before starting the stream so changes made immediately after `add` returns are reported.
 
-- Reject undeclared dependencies, duplicate layer membership and imports of source executables.
-
-- Pass the held inotify backend directly to synthetic read checks.
-
-- Keep synthetic inotify reads accessible to the relocated integration tests.
-
-- Check named source layers, cycles, entry files and dependency owners during source CI.
-
-- Keep watch contracts below the watcher and its backends, with test assembly above them.
-
-- Bound local Zig build caches before builds, retaining downloaded packages and tools.
-
 ### Changed
 
 - The README usage excerpt keeps the example calls without the surrounding commentary.
-
-- The settling test checks every interim batch and the exact deadline after the last write through a controlled clock.
-
-- Keep the quiet-machine speed harness and its build targets only on the `bench` branch.
 
 - Breaking: checkpoints require volume and FSEvents log identities and use per-device history; `add` returns `InvalidCheckpoint` for a changed identity or unavailable history, and mounted volumes need separate watches for resumable history.
 
@@ -97,23 +99,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Pending watches propagate checkpoint identity refusal from `add`; a refusal during later reconciliation reports overflow and starts fresh instead of retrying the rejected snapshot forever.
 
-- The stream-removal regression stops and joins native replay callbacks before constructing its exact synthetic delivery.
-
 - Recursive FSEvents scopes crossing a mounted volume keep live coverage through a host stream, report the registration gap as overflow and withhold checkpoints that cannot describe every device.
 
-- Wake and task-shutdown unit tests count completed work and synchronize on readiness; their post-completion elapsed limits run only in the quiet-machine harness.
-
-- Native checkpoint regression tests select their backend at compile time, so the shared suite also compiles on targets without FSEvents.
-
 - An incomplete directory-budget reread keeps its prior names and reports uncertainty until a complete listing succeeds, instead of treating inaccessible entries as absent.
-
-- Batch and deadline arithmetic tests use a frozen clock, so a runner pause cannot expire their input between samples or cross the platform wait clamp.
 
 - FSEvents accepts replay completion as stream state before applying path scope, so a file watch can finish catching up when the sentinel names its parent.
 
 - A paired rename releases the source path's settling or debounce hold after recording the destination, so the old name cannot later report a stale modification.
-
-- The held-event refilter test stages its input before polling, so runner pauses cannot promote it before inspection; failures print the backend, phase and delivery state.
 
 - Correct the baseline scope, polling registration count, recovery handout and minimum delivery-buffer descriptions.
 
