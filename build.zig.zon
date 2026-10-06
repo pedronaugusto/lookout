@@ -21,13 +21,8 @@
             .lazy = true,
         },
         .preflight = .{
-            .url = "https://codeload.github.com/pedronaugusto/preflight/tar.gz/9fb3e5d24f83d18c056ed308cdfb3d78c0a9a8ba",
-            .hash = "preflight-0.1.0-LX1Zwh6GAgDLU4nrPE1JxDIKVTLR4x_bUwdOHh-bnQYc",
-            .lazy = true,
-        },
-        .gantry = .{
-            .url = "git+https://github.com/pedronaugusto/gantry#b5b991bcc590a8f7032444287465269acda4fdaa",
-            .hash = "gantry-0.1.0-1iNrkcw4BwBD3pRucqF5FkGsGSOPIhkPh0rLr1u4EMDW",
+            .url = "https://codeload.github.com/pedronaugusto/preflight/tar.gz/9e72aac1b9f2837716105dca4de617685a4ca284",
+            .hash = "preflight-0.1.0-LX1ZwvN6AwDbnX3xF1J-0h68Hi_duYUxFTmiG__3gP6D",
             .lazy = true,
         },
     },

@@ -160,22 +160,9 @@ pub fn build(b: *std.Build) void {
     if (b.pkg_hash.len != 0) return;
     if (b.lazyImport(@This(), "preflight")) |preflight| {
         preflight.addCi(b, .{ .tests = test_step, .portable_tests = true });
+        // The build a consumer gets: nothing lookout fetches for itself.
+        preflight.addConsumerCheck(b, .{ .package = "lookout", .program = b.path("ci/consumer.zig") });
     }
-
-    // A project that depends on lookout by path, built with an empty
-    // package directory, so nothing lookout fetches for itself can be
-    // reached. It is the build a consumer gets.
-    const consumer = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--system" });
-    consumer.addDirectoryArg(b.addWriteFiles().add("README", "No packages.\n").dirname());
-    // Its cache and output stay in lookout's cache, out of the tree the
-    // source checks read.
-    const cache = b.cache_root.join(b.allocator, &.{"consumer"}) catch @panic("OOM");
-    const out = b.cache_root.join(b.allocator, &.{"consumer-out"}) catch @panic("OOM");
-    consumer.addArgs(&.{ "--cache-dir", b.pathFromRoot(cache), "--prefix", b.pathFromRoot(out) });
-    consumer.setCwd(b.path("ci/consumer"));
-    consumer.has_side_effects = true;
-    consumer.expectExitCode(0);
-    b.step("check-consumer", "Build a project that depends on lookout, with no packages fetched").dependOn(&consumer.step);
 }
 
 /// Every example, listed rather than globbed: a build graph that scans a

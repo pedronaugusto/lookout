@@ -1,3 +1,4 @@
+//! What a project that depends on lookout writes.
 const std = @import("std");
 const lookout = @import("lookout");
 

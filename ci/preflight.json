@@ -5,9 +5,6 @@
   "test_roots": [
     "src/tests.zig"
   ],
-  "test_support": [
-    "src/testing/*"
-  ],
   "function_exceptions": {},
   "layout_exceptions": {},
   "docs": {
