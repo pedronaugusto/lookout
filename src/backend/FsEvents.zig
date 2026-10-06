@@ -40,6 +40,9 @@ const Batch = @import("../Batch.zig");
 const Volume = @import("fsevents/Volume.zig");
 const CheckpointPaths = @import("../Checkpoint/History.zig");
 const checkpoint_format = @import("../Checkpoint/format.zig");
+/// The lock between the delivery thread and the polling one. Both of
+/// its sections are a bounded `memcpy`.
+const SpinLock = @import("../SpinLock.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
 const Filter = @import("../Filter.zig");
@@ -120,9 +123,7 @@ pub const KnownKey = struct {
 
 pub const KnownKeyContext = struct {
     pub fn hash(_: KnownKeyContext, key: KnownKey) u32 {
-        const mixed = path_cmp.hash(key.path) ^
-            (@as(u64, @intFromEnum(key.id)) *% 0x9e3779b97f4a7c15);
-        return @truncate(mixed);
+        return @truncate(path_cmp.hashOwned(@intFromEnum(key.id), key.path));
     }
 
     pub fn eql(_: KnownKeyContext, a: KnownKey, b: KnownKey, _: usize) bool {
@@ -152,25 +153,6 @@ const bounds: buffer.Bounds = .{
 /// so the partner is either in the next delivery or nowhere.
 const grace_ms = 25;
 const grace_rounds = 4;
-
-/// The lock between the delivery thread and the polling one.
-///
-/// A spin lock rather than `std.Io.Mutex`, which needs an `Io` to block
-/// on and cannot be taken from a system callback that has none. Both
-/// critical sections are a bounded `memcpy` and nothing else -- no
-/// syscall, no allocation, no lookout logic -- so there is nothing to wait
-/// through.
-const SpinLock = struct {
-    held: std.atomic.Value(bool) = .init(false),
-
-    fn acquire(l: *SpinLock) void {
-        while (l.held.swap(true, .acquire)) std.atomic.spinLoopHint();
-    }
-
-    fn release(l: *SpinLock) void {
-        l.held.store(false, .release);
-    }
-};
 
 /// What the delivery thread writes and `drain` reads.
 ///

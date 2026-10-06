@@ -3,6 +3,7 @@ const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "primitives", .patterns = &.{
+        "src/SpinLock.zig",
         "src/Waker.zig",
         "src/filesystem.zig",
         "src/backend/inotify/records.zig",
@@ -83,6 +84,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
 };
 
 pub const required = [_][]const u8{
+    "src/SpinLock.zig",
     "src/Waker.zig",
     "src/filesystem.zig",
     "src/backend/inotify/records.zig",

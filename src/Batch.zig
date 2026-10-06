@@ -191,7 +191,7 @@ pub const EventKey = struct {
 
 pub const EventKeyContext = struct {
     pub fn hash(_: EventKeyContext, key: EventKey) u64 {
-        return path_cmp.hash(key.path) ^ (@as(u64, @intFromEnum(key.id)) *% 0x9e3779b97f4a7c15);
+        return path_cmp.hashOwned(@intFromEnum(key.id), key.path);
     }
 
     pub fn eql(_: EventKeyContext, a: EventKey, b: EventKey) bool {

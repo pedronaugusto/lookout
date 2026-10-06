@@ -77,9 +77,7 @@ pub const Key = struct {
 
 pub const KeyContext = struct {
     pub fn hash(_: KeyContext, key: Key) u32 {
-        const mixed = path_cmp.hash(key.path) ^
-            (@as(u64, @intFromEnum(key.watch)) *% 0x9e3779b97f4a7c15);
-        return @truncate(mixed);
+        return @truncate(path_cmp.hashOwned(@intFromEnum(key.watch), key.path));
     }
 
     pub fn eql(_: KeyContext, a: Key, b: Key, _: usize) bool {

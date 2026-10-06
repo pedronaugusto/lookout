@@ -1,6 +1,15 @@
 //! Shared path history. A checkpoint leases a revision, not a copy of the tree.
 //! Tombstones stay until no leased revision can see them; ordinary removals
 //! need no allocation. Tokens flatten the revision to the existing wire format.
+//!
+//! The watcher's thread publishes and removes; a checkpoint may be read and
+//! released on any other. The lock is held for a pointer update or one step
+//! of an iterator and never across an allocation, a free or a caller's
+//! writer: a node a live lease can see is never freed, so an iterator rests
+//! on one between steps without holding anything. Tombstones are freed only
+//! by the watcher's thread, in `publish` and `remove`, so the watcher's
+//! allocator is not used from a thread that merely drops a checkpoint while
+//! the watcher runs.
 const std = @import("std");
 const path = @import("../path.zig");
 const WatchId = @import("../types.zig").WatchId;
@@ -8,9 +17,13 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const History = @This();
+const SpinLock = @import("../SpinLock.zig");
 
 gpa: Allocator,
-lock: std.atomic.Mutex = .unlocked,
+lock: SpinLock = .{},
+/// Set when the oldest lease is released: tombstones it alone could see
+/// can go, on the watcher's thread's next `publish` or `remove`.
+compact_due: bool = false,
 refs: usize = 1,
 revision: u64 = 0,
 first: ?*Node = null,
@@ -31,10 +44,6 @@ pub fn init(gpa: Allocator) Allocator.Error!*History {
     const h = try gpa.create(History);
     h.* = .{ .gpa = gpa };
     return h;
-}
-
-fn acquire(h: *History) void {
-    while (!h.lock.tryLock()) std.atomic.spinLoopHint();
 }
 
 pub fn prepare(h: *History, id: WatchId, name: []const u8) Allocator.Error!*Node {
@@ -61,8 +70,7 @@ pub fn publish(h: *History, node: *Node) void {
     assert(node.removed == 0);
     assert(node.prev == null);
     assert(node.next == null);
-    h.acquire();
-    defer h.lock.unlock();
+    h.lock.acquire();
     h.revision += 1;
     node.born = h.revision;
     // The list is in order of birth, which is what lets an iterator stop
@@ -71,47 +79,72 @@ pub fn publish(h: *History, node: *Node) void {
     node.prev = h.last;
     if (h.last) |last| last.next = node else h.first = node;
     h.last = node;
+    h.lock.release();
+    h.compactDue();
 }
 
 pub fn remove(h: *History, node: *Node) void {
-    h.acquire();
-    defer h.lock.unlock();
+    h.lock.acquire();
     assert(node.born != 0);
     assert(node.removed == 0);
     h.revision += 1;
     node.removed = h.revision;
     if (h.leases == null) {
-        h.unlink(node);
-    } else h.tombstones += 1;
+        h.detach(node);
+        h.lock.release();
+        h.discard(node);
+    } else {
+        h.tombstones += 1;
+        h.lock.release();
+    }
+    h.compactDue();
 }
 
-fn unlink(h: *History, node: *Node) void {
+/// Takes a node out of the list, under the lock; the caller frees it
+/// once the lock is released.
+fn detach(h: *History, node: *Node) void {
     if (node.prev) |prev| prev.next = node.next else h.first = node.next;
     if (node.next) |next| next.prev = node.prev else h.last = node.prev;
-    h.discard(node);
+    node.prev = null;
+    node.next = null;
 }
 
-fn compact(h: *History) void {
-    if (h.tombstones == 0) return;
-    var oldest = h.revision;
-    var lease = h.leases;
-    while (lease) |l| : (lease = l.next) oldest = @min(oldest, l.revision);
-    var node = h.first;
-    while (node) |n| {
-        node = n.next;
-        if (n.removed != 0 and n.removed <= oldest) {
-            h.unlink(n);
-            h.tombstones -= 1;
+/// Frees the tombstones no lease can see any more, if a release asked for
+/// it. Only on the watcher's thread: see the file's comment.
+fn compactDue(h: *History) void {
+    var gone: ?*Node = null;
+    {
+        h.lock.acquire();
+        defer h.lock.release();
+        if (!h.compact_due) return;
+        h.compact_due = false;
+        if (h.tombstones == 0) return;
+        var oldest = h.revision;
+        var lease = h.leases;
+        while (lease) |l| : (lease = l.next) oldest = @min(oldest, l.revision);
+        var node = h.first;
+        while (node) |n| {
+            node = n.next;
+            if (n.removed != 0 and n.removed <= oldest) {
+                h.detach(n);
+                h.tombstones -= 1;
+                n.next = gone;
+                gone = n;
+            }
         }
+    }
+    while (gone) |n| {
+        gone = n.next;
+        h.discard(n);
     }
 }
 
 pub fn release(h: *History) void {
-    h.acquire();
+    h.lock.acquire();
     assert(h.refs != 0);
     h.refs -= 1;
     const gone = h.refs == 0;
-    h.lock.unlock();
+    h.lock.release();
     if (!gone) return;
     var node = h.first;
     while (node) |n| {
@@ -125,8 +158,8 @@ pub fn snapshot(h: *History, gpa: Allocator, id: WatchId, root: []const u8) Allo
     const lease = try gpa.create(Lease);
     errdefer gpa.destroy(lease);
     const owned = try gpa.dupe(u8, root);
-    h.acquire();
-    defer h.lock.unlock();
+    h.lock.acquire();
+    defer h.lock.release();
     // Leases are kept newest first: only the last one can hold the oldest
     // revision, which is what `Lease.release` compacts on.
     if (h.leases) |newest| assert(newest.revision <= h.revision);
@@ -148,26 +181,26 @@ const Lease = struct {
     next: ?*Lease,
 
     fn retain(l: *Lease) void {
-        l.history.acquire();
-        defer l.history.lock.unlock();
+        l.history.lock.acquire();
+        defer l.history.lock.release();
         assert(l.refs != 0);
         l.refs += 1;
     }
 
     fn release(l: *Lease) void {
         const h = l.history;
-        h.acquire();
+        h.lock.acquire();
         assert(l.refs != 0);
         l.refs -= 1;
         if (l.refs != 0) {
-            h.lock.unlock();
+            h.lock.release();
             return;
         }
         if (l.prev) |prev| prev.next = l.next else h.leases = l.next;
         if (l.next) |next| next.prev = l.prev;
         // Newer leases cannot move the oldest retained revision.
-        if (l.next == null) h.compact();
-        h.lock.unlock();
+        if (l.next == null) h.compact_due = true;
+        h.lock.release();
         l.gpa.free(l.root);
         l.gpa.destroy(l);
         h.release();
@@ -189,8 +222,7 @@ pub const Paths = union(enum) {
 
     pub fn iterator(p: Paths) Iterator {
         if (p == .flat) return .{ .flat = p.flat };
-        p.shared.history.acquire();
-        return .{ .lease = p.shared, .node = p.shared.history.first };
+        return .{ .lease = p.shared };
     }
 
     pub fn jsonStringify(p: Paths, writer: anytype) !void {
@@ -210,15 +242,26 @@ pub const Iterator = struct {
     flat: []const []const u8 = &.{},
     index: usize = 0,
     lease: ?*Lease = null,
+    /// The last node returned: one the lease can see, and so one nothing
+    /// frees while the lease is held. `null` before the first.
     node: ?*Node = null,
+    done: bool = false,
 
     pub fn next(it: *Iterator) ?[]const u8 {
         if (it.lease) |l| {
-            while (it.node) |node| {
-                it.node = node.next;
-                if (node.born > l.revision) return null;
-                if (node.id == l.id and (node.removed == 0 or node.removed > l.revision) and path.within(l.root, node.path)) return node.path;
+            if (it.done) return null;
+            const h = l.history;
+            h.lock.acquire();
+            defer h.lock.release();
+            var node = if (it.node) |at| at.next else h.first;
+            while (node) |n| : (node = n.next) {
+                if (n.born > l.revision) break;
+                if (n.id == l.id and (n.removed == 0 or n.removed > l.revision) and path.within(l.root, n.path)) {
+                    it.node = n;
+                    return n.path;
+                }
             }
+            it.done = true;
             return null;
         }
         if (it.index == it.flat.len) return null;
@@ -228,7 +271,6 @@ pub const Iterator = struct {
     }
 
     pub fn deinit(it: *Iterator) void {
-        if (it.lease) |l| l.history.lock.unlock();
         it.* = undefined;
     }
 };
@@ -274,6 +316,51 @@ test "releasing the oldest revision compacts obsolete paths" {
     defer after.release();
     try std.testing.expectEqual(@as(usize, 1), h.tombstones);
     before.release();
+    // Released on whatever thread held it, the tombstone is freed by the
+    // next change the watcher's thread makes, and never by the release.
+    try std.testing.expectEqual(@as(usize, 1), h.tombstones);
+    const later = try h.prepare(@enumFromInt(1), root);
+    h.publish(later);
     try std.testing.expectEqual(@as(usize, 0), h.tombstones);
-    try std.testing.expect(h.first == null);
+    try std.testing.expectEqual(later, h.first.?);
+    h.remove(later);
+}
+
+test "a lease read on another thread while the watcher changes the history" {
+    const gpa = std.testing.allocator;
+    const h = try init(gpa);
+    defer h.release();
+    const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
+    var nodes: [64]*Node = undefined;
+    for (&nodes) |*slot| {
+        slot.* = try h.prepare(@enumFromInt(1), root);
+        h.publish(slot.*);
+    }
+    const leased = try h.snapshot(gpa, @enumFromInt(1), root);
+    const Reader = struct {
+        fn read(p: Paths, count: *usize) void {
+            for (0..50) |_| {
+                var it = p.iterator();
+                defer it.deinit();
+                var n: usize = 0;
+                while (it.next()) |_| n += 1;
+                count.* = n;
+            }
+            p.release();
+        }
+    };
+    var seen: usize = 0;
+    const reader = try std.Thread.spawn(.{}, Reader.read, .{ leased, &seen });
+    // Removals and new paths race the reader; what the lease sees does not
+    // move, and the watcher's thread frees what it no longer can.
+    for (nodes[0..32]) |node| h.remove(node);
+    for (0..32) |_| h.publish(try h.prepare(@enumFromInt(1), root));
+    reader.join();
+    try std.testing.expectEqual(@as(usize, nodes.len), seen);
+    for (nodes[32..]) |node| h.remove(node);
+    var node = h.first;
+    while (node) |n| {
+        node = n.next;
+        if (n.removed == 0) h.remove(n);
+    }
 }

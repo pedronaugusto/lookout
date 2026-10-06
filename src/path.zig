@@ -136,6 +136,13 @@ pub fn hash(p: []const u8) u64 {
     return hasher.final();
 }
 
+/// `hash` of a path held by one of several owners -- a watch, say -- so
+/// that the same path under two owners lands in two buckets. The one
+/// mixing every map keyed by owner and path uses.
+pub fn hashOwned(owner: u64, p: []const u8) u64 {
+    return hash(p) ^ (owner *% 0x9e3779b97f4a7c15);
+}
+
 /// The two above under names a hash-map context can reach past its own
 /// `hash` and `eql`.
 const same = eql;
