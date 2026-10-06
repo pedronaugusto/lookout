@@ -2999,13 +2999,23 @@ test "the descriptor becomes readable when there is something to report" {
         // And the other half of the promise: a wait loop that fires
         // when nothing has happened would spin. A `poll` that came
         // back empty has taken everything the descriptor held, so
-        // right after one the descriptor is quiet -- and it stays
-        // quiet, because a tree nobody touches has nothing to report.
+        // right after one the descriptor is quiet.
         try f.settle();
         fds[0].revents = 0;
         try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 0));
-        fds[0].revents = 0;
-        try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 500));
+        // A tree nobody touches has nothing to report, though the system
+        // may still deliver late what resolves to nothing -- FSEvents
+        // does. Each such wake drains to no event and leaves the
+        // descriptor quiet again; a loop that fired forever would not.
+        var wakes: usize = 0;
+        while (true) : (wakes += 1) {
+            fds[0].revents = 0;
+            if (try std.posix.poll(&fds, 500) == 0) break;
+            try std.testing.expect(wakes < 3);
+            try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+            fds[0].revents = 0;
+            try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 0));
+        }
     }
 }
 
