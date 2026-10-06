@@ -339,11 +339,14 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!FsEvent
         _ = std.c.close(fds[1]);
     }
     // Both ends non-blocking: the delivery thread must never block on a
-    // full pipe, and the drain must never block on an empty one.
+    // full pipe, and the drain must never block on an empty one. And both
+    // closed on exec, as the other backends' descriptors are: a host that
+    // starts processes would hand every child the pair.
     for (fds) |end| {
         const flags = std.c.fcntl(end, c.f_getfl, @as(c_int, 0));
         if (flags < 0) return error.Unexpected;
         if (std.c.fcntl(end, c.f_setfl, flags | c.o_nonblock) < 0) return error.Unexpected;
+        if (std.c.fcntl(end, c.f_setfd, c.fd_cloexec) < 0) return error.Unexpected;
     }
 
     const sink = try gpa.create(Sink);
@@ -1729,6 +1732,14 @@ fn incomplete(f: *FsEvents, batch: *Batch, stream: *const Stream) Allocator.Erro
     try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
 }
 
+test "the wake pipe is closed on exec" {
+    var f = try FsEvents.init(std.testing.allocator, std.testing.io, .{});
+    defer f.deinit();
+    for ([_]posix.fd_t{ f.sink.wake_r, f.sink.wake_w }) |end| {
+        try std.testing.expect(std.c.fcntl(end, c.f_getfd, @as(c_int, 0)) & c.fd_cloexec != 0);
+    }
+}
+
 test "FSEvents refuses a watch whose initial names could not be remembered" {
     const testing = std.testing;
     const gpa = testing.allocator;
@@ -1955,9 +1966,12 @@ const c = struct {
     const stream_create_flag_watch_root: u32 = 0x00000004;
     const stream_create_flag_file_events: u32 = 0x00000010;
 
-    /// Darwin's `fcntl` commands and flag, for the delivery pipe.
+    /// Darwin's `fcntl` commands and flags, for the delivery pipe.
+    const f_getfd: c_int = 1;
+    const f_setfd: c_int = 2;
     const f_getfl: c_int = 3;
     const f_setfl: c_int = 4;
+    const fd_cloexec: c_int = 1;
     const o_nonblock: c_int = 0x0004;
 
     const FsEventStreamContext = extern struct {
