@@ -668,14 +668,17 @@ pub const Watcher = struct {
     /// Puts the watch on the nearest existing ancestor of a path that is
     /// not there yet, narrowed to the one entry that leads to it.
     ///
-    /// Failing is not an error: the ancestor may be gone again. The watch
-    /// stays parked and the next `poll` tries again.
+    /// An ancestor gone again before it could be registered is not an
+    /// error: the watch stays parked and the next `poll` tries again. Any
+    /// other refusal is the caller's to hear, as it would be for a path
+    /// that was there -- otherwise the watch would wait on nothing and
+    /// never hear its path appear.
     ///
     /// The ancestor may be a path this watcher already watches, or one
     /// another pending watch is parked on. The registration is this
     /// watch's own either way, under its own id and its own filter, so
     /// neither watch hears the other's events or loses its own.
-    fn anchorPending(w: *Watcher, p: *Pending) error{InvalidCheckpoint}!void {
+    fn anchorPending(w: *Watcher, p: *Pending) AddError!void {
         p.anchor = null;
         w.unregister(p.id);
         const present = w.existingPrefix(p.target) orelse return;
@@ -685,13 +688,15 @@ pub const Watcher = struct {
         assert(std.mem.startsWith(u8, p.target, present));
         p.next = p.target[0..nextStep(p.target, present.len)];
         assert(p.next.len > present.len);
-        const mirror = w.gpa.dupe(u8, present) catch return;
+        const mirror = try w.gpa.dupe(u8, present);
         w.addBackend(p.id, present, p.target, .{
             .filter = .{ .allow = Pending.onlyNext, .context = p },
         }) catch |err| {
             w.gpa.free(mirror);
-            if (err == error.InvalidCheckpoint) return error.InvalidCheckpoint;
-            return;
+            switch (err) {
+                error.FileNotFound, error.NotDir => return,
+                else => |e| return e,
+            }
         };
         if (w.table.getPtr(p.id)) |held| held.registered = mirror else w.gpa.free(mirror);
         p.anchor = present;
@@ -699,12 +704,31 @@ pub const Watcher = struct {
 
     /// Registration initiated by poll cannot return an add error. A
     /// rejected checkpoint becomes explicit loss followed by a fresh watch.
-    fn reanchorPending(w: *Watcher, p: *Pending) PollError!void {
-        w.anchorPending(p) catch {
-            try w.resetCheckpoint(p);
-            // unreachable: a token names a root once (Checkpoint.parse), and resetCheckpoint used it
-            w.anchorPending(p) catch unreachable;
+    /// An ancestor the system will not register ends the wait with
+    /// `Kind.unwatched` against the path, and `false`: the caller stops
+    /// waiting for it, as for a path another watch turned out to have.
+    fn reanchorPending(w: *Watcher, p: *Pending) PollError!bool {
+        w.anchorPending(p) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCheckpoint => {
+                try w.resetCheckpoint(p);
+                w.anchorPending(p) catch |again| switch (again) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // A token names a root once (Checkpoint.parse), and
+                    // resetCheckpoint used it.
+                    error.InvalidCheckpoint => unreachable,
+                    else => return w.abandonPending(p),
+                };
+            },
+            else => return w.abandonPending(p),
         };
+        return true;
+    }
+
+    /// Stops waiting for a path whose way down could not be watched.
+    fn abandonPending(w: *Watcher, p: *Pending) Allocator.Error!bool {
+        try w.batch.pushDetail(w.gpa, p.id, p.target, .unwatched, null, .unknown);
+        return false;
     }
 
     fn resetCheckpoint(w: *Watcher, p: *Pending) Allocator.Error!void {
@@ -751,7 +775,11 @@ pub const Watcher = struct {
                 // watch was parked on is itself gone. Either way the
                 // parking place is no longer the right one.
                 w.removeBackend(p.id);
-                try w.reanchorPending(p);
+                if (!try w.reanchorPending(p)) {
+                    w.destroyPending(p);
+                    _ = w.pending.orderedRemove(i);
+                    continue;
+                }
                 // What appeared between the look and the new registration
                 // has no event of its own — `mkdir -p` makes the next step
                 // and the path in one breath — so this one is looked at
@@ -776,7 +804,8 @@ pub const Watcher = struct {
 
     /// Swaps the ancestor watch for the real one and reports the path
     /// appearing. `false` when the path could not be watched after all,
-    /// which parks it again.
+    /// which parks it again -- unless the way down cannot be watched
+    /// either, which ends the wait with `Kind.unwatched` and is `true`.
     ///
     /// A path that is, once it is there, one another watch already has
     /// -- reached through a symbolic link that appeared on the way -- is
@@ -796,10 +825,11 @@ pub const Watcher = struct {
                 break :target Target.unknown;
             break :target Target.of(stat.kind);
         };
-        {
+        const refused: ?AddError = refused: {
             // This scope owns the mirror only until the backend and table
-            // take the registration. Reporting below may still fail, but
-            // then unregister or deinit owns its eventual release.
+            // take the registration, or until it is refused. Whatever
+            // follows either may still fail, and must find the mirror
+            // released once or owned, never both.
             const mirror = try w.gpa.dupe(u8, p.target);
             errdefer w.gpa.free(mirror);
             w.addBackend(p.id, p.target, p.target, .{
@@ -809,15 +839,20 @@ pub const Watcher = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
                     w.gpa.free(mirror);
-                    if (err == error.InvalidCheckpoint) try w.resetCheckpoint(p);
-                    try w.reanchorPending(p);
-                    return false;
+                    break :refused err;
                 },
             };
             if (w.table.getPtr(p.id)) |held| {
                 held.registered = mirror;
                 held.target = target;
             } else w.gpa.free(mirror);
+            break :refused null;
+        };
+        if (refused) |err| {
+            if (err == error.InvalidCheckpoint) try w.resetCheckpoint(p);
+            if (try w.reanchorPending(p)) return false;
+            w.destroyPending(p);
+            return true;
         }
         if (p.follow and p.recursive and target == .directory) {
             try w.follow(p.id, p.target, p.filter, p.max_followed_links, true);
@@ -1469,6 +1504,109 @@ test "a failed pending promotion keeps each registered path owned" {
         if (!failed) break;
     }
     try testing.expect(fail_index > 0);
+}
+
+test "a pending promotion refused its checkpoint releases its path once under allocation failure" {
+    if (comptime !supported(.fsevents)) return error.SkipZigTest;
+    const testing = std.testing;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+        defer testing.allocator.free(root);
+        const target = try std.fs.path.join(testing.allocator, &.{ root, "later" });
+        defer testing.allocator.free(target);
+        var first = try Watcher.init(testing.allocator, testing.io, .{ .backend = .fsevents });
+        defer first.deinit();
+        _ = try first.add(target, .{ .pending = true });
+        var saved = (try first.checkpoint(testing.allocator)).?;
+        defer saved.deinit();
+        // Freed storage stays mapped, so a second release of the mirror
+        // is counted rather than crashing the runner.
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var failing = testing.FailingAllocator.init(arena.allocator(), .{});
+        var failed = false;
+        {
+            var watcher = try Watcher.init(failing.allocator(), testing.io, .{ .backend = .fsevents, .checkpoint = saved });
+            defer watcher.deinit();
+            _ = try watcher.add(target, .{ .pending = true });
+            // The log the token names is not the one the path appears on.
+            const backend = &watcher.impl.fsevents;
+            backend.resume_used[0] = false;
+            @constCast(backend.restarting.?.state.value.watches)[0].identity.log[0] ^= 1;
+            try tmp.dir.createDirPath(testing.io, "later");
+            failing.fail_index = failing.alloc_index + fail_index;
+            const answer = watcher.promotePending(watcher.pending.items[0]);
+            failing.fail_index = std.math.maxInt(usize);
+            if (answer) |promoted| {
+                try testing.expect(!promoted);
+            } else |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                failed = true;
+            }
+        }
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (!failed) break;
+    }
+    try testing.expect(fail_index > 0);
+}
+
+test "a pending watch whose way down cannot be watched says so" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "locked");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const locked = try std.fs.path.join(gpa, &.{ root, "locked" });
+    defer gpa.free(locked);
+    const target = try std.fs.path.join(gpa, &.{ locked, "later" });
+    defer gpa.free(target);
+    try tmp.dir.setFilePermissions(io, "locked", .fromMode(0o300), .{});
+    defer tmp.dir.setFilePermissions(io, "locked", .fromMode(0o755), .{}) catch {};
+    // Searchable, so the path resolves as absent rather than refused,
+    // and not readable, so the folder cannot be listed or opened for
+    // events. A user the permissions do not stop has nothing to show.
+    if (tmp.dir.openDir(io, "locked", .{ .iterate = true })) |opened| {
+        opened.close(io);
+        return error.SkipZigTest;
+    } else |_| {}
+
+    inline for (.{ Backend.poll, Backend.auto }) |choice| {
+        // The ancestor refused at `add`: an error, not an id that waits on
+        // nothing.
+        var watcher = try Watcher.init(gpa, io, .{ .backend = choice });
+        defer watcher.deinit();
+        if (watcher.add(target, .{ .pending = true })) |_| {
+            // A backend that registers a folder it cannot list -- FSEvents
+            // watches by path -- still hears the path appear.
+            try testing.expect(watcher.backend() == .fsevents);
+        } else |err| {
+            try testing.expectEqual(error.AccessDenied, err);
+            try testing.expectEqual(@as(usize, 0), watcher.stats().watches);
+        }
+    }
+
+    // Refused later, from a poll: the watch parked on `root` steps down
+    // to `locked` once it appears, cannot register it, and says so.
+    try tmp.dir.setFilePermissions(io, "locked", .fromMode(0o755), .{});
+    try tmp.dir.deleteDir(io, "locked");
+    var watcher = try Watcher.init(gpa, io, .{ .backend = .poll });
+    defer watcher.deinit();
+    const id = try watcher.add(target, .{ .pending = true });
+    try tmp.dir.createDirPath(io, "locked");
+    try tmp.dir.setFilePermissions(io, "locked", .fromMode(0o300), .{});
+    const events = try watcher.poll(0);
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(Kind.unwatched, events[0].kind);
+    try testing.expectEqual(id, events[0].id);
+    try testing.expectEqualStrings(target, events[0].path);
+    try testing.expectEqual(@as(usize, 0), watcher.pending.items.len);
 }
 
 test "auto chooses polling per network or FUSE watch and explicit backends retain their choice" {

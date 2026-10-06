@@ -246,5 +246,12 @@ pub const AddOptions = struct {
     /// symbolic link on the way to it that leads there -- is not
     /// watched twice either: the watch is not promoted, and says
     /// `Kind.unwatched` against its path.
+    ///
+    /// The ancestor a watch parks on has to be one the backend can
+    /// register. One it refuses -- a folder that cannot be listed, a full
+    /// watch table -- fails the `add` with that error, as a watch taken
+    /// on a path that was there would. Refused later, when the watch
+    /// steps down to a folder that has appeared, the watch stops waiting
+    /// and says `Kind.unwatched` against its path.
     pending: bool = false,
 };
