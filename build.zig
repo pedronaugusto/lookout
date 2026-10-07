@@ -143,8 +143,11 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "lookout", .module = module }},
         }),
     });
+    const bench_run = b.addRunArtifact(bench);
+    // A measurement is taken again on every run, never answered from the cache.
+    bench_run.has_side_effects = true;
     const bench_step = b.step("bench", "Run lookout's speed checks (a quiet machine, a release mode)");
-    bench_step.dependOn(&b.addRunArtifact(bench).step);
+    bench_step.dependOn(&bench_run.step);
     test_step.dependOn(&bench.step);
     check_step.dependOn(&bench.step);
 
