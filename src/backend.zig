@@ -57,6 +57,8 @@ comptime {
 
 test {
     _ = Poll;
+    if (comptime builtin.target.os.tag.isDarwin()) _ = FsEvents;
+    if (comptime builtin.target.os.tag == .linux) _ = Inotify;
     // Held-event transfers use no Windows calls and are tested on every host.
     _ = @import("backend/Windows.zig");
 }

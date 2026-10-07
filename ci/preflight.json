@@ -5,6 +5,10 @@
   "test_roots": [
     "src/tests.zig"
   ],
+  "test_dependencies": [
+    "shakedown",
+    "airlock.testing"
+  ],
   "function_exceptions": {},
   "layout_exceptions": {},
   "docs": {

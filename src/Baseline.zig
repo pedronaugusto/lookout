@@ -162,7 +162,7 @@ pub fn diff(b: *Baseline, io: Io) Baseline.DiffError![]const Change {
 }
 
 /// Errors `save` can return.
-pub const SaveError = Allocator.Error || airlock.WriteFileError || error{UnsupportedBaselineFilter};
+pub const SaveError = Allocator.Error || airlock.WriteFileOrRefuseError || error{UnsupportedBaselineFilter};
 /// Errors `load` can return.
 pub const LoadError = format.ParseError || Io.Dir.ReadFileAllocError || Io.Dir.RealPathFileAllocError ||
     CompiledFilter.Error || error{UnsupportedBaselineFilter};
@@ -201,9 +201,9 @@ pub fn save(b: *const Baseline, io: Io, filename: []const u8, options: SaveOptio
         dir.* = .{ .path = path, .truncated = remembered.snapshot.truncated, .check_contents = remembered.snapshot.check_contents, .entries = entries };
     }
     const bytes = try format.encode(a, .{ .platform = format.platform, .root = b.root, .recursive = b.recursive, .max_dir_entries = b.max_dir_entries, .ignore = b.filter.ignore, .only = b.filter.only, .dirs = dirs });
-    _ = try airlock.writeFile(io, Io.Dir.cwd(), filename, bytes, .{
+    _ = try airlock.writeFileOrRefuse(io, Io.Dir.cwd(), filename, bytes, .{
         .create = .{ .temp = .{ .random = temp_prefix } },
-        .commit = .{ .level = if (options.durable) .data else .none, .fallback = .refuse },
+        .commit = .{ .level = if (options.durable) .data else .none },
     });
 }
 
@@ -418,6 +418,7 @@ fn forgetAll(b: *Baseline, gpa: Allocator) void {
 
 const testing = std.testing;
 const shakedown = @import("shakedown");
+const seam = @import("airlock.testing");
 
 /// How many changes of `kind` the diff holds, and the path of the first.
 fn count(changes: []const Change, kind: Kind) usize {
@@ -962,27 +963,22 @@ test "a durable save syncs the file before the replacement and its directory aft
     try tmp.dir.writeFile(io, .{ .sub_path = "tree/new", .data = "one" });
     _ = try b.diff(io);
 
-    const Call = airlock.sys.Call;
-    const io_error: airlock.sys.Code = if (builtin.target.os.tag == .windows) .IO_DEVICE_ERROR else .IO;
     // The temp's sync is whichever call the platform makes for it, the
     // first of these on a path with the temp's prefix.
     const temp: shakedown.Match = .{ .prefix = temp_prefix };
-    const file_sync = [_]Seam.Plan.Entry{
-        .{ .at = .{ .nth = .{ .call = .sync_data, .n = 1, .path = temp } }, .fault = .{ .code = io_error } },
-        .{ .at = .{ .nth = .{ .call = .sync_full, .n = 1, .path = temp } }, .fault = .{ .code = io_error } },
-        .{ .at = .{ .nth = .{ .call = .sync_barrier, .n = 1, .path = temp } }, .fault = .{ .code = io_error } },
-        .{ .at = .{ .nth = .{ .call = .sync_plain, .n = 1, .path = temp } }, .fault = .{ .code = io_error } },
-        .{ .at = .{ .nth = .{ .call = .sync_writeout, .n = 1, .path = temp } }, .fault = .{ .code = io_error } },
-    };
-    const dir_sync = [_]Seam.Plan.Entry{
-        .{ .at = .{ .nth = .{ .call = Call.sync_dir, .n = 1 } }, .fault = .{ .code = io_error } },
+    const file_sync = [_]seam.Plan.Entry{
+        .{ .at = .{ .nth = .{ .call = .sync_data, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_full, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_barrier, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_plain, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_writeout, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
     };
 
     // A failed sync of the new contents leaves the old file, and no temp.
     {
-        var seam: Seam = undefined;
-        const hooked = seam.init(io, &file_sync);
-        try testing.expectError(error.InputOutput, b.save(hooked, filename, .{ .durable = true }));
+        const hooked = try seam.Seam.create(gpa, io, .{ .plan = &file_sync });
+        defer hooked.destroy();
+        try testing.expectError(error.InputOutput, b.save(hooked.io(), filename, .{ .durable = true }));
         const unchanged = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
         defer gpa.free(unchanged);
         try testing.expectEqualSlices(u8, original, unchanged);
@@ -991,59 +987,25 @@ test "a durable save syncs the file before the replacement and its directory aft
     // A failed directory sync comes after the replacement: the new file
     // is what a reader sees, and the save says it is not durable.
     {
-        var seam: Seam = undefined;
-        const hooked = seam.init(io, &dir_sync);
-        try testing.expectError(error.PublishedNotDurable, b.save(hooked, filename, .{ .durable = true }));
+        const hooked = try seam.Seam.create(gpa, io, .{ .plan = &.{seam.fail(.sync_dir, 1, seam.io_error)} });
+        defer hooked.destroy();
+        try testing.expectError(error.PublishedNotDurable, b.save(hooked.io(), filename, .{ .durable = true }));
         var replaced = try load(gpa, io, filename, root, .{});
         defer replaced.deinit();
         try testing.expectEqual(@as(usize, 0), (try replaced.diff(io)).len);
     }
     // Two syncs make a durable save, on every platform, and none a plain one.
     {
-        var seam: Seam = undefined;
-        const hooked = seam.init(io, &.{});
-        try b.save(hooked, filename, .{ .durable = true });
-        try testing.expectEqual(@as(u32, 2), seam.syncs);
-        seam.syncs = 0;
-        try b.save(hooked, filename, .{});
-        try testing.expectEqual(@as(u32, 0), seam.syncs);
+        const hooked = try seam.Seam.create(gpa, io, .{});
+        defer hooked.destroy();
+        try b.save(hooked.io(), filename, .{ .durable = true });
+        try testing.expectEqual(@as(u32, 2), hooked.syncs());
+        hooked.reset();
+        try b.save(hooked.io(), filename, .{});
+        try testing.expectEqual(@as(u32, 0), hooked.syncs());
         try testing.expectEqual(@as(usize, 2), try countEntries(tmp.dir));
     }
 }
-
-/// airlock's raw calls, decided by a plan and counted: the `Io` its test
-/// seam reads.
-const Seam = struct {
-    plan: Plan,
-    steps: shakedown.Steps,
-    counters: [8]u32,
-    hook: airlock.sys.Hook,
-    layer: Hooked,
-    /// The syncs airlock made, of a file or a directory.
-    syncs: u32,
-
-    const Plan = shakedown.Plan(airlock.sys.Call, airlock.sys.Result);
-    const Hooked = shakedown.Layer(airlock.sys.HookedState, .{ .fileSync = airlock.sys.hookedSync });
-
-    /// The seam must not move after this.
-    fn init(s: *Seam, base: Io, entries: []const Plan.Entry) Io {
-        s.steps = .init();
-        s.syncs = 0;
-        s.plan = .init(entries, .{ .steps = &s.steps, .counters = &s.counters });
-        s.hook = .{ .ctx = s, .call = decide, .base = base };
-        s.layer = .init(base, .{ .hook = &s.hook });
-        return s.layer.io();
-    }
-
-    fn decide(ctx: *anyopaque, call: airlock.sys.Call, path: ?[]const u8) ?airlock.sys.Result {
-        const s: *Seam = @ptrCast(@alignCast(ctx)); // safe: the hook's ctx is its seam
-        switch (call) {
-            .sync_full, .sync_barrier, .sync_data, .sync_plain, .sync_writeout, .sync_dir => s.syncs += 1,
-            else => {},
-        }
-        return s.plan.decide(call, path);
-    }
-};
 
 /// How many entries `dir` holds.
 fn countEntries(dir: Io.Dir) !usize {

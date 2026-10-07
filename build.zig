@@ -1,6 +1,8 @@
 const std = @import("std");
+/// airlock's build, for its test seam.
+const airlock_build = @import("airlock");
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -42,7 +44,8 @@ pub fn build(b: *std.Build) void {
         break :sdk .{ .frameworks = pinned.path("Frameworks"), .include = pinned.path("include"), .lib = pinned.path("lib") };
     };
 
-    const airlock = b.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock");
+    const airlock_dependency = b.dependency("airlock", .{ .target = target, .optimize = optimize });
+    const airlock = airlock_dependency.module("airlock");
     const sweep = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep");
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "airlock", .module = airlock },
@@ -60,6 +63,10 @@ pub fn build(b: *std.Build) void {
         if (sdk) |paths| paths.addTo(module);
         module.linkFramework("CoreServices", .{});
     }
+
+    // Everything below is lookout's own: a project depending on lookout
+    // builds the module and nothing else, and fetches nothing for it.
+    if (b.pkg_hash.len != 0) return;
 
     //=====================================================================
     // Tests.
@@ -92,14 +99,16 @@ pub fn build(b: *std.Build) void {
             .imports = imports,
         }),
     });
-    // shakedown is a lazy, test-only dependency, asked for only in
-    // lookout's own tree: a project that depends on lookout never fetches
-    // it, and no production source imports it.
-    if (b.pkg_hash.len == 0) {
-        if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |shakedown| {
-            tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
-        } else |_| {}
-    }
+    // shakedown, and airlock's seam on it, are lazy and test-only: no
+    // production source imports them. Their error is returned last, so one
+    // configure pass asks for them and for preflight together.
+    var needed: error{LazyDependencyNeeded}!void = {};
+    if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |shakedown| {
+        tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
+    } else |err| needed = err;
+    if (airlock_build.testing(airlock_dependency)) |seam| {
+        tests.root_module.addImport("airlock.testing", seam);
+    } else |err| needed = err;
     if (darwin) {
         if (sdk) |paths| paths.addTo(tests.root_module);
         tests.root_module.linkFramework("CoreServices", .{});
@@ -143,53 +152,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(examples_step);
 
     //=====================================================================
-    // Benchmarks
-    //
-    // lookout's own speed claims, each held to its ceiling on every
-    // backend the target has. `zig build bench` runs them, which wants a
-    // quiet machine and a release mode; everywhere else, CI included,
-    // they are only compiled, so they keep building without a shared
-    // runner timing anything.
-    //=====================================================================
-
-    const bench = b.addTest(.{
-        .name = "lookout-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/speed_claims.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = darwin,
-            .imports = &.{.{ .name = "lookout", .module = module }},
-        }),
-    });
-    // The filter on its own: the question every backend asks of every
-    // event. It is internal to lookout, so it is built here as a module of
-    // its own rather than reached through `lookout`.
-    const filter_bench = b.addTest(.{
-        .name = "lookout-filter-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/filter.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "filter", .module = b.createModule(.{
-                .root_source_file = b.path("src/CompiledFilter.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = imports,
-            }) }},
-        }),
-    });
-    const bench_step = b.step("bench", "Run lookout's speed checks (a quiet machine, a release mode)");
-    for ([_]*std.Build.Step.Compile{ bench, filter_bench }) |artifact| {
-        const bench_run = b.addRunArtifact(artifact);
-        // A measurement is taken again on every run, never answered from the cache.
-        bench_run.has_side_effects = true;
-        bench_step.dependOn(&bench_run.step);
-        test_step.dependOn(&artifact.step);
-        check_step.dependOn(&artifact.step);
-    }
-
-    //=====================================================================
     // The default step: compile everything for the selected target,
     // without running any of it.
     //
@@ -217,10 +179,26 @@ pub fn build(b: *std.Build) void {
     // project.
     //=====================================================================
 
-    if (b.pkg_hash.len != 0) return;
     if (b.lazyImport(@This(), "preflight")) |preflight| {
-        // What `LOOKOUT_TRACE` prints is at the info level.
-        preflight.addCi(b, .{ .tests = test_step, .portable_tests = true, .test_log_level = .info });
+        // What `LOOKOUT_TRACE` prints is at the info level. `zig build
+        // bench` holds lookout's speed claims to their ceilings, on every
+        // backend the target has, in ReleaseFast on a quiet machine; `zig
+        // build test` runs each once with `--smoke`, judging nothing.
+        preflight.addCi(b, .{
+            .tests = test_step,
+            .portable_tests = true,
+            .test_log_level = .info,
+            .bench = .{
+                .programs = &.{
+                    .{ .name = "lookout-bench", .source = "bench/speed_claims.zig" },
+                    .{ .name = "lookout-filter-bench", .source = "bench/filter.zig" },
+                },
+                .imports = benchImports,
+                .target = target,
+                .optimize = optimize,
+                .link_libc = darwin,
+            },
+        });
         // The build a consumer gets: airlock and sweep, and nothing lookout
         // fetches for itself.
         preflight.addConsumerCheck(b, .{
@@ -229,6 +207,49 @@ pub fn build(b: *std.Build) void {
             .packages = &.{ b.dependency("airlock", .{}), b.dependency("sweep", .{}) },
         });
     }
+    return needed;
+}
+
+/// lookout, and its filter on its own, in the mode a benchmark builds in:
+/// an imported module keeps its own mode, so a ReleaseFast benchmark over
+/// the Debug module would time the Debug module. The filter is internal to
+/// lookout, so the filter benchmark builds it as a module of its own rather
+/// than reaching it through `lookout`.
+fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "airlock", .module = b.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock") },
+        .{ .name = "sweep", .module = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep") },
+    };
+    const darwin = target.result.os.tag.isDarwin();
+    const lookout = b.createModule(.{
+        .root_source_file = b.path("src/lookout.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = darwin,
+        .imports = imports,
+    });
+    if (darwin) {
+        // The Apple SDK the published module links against, as `build`
+        // chose it.
+        const published = b.modules.get("lookout").?;
+        for (published.include_dirs.items) |dir| switch (dir) {
+            .framework_path_system => |path| lookout.addSystemFrameworkPath(path),
+            .path_system => |path| lookout.addSystemIncludePath(path),
+            else => {},
+        };
+        for (published.lib_paths.items) |path| lookout.addLibraryPath(path);
+        lookout.linkFramework("CoreServices", .{});
+    }
+    const filter = b.createModule(.{
+        .root_source_file = b.path("src/CompiledFilter.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = imports,
+    });
+    return b.allocator.dupe(std.Build.Module.Import, &.{
+        .{ .name = "lookout", .module = lookout },
+        .{ .name = "filter", .module = filter },
+    }) catch @panic("OOM");
 }
 
 /// Every example, listed rather than globbed: a build graph that scans a

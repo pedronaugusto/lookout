@@ -180,7 +180,9 @@ native build too.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the clock, fault
-  injection and counting allocator the tests run on, fetched only for them.
+  injection and counting allocator the tests run on, and under airlock's test
+  seam, `airlock.testing`, which counts and fails a durable save's syncs;
+  fetched only for the tests.
 - A pinned macOS SDK package, fetched only to link a named Apple target without
   an SDK of its own.
 
@@ -189,13 +191,14 @@ native build too.
 `zig build test` runs the suite and examples in Debug by default, exercising the
 backends available on the host. Tests cover filters, pending paths, renames,
 overflow, cancellation, settling, checkpoints and resource cleanup. `zig build
-examples` runs the examples separately. `zig build bench` runs lookout's own speed
-checks; run it on a quiet machine, with `-Doptimize=ReleaseFast`. CI also runs
+examples` runs the examples separately. `zig build bench` holds lookout's own speed
+claims to their ceilings in ReleaseFast; run it on a quiet machine. `zig build test`
+runs each once with `--smoke`, judging nothing. CI also runs
 `zig build lint`, which includes `zig build check-consumer`: a project that depends
 on lookout by path, built with only airlock and sweep fetched.
 
 [CI](.github/workflows/ci.yml) has three tiers. The fast tier runs the source
-checks and the Linux Debug suite with the examples, compiles the benchmarks, and
+checks and the Linux Debug suite with the examples and each benchmark once, and
 compiles the tests for macOS, Windows and every configured target without running
 them. The merge tier adds the Debug suite on `macos-latest` and `windows-latest`.
 The release tier runs the tests and examples in Debug and ReleaseSafe on all three

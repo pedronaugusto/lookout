@@ -55,10 +55,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Export `path.relative` and `path.within` for callers that need the same
   platform case folding and separator handling as lookout's watches.
 
-- `zig build bench` runs lookout's own speed checks, each held to its ceiling on every backend the target has: a change while `poll` is blocked, a rename then delete, a cancellation before `poll`, a wake, a task stopped by a flag, and what a filter costs a path. CI compiles them and runs none.
+- `zig build bench` runs lookout's own speed checks, each held to its ceiling on every backend the target has: a change while `poll` is blocked, a rename then delete, a cancellation before `poll`, a wake, a task stopped by a flag, and what a filter costs a path. `zig build test` runs each once with `--smoke`, judging nothing; CI times none.
 
 ### Changed
 
+- The fetched package holds the build files, `src` and the three documents; the benchmarks, examples, `ci/` and `.github/` stay in the repository, and a project depending on lookout builds the module and nothing else.
 - A path is matched against all of a watch's patterns in one pass over it, whatever their number and shape: a filter of twenty ignore patterns and three include patterns decides a path about six times faster than before, and one pattern about one and a half times.
 
 - Resuming an FSEvents checkpoint reports only what the watch would report live: a saved change outside the watch or excluded by its filter is dropped, and a saved rename with one side left out is the creation or removal of the other. Token paths must be absolute, without NUL or `.`/`..` components, or the token is `error.InvalidCheckpoint`.

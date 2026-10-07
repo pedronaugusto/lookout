@@ -1,6 +1,8 @@
 //! What a filter costs a path: the question every backend asks of every
 //! event, and of every directory before it registers one. `zig build
-//! bench` runs it; run it on a quiet machine, in a release mode.
+//! bench` runs it in ReleaseFast; run it on a quiet machine. A case over its
+//! ceiling fails the run. `--smoke`, which `zig build test` runs, asks a
+//! hundred paths once and judges nothing.
 
 const std = @import("std");
 const CompiledFilter = @import("filter");
@@ -39,11 +41,23 @@ fn paths(gpa: std.mem.Allocator, n: usize) ![][]u8 {
 /// about 500.
 const ceiling_ns = 1_500;
 
-test "quiet: a path is decided against twenty ignore patterns and three includes in one pass" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+/// A path is decided against twenty ignore patterns and three includes in
+/// one pass.
+pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    var smoke = false;
+    for (args[1..]) |arg| {
+        if (!std.mem.eql(u8, arg, "--smoke")) return error.UnknownArgument;
+        smoke = true;
+    }
+    const gpa = init.gpa;
+    const io = init.io;
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const out = &stdout.interface;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const subjects = try paths(arena.allocator(), 20_000);
-    const io = std.testing.io;
+    const subjects = try paths(arena.allocator(), if (smoke) 100 else 20_000);
     const Case = struct { name: []const u8, ignore: []const []const u8, only: []const []const u8 };
     const cases = [_]Case{
         .{ .name = "ignore_1", .ignore = ignore[2..3], .only = &.{} },
@@ -53,11 +67,11 @@ test "quiet: a path is decided against twenty ignore patterns and three includes
     };
     var over = false;
     for (cases) |case| {
-        var filter: CompiledFilter = try .compile(std.testing.allocator, .{ .ignore = case.ignore, .only = case.only });
+        var filter: CompiledFilter = try .compile(gpa, .{ .ignore = case.ignore, .only = case.only });
         defer filter.deinit();
         var best: u64 = std.math.maxInt(u64);
         var kept: usize = 0;
-        for (0..9) |_| {
+        for (0..if (smoke) 1 else 9) |_| {
             const start: std.Io.Timestamp = .now(io, .awake);
             kept = 0;
             for (subjects) |subject| {
@@ -68,18 +82,16 @@ test "quiet: a path is decided against twenty ignore patterns and three includes
         }
         std.mem.doNotOptimizeAway(kept);
         const per_question = best / (2 * subjects.len);
-        row(case.name, "per_question", per_question, "ns");
-        row(case.name, "budget", ceiling_ns, "ns");
-        row(case.name, "within_budget", @intFromBool(per_question <= ceiling_ns), "bool");
+        try row(out, case.name, "per_question", per_question, "ns");
+        if (smoke) continue;
+        try row(out, case.name, "budget", ceiling_ns, "ns");
+        try row(out, case.name, "within_budget", @intFromBool(per_question <= ceiling_ns), "bool");
         if (per_question > ceiling_ns) over = true;
     }
-    try std.testing.expect(!over);
+    try out.flush();
+    if (over) return error.OverBudget;
 }
 
-fn row(job: []const u8, measure: []const u8, value: anytype, unit: []const u8) void {
-    var buffer: [256]u8 = undefined;
-    var stderr = std.Io.File.stderr().writer(std.testing.io, &buffer);
-    const out = &stderr.interface;
-    out.print("lookout\tfilter_{s}\t{s}\t{d}\t{s}\n", .{ job, measure, value, unit }) catch return;
-    out.flush() catch return;
+fn row(out: *std.Io.Writer, job: []const u8, measure: []const u8, value: anytype, unit: []const u8) !void {
+    try out.print("lookout\tfilter_{s}\t{s}\t{d}\t{s}\n", .{ job, measure, value, unit });
 }

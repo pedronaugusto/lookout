@@ -1449,6 +1449,7 @@ pub const Watcher = struct {
 };
 
 test {
+    _ = options_mod;
     _ = Baseline;
     _ = Batch;
     _ = Filter;

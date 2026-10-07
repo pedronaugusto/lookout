@@ -953,3 +953,7 @@ pub const test_access = if (builtin.is_test) struct {
     pub const handleRead = handleReadFixture;
 } else struct {};
 const handleReadFixture = handleRead;
+
+test {
+    _ = records;
+}

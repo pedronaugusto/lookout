@@ -6,10 +6,6 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "bench",
-        "ci",
-        "examples",
-        ".github",
         "src",
         "CHANGELOG.md",
         "LICENSE",
@@ -22,21 +18,21 @@
             .lazy = true,
         },
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock#652b0e4f73a909d6876841d63ce997d496cae6c0",
-            .hash = "airlock-0.1.0-rfvu6J-8BABiFpUiwfGRVNjVLnwb0LEm3iFQlf3QCigU",
+            .url = "git+https://github.com/pedronaugusto/airlock#7f4add1981b59692b7fd7847f32fa6b32768bd3d",
+            .hash = "airlock-0.1.0-rfvu6NjxBABhOEPDMvXzGDAD-pNwgnBCo8wNfrF2g-EU",
         },
         .sweep = .{
             .url = "git+https://github.com/pedronaugusto/sweep#c6b0c6dba020178772adddd8d77b1cc25c52bb5c",
             .hash = "sweep-0.1.0-6ErwaQWIBAA3793zVtx4LOcrmeMPWLeMp6Zhbv3ZcAig",
         },
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight#f6a5191c42d8de76ab758465bf897e7acee931d9",
-            .hash = "preflight-0.1.0-LX1Zwv2WBQABkEzFUf5-MzYCtr0SSYHZrV097Vir7DYQ",
+            .url = "git+https://github.com/pedronaugusto/preflight#045cd2d68a7a9be3c03a6175744f639fc4751718",
+            .hash = "preflight-0.1.0-LX1ZwnBQBgBceaBSMsgOeQ7SHX_0AinOBImDX4xKQvI-",
             .lazy = true,
         },
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#4f590164cf91ef9f244ee26b0a20444b9ecdcdae",
-            .hash = "shakedown-0.1.0-BR8U47zBAwCoNKX4gYuShFo5o5tCR_GSyQ3PVjzPDoPw",
+            .url = "git+https://github.com/pedronaugusto/shakedown#59e7e2c5a2557eb2eff0b89512807c5b0c603886",
+            .hash = "shakedown-0.1.0-BR8U40ysBwCaMSj_dNrcfybX5fZyMcm_SbqE6k0Xiptx",
             .lazy = true,
         },
     },

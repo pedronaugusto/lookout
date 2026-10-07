@@ -2174,3 +2174,7 @@ const reportPlainFixture = reportPlain;
 const holdFixture = hold;
 
 const resolveHeldFixture = resolveHeld;
+
+test {
+    _ = records;
+}
