@@ -31,8 +31,8 @@ const Target = lookout.Target;
 
 const Baseline = @This();
 
-/// The `std.Io` every listing goes through, captured at `seed`.
-io: Io,
+/// Kept for the listings and the last diff, and released by `deinit`.
+gpa: Allocator,
 /// Absolute, canonical path of the tree, owned here.
 root: []u8,
 /// Mirrors `Options.recursive`.
@@ -92,10 +92,13 @@ pub const Change = struct {
     target: Target = .unknown,
 };
 
-/// Errors seeding or diffing can return, on top of the file-system errors
-/// of reading the tree.
-pub const Error = Allocator.Error || Io.Dir.OpenError ||
+/// Errors `seed` can return, on top of the file-system errors of reading
+/// the tree.
+pub const SeedError = Allocator.Error || Io.Dir.OpenError ||
     Io.Dir.RealPathFileAllocError || Snapshot.RefreshError;
+
+/// Errors `diff` can return: the reads `seed` makes, made again.
+pub const DiffError = SeedError;
 
 /// Remembers what is in `path` now, so that a later `diff` can say what
 /// has changed since.
@@ -103,14 +106,16 @@ pub const Error = Allocator.Error || Io.Dir.OpenError ||
 /// `path` must be a directory and must exist; a file has no listing to
 /// compare and `error.NotDir` says so. Call this where the watch is
 /// taken, so that the two cover the same tree from the same moment.
-pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Baseline.Error!Baseline {
+///
+/// `gpa` is kept until `deinit`; `io` is used here and not kept.
+pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Baseline.SeedError!Baseline {
     const real = try Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
     defer gpa.free(real);
 
     // Everything is owned by `b` from here, so there is one thing to
     // undo on failure rather than three that would undo each other.
     var b: Baseline = .{
-        .io = io,
+        .gpa = gpa,
         .root = try gpa.dupe(u8, real),
         .recursive = options.recursive,
         .max_dir_entries = options.max_dir_entries,
@@ -119,21 +124,22 @@ pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Baseline
         .changes = .empty,
         .scratch = .empty,
     };
-    errdefer b.deinit(gpa);
+    errdefer b.deinit();
     b.filter = try options.filter.dupe(gpa);
-    try b.scan(gpa, false);
+    try b.scan(gpa, io, false);
     return b;
 }
 
 /// Releases the remembered listings and the last diff.
-pub fn deinit(b: *Baseline, gpa: Allocator) void {
+pub fn deinit(b: *Baseline) void {
+    const gpa = b.gpa;
     b.forgetAll(gpa);
     b.dirs.deinit(gpa);
     b.clearChanges(gpa);
     b.changes.deinit(gpa);
     Snapshot.freeChanges(gpa, &b.scratch);
     b.scratch.deinit(gpa);
-    b.filter.deinit(gpa);
+    b.filter.deinit();
     gpa.free(b.root);
     b.* = undefined;
 }
@@ -147,25 +153,20 @@ pub fn deinit(b: *Baseline, gpa: Allocator) void {
 /// code. Calling it twice in a row returns nothing the second time.
 /// An error leaves the remembered tree unchanged, so retrying reports
 /// changes that have not yet been returned.
-pub fn diff(b: *Baseline, gpa: Allocator) Baseline.Error![]const Change {
-    try b.scan(gpa, true);
+pub fn diff(b: *Baseline, io: Io) Baseline.DiffError![]const Change {
+    try b.scan(b.gpa, io, true);
     return b.changes.items;
 }
 
+/// Errors `save` can return.
 pub const SaveError = Allocator.Error || Io.Dir.CreateFileAtomicError || Io.File.WritePositionalError ||
     Io.File.Atomic.ReplaceError || Io.Dir.OpenError || Io.File.SyncError ||
     error{ UnsupportedBaselineFilter, UnsupportedBaselineDurability };
+/// Errors `load` can return.
 pub const LoadError = format.ParseError || Io.Dir.ReadFileAllocError || Io.Dir.RealPathFileAllocError ||
     error{UnsupportedBaselineFilter};
 
-/// Atomically replaces the caller-named file with this baseline, without
-/// walking again. Keep it outside the watched tree. Predicate filters cannot
-/// be serialized and return UnsupportedBaselineFilter. Replacement is atomic;
-/// this does not promise power-loss durability (no fsync).
-pub fn save(b: *const Baseline, gpa: Allocator, filename: []const u8) Baseline.SaveError!void {
-    return b.saveWithOptions(gpa, filename, .{});
-}
-
+/// How `save` writes the file.
 pub const SaveOptions = struct {
     /// Sync the temporary file before replacement and its parent directory
     /// afterwards. Windows returns UnsupportedBaselineDurability before writing:
@@ -173,12 +174,16 @@ pub const SaveOptions = struct {
     durable: bool = false,
 };
 
-/// Saves with optional filesystem durability. A failure of the directory sync
-/// happens after replacement, so the new file may already be visible.
-pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8, options: SaveOptions) Baseline.SaveError!void {
+/// Atomically replaces the caller-named file with this baseline, without
+/// walking again. Keep it outside the watched tree. Predicate filters cannot
+/// be serialized and return UnsupportedBaselineFilter. Replacement is atomic;
+/// power-loss durability (fsync) is `SaveOptions.durable`, off by default. A
+/// failure of the directory sync happens after replacement, so the new file
+/// may already be visible.
+pub fn save(b: *const Baseline, io: Io, filename: []const u8, options: SaveOptions) Baseline.SaveError!void {
     if (b.filter.allow != null) return error.UnsupportedBaselineFilter;
     if (options.durable and builtin.target.os.tag == .windows) return error.UnsupportedBaselineDurability;
-    var arena: std.heap.ArenaAllocator = .init(gpa);
+    var arena: std.heap.ArenaAllocator = .init(b.gpa);
     defer arena.deinit();
     const a = arena.allocator();
     const dirs = try a.alloc(format.Directory, b.dirs.count());
@@ -192,18 +197,18 @@ pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8,
     // cwd may be the POSIX AT_FDCWD sentinel rather than an open descriptor.
     // Iteration also avoids Linux O_PATH, which cannot be fsynced.
     const parent: ?Io.Dir = if (options.durable)
-        try Io.Dir.cwd().openDir(b.io, std.Io.Dir.path.dirname(filename) orelse ".", .{ .iterate = true })
+        try Io.Dir.cwd().openDir(io, std.Io.Dir.path.dirname(filename) orelse ".", .{ .iterate = true })
     else
         null;
-    defer if (parent) |dir| dir.close(b.io);
-    var file = try (parent orelse Io.Dir.cwd()).createFileAtomic(b.io, if (parent != null) std.Io.Dir.path.basename(filename) else filename, .{ .replace = true });
-    defer file.deinit(b.io);
-    try file.file.writePositionalAll(b.io, bytes, 0);
-    if (options.durable) try file.file.sync(b.io);
-    try file.replace(b.io);
+    defer if (parent) |dir| dir.close(io);
+    var file = try (parent orelse Io.Dir.cwd()).createFileAtomic(io, if (parent != null) std.Io.Dir.path.basename(filename) else filename, .{ .replace = true });
+    defer file.deinit(io);
+    try file.file.writePositionalAll(io, bytes, 0);
+    if (options.durable) try file.file.sync(io);
+    try file.replace(io);
     if (parent) |dir| {
         const directory: Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
-        try directory.sync(b.io);
+        try directory.sync(io);
     }
 }
 
@@ -211,6 +216,7 @@ pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8,
 /// pattern filters must match those supplied by the caller. Corrupt, foreign
 /// and old-version files return InvalidBaseline, ForeignBaseline and
 /// UnsupportedBaselineVersion respectively. A later diff costs one walk.
+/// `gpa` is kept until `deinit`, as by `seed`.
 pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, options: Options) Baseline.LoadError!Baseline {
     if (options.filter.allow != null) return error.UnsupportedBaselineFilter;
     const bytes = Io.Dir.cwd().readFileAlloc(io, filename, gpa, .limited(format.file_limit)) catch |err| switch (err) {
@@ -229,8 +235,8 @@ pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, opti
     if (!path_cmp.eql(real, state.root) or options.recursive != state.recursive or
         options.max_dir_entries != state.max_dir_entries or !samePatterns(options.filter.ignore, state.ignore) or
         !samePatterns(options.filter.only, state.only)) return error.ForeignBaseline;
-    var b: Baseline = .{ .io = io, .root = try gpa.dupe(u8, state.root), .recursive = state.recursive, .max_dir_entries = state.max_dir_entries, .filter = .none, .dirs = .empty, .changes = .empty, .scratch = .empty };
-    errdefer b.deinit(gpa);
+    var b: Baseline = .{ .gpa = gpa, .root = try gpa.dupe(u8, state.root), .recursive = state.recursive, .max_dir_entries = state.max_dir_entries, .filter = .none, .dirs = .empty, .changes = .empty, .scratch = .empty };
+    errdefer b.deinit();
     b.filter = try options.filter.dupe(gpa);
     for (state.dirs) |dir| {
         const owned = try gpa.dupe(u8, dir.path);
@@ -256,7 +262,7 @@ fn samePatterns(a: []const []const u8, b: []const []const u8) bool {
 /// Walks the tree, refreshing every directory's listing. With `report`
 /// set, every difference found becomes a `Change`; without it the walk is
 /// only there to take the listings, which is what `seed` wants.
-fn scan(b: *Baseline, gpa: Allocator, report: bool) Error!void {
+fn scan(b: *Baseline, gpa: Allocator, io: Io, report: bool) DiffError!void {
     // The scan owns new listings and paths until all traversal and reporting
     // have succeeded. The remembered tree stays available for comparison
     // throughout; publishing the result needs no allocation.
@@ -266,7 +272,7 @@ fn scan(b: *Baseline, gpa: Allocator, report: bool) Error!void {
         b.scratch = next.scratch;
         next.deinit(gpa);
     }
-    try next.run(gpa, report);
+    try next.run(gpa, io, report);
     std.mem.swap(@TypeOf(b.dirs), &b.dirs, &next.dirs);
     std.mem.swap(@TypeOf(b.changes), &b.changes, &next.changes);
 }
@@ -290,7 +296,7 @@ const Scan = struct {
         s.* = undefined;
     }
 
-    fn run(s: *Scan, gpa: Allocator, report: bool) Error!void {
+    fn run(s: *Scan, gpa: Allocator, io: Io, report: bool) DiffError!void {
         const b = s.baseline;
         var frontier: std.ArrayList([]u8) = .empty;
         defer {
@@ -306,7 +312,7 @@ const Scan = struct {
         var i: usize = 0;
         while (i < frontier.items.len) : (i += 1) {
             const path = frontier.items[i];
-            var dir = Io.Dir.openDirAbsolute(b.io, path, .{ .iterate = true }) catch |err| {
+            var dir = Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch |err| {
                 switch (err) {
                     error.FileNotFound, error.NotDir => {},
                     else => return err,
@@ -319,12 +325,12 @@ const Scan = struct {
                 if (b.dirs.count() != 0) try s.record(gpa, b.root, .removed, .directory);
                 return;
             };
-            defer dir.close(b.io);
+            defer dir.close(io);
 
             const index = try s.remember(gpa, path);
             Snapshot.freeChanges(gpa, &s.scratch);
             const before = if (b.dirs.getPtr(path)) |remembered| &remembered.snapshot else &Snapshot.empty;
-            s.dirs.values()[index].snapshot = try before.read(gpa, b.io, dir, b.max_dir_entries);
+            s.dirs.values()[index].snapshot = try before.read(gpa, io, dir, b.max_dir_entries);
 
             if (report) {
                 try s.dirs.values()[index].snapshot.compare(gpa, before, &s.scratch);
@@ -351,7 +357,7 @@ const Scan = struct {
     }
 
     /// Turns one directory's comparison into changes.
-    fn reportChanges(s: *Scan, gpa: Allocator, path: []const u8, index: usize) Error!void {
+    fn reportChanges(s: *Scan, gpa: Allocator, path: []const u8, index: usize) DiffError!void {
         const b = s.baseline;
         if (s.dirs.values()[index].snapshot.truncated) {
             try s.record(gpa, b.root, .overflow, .directory);
@@ -374,7 +380,7 @@ const Scan = struct {
     /// Reports the contents of directories the scan did not reach. Their
     /// listings still belong to the previous baseline until the scan commits.
     /// The directory itself is reported by its parent's comparison.
-    fn reportLost(s: *Scan, gpa: Allocator) Error!void {
+    fn reportLost(s: *Scan, gpa: Allocator) DiffError!void {
         const b = s.baseline;
         for (b.dirs.keys(), b.dirs.values()) |path, remembered| {
             if (s.dirs.contains(path)) continue;
@@ -452,8 +458,8 @@ test "a seeded baseline has nothing to report until something changes" {
     defer gpa.free(root);
 
     var base = try Baseline.seed(gpa, io, root, .{});
-    defer base.deinit(gpa);
-    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+    defer base.deinit();
+    try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
 }
 
 test "a diff names what was created, changed and removed" {
@@ -467,13 +473,13 @@ test "a diff names what was created, changed and removed" {
     defer gpa.free(root);
 
     var base = try Baseline.seed(gpa, io, root, .{});
-    defer base.deinit(gpa);
+    defer base.deinit();
 
     try tmp.dir.writeFile(io, .{ .sub_path = "new.txt", .data = "two" });
     try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "one and two" });
     try tmp.dir.deleteFile(io, "old.txt");
 
-    const changes = try base.diff(gpa);
+    const changes = try base.diff(io);
     try testing.expectEqual(@as(usize, 3), changes.len);
     try testing.expect(try holds(changes, root, "new.txt", .created));
     try testing.expect(try holds(changes, root, "kept.txt", .modified));
@@ -481,7 +487,7 @@ test "a diff names what was created, changed and removed" {
 
     // The baseline is now what it found, so the same diff twice says
     // nothing the second time.
-    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+    try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
 }
 
 test "a recursive baseline follows subdirectories" {
@@ -494,20 +500,20 @@ test "a recursive baseline follows subdirectories" {
     defer gpa.free(root);
 
     var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
-    defer base.deinit(gpa);
+    defer base.deinit();
 
     try tmp.dir.createDirPath(io, "sub/deeper");
     try tmp.dir.writeFile(io, .{ .sub_path = "sub/deeper/a.txt", .data = "one" });
 
-    const changes = try base.diff(gpa);
+    const changes = try base.diff(io);
     try testing.expect(try holds(changes, root, "sub/deeper", .created));
     try testing.expect(try holds(changes, root, "sub/deeper/a.txt", .created));
 
     // A non-recursive one covers the root and nothing below it.
     var shallow = try Baseline.seed(gpa, io, root, .{});
-    defer shallow.deinit(gpa);
+    defer shallow.deinit();
     try tmp.dir.writeFile(io, .{ .sub_path = "sub/deeper/b.txt", .data = "two" });
-    try testing.expectEqual(@as(usize, 0), (try shallow.diff(gpa)).len);
+    try testing.expectEqual(@as(usize, 0), (try shallow.diff(io)).len);
 }
 
 test "a removed directory takes everything it held with it" {
@@ -522,13 +528,13 @@ test "a removed directory takes everything it held with it" {
     defer gpa.free(root);
 
     var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
-    defer base.deinit(gpa);
+    defer base.deinit();
 
     try tmp.dir.deleteTree(io, "tree");
 
     // Every path that is gone, not only the directory the caller could
     // have worked out for itself.
-    const changes = try base.diff(gpa);
+    const changes = try base.diff(io);
     try testing.expect(try holds(changes, root, "tree", .removed));
     try testing.expect(try holds(changes, root, "tree/a.txt", .removed));
     try testing.expect(try holds(changes, root, "tree/deep", .removed));
@@ -567,7 +573,7 @@ test "a change says whether its path is a file or a directory, gone or not" {
     defer gpa.free(root);
 
     var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
-    defer base.deinit(gpa);
+    defer base.deinit();
 
     // Gone: no stat could say what these were, and the diff still does.
     try tmp.dir.deleteTree(io, "tree");
@@ -576,7 +582,7 @@ test "a change says whether its path is a file or a directory, gone or not" {
     try tmp.dir.deleteFile(io, "turns.txt");
     try tmp.dir.createDir(io, "turns.txt", .default_dir);
 
-    const changes = try base.diff(gpa);
+    const changes = try base.diff(io);
     try testing.expectEqual(Target.directory, try targetOf(changes, root, "tree"));
     try testing.expectEqual(Target.directory, try targetOf(changes, root, "tree/deep"));
     try testing.expectEqual(Target.file, try targetOf(changes, root, "tree/a.txt"));
@@ -603,13 +609,13 @@ test "a filter keeps a subtree out of the diff" {
         .recursive = true,
         .filter = .{ .ignore = &.{ "skip", "*.tmp" } },
     });
-    defer base.deinit(gpa);
+    defer base.deinit();
 
     try tmp.dir.writeFile(io, .{ .sub_path = "skip/a.txt", .data = "one" });
     try tmp.dir.writeFile(io, .{ .sub_path = "keep/b.tmp", .data = "two" });
     try tmp.dir.writeFile(io, .{ .sub_path = "keep/b.txt", .data = "three" });
 
-    const changes = try base.diff(gpa);
+    const changes = try base.diff(io);
     try testing.expectEqual(@as(usize, 1), changes.len);
     try testing.expect(try holds(changes, root, "keep/b.txt", .created));
 }
@@ -627,12 +633,12 @@ test "an only filter traverses ancestors of matching descendants" {
         .recursive = true,
         .filter = .{ .only = &.{"src/**/*.zig"} },
     });
-    defer base.deinit(gpa);
+    defer base.deinit();
 
     try tmp.dir.writeFile(io, .{ .sub_path = "src/deep/main.zig", .data = "const x = 1;" });
     try tmp.dir.writeFile(io, .{ .sub_path = "src/deep/notes.txt", .data = "ignored" });
 
-    const changes = try base.diff(gpa);
+    const changes = try base.diff(io);
     try testing.expectEqual(@as(usize, 1), changes.len);
     try testing.expect(try holds(changes, root, "src/deep/main.zig", .created));
 }
@@ -646,7 +652,7 @@ test "a directory past the entry limit says the diff is incomplete" {
     defer gpa.free(root);
 
     var base = try Baseline.seed(gpa, io, root, .{ .max_dir_entries = 2 });
-    defer base.deinit(gpa);
+    defer base.deinit();
 
     for (0..6) |i| {
         var name: [8]u8 = undefined;
@@ -658,7 +664,7 @@ test "a directory past the entry limit says the diff is incomplete" {
 
     // The same word the watcher uses, meaning the same thing: this answer
     // is not the whole answer.
-    const changes = try base.diff(gpa);
+    const changes = try base.diff(io);
     try testing.expect(count(changes, .overflow) >= 1);
     try testing.expectEqualStrings(root, changes[0].path);
 }
@@ -674,10 +680,10 @@ test "a baseline whose root is gone says so" {
     defer gpa.free(root);
 
     var base = try Baseline.seed(gpa, io, root, .{});
-    defer base.deinit(gpa);
+    defer base.deinit();
 
     try tmp.dir.deleteTree(io, "target");
-    const changes = try base.diff(gpa);
+    const changes = try base.diff(io);
     try testing.expectEqual(@as(usize, 1), changes.len);
     try testing.expectEqualStrings(root, changes[0].path);
     try testing.expectEqual(Kind.removed, changes[0].kind);
@@ -692,15 +698,15 @@ test "a baseline reports its root removal only once" {
     const root = try tmp.dir.realPathFileAlloc(io, "target", gpa);
     defer gpa.free(root);
     var base = try Baseline.seed(gpa, io, root, .{});
-    defer base.deinit(gpa);
+    defer base.deinit();
     try tmp.dir.deleteTree(io, "target");
-    try testing.expectEqual(@as(usize, 1), (try base.diff(gpa)).len);
-    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+    try testing.expectEqual(@as(usize, 1), (try base.diff(io)).len);
+    try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
     try tmp.dir.createDirPath(io, "target");
-    _ = try base.diff(gpa);
+    _ = try base.diff(io);
     try tmp.dir.deleteTree(io, "target");
-    try testing.expectEqual(@as(usize, 1), (try base.diff(gpa)).len);
-    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+    try testing.expectEqual(@as(usize, 1), (try base.diff(io)).len);
+    try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
 }
 
 test "seeding a file rather than a directory is refused" {
@@ -728,7 +734,7 @@ test "directory access failures are not removals" {
     inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
         inline for (.{ false, true }) |subtree| {
             var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
-            defer base.deinit(gpa);
+            defer base.deinit();
             const before = base.dirs.count();
             var vtable = io.vtable.*;
             vtable.dirOpenDir = struct {
@@ -737,12 +743,11 @@ test "directory access failures are not removals" {
                     return testing.io.vtable.dirOpenDir(userdata, dir, path, options);
                 }
             }.open;
-            base.io.vtable = &vtable;
-            try testing.expectError(failure, base.diff(gpa));
+            const failing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+            try testing.expectError(failure, base.diff(failing));
             try testing.expectEqual(before, base.dirs.count());
             try testing.expectEqual(@as(usize, 0), count(base.changes.items, .removed));
-            base.io = io;
-            try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+            try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
         }
     }
 }
@@ -756,7 +761,7 @@ test "a failed baseline traversal leaves changes for the retry" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
     var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
-    defer base.deinit(gpa);
+    defer base.deinit();
     try tmp.dir.writeFile(io, .{ .sub_path = "new", .data = "one" });
     try tmp.dir.writeFile(io, .{ .sub_path = "blocked/new", .data = "two" });
 
@@ -767,13 +772,12 @@ test "a failed baseline traversal leaves changes for the retry" {
             return testing.io.vtable.dirOpenDir(userdata, dir, path, options);
         }
     }.open;
-    base.io.vtable = &vtable;
-    try testing.expectError(error.AccessDenied, base.diff(gpa));
-    base.io = io;
-    const changes = try base.diff(gpa);
+    const failing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    try testing.expectError(error.AccessDenied, base.diff(failing));
+    const changes = try base.diff(io);
     try testing.expect(try holds(changes, root, "new", .created));
     try testing.expect(try holds(changes, root, "blocked/new", .created));
-    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+    try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
 }
 
 test "a failed baseline allocation leaves every change for the retry" {
@@ -790,23 +794,26 @@ test "a failed baseline allocation leaves every change for the retry" {
         try tmp.dir.writeFile(io, .{ .sub_path = "old", .data = "one" });
         try tmp.dir.writeFile(io, .{ .sub_path = "sub/changed", .data = "one" });
         var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
-        defer base.deinit(gpa);
+        defer base.deinit();
         try tmp.dir.deleteFile(io, "old");
         try tmp.dir.writeFile(io, .{ .sub_path = "new", .data = "one" });
         try tmp.dir.writeFile(io, .{ .sub_path = "sub/changed", .data = "one and two" });
         defer tmp.dir.deleteFile(io, "new") catch unreachable;
 
         var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
-        if (base.diff(failing.allocator())) |_| {
+        base.gpa = failing.allocator();
+        const result = base.diff(io);
+        base.gpa = gpa;
+        if (result) |_| {
             try testing.expect(!failing.has_induced_failure);
             break;
         } else |err| {
             try testing.expectEqual(error.OutOfMemory, err);
-            const changes = try base.diff(gpa);
+            const changes = try base.diff(io);
             try testing.expect(try holds(changes, root, "old", .removed));
             try testing.expect(try holds(changes, root, "new", .created));
             try testing.expect(try holds(changes, root, "sub/changed", .modified));
-            try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+            try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
         }
     }
 }
@@ -821,20 +828,20 @@ test "a truncated baseline keeps remembered subtrees until a complete scan" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
     var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
-    defer base.deinit(gpa);
+    defer base.deinit();
 
     // No entries can be read with this budget. Nothing about a path's
     // existence follows from its absence in that listing.
     base.max_dir_entries = 0;
-    const incomplete = try base.diff(gpa);
+    const incomplete = try base.diff(io);
     try testing.expect(count(incomplete, .overflow) > 0);
     try testing.expectEqual(@as(usize, 0), count(incomplete, .removed));
     try testing.expectEqual(@as(usize, 3), base.dirs.count());
     try tmp.dir.deleteFile(io, "sub/deep/kept");
     base.max_dir_entries = 4096;
-    const complete = try base.diff(gpa);
+    const complete = try base.diff(io);
     try testing.expect(try holds(complete, root, "sub/deep/kept", .removed));
-    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+    try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
 }
 
 test "a saved baseline reports changes since last run and replaces its file" {
@@ -854,33 +861,33 @@ test "a saved baseline reports changes since last run and replaces its file" {
     const options: Options = .{ .recursive = true, .filter = .{ .ignore = &.{"*.tmp"} } };
     {
         var base = try seed(gpa, io, root, options);
-        defer base.deinit(gpa);
-        try base.save(gpa, file);
+        defer base.deinit();
+        try base.save(io, file, .{});
     }
     try tmp.dir.deleteTree(io, "tree/sub");
     try tmp.dir.writeFile(io, .{ .sub_path = "tree/kept", .data = "changed size" });
     try tmp.dir.writeFile(io, .{ .sub_path = "tree/new", .data = "new" });
     try tmp.dir.writeFile(io, .{ .sub_path = "tree/ignore.tmp", .data = "new" });
     var loaded = try load(gpa, io, file, root, options);
-    defer loaded.deinit(gpa);
-    const changes = try loaded.diff(gpa);
+    defer loaded.deinit();
+    const changes = try loaded.diff(io);
     try testing.expectEqual(@as(usize, 4), changes.len);
     try testing.expect(try holds(changes, root, "sub/gone", .removed));
     try testing.expectEqual(Target.file, try targetOf(changes, root, "sub/gone"));
     try testing.expect(try holds(changes, root, "sub", .removed));
     try testing.expect(try holds(changes, root, "kept", .modified));
     try testing.expect(try holds(changes, root, "new", .created));
-    try loaded.save(gpa, file);
+    try loaded.save(io, file, .{});
     var again = try load(gpa, io, file, root, options);
-    defer again.deinit(gpa);
-    try testing.expectEqual(@as(usize, 0), (try again.diff(gpa)).len);
+    defer again.deinit();
+    try testing.expectEqual(@as(usize, 0), (try again.diff(io)).len);
     try testing.expectError(error.ForeignBaseline, load(gpa, io, file, parent, options));
     try testing.expectError(error.ForeignBaseline, load(gpa, io, file, root, .{}));
     try tmp.dir.deleteTree(io, "tree");
     var missing = try load(gpa, io, file, root, options);
-    defer missing.deinit(gpa);
-    try testing.expectEqual(@as(usize, 1), (try missing.diff(gpa)).len);
-    try testing.expectEqual(@as(usize, 0), (try missing.diff(gpa)).len);
+    defer missing.deinit();
+    try testing.expectEqual(@as(usize, 1), (try missing.diff(io)).len);
+    try testing.expectEqual(@as(usize, 0), (try missing.diff(io)).len);
 }
 
 test "baseline storage refuses corrupt foreign and old files by name" {
@@ -914,8 +921,8 @@ test "a failed baseline replacement leaves the previous file intact" {
     const filename = try std.Io.Dir.path.join(gpa, &.{ parent, "saved" });
     defer gpa.free(filename);
     var b = try seed(gpa, io, root, .{});
-    defer b.deinit(gpa);
-    try b.save(gpa, filename);
+    defer b.deinit();
+    try b.save(io, filename, .{});
     const original = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
     defer gpa.free(original);
     const Broken = struct {
@@ -927,9 +934,8 @@ test "a failed baseline replacement leaves the previous file intact" {
     };
     var vtable = io.vtable.*;
     vtable.fileWritePositional = Broken.write;
-    b.io = .{ .userdata = io.userdata, .vtable = &vtable };
-    try testing.expectError(error.NoSpaceLeft, b.save(gpa, filename));
-    b.io = io;
+    const broken: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    try testing.expectError(error.NoSpaceLeft, b.save(broken, filename, .{}));
     const after = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
     defer gpa.free(after);
     try testing.expectEqualSlices(u8, original, after);
@@ -964,14 +970,14 @@ test "durable baseline saves sync before and after replacement and preserve name
     const filename = try std.Io.Dir.path.join(gpa, &.{ parent, "saved" });
     defer gpa.free(filename);
     var b = try seed(gpa, io, root, .{});
-    defer b.deinit(gpa);
-    try b.save(gpa, filename);
+    defer b.deinit();
+    try b.save(io, filename, .{});
     const original = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
     defer gpa.free(original);
     try tmp.dir.writeFile(io, .{ .sub_path = "tree/new", .data = "one" });
-    _ = try b.diff(gpa);
+    _ = try b.diff(io);
     if (builtin.target.os.tag == .windows) {
-        try testing.expectError(error.UnsupportedBaselineDurability, b.saveWithOptions(gpa, filename, .{ .durable = true }));
+        try testing.expectError(error.UnsupportedBaselineDurability, b.save(io, filename, .{ .durable = true }));
         const after = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
         defer gpa.free(after);
         try testing.expectEqualSlices(u8, original, after);
@@ -988,24 +994,24 @@ test "durable baseline saves sync before and after replacement and preserve name
     };
     var vtable = io.vtable.*;
     vtable.fileSync = Sync.sync;
-    b.io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const syncing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     Sync.calls = 0;
     Sync.fail_at = 1;
-    try testing.expectError(error.NoSpaceLeft, b.saveWithOptions(gpa, filename, .{ .durable = true }));
+    try testing.expectError(error.NoSpaceLeft, b.save(syncing, filename, .{ .durable = true }));
     const unchanged = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
     defer gpa.free(unchanged);
     try testing.expectEqualSlices(u8, original, unchanged);
     Sync.calls = 0;
     Sync.fail_at = 2;
-    try testing.expectError(error.NoSpaceLeft, b.saveWithOptions(gpa, filename, .{ .durable = true }));
+    try testing.expectError(error.NoSpaceLeft, b.save(syncing, filename, .{ .durable = true }));
     var replaced = try load(gpa, io, filename, root, .{});
-    defer replaced.deinit(gpa);
-    try testing.expectEqual(@as(usize, 0), (try replaced.diff(gpa)).len);
+    defer replaced.deinit();
+    try testing.expectEqual(@as(usize, 0), (try replaced.diff(io)).len);
     Sync.calls = 0;
     Sync.fail_at = 0;
-    try b.saveWithOptions(gpa, filename, .{ .durable = true });
+    try b.save(syncing, filename, .{ .durable = true });
     try testing.expectEqual(@as(usize, 2), Sync.calls);
     Sync.calls = 0;
-    try b.save(gpa, filename);
+    try b.save(syncing, filename, .{});
     try testing.expectEqual(@as(usize, 0), Sync.calls);
 }

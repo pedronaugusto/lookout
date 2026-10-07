@@ -36,7 +36,6 @@ const WatchId = lookout.WatchId;
 const Kqueue = @This();
 
 gpa: Allocator,
-io: Io,
 /// The kqueue descriptor, which is what `lookout.Watcher.fd` hands out.
 kq: posix.fd_t,
 tree: Tree,
@@ -84,7 +83,7 @@ const file_open_flags: posix.O = switch (builtin.target.os.tag) {
 };
 
 /// Creates the kernel queue.
-pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!Kqueue {
+pub fn init(gpa: Allocator, options: Options) contract.InitError!Kqueue {
     const rc = std.c.kqueue();
     if (rc < 0) return switch (posix.errno(rc)) {
         .MFILE => error.ProcessFdQuotaExceeded,
@@ -94,9 +93,8 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!Kqueue 
     };
     var k: Kqueue = .{
         .gpa = gpa,
-        .io = io,
         .kq = rc,
-        .tree = .init(gpa, io, options.max_dir_entries, true),
+        .tree = .init(gpa, options.max_dir_entries, true),
         .registrations = .empty,
     };
     // A file's descriptor is this backend's, and goes with its node.
@@ -119,12 +117,12 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!Kqueue 
 }
 
 /// Closes the kernel queue and every watched descriptor.
-pub fn deinit(k: *Kqueue) void {
+pub fn deinit(k: *Kqueue, io: Io) void {
     for (k.registrations.values()) |registration| {
         if (registration.owns_file) _ = std.c.close(registration.fd);
     }
     k.registrations.deinit(k.gpa);
-    k.tree.deinit();
+    k.tree.deinit(io);
     _ = std.c.close(k.kq);
     k.* = undefined;
 }
@@ -164,6 +162,7 @@ pub fn registrationCount(k: *const Kqueue) usize {
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(
     k: *Kqueue,
+    io: Io,
     id: WatchId,
     abs_path: []const u8,
     options: AddOptions,
@@ -173,48 +172,48 @@ pub fn add(
     defer added.deinit(k.gpa);
     // A watch the kernel only half accepted is worse than none: it would
     // report a fraction of a tree and look like a quiet one.
-    errdefer k.remove(id);
+    errdefer k.remove(io, id);
 
-    try k.tree.addWatch(id, abs_path, options, &added, batch);
-    try k.register(added.items, batch);
+    try k.tree.addWatch(io, id, abs_path, options, &added, batch);
+    try k.register(io, added.items, batch);
 }
 
 /// Stops watching `id` and closes its descriptors.
-pub fn remove(k: *Kqueue, id: WatchId) void {
-    k.tree.removeWatch(id);
+pub fn remove(k: *Kqueue, io: Io, id: WatchId) void {
+    k.tree.removeWatch(io, id);
     k.closeOrphanedRegistrations();
 }
 
 /// Reconciles descriptors with a live watch's new filter.
-pub fn refilter(k: *Kqueue, id: WatchId, filter: lookout.Filter, batch: *Batch) contract.RefilterError!void {
+pub fn refilter(k: *Kqueue, io: Io, id: WatchId, filter: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(k.gpa);
-    try k.tree.refilter(id, filter, &added, batch);
-    try k.register(added.items, batch);
+    try k.tree.refilter(io, id, filter, &added, batch);
+    try k.register(io, added.items, batch);
     k.closeOrphanedRegistrations();
 }
 
 /// Waits on the kernel queue until it reports something `batch` did not
 /// already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+pub fn wait(k: *Kqueue, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     // `kevent` both waits and takes the events off the queue, so once it
     // has returned, what it returned is recorded before anything stops:
     // see `Watcher.poll`. The wait itself is out of `std.Io`'s reach.
-    const protection = k.io.swapCancelProtection(.blocked);
-    defer _ = k.io.swapCancelProtection(protection);
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     const before = batch.revision;
-    if (k.retry_registration) try k.retryRegistrations(batch);
-    const deadline: Deadline = .start(k.io, timeout_ms);
+    if (k.retry_registration) try k.retryRegistrations(io, batch);
+    const deadline: Deadline = .fromMs(io, timeout_ms);
 
     while (true) {
-        const woken = try k.drain(batch);
+        const woken = try k.drain(io, batch);
         if (woken or batch.revision != before) return;
         // The one thing the shared deadline does not hand out: this is
         // the only backend that wants a `timespec`, and Windows gives
         // the name no shape to build one from.
         var storage: std.c.timespec = undefined;
         const timeout_ptr: ?*const std.c.timespec = ptr: {
-            const remaining = deadline.remainingMs() orelse break :ptr null;
+            const remaining = deadline.remainingMs(io) orelse break :ptr null;
             storage = .{
                 .sec = @intCast(remaining / std.time.ms_per_s),
                 .nsec = @intCast((remaining % std.time.ms_per_s) * std.time.ns_per_ms),
@@ -235,7 +234,7 @@ pub fn wait(k: *Kqueue, batch: *Batch, timeout_ms: ?u32) contract.PollError!void
     }
 }
 
-fn drain(k: *Kqueue, batch: *Batch) contract.PollError!bool {
+fn drain(k: *Kqueue, io: Io, batch: *Batch) contract.PollError!bool {
     var woken = false;
     while (k.delivery_at < k.delivery_len) : (k.delivery_at += 1) {
         const event = k.delivery[k.delivery_at];
@@ -243,7 +242,7 @@ fn drain(k: *Kqueue, batch: *Batch) contract.PollError!bool {
             woken = true;
             continue;
         }
-        try k.handle(event, batch);
+        try k.handle(io, event, batch);
     }
     k.delivery_len = 0;
     k.delivery_at = 0;
@@ -251,7 +250,7 @@ fn drain(k: *Kqueue, batch: *Batch) contract.PollError!bool {
 }
 
 /// Turns one kernel event into lookout events.
-fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) contract.PollError!void {
+fn handle(k: *Kqueue, io: Io, event: posix.Kevent, batch: *Batch) contract.PollError!void {
     const node_id: Tree.NodeId = @fromBackingInt(@intCast(event.udata));
     const node = k.tree.nodes.get(node_id) orelse return;
     const flags = event.fflags;
@@ -272,8 +271,8 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) contract.PollError!voi
         break :gone null;
     };
     if (gone) |kind| {
-        try batch.push(k.gpa, watch, path, kind, target);
-        k.tree.removeSubtree(watch, path);
+        try batch.push(k.gpa, io, watch, path, kind, target);
+        k.tree.removeSubtree(io, watch, path);
         k.closeOrphanedRegistrations();
         return;
     }
@@ -283,9 +282,9 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) contract.PollError!voi
             if (flags & (std.c.NOTE.WRITE | std.c.NOTE.EXTEND) != 0) {
                 var added: std.ArrayList(Tree.NodeId) = .empty;
                 defer added.deinit(k.gpa);
-                try k.tree.rescanDirectory(node_id, batch, &added);
+                try k.tree.rescanDirectory(io, node_id, batch, &added);
                 k.closeOrphanedRegistrations();
-                k.register(added.items, batch) catch |err| switch (err) {
+                k.register(io, added.items, batch) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     // The descriptor limit, reached while registering
                     // the path the caller named. `register` has already
@@ -297,22 +296,22 @@ fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) contract.PollError!voi
             // moved, which the listing already reports as a creation or a
             // removal, so only a real metadata change is an event here.
             if (flags & std.c.NOTE.ATTRIB != 0) {
-                try batch.push(k.gpa, watch, path, .attributes, target);
+                try batch.push(k.gpa, io, watch, path, .attributes, target);
             }
         },
         .file => {
             if (flags & (std.c.NOTE.WRITE | std.c.NOTE.EXTEND) != 0) {
-                try batch.push(k.gpa, watch, path, .modified, target);
+                try batch.push(k.gpa, io, watch, path, .modified, target);
             }
             if (flags & (std.c.NOTE.ATTRIB | std.c.NOTE.LINK) != 0) {
-                try batch.push(k.gpa, watch, path, .attributes, target);
+                try batch.push(k.gpa, io, watch, path, .attributes, target);
             }
         },
     }
 }
 
 /// Tells the kernel about newly created nodes.
-fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) contract.AddError!void {
+fn register(k: *Kqueue, io: Io, ids: []const Tree.NodeId, batch: *Batch) contract.AddError!void {
     errdefer k.retry_registration = true;
     for (ids) |id| {
         if (k.registrations.contains(id)) continue;
@@ -332,7 +331,7 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) contract.AddErr
                     if (std.mem.eql(u8, node.path, k.tree.watchRoot(node.watch)))
                         return translateOpen(err);
                     try batch.trouble(k.gpa, node.watch, node.path, .file);
-                    k.tree.removeSubtree(node.watch, node.path);
+                    k.tree.removeSubtree(io, node.watch, node.path);
                     continue;
                 };
                 break :file opened;
@@ -359,7 +358,7 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) contract.AddErr
                 .NOMEM => {
                     if (root) return error.WatchLimitReached;
                     try batch.trouble(k.gpa, node.watch, node.path, .directory);
-                    k.tree.removeSubtree(node.watch, node.path);
+                    k.tree.removeSubtree(io, node.watch, node.path);
                     continue;
                 },
                 .NOENT, .BADF => continue,
@@ -374,12 +373,12 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) contract.AddErr
 /// Reconciles an interrupted registration pass without depending on the
 /// caller's temporary list of newly created nodes. Only failures need
 /// this full traversal; ordinary waits still do work per kernel event.
-fn retryRegistrations(k: *Kqueue, batch: *Batch) contract.PollError!void {
+fn retryRegistrations(k: *Kqueue, io: Io, batch: *Batch) contract.PollError!void {
     k.closeOrphanedRegistrations();
     var i: usize = 0;
     while (i < k.tree.nodes.count()) {
         const id = k.tree.nodes.keys()[i];
-        k.register(&.{id}, batch) catch |err| switch (err) {
+        k.register(io, &.{id}, batch) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Unexpected => return error.Unexpected,
             else => {},
@@ -440,6 +439,7 @@ fn translateOpen(err: posix.OpenError) contract.AddError {
 }
 
 test "allocation failure during delivery retains unread kqueue flags" {
+    const io = std.testing.io;
     const testing = std.testing;
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
@@ -452,21 +452,21 @@ test "allocation failure during delivery retains unread kqueue flags" {
         const last = try tmp.dir.realPathFileAlloc(testing.io, "last", testing.allocator);
         defer testing.allocator.free(last);
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
-        var k = try Kqueue.init(failing.allocator(), testing.io, .{});
-        defer k.deinit();
-        var batch = Batch.init(testing.io, .{});
+        var k = try Kqueue.init(failing.allocator(), .{});
+        defer k.deinit(io);
+        var batch = Batch.init(.{});
         defer batch.deinit(failing.allocator());
-        try k.add(@fromBackingInt(@intCast(0)), first, .{}, &batch);
-        try k.add(@fromBackingInt(@intCast(1)), last, .{}, &batch);
-        try k.wait(&batch, 0);
+        try k.add(io, @fromBackingInt(@intCast(0)), first, .{}, &batch);
+        try k.add(io, @fromBackingInt(@intCast(1)), last, .{}, &batch);
+        try k.wait(io, &batch, 0);
         batch.reset(failing.allocator());
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "first", .data = "changed" });
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "last", .data = "changed" });
         failing.fail_index = failing.alloc_index + fail_index;
-        const answer = k.wait(&batch, 0);
+        const answer = k.wait(io, &batch, 0);
         failing.fail_index = std.math.maxInt(usize);
         if (answer) |_| break else |err| try testing.expectEqual(error.OutOfMemory, err);
-        try k.wait(&batch, 0);
+        try k.wait(io, &batch, 0);
         var saw_first = false;
         var saw_last = false;
         for (batch.events.items) |event| {
@@ -479,17 +479,18 @@ test "allocation failure during delivery retains unread kqueue flags" {
 }
 
 test "a failed kqueue registration is retried before waiting again" {
+    const io = std.testing.io;
     const testing = std.testing;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(root);
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
-    var k = try Kqueue.init(failing.allocator(), testing.io, .{});
-    defer k.deinit();
-    var batch = Batch.init(testing.io, .{});
+    var k = try Kqueue.init(failing.allocator(), .{});
+    defer k.deinit(io);
+    var batch = Batch.init(.{});
     defer batch.deinit(failing.allocator());
-    try k.add(@fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch);
+    try k.add(io, @fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch);
     const parent = k.tree.nodes.keys()[0];
     try tmp.dir.createDirPath(testing.io, "child");
     for (0..40) |i| {
@@ -498,20 +499,20 @@ test "a failed kqueue registration is retried before waiting again" {
     }
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(failing.allocator());
-    try k.tree.rescanDirectory(parent, &batch, &added);
+    try k.tree.rescanDirectory(io, parent, &batch, &added);
     // The snapshot is now committed, but the kernel has not accepted
     // these nodes. A later scan cannot rediscover their creation.
     failing.fail_index = failing.alloc_index;
-    try testing.expectError(error.OutOfMemory, k.register(added.items, &batch));
+    try testing.expectError(error.OutOfMemory, k.register(io, added.items, &batch));
     failing.fail_index = std.math.maxInt(usize);
     try testing.expectEqual(k.registrations.count(), k.registrationCount());
-    try k.wait(&batch, 0);
+    try k.wait(io, &batch, 0);
     batch.reset(failing.allocator());
     for (0..40) |i| {
         var name: [64]u8 = undefined;
         try tmp.dir.writeFile(testing.io, .{ .sub_path = try std.mem.print(&name, "child/file{d}", .{i}), .data = "changed size" });
     }
-    try k.wait(&batch, 0);
+    try k.wait(io, &batch, 0);
     var modified: usize = 0;
     for (batch.events.items) |event| {
         if (event.kind == .modified) modified += 1;

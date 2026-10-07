@@ -14,7 +14,7 @@ pub const Backend = enum {
     /// Apple's FSEvents. Recursive in the kernel, so a tree costs no
     /// descriptor per directory, and renames arrive paired. Its system
     /// delivery has a measured roughly ten-millisecond floor even when
-    /// `Options.latency_ms` is zero.
+    /// `Watcher.Options.latency` is zero.
     fsevents,
     /// BSD `kqueue` with the `EVFILT_VNODE` filter. One descriptor is held
     /// open per watched file and per watched directory.
@@ -129,10 +129,10 @@ pub fn reportsRootMove(backend: Backend) RootMove {
 /// paused. FSEvents, `kqueue`, `ReadDirectoryChangesW` and a listing
 /// comparison all see writes and none of them sees a close.
 ///
-/// This is why `Options.report_closes` is off by default and why this
+/// This is why `Watcher.Options.report_closes` is off by default and why this
 /// predicate exists beside it: a kind that silently means nothing on
 /// four backends out of five is worse than no kind at all. A program
-/// that wants the end of a write everywhere uses `Options.settle_ms`,
+/// that wants the end of a write everywhere uses `Watcher.Options.settle`,
 /// which estimates it from a quiet window and works on all five.
 pub fn reportsCloses(backend: Backend) bool {
     return switch (backend) {
@@ -145,7 +145,7 @@ pub fn reportsCloses(backend: Backend) bool {
 /// Whether `backend` can leave an excluded directory unregistered, or
 /// only drop the events coming out of it.
 ///
-/// `AddOptions.filter` means the same thing to a caller on every backend:
+/// `Watcher.AddOptions.filter` means the same thing to a caller on every backend:
 /// the excluded paths are not reported. What differs is what it saves.
 /// `inotify`, `kqueue` and `poll` recurse in lookout, so an excluded
 /// directory is never opened, never registered, and costs neither a
@@ -204,7 +204,7 @@ pub fn tracksCheckpoint(backend: Backend) bool {
 /// confused with a later one.
 ///
 /// One id is registered with a backend twice, and only one: a watch taken
-/// with `AddOptions.pending` is registered on an ancestor while it waits
+/// with `Watcher.AddOptions.pending` is registered on an ancestor while it waits
 /// and registered again on the path itself when that appears, under the
 /// id the caller already holds. A backend that keeps state past a
 /// `remove` -- a buffer the kernel may still be writing into, say --
@@ -218,7 +218,7 @@ pub const WatchId = enum(u32) { _ };
 /// `created` < `renamed` < `removed` < `overflow` < `unwatched`. A path
 /// created and then written inside one window reports `created`; a path
 /// written and then deleted reports `removed`.
-/// With `Options.debounce_ms`, ordinary changes report the kind seen last.
+/// With `Watcher.Options.debounce`, ordinary changes report the kind seen last.
 /// `overflow` and `unwatched` bypass holding in every mode and keep the
 /// precedence above: neither can be replaced by an ordinary change, and
 /// `unwatched` wins when both loss notices name the same watch and path.
@@ -255,10 +255,10 @@ pub const Kind = enum {
     attributes,
     /// A file that was open for writing has been closed: the writing is
     /// over, said by the operating system rather than inferred from a
-    /// quiet window. It is the answer `Options.settle_ms` estimates.
+    /// quiet window. It is the answer `Watcher.Options.settle` estimates.
     ///
     /// Only `inotify` is told this, so it is off unless
-    /// `Options.report_closes` asks for it, and `reportsCloses` says
+    /// `Watcher.Options.report_closes` asks for it, and `reportsCloses` says
     /// whether this backend can ever produce one. A program that turns
     /// it on where it is not reported gets no `closed` events and the
     /// writes it would have reported still arrive as `modified`; nothing
@@ -266,12 +266,12 @@ pub const Kind = enum {
     ///
     /// It outranks `modified` when both land on one path in a window,
     /// because a write that has finished is the more useful statement of
-    /// the two. Set `Options.latency_ms` to zero to see each as it
+    /// the two. Set `Watcher.Options.latency` to zero to see each as it
     /// arrives instead.
     closed,
     /// Changes were lost and the caller should rescan the watch itself.
     /// Emitted when the kernel event queue overflowed, or when a watched
-    /// directory holds more entries than `Options.max_dir_entries`. The
+    /// directory holds more entries than `Watcher.Options.max_dir_entries`. The
     /// `path` is the watch root, not an entry inside it.
     ///
     /// What was lost is not knowable from here -- the names are gone --

@@ -21,15 +21,16 @@ buffered standard output writer, `output`.
 ```zig
 const lookout = @import("lookout");
 
-var watcher: lookout.Watcher = try .init(gpa, io, .{});
-defer watcher.deinit();
+var watcher: lookout.Watcher = try .init(gpa, .{});
+defer watcher.deinit(io);
 
-const id = try watcher.add(dir_path, .{ .recursive = true });
-defer watcher.remove(id);
+const id = try watcher.add(io, dir_path, .{ .recursive = true });
+defer watcher.remove(io, id);
 
 try scratch.writeFile(io, .{ .sub_path = "notes.txt", .data = "hello" });
 
-for (try watcher.poll(1_000)) |event| {
+const one_second: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+for (try watcher.poll(io, one_second)) |event| {
     try output.print("{s} {s}\n", .{ @tagName(event.kind), event.path });
 }
 ```
@@ -37,35 +38,14 @@ for (try watcher.poll(1_000)) |event| {
 
 ## Design
 
-The watcher module uses Zig's standard library. Apple targets link libc and
-CoreServices for FSEvents and need a macOS SDK. Native macOS builds locate the host
-SDK; cross-builds on other hosts use a pinned SDK package. An explicit `--sysroot`
-takes precedence, and `-Dbundled-macos-sdk=true` selects the pinned SDK on macOS too. A watcher uses the caller's allocator for watches, paths and event storage. A
+The watcher module uses Zig's standard library. A watcher keeps the allocator it is
+made with for watches, paths and event storage, and keeps no `std.Io`: `add`,
+`remove`, `refilter`, `poll` and `deinit` each take the `io` they go through. A
 returned event slice and its paths belong to the watcher until the next poll or
-`deinit`. Baselines and checkpoints retain their storage and must be released.
-A checkpoint can outlive its watcher; the watcher allocator must remain valid
-until every shared checkpoint is released.
-
-The automatic backend is FSEvents on Apple targets, kqueue on supported BSD targets,
-inotify on Linux, ReadDirectoryChangesW on Windows and polling elsewhere.
-For each `.auto` watch, network and FUSE filesystems select polling instead; local
-watches in the same watcher retain their native backend. Explicit backend choices
-are kept. `Watcher.capabilities(id)` reports the selected backend and filesystem
-fact (`local`, `network`, `fuse`, or `unknown`), measured with statfs/statvfs on POSIX
-and drive type plus the remote-device flag on Windows. Failed or unavailable type
-queries report `unknown` and keep the default backend. Pending watches recheck when
-they move to another ancestor or their root. `backend()` reports the watcher's
-primary backend; use the per-watch result for backend capability queries. A watcher
-with polling registrations returns null from `fd` and `checkpoint`; drive it with
-`poll` and persist a Baseline for those roots. Detection describes the root mount,
-so watch nested mounted volumes separately. `supported`
-lets a caller check availability before choosing a backend. `pairsRenames`,
-`reportsRootMove`, `reportsCloses`, `prunesIgnored` and `tracksCheckpoint` describe
-differences that affect event handling.
-
-| Backend | Snapshot comparison |
-| --- | --- |
-| Polling | Entries whose mtime or ctime is not strictly older than their snapshot in a conservative two-second tick are checked by content until they age; hashes cover files up to 1 MiB, and larger or unreadable racy entries report modification. |
+`deinit`. Baselines keep their allocator the same way and take `io` per call;
+baselines and checkpoints retain their storage and must be released. A checkpoint
+can outlive its watcher; the watcher allocator must remain valid until every shared
+checkpoint is released.
 
 `add` accepts file or directory watches, optional recursion and filters. Pending watches
 wait at an existing ancestor for a missing path to appear. Filters select paths by
@@ -85,20 +65,23 @@ elsewhere is reported on its own path and the watch moves to the new directory; 
 dangling link is an entry until it changes. A watch follows at most `max_followed_links`
 links and reports a link past that as `unwatched`. Such a watch produces no checkpoint.
 
-`latency_ms` combines events collected together. `settle_ms` waits for modified file
-contents to stop changing. `debounce_ms` holds ordinary changes until the path is quiet
+`Watcher.Options` holds the watcher's settings and `Watcher.AddOptions` a watch's.
+Their spans are `std.Io.Duration`s, kept to the millisecond and rounded up.
+`latency` combines events collected together. `settle` waits for modified file
+contents to stop changing. `debounce` holds ordinary changes until the path is quiet
 and reports the last kind; it takes precedence over the other windows. Overflow and
 unwatched notices bypass these waits. A seeded `Baseline` can diff the current tree
 after an overflow. A baseline does not follow symbolic links, so for a watch with
-`follow_symlinks` it answers for the tree itself and not for what lies below its links. `save(gpa, filename)` atomically replaces a versioned, SHA-256
-checksummed file; `Baseline.load(gpa, io, filename, root, options)` restores it on
-every backend, and `diff` answers what changed since the last run with one walk.
+`follow_symlinks` it answers for the tree itself and not for what lies below its links.
+`save(io, filename, .{})` atomically replaces a versioned, SHA-256 checksummed file;
+`Baseline.load(gpa, io, filename, root, options)` restores it on every backend, and
+`diff(io)` answers what changed since the last run with one walk.
 Keep the file outside the watched tree. Corrupt files return `InvalidBaseline`,
 old versions `UnsupportedBaselineVersion`, and mismatched platform, root, scope,
 budget or patterns `ForeignBaseline`. Predicate filters return
 `UnsupportedBaselineFilter`: executable predicates cannot be stored. Replacement
-does not fsync; it promises atomic visibility. For filesystem durability, use
-`saveWithOptions(gpa, filename, .{ .durable = true })`: POSIX syncs the temporary
+does not fsync by default; it promises atomic visibility. For filesystem durability,
+use `save(io, filename, .{ .durable = true })`: POSIX syncs the temporary
 file before replacement and the parent directory afterwards. A directory-sync
 failure returns its error after the new file has become visible. Windows returns
 `UnsupportedBaselineDurability` before writing because the I/O API cannot promise
@@ -107,7 +90,7 @@ recover transient changes absent from both snapshots.
 Each change carries its `target`, file or directory, from the listing that saw it, so a
 removed directory is known for one without a `stat`.
 
-`poll` accepts a timeout and is a `std.Io` cancellation point. Cancellation preserves
+`poll` takes a `std.Io.Timeout` and is a `std.Io` cancellation point. Cancellation preserves
 gathered events for a later poll. Native waits observe cancellation when they wake; use
 `wake` to end a blocked wait on any backend. `fd` returns a pollable descriptor where
 the backend provides one.
@@ -132,7 +115,7 @@ coverage but cannot produce a checkpoint. Other backends return null.
 | API | Result |
 | --- | --- |
 | `Baseline.seed`, `diff`, `deinit` | Own, compare and release a tree snapshot. |
-| `Baseline.save`, `saveWithOptions`, `load` | Atomically persist and restore a checked snapshot for any backend. |
+| `Baseline.save`, `load` | Atomically persist, durably on request, and restore a checked snapshot for any backend. |
 | `Watcher.checkpoint`, `Checkpoint.token`, `parse`, `deinit` | Own, persist and resume FSEvents log cursors and known path baselines. |
 | `Watcher.capabilities(id)` | The backend and filesystem fact for one watch; null for an unknown id. |
 
@@ -147,26 +130,67 @@ coverage but cannot produce a checkpoint. Other backends return null.
 
 <!-- performance: quiet pass -->
 
+## Platforms
+
+The automatic backend is FSEvents on Apple targets, kqueue on supported BSD targets,
+inotify on Linux, ReadDirectoryChangesW on Windows and polling elsewhere.
+For each `.auto` watch, network and FUSE filesystems select polling instead; local
+watches in the same watcher retain their native backend. Explicit backend choices
+are kept. `Watcher.capabilities(id)` reports the selected backend and filesystem
+fact (`local`, `network`, `fuse`, or `unknown`), measured with statfs/statvfs on POSIX
+and drive type plus the remote-device flag on Windows. Failed or unavailable type
+queries report `unknown` and keep the default backend. Pending watches recheck when
+they move to another ancestor or their root. `backend()` reports the watcher's
+primary backend; use the per-watch result for backend capability queries. A watcher
+with polling registrations returns null from `fd` and `checkpoint`; drive it with
+`poll` and persist a Baseline for those roots. Detection describes the root mount,
+so watch nested mounted volumes separately. `supported`
+lets a caller check availability before choosing a backend. `pairsRenames`,
+`reportsRootMove`, `reportsCloses`, `prunesIgnored` and `tracksCheckpoint` describe
+differences that affect event handling.
+
+| Backend | Snapshot comparison |
+| --- | --- |
+| Polling | Entries whose mtime or ctime is not strictly older than their snapshot in a conservative two-second tick are checked by content until they age; hashes cover files up to 1 MiB, and larger or unreadable racy entries report modification. |
+
+Apple targets link libc and CoreServices for FSEvents and need a macOS SDK. A
+native macOS build finds the host's SDK by itself. A named Apple target links
+against the SDK given with `-Dmacos-sdk=$(xcrun --show-sdk-path)` or, without one,
+a pinned SDK package; `-Dbundled-macos-sdk=true` selects the pinned SDK for a
+native build too.
+
+## Built with
+
+- [Zig](https://ziglang.org) 0.17.0 and its standard library. On Apple targets the
+  module links libc and CoreServices; nothing else is linked anywhere.
+- [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
+  the tests and CI.
+- A pinned macOS SDK package, fetched only to link a named Apple target without
+  an SDK of its own.
+
 ## Testing
 
 `zig build test` runs the suite and examples in Debug by default, exercising the
-backends available on the host. Tests cover filters, pending paths, renames, overflow,
-cancellation, settling, checkpoints and resource cleanup. `zig build examples` runs the
-examples separately. CI also runs `zig build lint`, which includes `zig build check-consumer`:
-a project that depends on lookout by path, built with no packages fetched.
+backends available on the host. Tests cover filters, pending paths, renames,
+overflow, cancellation, settling, checkpoints and resource cleanup. `zig build
+examples` runs the examples separately. `zig build bench` runs lookout's own speed
+checks; run it on a quiet machine, with `-Doptimize=ReleaseFast`. CI also runs
+`zig build lint`, which includes `zig build check-consumer`: a project that depends
+on lookout by path, built with no packages fetched.
 
-Full [CI](.github/workflows/ci.yml) runs tests and examples in Debug and ReleaseSafe on
-`ubuntu-latest`, `macos-latest` and `windows-latest`, plus ReleaseFast on Ubuntu.
-ReleaseSmall compiles the tests and library without running them on Ubuntu. Separate
-Ubuntu jobs run ThreadSanitizer in Debug and check formatting and cast reasons.
+[CI](.github/workflows/ci.yml) has three tiers. The fast tier runs the source
+checks and the Linux Debug suite with the examples, compiles the benchmarks, and
+compiles the tests for macOS, Windows and every configured target without running
+them. The merge tier adds the Debug suite on `macos-latest` and `windows-latest`.
+The release tier runs the tests and examples in Debug and ReleaseSafe on all three
+hosts, plus ReleaseFast on Ubuntu; it compiles ReleaseSmall without running it, and
+runs ThreadSanitizer in Debug on Ubuntu.
 
 The default `zig build` compiles the backend-bearing tests and library. CI uses it for
 `x86_64-linux-gnu`, `aarch64-linux-gnu`, `x86_64-linux-musl`, `x86_64-windows-gnu`,
 `x86_64-windows-msvc`, `aarch64-windows-gnu`, `x86_64-freebsd` and `x86_64-netbsd`.
 These jobs do not execute the targets or compile the examples. Apple targets are built
-and run by the native macOS jobs. Fast CI runs the full Linux Debug suite and
-source checks, then compiles the tests and examples for every configured target
-and macOS in the same Ubuntu job.
+and run by the native macOS jobs.
 
 ## Licence
 

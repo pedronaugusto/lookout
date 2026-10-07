@@ -15,3 +15,9 @@ pub fn frozen(source: Io, vtable: *Io.VTable) Io {
 fn now(_: ?*anyopaque, _: Io.Clock) Io.Timestamp {
     return .{ .nanoseconds = 1_000 * std.time.ns_per_ms };
 }
+
+/// A timeout of `n` milliseconds on the monotonic clock, as the tests
+/// hand `lookout.Watcher.poll` one.
+pub fn ms(n: i64) Io.Timeout {
+    return .{ .duration = .{ .raw = .fromMilliseconds(n), .clock = .awake } };
+}

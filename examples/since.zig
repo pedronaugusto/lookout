@@ -13,6 +13,8 @@
 const std = @import("std");
 const lookout = @import("lookout");
 
+const two_seconds: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } };
+
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
@@ -45,11 +47,11 @@ pub fn main() !void {
     var token: []u8 = undefined;
     defer gpa.free(token);
     {
-        var watcher: lookout.Watcher = try .init(gpa, io, .{});
-        defer watcher.deinit();
-        _ = try watcher.add(dir_path, .{ .recursive = true });
+        var watcher: lookout.Watcher = try .init(gpa, .{});
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, dir_path, .{ .recursive = true });
         try scratch.writeFile(io, .{ .sub_path = "seen.txt", .data = "while watching" });
-        for (try watcher.poll(2_000)) |event| {
+        for (try watcher.poll(io, two_seconds)) |event| {
             try output.print("first run: {s} {s}\n", .{ @tagName(event.kind), event.path });
         }
 
@@ -67,13 +69,13 @@ pub fn main() !void {
     // The second run hands the token back.
     var resumed = try lookout.Checkpoint.parse(gpa, token);
     defer resumed.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .checkpoint = resumed });
-    defer watcher.deinit();
-    _ = try watcher.add(dir_path, .{ .recursive = true });
+    var watcher: lookout.Watcher = try .init(gpa, .{ .checkpoint = resumed });
+    defer watcher.deinit(io);
+    _ = try watcher.add(io, dir_path, .{ .recursive = true });
 
     // A replayed change is reported against the tree as it is now, so
     // what matters is the path, not which of the kinds it arrives as.
-    for (try watcher.poll(2_000)) |event| {
+    for (try watcher.poll(io, two_seconds)) |event| {
         try output.print("since: {s} {s}\n", .{ @tagName(event.kind), event.path });
     }
     try output.flush();

@@ -3,8 +3,13 @@ const Filter = @import("Filter.zig");
 const Checkpoint = @import("Checkpoint.zig");
 const types = @import("types.zig");
 const Backend = types.Backend;
+const std = @import("std");
+const Io = std.Io;
 
 /// How a `Watcher` behaves, fixed for its lifetime.
+///
+/// Its spans are counted in whole milliseconds, rounded up, and a negative
+/// one is zero.
 pub const Options = struct {
     /// Which mechanism to use. See `Backend`, `default_backend` and
     /// `supported`.
@@ -12,7 +17,7 @@ pub const Options = struct {
     /// How long the `poll` backend waits between scans. Ignored by every
     /// other backend. Zero is clamped to one millisecond so a quiet
     /// indefinite poll still blocks instead of scanning in a busy loop.
-    poll_interval_ms: u32 = 500,
+    poll_interval: Io.Duration = .fromMilliseconds(500),
     /// How long `Watcher.poll` keeps collecting after the first event of a
     /// batch arrives. Everything that lands on one path inside that window
     /// becomes a single `Event`, so a program is not woken once per write
@@ -22,28 +27,28 @@ pub const Options = struct {
     /// of the window. Zero asks the system for no additional delay; on
     /// macOS the measured system-delivery floor is still roughly ten
     /// milliseconds.
-    latency_ms: u32 = 50,
+    latency: Io.Duration = .fromMilliseconds(50),
     /// How long a file must stop changing before its `Kind.modified` is
     /// reported. Zero, the default, reports it as soon as it is seen.
     ///
-    /// `latency_ms` merges the writes that arrive together; this waits
+    /// `latency` merges the writes that arrive together; this waits
     /// for the writing to be over. A build system copying a large file
     /// produces `modified` the moment it starts, which is the wrong
-    /// moment to read it; with `settle_ms` the event arrives once the
+    /// moment to read it; with `settle` the event arrives once the
     /// file has been still for that long.
     ///
     /// It delays only `modified`. A creation, a removal and a rename are
     /// facts about a name rather than about contents, and are reported at
     /// once whatever this is set to.
-    settle_ms: u32 = 0,
+    settle: Io.Duration = .zero,
     /// How long an ordinary change must be quiet before it is reported. Zero,
     /// the default, is off.
     ///
     /// This is the third and strongest of the three windows, and it
-    /// answers a different question from the other two. `latency_ms`
+    /// answers a different question from the other two. `latency`
     /// merges what arrives together and reports the most significant kind
-    /// seen; `settle_ms` waits for a file's contents to stop changing.
-    /// `debounce_ms` holds every ordinary kind until the path has been quiet for
+    /// seen; `settle` waits for a file's contents to stop changing.
+    /// `debounce` holds every ordinary kind until the path has been quiet for
     /// the window and then reports it once, carrying the kind seen
     /// **last** rather than the most significant one. A file created and
     /// then deleted inside one window is one `removed`; a file deleted
@@ -53,10 +58,10 @@ pub const Options = struct {
     /// over ordinary changes; see `Kind`.
     ///
     /// That is what a caller rebuilding from the end state wants, and it
-    /// is why it supersedes both of the others: a non-zero `debounce_ms`
-    /// takes over from `settle_ms`, and `poll` returns as soon as a
-    /// window closes rather than collecting for `latency_ms` more.
-    debounce_ms: u32 = 0,
+    /// is why it supersedes both of the others: a positive `debounce`
+    /// takes over from `settle`, and `poll` returns as soon as a
+    /// window closes rather than collecting for `latency` more.
+    debounce: Io.Duration = .zero,
     /// Report `Kind.closed` when a file that was open for writing is
     /// closed. Off by default.
     ///
@@ -261,3 +266,24 @@ pub const AddOptions = struct {
     /// and says `Kind.unwatched` against its path.
     pending: bool = false,
 };
+
+/// `span` in whole milliseconds, rounded up so that a wait is never cut
+/// short, a negative span being zero and a span past the range the
+/// backends take being the largest they do.
+pub fn milliseconds(span: Io.Duration) u32 {
+    if (span.nanoseconds <= 0) return 0;
+    const ns_per_ms = 1_000_000;
+    const whole = @divFloor(span.nanoseconds - 1, ns_per_ms) + 1;
+    return @intCast(@min(whole, @as(i96, std.math.maxInt(u32))));
+}
+
+test "spans round up to whole milliseconds and clamp at both ends" {
+    const testing = std.testing;
+    try testing.expectEqual(@as(u32, 0), milliseconds(.zero));
+    try testing.expectEqual(@as(u32, 0), milliseconds(.fromMilliseconds(-5)));
+    try testing.expectEqual(@as(u32, 1), milliseconds(.fromNanoseconds(1)));
+    try testing.expectEqual(@as(u32, 1), milliseconds(.fromMilliseconds(1)));
+    try testing.expectEqual(@as(u32, 2), milliseconds(.fromNanoseconds(1_000_001)));
+    try testing.expectEqual(@as(u32, 500), milliseconds(.fromMilliseconds(500)));
+    try testing.expectEqual(@as(u32, std.math.maxInt(u32)), milliseconds(.max));
+}

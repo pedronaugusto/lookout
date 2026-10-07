@@ -2,15 +2,17 @@
 //!
 //! Every backend blocks on something different -- a descriptor, a kernel
 //! queue, a completion port, a sleep -- and every one of them has to
-//! answer the same question first: the caller asked for `timeout_ms`,
-//! some of it has gone, how much may this call wait for?
+//! answer the same question first: the caller gave a `std.Io.Timeout`,
+//! some of it has gone, how many milliseconds may this call wait for?
 //!
 //! The arithmetic is short and was written out five times, once per
-//! backend, with the same two rules each time. The rules are what matter
-//! and they are stated here once: a timeout of `null` never expires, and
-//! an expired timeout is clamped to zero rather than returned on, so
-//! that `lookout.Watcher.poll(0)` still performs one non-blocking check
-//! instead of reporting nothing, ever.
+//! backend, with the same rules each time. The rules are what matter and
+//! they are stated here once: `.none` never expires; what is left is
+//! rounded up to the millisecond, so a wait never ends before its
+//! deadline; and an expired timeout is clamped to zero rather than
+//! returned on, so that a `lookout.Watcher.poll` given a zero duration
+//! still performs one non-blocking check instead of reporting nothing,
+//! ever.
 
 const std = @import("std");
 const Io = std.Io;
@@ -18,40 +20,46 @@ const assert = std.debug.assert;
 
 const Deadline = @This();
 
-io: Io,
-started: Io.Timestamp,
-/// The caller's timeout in milliseconds, or `null` for no timeout.
-total: ?u32,
+/// When the timeout runs out, on the clock it was given in, or `null` when
+/// it never does.
+due: ?Io.Clock.Timestamp,
 
-/// Starts the clock now.
-pub fn start(io: Io, timeout_ms: ?u32) Deadline {
-    return .{ .io = io, .started = .now(io, .awake), .total = timeout_ms };
+/// Fixes the deadline `timeout` names, as of now.
+pub fn start(io: Io, timeout: Io.Timeout) Deadline {
+    return .{ .due = timeout.toTimestamp(io) };
 }
 
-/// Milliseconds left, or `null` when there is no timeout at all. Zero
-/// means it has expired.
-pub fn remainingMs(d: Deadline) ?u32 {
-    const total = d.total orelse return null;
-    const elapsed = d.started.durationTo(Io.Timestamp.now(d.io, .awake)).toMilliseconds();
-    const left: u32 = @intCast(@max(0, @as(i64, total) - elapsed));
-    assert(left <= total);
-    return left;
+/// A deadline `ms` milliseconds from now on the monotonic clock, or none
+/// for `null`: the form the watcher hands its backends a wait in.
+pub fn fromMs(io: Io, ms: ?u32) Deadline {
+    const span = ms orelse return .{ .due = null };
+    return .start(io, .{ .duration = .{ .raw = .fromMilliseconds(span), .clock = .awake } });
+}
+
+/// Milliseconds left, rounded up, or `null` when there is no timeout at
+/// all. Zero means it has expired.
+pub fn remainingMs(d: Deadline, io: Io) ?u32 {
+    const due = d.due orelse return null;
+    const left = due.durationFromNow(io).raw.nanoseconds;
+    if (left <= 0) return 0;
+    const ms = @divFloor(left - 1, std.time.ns_per_ms) + 1;
+    return @intCast(@min(ms, std.math.maxInt(u32)));
 }
 
 /// Whether the timeout has run out. A deadline with no timeout never has.
-pub fn expired(d: Deadline) bool {
-    return (d.remainingMs() orelse return false) == 0;
+pub fn expired(d: Deadline, io: Io) bool {
+    return (d.remainingMs(io) orelse return false) == 0;
 }
 
 /// What `poll(2)` wants: milliseconds, or `-1` to block indefinitely.
-pub fn pollMs(d: Deadline) i32 {
-    const remaining = d.remainingMs() orelse return -1;
+pub fn pollMs(d: Deadline, io: Io) i32 {
+    const remaining = d.remainingMs(io) orelse return -1;
     return @intCast(@min(remaining, std.math.maxInt(i32)));
 }
 
 /// What `GetQueuedCompletionStatus` wants: milliseconds, or `INFINITE`.
-pub fn windowsMs(d: Deadline) u32 {
-    const remaining = d.remainingMs() orelse return std.math.maxInt(u32);
+pub fn windowsMs(d: Deadline, io: Io) u32 {
+    const remaining = d.remainingMs(io) orelse return std.math.maxInt(u32);
     const ms = @min(remaining, std.math.maxInt(u32) - 1);
     // A timeout, however long, is never the value that means none.
     assert(ms != std.math.maxInt(u32));
@@ -64,41 +72,49 @@ const clock = @import("testing/clock.zig");
 test "no timeout never expires and never clamps" {
     var vtable: Io.VTable = undefined;
     const io = clock.frozen(testing.io, &vtable);
-    const d: Deadline = .start(io, null);
-    try testing.expectEqual(@as(?u32, null), d.remainingMs());
-    try testing.expect(!d.expired());
-    try testing.expectEqual(@as(i32, -1), d.pollMs());
-    try testing.expectEqual(std.math.maxInt(u32), d.windowsMs());
+    const d: Deadline = .start(io, .none);
+    try testing.expectEqual(@as(?u32, null), d.remainingMs(io));
+    try testing.expect(!d.expired(io));
+    try testing.expectEqual(@as(i32, -1), d.pollMs(io));
+    try testing.expectEqual(std.math.maxInt(u32), d.windowsMs(io));
 }
 
 test "a timeout that has run out clamps to zero rather than going negative" {
     var vtable: Io.VTable = undefined;
     const io = clock.frozen(testing.io, &vtable);
-    var d: Deadline = .start(io, 10);
+    var d: Deadline = .fromMs(io, 10);
     // Reaching back in time is the same as waiting, and a test that
     // waits on a wall clock is a test that fails on a loaded machine.
-    d.started.nanoseconds -= 100 * std.time.ns_per_ms;
-    try testing.expectEqual(@as(?u32, 0), d.remainingMs());
-    try testing.expect(d.expired());
-    try testing.expectEqual(@as(i32, 0), d.pollMs());
-    try testing.expectEqual(@as(u32, 0), d.windowsMs());
+    d.due.?.raw.nanoseconds -= 100 * std.time.ns_per_ms;
+    try testing.expectEqual(@as(?u32, 0), d.remainingMs(io));
+    try testing.expect(d.expired(io));
+    try testing.expectEqual(@as(i32, 0), d.pollMs(io));
+    try testing.expectEqual(@as(u32, 0), d.windowsMs(io));
 }
 
 test "a deadline in the future has time left on it" {
     var vtable: Io.VTable = undefined;
     const io = clock.frozen(testing.io, &vtable);
-    const d: Deadline = .start(io, 2_500);
-    const left = d.remainingMs().?;
-    try testing.expect(left > 0 and left <= 2_500);
-    try testing.expect(!d.expired());
+    const d: Deadline = .fromMs(io, 2_500);
+    try testing.expectEqual(@as(?u32, 2_500), d.remainingMs(io));
+    try testing.expect(!d.expired(io));
+}
+
+test "what is left rounds up, so a wait never ends before its deadline" {
+    var vtable: Io.VTable = undefined;
+    const io = clock.frozen(testing.io, &vtable);
+    const d: Deadline = .start(io, .{ .duration = .{ .raw = .fromNanoseconds(1), .clock = .awake } });
+    try testing.expectEqual(@as(?u32, 1), d.remainingMs(io));
+    const past: Deadline = .start(io, .{ .deadline = .{ .raw = .zero, .clock = .awake } });
+    try testing.expectEqual(@as(?u32, 0), past.remainingMs(io));
 }
 
 test "finite waits are clamped to each operating system API" {
     var vtable: Io.VTable = undefined;
     const io = clock.frozen(testing.io, &vtable);
-    const posix_long: Deadline = .start(io, @as(u32, std.math.maxInt(i32)) + 1);
-    try testing.expectEqual(std.math.maxInt(i32), posix_long.pollMs());
+    const posix_long: Deadline = .fromMs(io, @as(u32, std.math.maxInt(i32)) + 1);
+    try testing.expectEqual(std.math.maxInt(i32), posix_long.pollMs(io));
 
-    const windows_long: Deadline = .start(io, std.math.maxInt(u32));
-    try testing.expectEqual(std.math.maxInt(u32) - 1, windows_long.windowsMs());
+    const windows_long: Deadline = .fromMs(io, std.math.maxInt(u32));
+    try testing.expectEqual(std.math.maxInt(u32) - 1, windows_long.windowsMs(io));
 }

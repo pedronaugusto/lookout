@@ -124,6 +124,31 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(examples_step);
 
     //=====================================================================
+    // Benchmarks
+    //
+    // lookout's own speed claims, each held to its ceiling on every
+    // backend the target has. `zig build bench` runs them, which wants a
+    // quiet machine and a release mode; everywhere else, CI included,
+    // they are only compiled, so they keep building without a shared
+    // runner timing anything.
+    //=====================================================================
+
+    const bench = b.addTest(.{
+        .name = "lookout-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/speed_claims.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = darwin,
+            .imports = &.{.{ .name = "lookout", .module = module }},
+        }),
+    });
+    const bench_step = b.step("bench", "Run lookout's speed checks (a quiet machine, a release mode)");
+    bench_step.dependOn(&b.addRunArtifact(bench).step);
+    test_step.dependOn(&bench.step);
+    check_step.dependOn(&bench.step);
+
+    //=====================================================================
     // The default step: compile everything for the selected target,
     // without running any of it.
     //

@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const lookout = @import("../lookout.zig");
+const ms = @import("clock.zig").ms;
 const Watcher = lookout.Watcher;
 
 /// Every backend this target was built with.
@@ -82,15 +83,15 @@ test "poll reports each change from another thread" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = backend,
-            .poll_interval_ms = interval_ms,
+            .poll_interval = .fromMilliseconds(interval_ms),
             // Collect the backend's delivery without a coalescing tail.
-            .latency_ms = 0,
+            .latency = .fromMilliseconds(0),
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
-        while ((try watcher.poll(200)).len != 0) {}
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{});
+        while ((try watcher.poll(io, ms(200))).len != 0) {}
 
         const Toucher = struct {
             dir: std.Io.Dir,
@@ -122,7 +123,7 @@ test "poll reports each change from another thread" {
             defer gpa.free(expected);
             var seen = false;
             while (!seen) {
-                const events = try watcher.poll(5_000);
+                const events = try watcher.poll(io, ms(5_000));
                 if (events.len == 0) break;
                 for (events) |event| {
                     if (event.kind == .created and std.mem.eql(u8, event.path, expected)) seen = true;
@@ -148,13 +149,13 @@ test "a burst arrives whole, or says what it lost" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 1_000_000,
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{});
 
         for (0..burst) |i| {
             var name: [64]u8 = undefined;
@@ -174,7 +175,7 @@ test "a burst arrives whole, or says what it lost" {
         var overflow: usize = 0;
         var waited_ms: u32 = 0;
         while (created < burst and overflow == 0 and waited_ms < 30_000) {
-            const events = try watcher.poll(200);
+            const events = try watcher.poll(io, ms(200));
             if (events.len == 0) waited_ms += 200;
             for (events) |event| switch (event.kind) {
                 .created => created += 1,
@@ -235,16 +236,16 @@ test "a watched directory costs what it is budgeted" {
 
         var counting: Counting = .{ .child = std.testing.allocator };
         {
-            var watcher: Watcher = try .init(counting.allocator(), io, .{
+            var watcher: Watcher = try .init(counting.allocator(), .{
                 .backend = backend,
-                .poll_interval_ms = 20,
+                .poll_interval = .fromMilliseconds(20),
                 // The delivery buffer is one per watcher rather than one
                 // per directory, so it is not what is being measured
                 // here; the floor keeps it out of the number.
                 .buffer_bytes = 4 * 1024,
             });
-            defer watcher.deinit();
-            _ = try watcher.add(root, .{ .recursive = true });
+            defer watcher.deinit(io);
+            _ = try watcher.add(io, root, .{ .recursive = true });
 
             const per_directory = counting.live / dirs;
             if (per_directory > directoryBudget(backend)) {

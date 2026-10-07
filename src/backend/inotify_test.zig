@@ -3,6 +3,7 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 const lookout = @import("../lookout.zig");
+const ms = @import("../testing/clock.zig").ms;
 const records = @import("inotify/records.zig");
 const Target = lookout.Target;
 const Inotify = @import("Inotify.zig");
@@ -28,11 +29,11 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     const file = try std.Io.Dir.path.join(gpa, &.{ root, "a.txt" });
     defer gpa.free(file);
 
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify });
-    defer watcher.deinit();
-    const dir = try watcher.add(root, .{ .recursive = true });
-    const single = try watcher.add(file, .{});
-    while ((try watcher.poll(200)).len != 0) {}
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .inotify });
+    defer watcher.deinit(io);
+    const dir = try watcher.add(io, root, .{ .recursive = true });
+    const single = try watcher.add(io, file, .{});
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
 
     var bytes: [records.header_len]u8 = undefined;
     const len = records.encode(&bytes, .{ .wd = -1, .mask = linux.IN.Q_OVERFLOW, .cookie = 0, .name = null });
@@ -43,7 +44,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     // Straight into the batch the next poll returns, which is where a
     // read puts it.
     const n = &watcher.impl.inotify;
-    try Inotify.test_access.handleRead(n, bytes[0..len], &watcher.batch);
+    try Inotify.test_access.handleRead(n, io, bytes[0..len], &watcher.batch);
 
     var dir_overflows: usize = 0;
     var file_overflows: usize = 0;
@@ -70,7 +71,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     var saw_file = false;
     var waited: u32 = 0;
     while (waited < 10_000 and !(saw_dir and saw_file)) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind != .modified or !std.mem.eql(u8, event.path, file)) continue;
             if (event.id == dir) saw_dir = true;
             if (event.id == single) saw_file = true;
@@ -96,10 +97,10 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify, .max_dir_entries = 3 });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    while ((try watcher.poll(200)).len != 0) {}
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .inotify, .max_dir_entries = 3 });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{});
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
     const n = &watcher.impl.inotify;
 
     for ([_][]const u8{ "a", "b", "c" }) |name| {
@@ -118,19 +119,19 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
 
     var bytes: [records.header_len]u8 = undefined;
     const len = records.encode(&bytes, .{ .wd = -1, .mask = linux.IN.Q_OVERFLOW, .cookie = 0, .name = null });
-    try Inotify.test_access.handleRead(n, bytes[0..len], &watcher.batch);
+    try Inotify.test_access.handleRead(n, io, bytes[0..len], &watcher.batch);
     try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
     try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
     // Three entries: at the budget, as the folder is.
     try testing.expectEqual(@as(usize, 3), n.budget.count(root).?);
 
     // So the fourth is past it, and the watch is told.
-    _ = try watcher.poll(0);
+    _ = try watcher.poll(io, ms(0));
     try tmp.dir.writeFile(io, .{ .sub_path = "d", .data = "x" });
     var overflowed = false;
     var waited: u32 = 0;
     while (waited < 10_000 and !overflowed) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
     }
@@ -154,15 +155,15 @@ test "a watch on a file keeps no count keyed by the file" {
     const file = try std.Io.Dir.path.join(gpa, &.{ root, "file" });
     defer gpa.free(file);
 
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify });
-    defer watcher.deinit();
-    const id = try watcher.add(file, .{});
-    while ((try watcher.poll(200)).len != 0) {}
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .inotify });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, file, .{});
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
     try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "y" });
     var modified = false;
     var waited: u32 = 0;
     while (waited < 10_000 and !modified) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .modified and event.id == id) modified = true;
         }
     }

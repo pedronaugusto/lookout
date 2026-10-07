@@ -89,6 +89,10 @@ allow: ?*const fn (context: ?*anyopaque, path: []const u8) bool = null,
 /// whatever it points at alive for the life of the watch is the caller's.
 context: ?*anyopaque = null,
 
+/// Private: the allocator a copy made by `dupe` owns its patterns in, or
+/// null for a filter that borrows them.
+owner: ?Allocator = null,
+
 /// A filter that excludes nothing, which is what a watch has unless the
 /// caller says otherwise.
 pub const none: Filter = .{};
@@ -99,13 +103,13 @@ pub fn isEmpty(f: Filter) bool {
     return f.ignore.len == 0 and f.only.len == 0 and f.allow == null;
 }
 
-/// A copy owning its pattern lists, for a backend that keeps a filter
-/// past the `add` that was given it.
+/// A copy owning its pattern lists in `gpa`, for a backend that keeps a
+/// filter past the `add` that was given it. `deinit` releases it.
 pub fn dupe(f: Filter, gpa: Allocator) Allocator.Error!Filter {
     const ignore = try dupeList(gpa, f.ignore);
     errdefer freeList(gpa, ignore);
     const only = try dupeList(gpa, f.only);
-    return .{ .ignore = ignore, .only = only, .allow = f.allow, .context = f.context };
+    return .{ .ignore = ignore, .only = only, .allow = f.allow, .context = f.context, .owner = gpa };
 }
 
 fn dupeList(gpa: Allocator, list: []const []const u8) Allocator.Error![]const []const u8 {
@@ -128,8 +132,10 @@ fn freeList(gpa: Allocator, list: []const []const u8) void {
     if (list.len != 0) gpa.free(list);
 }
 
-/// Releases a copy made by `dupe`.
-pub fn deinit(f: *Filter, gpa: Allocator) void {
+/// Releases a copy made by `dupe`. A filter that borrows its patterns
+/// owns nothing, and this leaves it as it is.
+pub fn deinit(f: *Filter) void {
+    const gpa = f.owner orelse return;
     freeList(gpa, f.ignore);
     freeList(gpa, f.only);
     f.* = undefined;
@@ -555,7 +561,7 @@ test "a copy owns its patterns" {
         only[0] = owned_only;
 
         var copy = try (Filter{ .ignore = &ignore, .only = &only }).dupe(gpa);
-        defer copy.deinit(gpa);
+        defer copy.deinit();
         try testing.expect(copy.excludes(sep("/w"), sep("/w/target/a")));
         try testing.expect(!copy.excludes(sep("/w"), sep("/w/a.zig")));
         // The original lists and their strings are gone after this

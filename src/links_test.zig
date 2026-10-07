@@ -8,6 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const lookout = @import("lookout.zig");
+const ms = @import("testing/clock.zig").ms;
 const Deadline = @import("Deadline.zig");
 const path_cmp = @import("path.zig");
 
@@ -37,6 +38,8 @@ const quiet_ms = 600;
 const Fixture = struct {
     tmp: testing.TmpDir,
     root: [:0]u8,
+    /// What every call on `watcher` goes through.
+    io: std.Io,
     watcher: Watcher,
 
     fn init(backend: lookout.Backend) !Fixture {
@@ -49,12 +52,13 @@ const Fixture = struct {
         return .{
             .tmp = tmp,
             .root = root,
-            .watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20, .latency_ms = 20 }),
+            .io = io,
+            .watcher = try .init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(20), .latency = .fromMilliseconds(20) }),
         };
     }
 
     fn deinit(f: *Fixture) void {
-        f.watcher.deinit();
+        f.watcher.deinit(f.io);
         gpa.free(f.root);
         f.tmp.cleanup();
         f.* = undefined;
@@ -70,13 +74,13 @@ const Fixture = struct {
         return std.Io.Dir.path.join(gpa, parts.items);
     }
 
-    fn watch(f: *Fixture, options: lookout.AddOptions) !lookout.WatchId {
+    fn watch(f: *Fixture, options: lookout.Watcher.AddOptions) !lookout.WatchId {
         const root = try f.path("watched");
         defer gpa.free(root);
         var with = options;
         with.recursive = true;
         with.follow_symlinks = true;
-        const id = try f.watcher.add(root, with);
+        const id = try f.watcher.add(f.io, root, with);
         try f.settle();
         return id;
     }
@@ -105,7 +109,7 @@ const Fixture = struct {
 
     /// Drains whatever is pending.
     fn settle(f: *Fixture) !void {
-        while ((try f.watcher.poll(150)).len != 0) {}
+        while ((try f.watcher.poll(f.io, ms(150))).len != 0) {}
     }
 
     /// Polls until `sub_path` is reported -- as `kind`, or as anything
@@ -114,9 +118,9 @@ const Fixture = struct {
     fn expect(f: *Fixture, sub_path: []const u8, kind: ?Kind, forbidden: []const []const u8) !void {
         const want = try f.path(sub_path);
         defer gpa.free(want);
-        const deadline = Deadline.start(io, timeout_ms);
-        while (!deadline.expired()) {
-            for (try f.watcher.poll(100)) |event| {
+        const deadline = Deadline.fromMs(io, timeout_ms);
+        while (!deadline.expired(io)) {
+            for (try f.watcher.poll(f.io, ms(100))) |event| {
                 try f.allowed(event, forbidden);
                 if (!path_cmp.eql(event.path, want)) continue;
                 if (kind == null or kind.? == event.kind) return;
@@ -131,11 +135,11 @@ const Fixture = struct {
     /// events in two polls, and what is written below it is only seen
     /// once it is followed again.
     fn await(f: *Fixture, wanted: usize, above: bool) !void {
-        const deadline = Deadline.start(io, timeout_ms);
-        while (!deadline.expired()) {
+        const deadline = Deadline.fromMs(io, timeout_ms);
+        while (!deadline.expired(io)) {
             const held = f.watcher.stats().registrations;
             if (if (above) held > wanted else held == wanted) return;
-            _ = try f.watcher.poll(100);
+            _ = try f.watcher.poll(f.io, ms(100));
         }
         std.debug.print("{s}: {d} registrations, wanted {s}{d}\n", .{ @tagName(f.watcher.backend()), f.watcher.stats().registrations, if (above) "more than " else "", wanted });
         return error.EventNotObserved;
@@ -143,9 +147,9 @@ const Fixture = struct {
 
     /// Listens for a while, failing on any event at or below `forbidden`.
     fn quiet(f: *Fixture, forbidden: []const []const u8) !void {
-        const deadline = Deadline.start(io, quiet_ms);
-        while (!deadline.expired()) {
-            for (try f.watcher.poll(100)) |event| try f.allowed(event, forbidden);
+        const deadline = Deadline.fromMs(io, quiet_ms);
+        while (!deadline.expired(io)) {
+            for (try f.watcher.poll(f.io, ms(100))) |event| try f.allowed(event, forbidden);
         }
     }
 
@@ -162,11 +166,11 @@ const Fixture = struct {
     /// What a plain recursive watch of `watched` costs, with no links
     /// followed: the registrations a following watch must come back to.
     fn plainRegistrations(f: *Fixture, backend: lookout.Backend, filter: lookout.Filter) !usize {
-        var plain = try Watcher.init(gpa, io, .{ .backend = backend });
-        defer plain.deinit();
+        var plain = try Watcher.init(gpa, .{ .backend = backend });
+        defer plain.deinit(io);
         const root = try f.path("watched");
         defer gpa.free(root);
-        _ = try plain.add(root, .{ .recursive = true, .filter = filter });
+        _ = try plain.add(io, root, .{ .recursive = true, .filter = filter });
         return plain.stats().registrations;
     }
 };
@@ -336,7 +340,7 @@ test "a link changed to lead elsewhere is reported on its path and follows the n
         try f.write("outside/second/new.txt");
         try f.expect("watched/link/new.txt", .created, &.{ "outside", "watched/link/old.txt" });
         try f.quiet(&.{"watched/link/old.txt"});
-        f.watcher.remove(id);
+        f.watcher.remove(f.io, id);
         try testing.expectEqual(@as(usize, 0), f.watcher.stats().registrations);
     }
 }
@@ -388,13 +392,13 @@ test "a link past the most a watch follows is reported unwatched" {
         try f.link("outside/two", "watched/second");
         const root = try f.path("watched");
         defer gpa.free(root);
-        _ = try f.watcher.add(root, .{ .recursive = true, .follow_symlinks = true, .max_followed_links = 1 });
+        _ = try f.watcher.add(f.io, root, .{ .recursive = true, .follow_symlinks = true, .max_followed_links = 1 });
 
-        const deadline = Deadline.start(io, timeout_ms);
+        const deadline = Deadline.fromMs(io, timeout_ms);
         var unwatched: ?[]u8 = null;
         defer if (unwatched) |p| gpa.free(p);
-        while (unwatched == null and !deadline.expired()) {
-            for (try f.watcher.poll(100)) |event| {
+        while (unwatched == null and !deadline.expired(io)) {
+            for (try f.watcher.poll(f.io, ms(100))) |event| {
                 if (event.kind == .unwatched) unwatched = try gpa.dupe(u8, event.path);
             }
         }
@@ -430,7 +434,7 @@ test "a followed link's changes pass through the watch's filter" {
         try f.expect("watched/link/b.txt", .created, &.{ "watched/link/a.tmp", "watched/skipped", "outside" });
 
         // A filter that leaves the link out lets go of what it led to.
-        try f.watcher.refilter(id, .{ .ignore = &.{ "*.tmp", "skipped", "link" } });
+        try f.watcher.refilter(f.io, id, .{ .ignore = &.{ "*.tmp", "skipped", "link" } });
         try testing.expectEqual(plain, f.watcher.stats().registrations);
         try f.write("outside/target/d.txt");
         try f.quiet(&.{ "watched/link", "outside" });
@@ -444,7 +448,7 @@ test "a pending watch follows the links of the directory it becomes" {
         try f.tmp.dir.createDirPath(io, "outside/target");
         const later = try f.path("later");
         defer gpa.free(later);
-        _ = try f.watcher.add(later, .{ .pending = true, .recursive = true, .follow_symlinks = true });
+        _ = try f.watcher.add(f.io, later, .{ .pending = true, .recursive = true, .follow_symlinks = true });
         try f.tmp.dir.createDirPath(io, "later");
         try f.link("outside/target", "later/link");
         try f.expect("later", .created, &.{});

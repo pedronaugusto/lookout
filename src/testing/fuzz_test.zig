@@ -765,17 +765,17 @@ fn fuzzBaseline(_: void, smith: *testing.Smith) !void {
 
     const recursive = smith.boolWeighted(1, 3);
     var base = try Baseline.seed(gpa, io, root, .{ .recursive = recursive });
-    defer base.deinit(gpa);
+    defer base.deinit();
 
     var after: Model = .empty;
     for (before.keys(), before.values()) |key, value| try after.put(a, key, value);
     try changeModel(a, smith, tmp.dir, &after);
 
     const expected = try expectDiff(a, &before, &after, recursive);
-    const found = try base.diff(gpa);
+    const found = try base.diff(io);
     try matchDiff(root, &expected, found);
     // And the tree is now the baseline: nothing more to say.
-    try testing.expectEqual(@as(usize, 0), (try base.diff(gpa)).len);
+    try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
 }
 
 /// Up to a dozen paths, each a file or a directory below an existing

@@ -47,7 +47,6 @@ const WatchId = lookout.WatchId;
 const Inotify = @This();
 
 gpa: Allocator,
-io: Io,
 /// The inotify descriptor, which is what `lookout.Watcher.fd` hands out.
 ifd: posix.fd_t,
 /// Read and write ends of the pipe `wake` pokes. Both non-blocking, so
@@ -127,7 +126,7 @@ const base_mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
 const read_buffer_len = 8192;
 
 /// Creates the inotify descriptor and the pipe `wake` pokes.
-pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!Inotify {
+pub fn init(gpa: Allocator, options: Options) contract.InitError!Inotify {
     // `linux.errno`, not `posix.errno`: these are raw syscalls, and on a
     // target that links libc `posix.errno` reads libc's thread-local
     // variable, which a raw syscall never writes.
@@ -152,13 +151,12 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!Inotify
 
     return .{
         .gpa = gpa,
-        .io = io,
         .ifd = ifd,
         .wake_r = fds[0],
         .wake_w = fds[1],
         .watches = .empty,
         .wds = .empty,
-        .budget = .init(gpa, io, options.max_dir_entries),
+        .budget = .init(gpa, options.max_dir_entries),
         .mask = if (options.report_closes)
             base_mask | linux.IN.CLOSE_WRITE
         else
@@ -168,7 +166,8 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!Inotify
 }
 
 /// Closes the descriptors and releases every watch.
-pub fn deinit(n: *Inotify) void {
+pub fn deinit(n: *Inotify, io: Io) void {
+    _ = io; // Every backend takes it; this one closes nothing through it.
     for (n.wds.values()) |*registration| {
         n.gpa.free(registration.path);
         registration.watches.deinit(n.gpa);
@@ -176,7 +175,7 @@ pub fn deinit(n: *Inotify) void {
     n.wds.deinit(n.gpa);
     for (n.watches.values()) |*watch| {
         n.gpa.free(watch.root);
-        watch.filter.deinit(n.gpa);
+        watch.filter.deinit();
     }
     n.watches.deinit(n.gpa);
     for (n.pending_renames.values()) |half| n.gpa.free(half.path);
@@ -217,17 +216,18 @@ pub fn registrationCount(n: *const Inotify) usize {
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(
     n: *Inotify,
+    io: Io,
     id: WatchId,
     abs_path: []const u8,
     options: AddOptions,
     batch: *Batch,
 ) contract.AddError!void {
-    const stat = try Io.Dir.cwd().statFile(n.io, abs_path, .{});
+    const stat = try Io.Dir.cwd().statFile(io, abs_path, .{});
 
     const root = try n.gpa.dupe(u8, abs_path);
     errdefer n.gpa.free(root);
     var filter = try options.filter.dupe(n.gpa);
-    errdefer filter.deinit(n.gpa);
+    errdefer filter.deinit();
     try n.watches.put(n.gpa, id, .{
         .root = root,
         .target = .of(stat.kind),
@@ -240,7 +240,7 @@ pub fn add(
     errdefer n.removeWatchDescriptors(id);
 
     try n.register(id, try n.gpa.dupe(u8, abs_path));
-    if (stat.kind == .directory) try n.budget.seed(abs_path);
+    if (stat.kind == .directory) try n.budget.seed(io, abs_path);
     if (stat.kind != .directory or !options.recursive) return;
 
     // One kernel watch per directory: inotify does not recurse.
@@ -271,19 +271,20 @@ pub fn add(
         }
     };
     var registering: Registering = .{ .n = n, .id = id, .batch = batch };
-    walk.tree(*Registering, Registering.visit, n.gpa, n.io, abs_path, &registering) catch |err| switch (err) {
+    walk.tree(*Registering, Registering.visit, n.gpa, io, abs_path, &registering) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
 }
 
 /// Stops watching `id` and releases its kernel watches.
-pub fn remove(n: *Inotify, id: WatchId) void {
+pub fn remove(n: *Inotify, io: Io, id: WatchId) void {
+    _ = io; // Every backend takes it; this one closes nothing through it.
     var watch = n.watches.fetchSwapRemove(id) orelse return;
     n.removeWatchDescriptors(id);
     n.budget.release(*const Inotify, stillCounted, watch.value.root, n);
     n.gpa.free(watch.value.root);
-    watch.value.filter.deinit(n.gpa);
+    watch.value.filter.deinit();
     var i: usize = 0;
     while (i < n.pending_renames.count()) {
         if (n.pending_renames.keys()[i].watch != id) {
@@ -297,13 +298,13 @@ pub fn remove(n: *Inotify, id: WatchId) void {
 
 /// Reconciles this watch's directory registrations with a new filter.
 /// New directories are registered before excluded ones are released.
-pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
+pub fn refilter(n: *Inotify, io: Io, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     const watch = n.watches.getPtr(id) orelse return error.UnknownWatch;
     const replacement = try next.dupe(n.gpa);
     var previous = watch.filter;
     watch.filter = replacement;
     errdefer {
-        watch.filter.deinit(n.gpa);
+        watch.filter.deinit();
         watch.filter = previous;
         var rollback: usize = 0;
         while (rollback < n.wds.count()) {
@@ -320,6 +321,7 @@ pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) c
     if (watch.recursive and watch.target == .directory) {
         const Registering = struct {
             n: *Inotify,
+            io: Io,
             id: WatchId,
             batch: *Batch,
 
@@ -335,13 +337,13 @@ pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) c
                             return .over;
                         },
                     };
-                    try r.n.budget.seed(entry.path);
+                    try r.n.budget.seed(r.io, entry.path);
                 }
                 return .into;
             }
         };
-        var registering: Registering = .{ .n = n, .id = id, .batch = batch };
-        walk.tree(*Registering, Registering.visit, n.gpa, n.io, watch.root, &registering) catch |err| switch (err) {
+        var registering: Registering = .{ .n = n, .io = io, .id = id, .batch = batch };
+        walk.tree(*Registering, Registering.visit, n.gpa, io, watch.root, &registering) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.Unexpected,
         };
@@ -354,7 +356,7 @@ pub fn refilter(n: *Inotify, id: WatchId, next: lookout.Filter, batch: *Batch) c
         } else i += 1;
     }
     n.budget.release(*const Inotify, stillCounted, watch.root, n);
-    previous.deinit(n.gpa);
+    previous.deinit();
 }
 
 fn ownsPath(n: *const Inotify, id: WatchId, subject: []const u8) bool {
@@ -391,44 +393,44 @@ fn pruned(n: *const Inotify, id: WatchId, subject: []const u8) bool {
 
 /// Waits on the inotify descriptor until it reports something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(n: *Inotify, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+pub fn wait(n: *Inotify, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     // A read takes records off the descriptor, and a directory that
     // appears is registered below it one directory at a time, so nothing
     // in here is a place to stop: see `Watcher.poll`. The wait itself is
     // out of `std.Io`'s reach.
-    const protection = n.io.swapCancelProtection(.blocked);
-    defer _ = n.io.swapCancelProtection(protection);
-    try n.collect(batch, timeout_ms);
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    try n.collect(io, batch, timeout_ms);
     // Whatever is still held when the wait is over never found its other
     // half, however many reads it waited through.
-    try n.flushRenames(batch);
+    try n.flushRenames(io, batch);
 }
 
-fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+fn collect(n: *Inotify, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     const before = batch.revision;
-    const deadline: Deadline = .start(n.io, timeout_ms);
+    const deadline: Deadline = .fromMs(io, timeout_ms);
 
     while (true) {
         if (n.read_len != 0) {
-            _ = try n.read(batch);
+            _ = try n.read(io, batch);
             while (n.pending_renames.count() != 0) {
-                if (!try n.read(batch)) break;
+                if (!try n.read(io, batch)) break;
             }
             if (batch.revision != before) return;
         }
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still performs one non-blocking check. Returning early here
-        // would make `poll(0)` report nothing, ever.
+        // would make a zero-timeout `poll` report nothing, ever.
         var fds: [2]posix.pollfd = .{
             .{ .fd = n.ifd, .events = posix.POLL.IN, .revents = 0 },
             .{ .fd = n.wake_r, .events = posix.POLL.IN, .revents = 0 },
         };
-        const ready = posix.poll(&fds, deadline.pollMs()) catch |err| switch (err) {
+        const ready = posix.poll(&fds, deadline.pollMs(io)) catch |err| switch (err) {
             error.SystemResources => return error.SystemResources,
             else => return error.Unexpected,
         };
         if (ready == 0) {
-            if (!deadline.expired()) continue;
+            if (!deadline.expired(io)) continue;
             return;
         }
 
@@ -438,7 +440,7 @@ fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) contract.PollError!void
             woken = true;
         }
         if (fds[0].revents & posix.POLL.IN != 0) {
-            if (!try n.read(batch)) continue;
+            if (!try n.read(io, batch)) continue;
         }
         if (!woken and batch.revision == before) continue;
         // A half with no partner yet is worth one more look: the other
@@ -446,7 +448,7 @@ fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) contract.PollError!void
         // read, and flushing here would turn a rename into a removal and
         // a creation on a backend that says it pairs them.
         while (n.pending_renames.count() != 0) {
-            if (!try n.read(batch)) break;
+            if (!try n.read(io, batch)) break;
         }
         return;
     }
@@ -454,7 +456,7 @@ fn collect(n: *Inotify, batch: *Batch, timeout_ms: ?u32) contract.PollError!void
 
 /// Reads one buffer of kernel events and turns them into lookout events.
 /// `false` when there was nothing to read.
-fn read(n: *Inotify, batch: *Batch) contract.PollError!bool {
+fn read(n: *Inotify, io: Io, batch: *Batch) contract.PollError!bool {
     if (n.read_len == 0) {
         n.read_len = posix.read(n.ifd, &n.read_buffer) catch |err| switch (err) {
             error.WouldBlock => return false,
@@ -466,7 +468,7 @@ fn read(n: *Inotify, batch: *Batch) contract.PollError!bool {
     // A read held across calls is resumed where its walk stopped.
     assert(n.read_len <= n.read_buffer.len);
     assert(n.read_offset <= n.read_len);
-    try n.consume(n.read_buffer[0..n.read_len], &n.read_offset, batch);
+    try n.consume(io, n.read_buffer[0..n.read_len], &n.read_offset, batch);
     n.read_len = 0;
     return true;
 }
@@ -479,17 +481,17 @@ fn read(n: *Inotify, batch: *Batch) contract.PollError!bool {
 /// the overflow record, because the records after that one are changes
 /// made since: counted from their records and then taken in again by a
 /// re-read made before them, they would be counted twice.
-fn handleRead(n: *Inotify, bytes: []const u8, batch: *Batch) contract.PollError!void {
+fn handleRead(n: *Inotify, io: Io, bytes: []const u8, batch: *Batch) contract.PollError!void {
     var offset: usize = 0;
-    try n.consume(bytes, &offset, batch);
+    try n.consume(io, bytes, &offset, batch);
 }
 
-fn consume(n: *Inotify, bytes: []const u8, offset: *usize, batch: *Batch) contract.PollError!void {
+fn consume(n: *Inotify, io: Io, bytes: []const u8, offset: *usize, batch: *Batch) contract.PollError!void {
     assert(offset.* <= bytes.len);
     // Partial bookkeeping can no longer supply reliable entry counts.
-    errdefer n.budget.reread(void, everyDirectory, {});
+    errdefer n.budget.reread(void, everyDirectory, io, {});
     var lost = false;
-    defer if (lost) n.budget.reread(void, everyDirectory, {});
+    defer if (lost) n.budget.reread(void, everyDirectory, io, {});
     var it = records.iterate(bytes);
     it.offset = offset.*;
     while (true) {
@@ -502,7 +504,7 @@ fn consume(n: *Inotify, bytes: []const u8, offset: *usize, batch: *Batch) contra
             error.TruncatedRecord => return,
         } orelse return;
         if (event.mask & linux.IN.Q_OVERFLOW != 0) lost = true;
-        try n.handle(event, batch);
+        try n.handle(io, event, batch);
         offset.* = it.offset;
     }
 }
@@ -546,11 +548,11 @@ const Change = struct {
 
 /// Turns one kernel event into lookout events: read the flags, pair what
 /// can be paired, report, then keep the books.
-fn handle(n: *Inotify, event: records.Record, batch: *Batch) contract.PollError!void {
+fn handle(n: *Inotify, io: Io, event: records.Record, batch: *Batch) contract.PollError!void {
     if (event.mask & linux.IN.Q_OVERFLOW != 0) {
         // The kernel does not say what was lost, so every watch is suspect.
         for (n.watches.keys(), n.watches.values()) |id, watch| {
-            try batch.push(n.gpa, id, watch.root, .overflow, watch.target);
+            try batch.push(n.gpa, io, id, watch.root, .overflow, watch.target);
         }
         return;
     }
@@ -568,14 +570,14 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) contract.PollError!
     }
     if (event.mask & linux.IN.DELETE_SELF != 0) {
         for (owners) |watch| {
-            try batch.push(n.gpa, watch, base, .removed, n.targetOfWatchPath(watch, base));
+            try batch.push(n.gpa, io, watch, base, .removed, n.targetOfWatchPath(watch, base));
         }
         n.drop(event.wd);
         return;
     }
     if (event.mask & linux.IN.MOVE_SELF != 0) {
         for (owners) |watch| {
-            try batch.push(n.gpa, watch, base, .renamed, n.targetOfWatchPath(watch, base));
+            try batch.push(n.gpa, io, watch, base, .renamed, n.targetOfWatchPath(watch, base));
         }
         n.forget(event.wd);
         return;
@@ -593,7 +595,7 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) contract.PollError!
             .vanished
         else
             .unchanged;
-        if (move != .unchanged and n.budget.count(base) != null) _ = try n.budget.note(base, name, move);
+        if (move != .unchanged and n.budget.count(base) != null) _ = try n.budget.note(io, base, name, move);
     }
     for (owners) |watch| {
         var change = (try n.decode(event, watch, base)) orelse continue;
@@ -601,9 +603,9 @@ fn handle(n: *Inotify, event: records.Record, batch: *Batch) contract.PollError!
             n.gpa.free(change.path);
             n.gpa.free(change.dir);
         }
-        const paired = try n.pair(&change, batch);
-        try n.emit(change, paired, batch);
-        try n.bookkeep(change, paired, batch);
+        const paired = try n.pair(io, &change, batch);
+        try n.emit(io, change, paired, batch);
+        try n.bookkeep(io, change, paired, batch);
     }
 }
 
@@ -655,7 +657,7 @@ fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u
 /// excludes is then treated exactly as a name outside the watch: both
 /// names kept is `renamed`; only the new one kept is `created` there;
 /// only the old one kept is `removed` there; neither is nothing.
-fn pair(n: *Inotify, change: *const Change, batch: *Batch) contract.PollError!bool {
+fn pair(n: *Inotify, io: Io, change: *const Change, batch: *Batch) contract.PollError!bool {
     if (change.moved_from) {
         const owned = try n.gpa.dupe(u8, change.path);
         errdefer n.gpa.free(owned);
@@ -673,11 +675,11 @@ fn pair(n: *Inotify, change: *const Change, batch: *Batch) contract.PollError!bo
         const keeps_to = !n.excluded(change.watch, change.path);
         const keeps_from = !n.excluded(change.watch, half.path);
         if (keeps_to and keeps_from) {
-            try batch.pushRename(n.gpa, change.watch, change.path, half.path, change.target());
+            try batch.pushRename(n.gpa, io, change.watch, change.path, half.path, change.target());
         } else if (keeps_to) {
-            try batch.push(n.gpa, change.watch, change.path, .created, change.target());
+            try batch.push(n.gpa, io, change.watch, change.path, .created, change.target());
         } else if (keeps_from) {
-            try batch.push(n.gpa, change.watch, half.path, .removed, change.target());
+            try batch.push(n.gpa, io, change.watch, half.path, .removed, change.target());
         }
         // The watches below a moved directory are still on the right
         // inodes but under the wrong names, so they are dropped and
@@ -695,31 +697,32 @@ fn pair(n: *Inotify, change: *const Change, batch: *Batch) contract.PollError!bo
 
 /// Reports what happened to the entry, for everything a pairing did not
 /// already answer.
-fn emit(n: *Inotify, change: Change, paired: bool, batch: *Batch) contract.PollError!void {
+fn emit(n: *Inotify, io: Io, change: Change, paired: bool, batch: *Batch) contract.PollError!void {
     if (n.excluded(change.watch, change.path)) return;
     const target = change.target();
     if (change.appeared and !paired) {
-        try batch.push(n.gpa, change.watch, change.path, .created, target);
+        try batch.push(n.gpa, io, change.watch, change.path, .created, target);
     }
     if (change.vanished and !paired) {
-        try batch.push(n.gpa, change.watch, change.path, .removed, target);
+        try batch.push(n.gpa, io, change.watch, change.path, .removed, target);
     }
     if (change.modified) {
-        try batch.push(n.gpa, change.watch, change.path, .modified, target);
+        try batch.push(n.gpa, io, change.watch, change.path, .modified, target);
     }
     // Only asked for when `@import("../options.zig").Options.report_closes` is set, so a
     // watcher that did not ask never sees one of these.
     if (change.closed) {
-        try batch.push(n.gpa, change.watch, change.path, .closed, target);
+        try batch.push(n.gpa, io, change.watch, change.path, .closed, target);
     }
     if (change.attributes) {
-        try batch.push(n.gpa, change.watch, change.path, .attributes, target);
+        try batch.push(n.gpa, io, change.watch, change.path, .attributes, target);
     }
 }
 
 /// Keeps the entry budget and the registrations current.
 fn bookkeep(
     n: *Inotify,
+    io: Io,
     change: Change,
     paired: bool,
     batch: *Batch,
@@ -730,17 +733,17 @@ fn bookkeep(
     // is what the listing backends do. The count itself moved in
     // `handle`, once for the folder. A change to a watched file is no
     // entry of anything: the file is no directory, and has no count.
-    if (change.named and try n.budget.note(change.dir, std.Io.Dir.path.basename(change.path), .unchanged)) {
+    if (change.named and try n.budget.note(io, change.dir, std.Io.Dir.path.basename(change.path), .unchanged)) {
         const watch = n.watches.get(change.watch) orelse return;
-        try batch.push(n.gpa, change.watch, watch.root, .overflow, watch.target);
+        try batch.push(n.gpa, io, change.watch, watch.root, .overflow, watch.target);
     }
 
     if (!change.is_dir) return;
     if (change.appeared and !paired and n.recursive(change.watch)) {
-        try n.adopt(change.watch, change.path, batch);
+        try n.adopt(io, change.watch, change.path, batch);
     }
     if (change.moved_to and paired and n.recursive(change.watch)) {
-        try n.adopt(change.watch, change.path, batch);
+        try n.adopt(io, change.watch, change.path, batch);
     }
     if (change.vanished and !paired) {
         n.forgetSubtree(change.watch, change.path);
@@ -762,12 +765,13 @@ fn targetOfWatchPath(n: *const Inotify, id: WatchId, subject: []const u8) Target
 /// from inside the watch is indistinguishable from a deletion. A half on
 /// a name the filter excludes is held only so that its partner can be
 /// told apart from a rename in, and is not reported.
-fn flushRenames(n: *Inotify, batch: *Batch) contract.PollError!void {
+fn flushRenames(n: *Inotify, io: Io, batch: *Batch) contract.PollError!void {
     while (n.pending_renames.count() != 0) {
         const key = n.pending_renames.keys()[0];
         const half = n.pending_renames.values()[0];
         if (!n.excluded(key.watch, half.path)) try batch.push(
             n.gpa,
+            io,
             key.watch,
             half.path,
             .removed,
@@ -786,7 +790,7 @@ fn flushRenames(n: *Inotify, batch: *Batch) contract.PollError!void {
 /// reports whatever is already inside them as created -- a directory can
 /// be populated before the watch on it exists, and those events would
 /// otherwise be lost.
-fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) contract.PollError!void {
+fn adopt(n: *Inotify, io: Io, id: WatchId, root: []const u8, batch: *Batch) contract.PollError!void {
     n.register(id, try n.gpa.dupe(u8, root)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -794,10 +798,11 @@ fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) contract.Pol
             return;
         },
     };
-    try n.budget.seed(root);
+    try n.budget.seed(io, root);
 
     const Adopting = struct {
         n: *Inotify,
+        io: Io,
         id: WatchId,
         batch: *Batch,
 
@@ -806,7 +811,7 @@ fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) contract.Pol
         fn visit(a: *Self, entry: walk.Entry) anyerror!walk.Step {
             if (a.n.pruned(a.id, entry.path)) return .over;
             if (!a.n.excluded(a.id, entry.path)) {
-                try a.batch.push(a.n.gpa, a.id, entry.path, .created, .of(entry.kind));
+                try a.batch.push(a.n.gpa, a.io, a.id, entry.path, .created, .of(entry.kind));
             }
             if (entry.kind != .directory) return .over;
             a.n.register(a.id, try a.n.gpa.dupe(u8, entry.path)) catch |err| switch (err) {
@@ -816,12 +821,12 @@ fn adopt(n: *Inotify, id: WatchId, root: []const u8, batch: *Batch) contract.Pol
                     return .over;
                 },
             };
-            try a.n.budget.seed(entry.path);
+            try a.n.budget.seed(a.io, entry.path);
             return .into;
         }
     };
-    var adopting: Adopting = .{ .n = n, .id = id, .batch = batch };
-    walk.tree(*Adopting, Adopting.visit, n.gpa, n.io, root, &adopting) catch |err| switch (err) {
+    var adopting: Adopting = .{ .n = n, .io = io, .id = id, .batch = batch };
+    walk.tree(*Adopting, Adopting.visit, n.gpa, io, root, &adopting) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };

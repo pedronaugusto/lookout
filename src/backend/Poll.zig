@@ -6,7 +6,7 @@
 //! to the same contract.
 //!
 //! The costs are the obvious ones: a change is seen up to
-//! `@import("../options.zig").Options.poll_interval_ms` after it happens, every watched
+//! `@import("../options.zig").Options.poll_interval` after it happens, every watched
 //! directory is listed and stat-ed on every tick, and a file created and
 //! deleted between two ticks is never seen at all.
 
@@ -21,6 +21,7 @@ const Tree = @import("../Tree.zig");
 const Waker = @import("../Waker.zig");
 const Options = @import("../options.zig").Options;
 const AddOptions = @import("../options.zig").AddOptions;
+const milliseconds = @import("../options.zig").milliseconds;
 const contract = @import("../watch_contract.zig");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
@@ -28,12 +29,11 @@ const WatchId = lookout.WatchId;
 const Poll = @This();
 
 gpa: Allocator,
-io: Io,
 interval_ms: u32,
 tree: Tree,
 
 /// The longest this backend sleeps without looking at the flag `wake`
-/// sets. A wake is answered within this even when `poll_interval_ms` is
+/// sets. A wake is answered within this even when `poll_interval` is
 /// minutes.
 const slice_ms = 100;
 
@@ -41,20 +41,20 @@ const slice_ms = 100;
 /// and allocates nothing, so its error set is empty: `lookout.Watcher.init`
 /// still treats it as every other backend's init, and a watcher building
 /// one beside its native backend needs no error path for it.
-pub fn init(gpa: Allocator, io: Io, options: Options) error{}!Poll {
-    var tree: Tree = .init(gpa, io, options.max_dir_entries, false);
+pub fn init(gpa: Allocator, options: Options) error{}!Poll {
+    var tree: Tree = .init(gpa, options.max_dir_entries, false);
     tree.check_contents = true;
     return .{
         .gpa = gpa,
-        .io = io,
-        .interval_ms = @max(1, options.poll_interval_ms),
+        .interval_ms = @max(1, milliseconds(options.poll_interval)),
         .tree = tree,
     };
 }
 
 test "a zero polling interval still sleeps between quiet scans" {
-    var p = try Poll.init(std.testing.allocator, std.testing.io, .{ .poll_interval_ms = 0 });
-    defer p.deinit();
+    const io = std.testing.io;
+    var p = try Poll.init(std.testing.allocator, .{ .poll_interval = .fromMilliseconds(0) });
+    defer p.deinit(io);
     try std.testing.expectEqual(@as(u32, 1), p.interval_ms);
 }
 
@@ -101,13 +101,13 @@ test "polling racy entries compare bytes even when size and timestamps match" {
             Clock.mtime_ns = if (ctime_only) 0 else 2 * std.time.ns_per_s;
             Clock.ctime_ns = if (ctime_only) 2 * std.time.ns_per_s else 0;
             try tmp.dir.writeFile(io, .{ .sub_path = "nested/file", .data = "one" });
-            var p = try Poll.init(gpa, io, .{});
-            defer p.deinit();
-            var batch: Batch = .init(io, .{});
+            var p = try Poll.init(gpa, .{});
+            defer p.deinit(io);
+            var batch: Batch = .init(.{});
             defer batch.deinit(gpa);
             const watch_path = if (scope == 2) file_path else if (scope == 1) root else nested;
-            try p.add(@fromBackingInt(@intCast(0)), watch_path, .{ .recursive = scope == 1 }, &batch);
-            try p.scan(&batch);
+            try p.add(io, @fromBackingInt(@intCast(0)), watch_path, .{ .recursive = scope == 1 }, &batch);
+            try p.scan(io, &batch);
             try testing.expectEqual(@as(usize, 0), batch.events.items.len);
 
             const file = try tmp.dir.openFile(io, "nested/file", .{ .mode = .read_write });
@@ -118,21 +118,21 @@ test "polling racy entries compare bytes even when size and timestamps match" {
                 // A racy baseline must still compare content on the scan
                 // where the timestamps first become strictly older.
                 if (index == 2) Clock.time_ns = 4 * std.time.ns_per_s;
-                try p.scan(&batch);
+                try p.scan(io, &batch);
                 try testing.expectEqual(@as(usize, 1), batch.events.items.len);
                 try testing.expectEqual(lookout.Kind.modified, batch.events.items[0].kind);
                 try testing.expectEqualStrings(file_path, batch.events.items[0].path);
             }
             batch.reset(gpa);
-            try p.scan(&batch);
+            try p.scan(io, &batch);
             try testing.expectEqual(@as(usize, 0), batch.events.items.len);
         }
     }
 }
 
 /// Releases the watch tables and the directory handles they hold open.
-pub fn deinit(p: *Poll) void {
-    p.tree.deinit();
+pub fn deinit(p: *Poll, io: Io) void {
+    p.tree.deinit(io);
     p.* = undefined;
 }
 
@@ -163,6 +163,7 @@ pub fn registrationCount(p: *const Poll) usize {
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(
     p: *Poll,
+    io: Io,
     id: WatchId,
     abs_path: []const u8,
     options: AddOptions,
@@ -170,19 +171,19 @@ pub fn add(
 ) contract.AddError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(p.gpa);
-    try p.tree.addWatch(id, abs_path, options, &added, batch);
+    try p.tree.addWatch(io, id, abs_path, options, &added, batch);
 }
 
 /// Stops watching `id`.
-pub fn remove(p: *Poll, id: WatchId) void {
-    p.tree.removeWatch(id);
+pub fn remove(p: *Poll, io: Io, id: WatchId) void {
+    p.tree.removeWatch(io, id);
 }
 
 /// Changes a watch's filter while retaining its root and snapshots.
-pub fn refilter(p: *Poll, id: WatchId, filter: lookout.Filter, batch: *Batch) contract.RefilterError!void {
+pub fn refilter(p: *Poll, io: Io, id: WatchId, filter: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(p.gpa);
-    try p.tree.refilter(id, filter, &added, batch);
+    try p.tree.refilter(io, id, filter, &added, batch);
 }
 
 /// Scans, then sleeps and scans again until the scan produces an event
@@ -193,21 +194,22 @@ pub fn refilter(p: *Poll, id: WatchId, filter: lookout.Filter, batch: *Batch) co
 /// clearing it is the watcher's, which answers the wake.
 pub fn wait(
     p: *Poll,
+    io: Io,
     batch: *Batch,
     timeout_ms: ?u32,
     woken: *const std.atomic.Value(bool),
 ) contract.PollError!void {
     const before = batch.revision;
-    const deadline: Deadline = .start(p.io, timeout_ms);
+    const deadline: Deadline = .fromMs(io, timeout_ms);
 
     while (true) {
-        try p.scan(batch);
+        try p.scan(io, batch);
         if (batch.revision != before) return;
         if (woken.load(.acquire)) return;
 
         var napped: u32 = 0;
         const nap_ms = nap: {
-            const remaining = deadline.remainingMs() orelse break :nap p.interval_ms;
+            const remaining = deadline.remainingMs(io) orelse break :nap p.interval_ms;
             if (remaining == 0) return;
             break :nap @min(p.interval_ms, remaining);
         };
@@ -215,7 +217,7 @@ pub fn wait(
         // a whole tick, which on a long interval is a long time.
         while (napped < nap_ms) {
             const slice = @min(slice_ms, nap_ms - napped);
-            try p.io.sleep(.fromMilliseconds(slice), .awake);
+            try io.sleep(.fromMilliseconds(slice), .awake);
             napped += slice;
             if (woken.load(.acquire)) break;
         }
@@ -229,10 +231,10 @@ pub fn wait(
 /// have taken some of the differences and not reported them. The sleep
 /// between scans is where a cancellation ends this backend's wait; see
 /// `Watcher.poll`.
-pub fn scan(p: *Poll, batch: *Batch) Tree.ScanError!void {
-    const protection = p.io.swapCancelProtection(.blocked);
-    defer _ = p.io.swapCancelProtection(protection);
-    try p.checkRoots(batch);
+pub fn scan(p: *Poll, io: Io, batch: *Batch) Tree.ScanError!void {
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    try p.checkRoots(io, batch);
 
     // The node list is copied first: a scan can both add nodes, when a
     // recursive watch sees a new subdirectory, and drop them, when a
@@ -247,8 +249,8 @@ pub fn scan(p: *Poll, batch: *Batch) Tree.ScanError!void {
     for (ids.items) |id| {
         const role = (p.tree.nodes.get(id) orelse continue).role;
         switch (role) {
-            .directory => try p.tree.rescanDirectory(id, batch, &added),
-            .file => try p.tree.rescanFile(id, batch),
+            .directory => try p.tree.rescanDirectory(io, id, batch, &added),
+            .file => try p.tree.rescanFile(io, id, batch),
         }
     }
 }
@@ -267,7 +269,7 @@ pub fn scan(p: *Poll, batch: *Batch) Tree.ScanError!void {
 /// A move is reported as `lookout.Kind.removed` rather than
 /// `lookout.Kind.renamed`, because a comparison of names cannot tell the
 /// two apart. See `lookout.reportsRootMove`.
-fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
+fn checkRoots(p: *Poll, io: Io, batch: *Batch) Tree.ScanError!void {
     const Gone = struct { id: WatchId, path: []u8, target: Target };
     var gone: std.ArrayList(Gone) = .empty;
     defer {
@@ -279,7 +281,7 @@ fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
         // Only a watch that still has nodes: one already reported gone
         // keeps its id, and must not be reported twice.
         if (!p.hasNodes(id)) continue;
-        _ = Io.Dir.cwd().statFile(p.io, watch.root, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        _ = Io.Dir.cwd().statFile(io, watch.root, .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => {
                 const owned = try p.gpa.dupe(u8, watch.root);
                 errdefer p.gpa.free(owned);
@@ -295,8 +297,8 @@ fn checkRoots(p: *Poll, batch: *Batch) Tree.ScanError!void {
     }
 
     for (gone.items) |item| {
-        try batch.push(p.gpa, item.id, item.path, .removed, item.target);
-        p.tree.removeSubtree(item.id, item.path);
+        try batch.push(p.gpa, io, item.id, item.path, .removed, item.target);
+        p.tree.removeSubtree(io, item.id, item.path);
     }
 }
 
@@ -307,27 +309,28 @@ fn hasNodes(p: *const Poll, id: WatchId) bool {
 }
 
 test "a failed polling removal allocation releases its staged path" {
+    const io = std.testing.io;
     const testing = std.testing;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "gone", .data = "x" });
     const root = try tmp.dir.realPathFileAlloc(testing.io, "gone", testing.allocator);
     defer testing.allocator.free(root);
-    var poll = try Poll.init(testing.allocator, testing.io, .{});
-    defer poll.deinit();
-    var batch: Batch = .init(testing.io, .{});
+    var poll = try Poll.init(testing.allocator, .{});
+    defer poll.deinit(io);
+    var batch: Batch = .init(.{});
     defer batch.deinit(testing.allocator);
-    try poll.add(@fromBackingInt(@intCast(0)), root, .{}, &batch);
+    try poll.add(io, @fromBackingInt(@intCast(0)), root, .{}, &batch);
     try tmp.dir.deleteFile(testing.io, "gone");
 
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
     poll.gpa = failing.allocator();
-    try testing.expectError(error.OutOfMemory, poll.checkRoots(&batch));
+    try testing.expectError(error.OutOfMemory, poll.checkRoots(io, &batch));
     try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     try testing.expectEqual(@as(usize, 0), batch.events.items.len);
     try testing.expectEqual(@as(usize, 1), poll.registrationCount());
     poll.gpa = testing.allocator;
-    try poll.checkRoots(&batch);
+    try poll.checkRoots(io, &batch);
     try testing.expectEqual(@as(usize, 1), batch.events.items.len);
     try testing.expectEqual(lookout.Kind.removed, batch.events.items[0].kind);
     try testing.expectEqual(@as(usize, 0), poll.registrationCount());

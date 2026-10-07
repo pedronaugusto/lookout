@@ -50,7 +50,6 @@ const WatchId = lookout.WatchId;
 const Windows = @This();
 
 gpa: Allocator,
-io: Io,
 /// The completion port every watch's reads land on.
 port: windows.HANDLE,
 watches: std.array_hash_map.Auto(WatchId, *Watch),
@@ -190,22 +189,22 @@ const Watch = struct {
 };
 
 /// Creates the completion port.
-pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!Windows {
+pub fn init(gpa: Allocator, options: Options) contract.InitError!Windows {
     const port = c.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 0) orelse
         return error.SystemResources;
     return .{
         .gpa = gpa,
-        .io = io,
         .port = port,
         .watches = .empty,
         .retiring = null,
-        .budget = .init(gpa, io, options.max_dir_entries),
+        .budget = .init(gpa, options.max_dir_entries),
         .buffer_len = buffer.clamp(options.buffer_bytes, bounds),
     };
 }
 
 /// Closes every directory handle and the port.
-pub fn deinit(w: *Windows) void {
+pub fn deinit(w: *Windows, io: Io) void {
+    _ = io; // Every backend takes it; this one closes nothing through it.
     for (w.watches.values()) |watch| {
         _ = c.CancelIoEx(watch.handle, &watch.overlapped);
         _ = c.CloseHandle(watch.handle);
@@ -254,13 +253,14 @@ pub fn registrationCount(w: *const Windows) usize {
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(
     w: *Windows,
+    io: Io,
     id: WatchId,
     abs_path: []const u8,
     options: AddOptions,
     batch: *Batch,
 ) contract.AddError!void {
     _ = batch;
-    const stat = try Io.Dir.cwd().statFile(w.io, abs_path, .{});
+    const stat = try Io.Dir.cwd().statFile(io, abs_path, .{});
     const is_dir = stat.kind == .directory;
 
     // `ReadDirectoryChangesW` reads directories, so a watch on a file is
@@ -278,7 +278,7 @@ pub fn add(
     errdefer _ = c.CloseHandle(handle);
 
     var filter = try options.filter.dupe(w.gpa);
-    errdefer filter.deinit(w.gpa);
+    errdefer filter.deinit();
 
     const bytes = try w.gpa.alignedAlloc(u8, .of(u32), w.buffer_len);
     errdefer w.gpa.free(bytes);
@@ -299,7 +299,7 @@ pub fn add(
         .accepted_len = w.buffer_len,
         .retiring_next = null,
     };
-    if (is_dir) try w.budget.seed(dir_path);
+    if (is_dir) try w.budget.seed(io, dir_path);
 
     if (c.CreateIoCompletionPort(handle, w.port, @backingInt(id), 0) == null)
         return error.WatchLimitReached;
@@ -373,7 +373,8 @@ fn arm(w: *Windows, watch: *Watch) contract.AddError!void {
 }
 
 /// Stops watching `id`.
-pub fn remove(w: *Windows, id: WatchId) void {
+pub fn remove(w: *Windows, io: Io, id: WatchId) void {
+    _ = io; // Every backend takes it; this one closes nothing through it.
     const entry = w.watches.fetchSwapRemove(id) orelse return;
     const watch = entry.value;
     w.budget.release(*const Windows, stillCounted, watch.root, w);
@@ -392,13 +393,14 @@ pub fn remove(w: *Windows, id: WatchId) void {
 }
 
 /// Replaces the delivery filter; the kernel's recursive read stays armed.
-pub fn refilter(w: *Windows, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
+pub fn refilter(w: *Windows, io: Io, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
+    _ = io; // Every backend takes it; this one reads nothing through it.
     _ = batch;
     const watch = w.watches.get(id) orelse return error.UnknownWatch;
     const replacement = try next.dupe(w.gpa);
     var previous = watch.filter;
     watch.filter = replacement;
-    previous.deinit(w.gpa);
+    previous.deinit();
 }
 
 /// Whether a watch still held reads the entries of `dir`, so that its
@@ -414,7 +416,7 @@ fn stillCounted(w: *const Windows, dir: []const u8) bool {
 fn free(w: *Windows, watch: *Watch) void {
     w.gpa.free(watch.buffer);
     w.gpa.free(watch.root);
-    watch.filter.deinit(w.gpa);
+    watch.filter.deinit();
     if (watch.only) |name| w.gpa.free(name);
     if (watch.pending_rename) |name| w.gpa.free(name);
     if (watch.held_removal) |name| w.gpa.free(name);
@@ -423,47 +425,47 @@ fn free(w: *Windows, watch: *Watch) void {
 
 /// Waits on the completion port until a read produces something `batch`
 /// did not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(w: *Windows, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+pub fn wait(w: *Windows, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     // A completion is taken off the port by the call that waits for it,
     // and the read it completes is re-armed before the next, so nothing
     // in here is a place to stop: see `Watcher.poll`. The wait itself is
     // out of `std.Io`'s reach.
-    const protection = w.io.swapCancelProtection(.blocked);
-    defer _ = w.io.swapCancelProtection(protection);
-    try w.collect(batch, timeout_ms);
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    try w.collect(io, batch, timeout_ms);
     // Whatever is still held when the wait is over never found its other
     // half: the path moved somewhere this watch cannot see it. A removal
     // is resolved first, being the older of the two.
-    try w.resolveRemovals(batch);
-    try w.flushRenames(batch);
+    try w.resolveRemovals(io, batch);
+    try w.flushRenames(io, batch);
 }
 
 /// Reports every held old name whose new name never came as a removal.
 /// An old name the watch does not want was held only so that its new
 /// name could be told apart from a rename in, and is not reported.
-fn flushRenames(w: *Windows, batch: *Batch) contract.PollError!void {
+fn flushRenames(w: *Windows, io: Io, batch: *Batch) contract.PollError!void {
     for (w.watches.values()) |watch| {
         const old = watch.pending_rename orelse continue;
         if (wants(watch, old))
-            try batch.push(w.gpa, watch.id, old, .removed, watch.goneTarget());
+            try batch.push(w.gpa, io, watch.id, old, .removed, watch.goneTarget());
         watch.pending_rename = null;
         w.gpa.free(old);
     }
 }
 
-fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+fn collect(w: *Windows, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     const before = batch.revision;
-    const deadline: Deadline = .start(w.io, timeout_ms);
+    const deadline: Deadline = .fromMs(io, timeout_ms);
 
     while (true) {
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still takes one look at the port.
-        const timeout: u32 = if (timeout_ms == null) c.infinite else deadline.windowsMs();
-        switch (try w.take(batch, timeout)) {
+        const timeout: u32 = if (timeout_ms == null) c.infinite else deadline.windowsMs(io);
+        switch (try w.take(io, batch, timeout)) {
             .woken => return,
             // A finite timeout may have been clamped to what this API
             // can represent, so only the original deadline ends it.
-            .quiet => if (deadline.expired()) return else continue,
+            .quiet => if (deadline.expired(io)) return else continue,
             .taken => {},
         }
         // A removal that ended its read is worth waiting a moment for:
@@ -472,7 +474,7 @@ fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) contract.PollError!void
         // stands there. See `Watch.held_removal`.
         var round: usize = 0;
         while (w.holdsRemoval() and round < grace_rounds) : (round += 1) {
-            switch (try w.take(batch, grace_ms)) {
+            switch (try w.take(io, batch, grace_ms)) {
                 .taken => {},
                 .quiet, .woken => break,
             }
@@ -480,7 +482,7 @@ fn collect(w: *Windows, batch: *Batch, timeout_ms: ?u32) contract.PollError!void
         // A removal no move followed within the grace is decided now,
         // not when the next change happens to come, which a wait with no
         // deadline could make never.
-        try w.resolveRemovals(batch);
+        try w.resolveRemovals(io, batch);
         if (batch.revision != before) return;
     }
 }
@@ -512,11 +514,11 @@ const Completion = struct {
     failure: ?u32,
 };
 
-fn take(w: *Windows, batch: *Batch, timeout: u32) contract.PollError!Taken {
+fn take(w: *Windows, io: Io, batch: *Batch, timeout: u32) contract.PollError!Taken {
     // A completion already taken is ready even if the port is quiet.
     for (w.watches.values()) |watch| {
         if (watch.completion != null) {
-            try w.complete(watch, batch);
+            try w.complete(io, watch, batch);
             return .taken;
         }
     }
@@ -536,47 +538,47 @@ fn take(w: *Windows, batch: *Batch, timeout: u32) contract.PollError!Taken {
         return .taken;
     };
     watch.completion = .{ .transferred = transferred, .failure = failure };
-    try w.complete(watch, batch);
+    try w.complete(io, watch, batch);
     return .taken;
 }
 
 /// Finishes a retained completion before its buffer can be overwritten.
-fn complete(w: *Windows, watch: *Watch, batch: *Batch) contract.PollError!void {
+fn complete(w: *Windows, io: Io, watch: *Watch, batch: *Batch) contract.PollError!void {
     const completion = watch.completion.?;
     const id = watch.id;
     if (!watch.reported) {
         if (completion.failure) |err| {
-            try w.resolveRemoval(watch, batch);
+            try w.resolveRemoval(io, watch, batch);
             if (err != c.error_notify_enum_dir) {
-                try batch.push(w.gpa, id, watch.root, .removed, .directory);
+                try batch.push(w.gpa, io, id, watch.root, .removed, .directory);
                 w.discard(id);
                 return;
             }
-            try batch.push(w.gpa, id, watch.root, .overflow, .directory);
-            w.lost(watch);
+            try batch.push(w.gpa, io, id, watch.root, .overflow, .directory);
+            w.lost(io, watch);
         } else {
-            if (watch.only == null) switch (w.rootState(watch)) {
+            if (watch.only == null) switch (rootState(io, watch)) {
                 .stands => {},
                 .gone => {
-                    try w.resolveRemoval(watch, batch);
-                    try batch.push(w.gpa, id, watch.root, .removed, .directory);
+                    try w.resolveRemoval(io, watch, batch);
+                    try batch.push(w.gpa, io, id, watch.root, .removed, .directory);
                     w.discard(id);
                     return;
                 },
                 .moved, .unknown => {
-                    try w.resolveRemoval(watch, batch);
-                    try batch.push(w.gpa, id, watch.root, .unwatched, .directory);
+                    try w.resolveRemoval(io, watch, batch);
+                    try batch.push(w.gpa, io, id, watch.root, .unwatched, .directory);
                     w.discard(id);
                     return;
                 },
             };
             if (completion.transferred == 0) {
-                try w.resolveRemoval(watch, batch);
-                try batch.push(w.gpa, id, watch.root, .overflow, .directory);
-                w.lost(watch);
+                try w.resolveRemoval(io, watch, batch);
+                try batch.push(w.gpa, io, id, watch.root, .overflow, .directory);
+                w.lost(io, watch);
             } else {
-                w.report(watch, completion.transferred, batch) catch |err| {
-                    w.lost(watch);
+                w.report(io, watch, completion.transferred, batch) catch |err| {
+                    w.lost(io, watch);
                     return err;
                 };
             }
@@ -584,7 +586,7 @@ fn complete(w: *Windows, watch: *Watch, batch: *Batch) contract.PollError!void {
         watch.reported = true;
     }
     // rearm may discard the watch; keep no reference to it afterwards.
-    const armed = try w.rearm(watch, batch);
+    const armed = try w.rearm(io, watch, batch);
     if (armed) {
         watch.completion = null;
         watch.reported = false;
@@ -602,25 +604,25 @@ fn holdsRemoval(w: *const Windows) bool {
 
 /// Reports every held removal as the removal it is: no move onto its
 /// name came.
-fn resolveRemovals(w: *Windows, batch: *Batch) contract.PollError!void {
-    for (w.watches.values()) |watch| try w.resolveRemoval(watch, batch);
+fn resolveRemovals(w: *Windows, io: Io, batch: *Batch) contract.PollError!void {
+    for (w.watches.values()) |watch| try w.resolveRemoval(io, watch, batch);
 }
 
 /// Reports `watch`'s held removal, if it holds one.
-fn resolveRemoval(w: *Windows, watch: *Watch, batch: *Batch) contract.PollError!void {
+fn resolveRemoval(w: *Windows, io: Io, watch: *Watch, batch: *Batch) contract.PollError!void {
     const gone = watch.held_removal orelse return;
     trace.log("windows push removed held path={s}", .{gone});
-    try batch.push(w.gpa, watch.id, gone, .removed, watch.goneTarget());
+    try batch.push(w.gpa, io, watch.id, gone, .removed, watch.goneTarget());
     watch.held_removal = null;
     w.gpa.free(gone);
 }
 
 const RootState = enum { stands, moved, gone, unknown };
 
-fn rootState(w: *const Windows, watch: *const Watch) RootState {
-    const named = Io.Dir.cwd().statFile(w.io, watch.root, .{ .follow_symlinks = false }) catch {
+fn rootState(io: Io, watch: *const Watch) RootState {
+    const named = Io.Dir.cwd().statFile(io, watch.root, .{ .follow_symlinks = false }) catch {
         const opened: Io.File = .{ .handle = watch.handle, .flags = .{ .nonblocking = true } };
-        const held = opened.stat(w.io) catch return .unknown;
+        const held = opened.stat(io) catch return .unknown;
         return if (held.nlink == 0) .gone else .moved;
     };
     return if (named.inode == watch.root_inode) .stands else .moved;
@@ -633,7 +635,7 @@ fn rootState(w: *const Windows, watch: *const Watch) RootState {
 /// Called once the read is over, before the next is posted: what the
 /// kernel buffers from here on is read after the count and counted on
 /// top of it, as it should be.
-fn lost(w: *Windows, watch: *const Watch) void {
+fn lost(w: *Windows, io: Io, watch: *const Watch) void {
     const Loss = struct {
         w: *const Windows,
         watch: *const Watch,
@@ -644,7 +646,7 @@ fn lost(w: *Windows, watch: *const Watch) void {
             return Budget.restsOn(loss.w.watches.values(), loss.watch, dir);
         }
     };
-    w.budget.reread(Loss, Loss.stale, .{ .w = w, .watch = watch });
+    w.budget.reread(Loss, Loss.stale, io, .{ .w = w, .watch = watch });
 }
 
 /// Posts the next read, and says so when it cannot be posted.
@@ -653,14 +655,14 @@ fn lost(w: *Windows, watch: *const Watch) void {
 /// That used to be swallowed, which left the caller with a live watch id
 /// over a tree that had gone quiet; now the watch is dropped and the
 /// root is reported as `lookout.Kind.unwatched`, which is what it is.
-fn rearm(w: *Windows, watch: *Watch, batch: *Batch) contract.PollError!bool {
+fn rearm(w: *Windows, io: Io, watch: *Watch, batch: *Batch) contract.PollError!bool {
     w.arm(watch) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             const root = try w.gpa.dupe(u8, watch.root);
             defer w.gpa.free(root);
             const id = watch.id;
-            try batch.push(w.gpa, id, root, .unwatched, .directory);
+            try batch.push(w.gpa, io, id, root, .unwatched, .directory);
             w.discard(id);
             return false;
         },
@@ -711,7 +713,7 @@ fn retire(w: *Windows, overlapped: ?*c.Overlapped) void {
 }
 
 /// Turns one completed read into events.
-fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) contract.PollError!void {
+fn report(w: *Windows, io: Io, watch: *Watch, transferred: u32, batch: *Batch) contract.PollError!void {
     // A completed read wrote no more than `arm` offered.
     assert(transferred <= watch.accepted_len);
     const dir = watch.dir();
@@ -730,7 +732,7 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) contract.
                 watch.held_removal = null;
                 w.gpa.free(gone);
             } else {
-                try w.resolveRemoval(watch, batch);
+                try w.resolveRemoval(io, watch, batch);
             }
         }
         watch.cursor = it;
@@ -742,8 +744,8 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) contract.
         // is what lookout says when it has lost something and cannot
         // say what. The caller already handles it.
         const record = it.next() catch {
-            try batch.push(w.gpa, watch.id, watch.root, .overflow, .directory);
-            w.lost(watch);
+            try batch.push(w.gpa, io, watch.id, watch.root, .overflow, .directory);
+            w.lost(io, watch);
             return;
         } orelse return;
 
@@ -763,13 +765,13 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) contract.
         // the filter is applied to the pair -- see `reportRename`.
         switch (record.action) {
             c.file_action_renamed_old_name, c.file_action_renamed_new_name => {
-                try w.reportRename(watch, record.action, path, batch);
+                try w.reportRename(io, watch, record.action, path, batch);
             },
             c.file_action_removed => if (wants(watch, path)) {
-                try w.reportRemoval(watch, it, dir, path, batch);
+                try w.reportRemoval(io, watch, it, dir, path, batch);
             },
             else => if (wants(watch, path)) {
-                try w.reportOne(watch, record.action, path, batch);
+                try w.reportOne(io, watch, record.action, path, batch);
             },
         }
         watch.cursor = it;
@@ -797,21 +799,21 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) contract.
 /// `created`, which says the name holds an entry it did not before.
 ///
 /// Either way the entry that was at `path` left, so the count moves now.
-fn reportRemoval(w: *Windows, watch: *Watch, rest: records.Iterator, dir: []const u8, path: []const u8, batch: *Batch) contract.PollError!void {
+fn reportRemoval(w: *Windows, io: Io, watch: *Watch, rest: records.Iterator, dir: []const u8, path: []const u8, batch: *Batch) contract.PollError!void {
     switch (records.arrival(rest)) {
         .moved => |record| if (try w.sameName(record, dir, path)) {
             trace.log("windows drop replaced path={s}", .{path});
-            return w.recount(watch, path, .vanished, batch);
+            return w.recount(io, watch, path, .vanished, batch);
         },
         .none => {},
         .unsaid => {
             trace.log("windows hold removed path={s}", .{path});
-            try w.resolveRemoval(watch, batch);
+            try w.resolveRemoval(io, watch, batch);
             watch.held_removal = try w.gpa.dupe(u8, path);
-            return w.recount(watch, path, .vanished, batch);
+            return w.recount(io, watch, path, .vanished, batch);
         },
     }
-    try w.reportOne(watch, c.file_action_removed, path, batch);
+    try w.reportOne(io, watch, c.file_action_removed, path, batch);
 }
 
 /// Whether `record`, read on `dir`, names `path`.
@@ -853,7 +855,7 @@ fn wants(watch: *const Watch, subject: []const u8) bool {
 /// `created` there, as a rename in from outside would be; only the old
 /// one wanted is `removed` there, as a rename out would be; neither is
 /// nothing.
-fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) contract.PollError!void {
+fn reportRename(w: *Windows, io: Io, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) contract.PollError!void {
     const wanted = wants(watch, subject);
     if (action == c.file_action_renamed_old_name) {
         // Copied before the one it replaces is freed, so a copy that
@@ -861,7 +863,7 @@ fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, ba
         const owned = try w.gpa.dupe(u8, subject);
         if (watch.pending_rename) |old| w.gpa.free(old);
         watch.pending_rename = owned;
-        if (wanted) try w.recount(watch, subject, .vanished, batch);
+        if (wanted) try w.recount(io, watch, subject, .vanished, batch);
         return;
     }
     const from = watch.pending_rename;
@@ -873,24 +875,24 @@ fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, ba
     const keeps_from = if (from) |old| wants(watch, old) else false;
     // The new name is where the entry is now, so it can be asked what the
     // entry is, whichever name is reported.
-    const target = w.targetOf(subject);
+    const target = targetOf(io, subject);
     if (!wanted) {
         if (keeps_from) {
             const gone = if (target != .unknown) target else watch.goneTarget();
-            try batch.push(w.gpa, watch.id, from.?, .removed, gone);
+            try batch.push(w.gpa, io, watch.id, from.?, .removed, gone);
         }
         transferred = true;
         return;
     }
     watch.noteRoot(target);
     if (keeps_from) {
-        try batch.pushRename(w.gpa, watch.id, subject, from.?, target);
+        try batch.pushRename(w.gpa, io, watch.id, subject, from.?, target);
     } else {
         // Renamed in from outside the watch, or from a name it does not
         // want: a creation as far as anyone watching it can tell.
-        try batch.push(w.gpa, watch.id, subject, .created, target);
+        try batch.push(w.gpa, io, watch.id, subject, .created, target);
     }
-    try w.recount(watch, subject, .appeared, batch);
+    try w.recount(io, watch, subject, .appeared, batch);
     transferred = true;
 }
 
@@ -899,38 +901,38 @@ fn reportRename(w: *Windows, watch: *Watch, action: u32, subject: []const u8, ba
 /// is about a directory, which is why this is a `stat` and why an entry
 /// that is already gone is `unknown`; the watched path itself is the
 /// exception, because `Watch.root_target` remembers it.
-fn targetOf(w: *const Windows, subject: []const u8) Target {
-    const stat = Io.Dir.cwd().statFile(w.io, subject, .{ .follow_symlinks = false }) catch
+fn targetOf(io: Io, subject: []const u8) Target {
+    const stat = Io.Dir.cwd().statFile(io, subject, .{ .follow_symlinks = false }) catch
         return .unknown;
     return .of(stat.kind);
 }
 
-fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) contract.PollError!void {
+fn reportOne(w: *Windows, io: Io, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) contract.PollError!void {
     var move: Budget.Move = .unchanged;
     switch (action) {
         c.file_action_added => {
-            const target = w.targetOf(subject);
+            const target = targetOf(io, subject);
             watch.noteRoot(target);
-            try batch.push(w.gpa, watch.id, subject, .created, target);
+            try batch.push(w.gpa, io, watch.id, subject, .created, target);
             move = .appeared;
         },
         c.file_action_removed => {
-            try batch.push(w.gpa, watch.id, subject, .removed, watch.goneTarget());
+            try batch.push(w.gpa, io, watch.id, subject, .removed, watch.goneTarget());
             move = .vanished;
         },
         c.file_action_modified => {
             // A directory's own times move whenever anything inside it
             // moves, and no other backend reports that. The record does
             // not say which this is, so the file system is asked.
-            const target = w.targetOf(subject);
+            const target = targetOf(io, subject);
             if (target != .directory) {
-                try batch.push(w.gpa, watch.id, subject, .modified, target);
+                try batch.push(w.gpa, io, watch.id, subject, .modified, target);
             }
         },
         else => {},
     }
     if (move == .unchanged) return;
-    try w.recount(watch, subject, move, batch);
+    try w.recount(io, watch, subject, move, batch);
 }
 
 /// Keeps the entry budget of the directory `subject` is in, and reports
@@ -947,16 +949,16 @@ fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch
 /// and counting each copy reached the budget at half the folder's size.
 /// One copy counts, chosen by `Budget.counter`, and when that takes the
 /// directory past the budget every watch the change reached is told.
-fn recount(w: *Windows, watch: *Watch, subject: []const u8, move: Budget.Move, batch: *Batch) contract.PollError!void {
+fn recount(w: *Windows, io: Io, watch: *Watch, subject: []const u8, move: Budget.Move, batch: *Batch) contract.PollError!void {
     const change: Change = .{
         .dir = std.Io.Dir.path.dirname(subject) orelse return,
         .subject = subject,
     };
     if (Budget.counter(*Watch, Change, Change.reaches, w.watches.values(), change) != watch) return;
-    if (!try w.budget.note(change.dir, std.Io.Dir.path.basename(subject), move)) return;
+    if (!try w.budget.note(io, change.dir, std.Io.Dir.path.basename(subject), move)) return;
     for (w.watches.values()) |other| {
         if (!change.reaches(other)) continue;
-        try batch.push(w.gpa, other.id, other.root, .overflow, .directory);
+        try batch.push(w.gpa, io, other.id, other.root, .overflow, .directory);
     }
 }
 
@@ -1097,6 +1099,7 @@ test "a failed Windows rename pair transfer keeps its held path" {
 
 fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !void {
     const testing = std.testing;
+    const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
@@ -1109,10 +1112,9 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     // Only the state used by these platform-independent transfers is live.
     var backend: Windows = undefined;
     backend.gpa = failing.allocator();
-    backend.io = testing.io;
     backend.watches = .empty;
     defer backend.watches.deinit(testing.allocator);
-    backend.budget = .init(testing.allocator, testing.io, 8);
+    backend.budget = .init(testing.allocator, 8);
     defer backend.budget.deinit();
     var watch: Watch = undefined;
     watch.id = @fromBackingInt(@intCast(0));
@@ -1126,15 +1128,15 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     defer if (watch.held_removal) |held| testing.allocator.free(held);
     defer if (watch.pending_rename) |held| testing.allocator.free(held);
     try backend.watches.put(testing.allocator, watch.id, &watch);
-    var batch: Batch = .init(testing.io, .{});
+    var batch: Batch = .init(.{});
     defer batch.deinit(testing.allocator);
     const held = try testing.allocator.dupe(u8, old_path);
     if (transfer == .removal) watch.held_removal = held else watch.pending_rename = held;
 
     const result = switch (transfer) {
-        .removal => backend.resolveRemoval(&watch, &batch),
-        .flush => backend.flushRenames(&batch),
-        .pair => backend.reportRename(&watch, c.file_action_renamed_new_name, new_path, &batch),
+        .removal => backend.resolveRemoval(io, &watch, &batch),
+        .flush => backend.flushRenames(io, &batch),
+        .pair => backend.reportRename(io, &watch, c.file_action_renamed_new_name, new_path, &batch),
     };
     try testing.expectError(error.OutOfMemory, result);
     const kept = if (transfer == .removal) watch.held_removal else watch.pending_rename;
@@ -1143,9 +1145,9 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     try testing.expectEqual(@as(usize, 0), batch.events.items.len);
     backend.gpa = testing.allocator;
     switch (transfer) {
-        .removal => try backend.resolveRemoval(&watch, &batch),
-        .flush => try backend.flushRenames(&batch),
-        .pair => try backend.reportRename(&watch, c.file_action_renamed_new_name, new_path, &batch),
+        .removal => try backend.resolveRemoval(io, &watch, &batch),
+        .flush => try backend.flushRenames(io, &batch),
+        .pair => try backend.reportRename(io, &watch, c.file_action_renamed_new_name, new_path, &batch),
     }
     try testing.expectEqual(@as(usize, 1), batch.events.items.len);
     try testing.expectEqual(if (transfer == .pair) lookout.Kind.renamed else .removed, batch.events.items[0].kind);

@@ -1,5 +1,5 @@
 //! How many entries each watched directory holds, against
-//! `lookout.Options.max_dir_entries`.
+//! `lookout.Watcher.Options.max_dir_entries`.
 //!
 //! The backends that compare directory listings know when a directory is
 //! past the budget because the listing itself is truncated -- see
@@ -23,8 +23,7 @@ const path = @import("path.zig");
 const Budget = @This();
 
 gpa: Allocator,
-io: Io,
-/// Mirrors `lookout.Options.max_dir_entries`.
+/// Mirrors `lookout.Watcher.Options.max_dir_entries`.
 max: usize,
 /// The entries of each directory the backend has been told about, by
 /// name: a set, so that a creation reported twice, or a removal of a
@@ -46,8 +45,8 @@ const Remembered = struct {
 /// What happened to a directory's entry count.
 pub const Move = enum { appeared, vanished, unchanged };
 
-pub fn init(gpa: Allocator, io: Io, max: usize) Budget {
-    return .{ .gpa = gpa, .io = io, .max = max, .counts = .empty, .walking = .empty };
+pub fn init(gpa: Allocator, max: usize) Budget {
+    return .{ .gpa = gpa, .max = max, .counts = .empty, .walking = .empty };
 }
 
 pub fn deinit(b: *Budget) void {
@@ -73,8 +72,8 @@ pub fn count(b: *const Budget, dir: []const u8) ?usize {
 /// A directory already counted is read again and its count replaced, as
 /// `begin` counts it again from a walk: what another watch left may be
 /// only what it heard. A failed read retains the old names as uncertain.
-pub fn seed(b: *Budget, dir: []const u8) Allocator.Error!void {
-    var names = namesIn(b.gpa, b.io, dir) catch |err| switch (err) {
+pub fn seed(b: *Budget, io: Io, dir: []const u8) Allocator.Error!void {
+    var names = namesIn(b.gpa, io, dir) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Incomplete => {
             if (b.counts.getPtr(dir)) |remembered| {
@@ -145,10 +144,10 @@ pub fn end(b: *Budget) void {
 /// one heard of it before -- a watch parked on a folder for one name in
 /// it, which lets every other change there go by, leaves the count as
 /// true as any other.
-pub fn note(b: *Budget, dir: []const u8, name: []const u8, move: Move) Allocator.Error!bool {
+pub fn note(b: *Budget, io: Io, dir: []const u8, name: []const u8, move: Move) Allocator.Error!bool {
     if (b.counts.getPtr(dir)) |remembered| {
         if (!remembered.complete) {
-            const fresh = namesIn(b.gpa, b.io, dir) catch |err| switch (err) {
+            const fresh = namesIn(b.gpa, io, dir) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Incomplete => return true,
             };
@@ -168,7 +167,7 @@ pub fn note(b: *Budget, dir: []const u8, name: []const u8, move: Move) Allocator
 
     // Publish only a complete listing. Until the map takes it, this scope
     // owns both the directory key and every entry name.
-    var names = namesIn(b.gpa, b.io, dir) catch |err| switch (err) {
+    var names = namesIn(b.gpa, io, dir) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Incomplete => return true,
     };
@@ -266,11 +265,12 @@ pub fn reread(
     b: *Budget,
     comptime Context: type,
     comptime stale: fn (Context, []const u8) bool,
+    io: Io,
     context: Context,
 ) void {
     for (b.counts.keys(), b.counts.values()) |dir, *remembered| {
         if (!stale(context, dir)) continue;
-        const fresh = namesIn(b.gpa, b.io, dir) catch {
+        const fresh = namesIn(b.gpa, io, dir) catch {
             remembered.complete = false;
             continue;
         };
@@ -394,16 +394,16 @@ test "a failed first budget count leaves no directory for the retry" {
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
-        var budget: Budget = .init(failing.allocator(), testing.io, 8);
+        var budget: Budget = .init(failing.allocator(), 8);
         defer budget.deinit();
-        if (budget.note(root, "entry", .appeared)) |_| {
+        if (budget.note(testing.io, root, "entry", .appeared)) |_| {
             try testing.expectEqual(@as(usize, 1), budget.count(root).?);
             break;
         } else |err| {
             try testing.expectEqual(error.OutOfMemory, err);
             try testing.expectEqual(@as(usize, 0), budget.counts.count());
             failing.fail_index = std.math.maxInt(usize);
-            try testing.expect(!try budget.note(root, "entry", .appeared));
+            try testing.expect(!try budget.note(testing.io, root, "entry", .appeared));
             try testing.expectEqual(@as(usize, 1), budget.count(root).?);
         }
     }
@@ -420,14 +420,14 @@ test "a directory is counted once and then kept current" {
     try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "x" });
     try tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "x" });
 
-    var b: Budget = .init(gpa, io, 3);
+    var b: Budget = .init(gpa, 3);
     defer b.deinit();
 
-    try b.seed(root);
+    try b.seed(io, root);
     try testing.expectEqual(@as(usize, 2), b.count(root).?);
-    try testing.expect(!try b.note(root, "c.txt", .appeared));
-    try testing.expect(try b.note(root, "d.txt", .appeared));
-    try testing.expect(!try b.note(root, "d.txt", .vanished));
+    try testing.expect(!try b.note(io, root, "c.txt", .appeared));
+    try testing.expect(try b.note(io, root, "d.txt", .appeared));
+    try testing.expect(!try b.note(io, root, "d.txt", .vanished));
 }
 
 test "each directory has its own budget" {
@@ -445,18 +445,18 @@ test "each directory has its own budget" {
     const two = try std.Io.Dir.path.join(gpa, &.{ root, "two" });
     defer gpa.free(two);
 
-    var b: Budget = .init(gpa, io, 2);
+    var b: Budget = .init(gpa, 2);
     defer b.deinit();
 
     // The first mention of a directory counts what is in it, because the
     // change being reported is already on disk by then.
-    try b.seed(one);
-    try b.seed(two);
-    try testing.expect(!try b.note(one, "a", .appeared));
-    try testing.expect(!try b.note(one, "b", .appeared));
-    try testing.expect(try b.note(one, "c", .appeared));
+    try b.seed(io, one);
+    try b.seed(io, two);
+    try testing.expect(!try b.note(io, one, "a", .appeared));
+    try testing.expect(!try b.note(io, one, "b", .appeared));
+    try testing.expect(try b.note(io, one, "c", .appeared));
     // The other directory has spent nothing of its own.
-    try testing.expect(!try b.note(two, "a", .appeared));
+    try testing.expect(!try b.note(io, two, "a", .appeared));
 
     b.forget(root);
     try testing.expectEqual(@as(usize, 0), b.counts.count());
@@ -476,14 +476,14 @@ test "a watch removed leaves the counts another watch still holds" {
     const gone = try std.Io.Dir.path.join(gpa, &.{ root, "gone" });
     defer gpa.free(gone);
 
-    var b: Budget = .init(gpa, io, 8);
+    var b: Budget = .init(gpa, 8);
     defer b.deinit();
-    try b.seed(root);
-    try b.seed(kept);
-    try b.seed(gone);
+    try b.seed(io, root);
+    try b.seed(io, kept);
+    try b.seed(io, gone);
     // A count that differs from what is on disk, so that a count read
     // again from disk would show.
-    _ = try b.note(kept, "counted", .appeared);
+    _ = try b.note(io, kept, "counted", .appeared);
 
     const Left = struct {
         dir: []const u8,
@@ -512,10 +512,10 @@ test "a lost read has its counts read again from disk, and only those" {
     const kept = try std.Io.Dir.path.join(gpa, &.{ root, "kept" });
     defer gpa.free(kept);
 
-    var b: Budget = .init(gpa, io, 2);
+    var b: Budget = .init(gpa, 2);
     defer b.deinit();
-    try b.seed(lost);
-    try b.seed(kept);
+    try b.seed(io, lost);
+    try b.seed(io, kept);
     // Three entries each, which neither count was told about.
     for ([_][]const u8{ "lost/a", "lost/b", "lost/c", "kept/a", "kept/b", "kept/c" }) |name| {
         try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
@@ -529,11 +529,11 @@ test "a lost read has its counts read again from disk, and only those" {
             return path.eql(l.dir, dir);
         }
     };
-    b.reread(Lost, Lost.stale, Lost{ .dir = lost });
+    b.reread(Lost, Lost.stale, io, Lost{ .dir = lost });
     try testing.expectEqual(@as(usize, 3), b.count(lost).?);
     try testing.expectEqual(@as(usize, 0), b.count(kept).?);
     // And the next change is measured against what is there.
-    try testing.expect(try b.note(lost, "d", .appeared));
+    try testing.expect(try b.note(io, lost, "d", .appeared));
 }
 
 test "a count rests on the lowest watch that keeps every entry" {
@@ -583,7 +583,7 @@ test "an existing walk seeds a directory without listing it again" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var b: Budget = .init(gpa, io, 2);
+    var b: Budget = .init(gpa, 2);
     defer b.deinit();
 
     try b.begin(root);
@@ -591,7 +591,7 @@ test "an existing walk seeds a directory without listing it again" {
     try b.found(root, "b");
     b.end();
     try testing.expectEqual(@as(usize, 2), b.count(root).?);
-    try testing.expect(try b.note(root, "c", .appeared));
+    try testing.expect(try b.note(io, root, "c", .appeared));
 }
 
 test "a second walk of a directory already counted adds nothing" {
@@ -606,7 +606,7 @@ test "a second walk of a directory already counted adds nothing" {
     const sub = try std.Io.Dir.path.join(gpa, &.{ root, "sub" });
     defer gpa.free(sub);
 
-    var b: Budget = .init(gpa, io, 3);
+    var b: Budget = .init(gpa, 3);
     defer b.deinit();
 
     try b.begin(root);
@@ -625,8 +625,8 @@ test "a second walk of a directory already counted adds nothing" {
 
     try testing.expectEqual(@as(usize, 2), b.count(root).?);
     try testing.expectEqual(@as(usize, 1), b.count(sub).?);
-    try testing.expect(!try b.note(root, "b", .appeared));
-    try testing.expect(try b.note(root, "c", .appeared));
+    try testing.expect(!try b.note(io, root, "b", .appeared));
+    try testing.expect(try b.note(io, root, "c", .appeared));
 }
 
 test "a change every watch reads its own copy of is counted once" {
@@ -674,9 +674,9 @@ test "a change every watch reads its own copy of is counted once" {
 
     const orders = [_][3]usize{ .{ 0, 1, 2 }, .{ 2, 1, 0 }, .{ 1, 2, 0 } };
     for (orders) |order| {
-        var b: Budget = .init(gpa, io, 3);
+        var b: Budget = .init(gpa, 3);
         defer b.deinit();
-        try b.seed(folder);
+        try b.seed(io, folder);
 
         // Three entries: at the budget and not past it, whichever watch
         // reads its copy first. `later` reaches all three watches.
@@ -687,7 +687,7 @@ test "a change every watch reads its own copy of is counted once" {
                 const watch = pointers[i];
                 if (!copy.reads(watch)) continue;
                 if (counter(*const Watch, Copy, Copy.reads, &pointers, copy) != watch) continue;
-                if (try b.note(folder, name, .appeared)) passed = true;
+                if (try b.note(io, folder, name, .appeared)) passed = true;
             }
         }
         try testing.expect(!passed);
@@ -701,7 +701,7 @@ test "a change every watch reads its own copy of is counted once" {
             if (!copy.reads(watch)) continue;
             if (counter(*const Watch, Copy, Copy.reads, &pointers, copy) != watch) continue;
             counted += 1;
-            try testing.expect(try b.note(folder, "c", .appeared));
+            try testing.expect(try b.note(io, folder, "c", .appeared));
         }
         try testing.expectEqual(@as(usize, 1), counted);
         try testing.expectEqual(@as(usize, 4), b.count(folder).?);
@@ -746,22 +746,22 @@ test "a name reported twice is one entry, and one never counted goes without tak
     defer gpa.free(root);
     try tmp.dir.writeFile(io, .{ .sub_path = "a", .data = "x" });
 
-    var b: Budget = .init(gpa, io, 2);
+    var b: Budget = .init(gpa, 2);
     defer b.deinit();
-    try b.seed(root);
+    try b.seed(io, root);
     try testing.expectEqual(@as(usize, 1), b.count(root).?);
     // `a` was on disk when the folder was counted: its creation, heard
     // late, is already in
-    try testing.expect(!try b.note(root, "a", .appeared));
+    try testing.expect(!try b.note(io, root, "a", .appeared));
     try testing.expectEqual(@as(usize, 1), b.count(root).?);
     // a removal of a name never counted takes nothing
-    try testing.expect(!try b.note(root, "never", .vanished));
+    try testing.expect(!try b.note(io, root, "never", .vanished));
     try testing.expectEqual(@as(usize, 1), b.count(root).?);
-    try testing.expect(!try b.note(root, "b", .appeared));
-    try testing.expect(!try b.note(root, "b", .appeared));
-    try testing.expect(try b.note(root, "c", .appeared));
-    try testing.expect(!try b.note(root, "c", .vanished));
-    try testing.expect(!try b.note(root, "c", .vanished));
+    try testing.expect(!try b.note(io, root, "b", .appeared));
+    try testing.expect(!try b.note(io, root, "b", .appeared));
+    try testing.expect(try b.note(io, root, "c", .appeared));
+    try testing.expect(!try b.note(io, root, "c", .vanished));
+    try testing.expect(!try b.note(io, root, "c", .vanished));
     try testing.expectEqual(@as(usize, 2), b.count(root).?);
 }
 
@@ -774,9 +774,9 @@ test "a failed budget reread keeps its names and reports uncertainty until compl
     try tmp.dir.writeFile(io, .{ .sub_path = "two", .data = "x" });
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    var budget: Budget = .init(gpa, io, 2);
+    var budget: Budget = .init(gpa, 2);
     defer budget.deinit();
-    try budget.seed(root);
+    try budget.seed(io, root);
     try tmp.dir.writeFile(io, .{ .sub_path = "three", .data = "x" });
     var vtable = io.vtable.*;
     vtable.dirRead = struct {
@@ -784,16 +784,15 @@ test "a failed budget reread keeps its names and reports uncertainty until compl
             return error.AccessDenied;
         }
     }.read;
-    budget.io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const failing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     budget.reread(void, struct {
         fn stale(_: void, _: []const u8) bool {
             return true;
         }
-    }.stale, {});
+    }.stale, failing, {});
     try testing.expectEqual(@as(usize, 2), budget.count(root).?);
-    try testing.expect(try budget.note(root, "three", .unchanged));
+    try testing.expect(try budget.note(failing, root, "three", .unchanged));
     try testing.expectEqual(@as(usize, 2), budget.count(root).?);
-    budget.io = io;
-    try testing.expect(try budget.note(root, "three", .appeared));
+    try testing.expect(try budget.note(io, root, "three", .appeared));
     try testing.expectEqual(@as(usize, 3), budget.count(root).?);
 }

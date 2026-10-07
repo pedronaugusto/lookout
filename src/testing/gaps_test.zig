@@ -9,6 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const lookout = @import("../lookout.zig");
+const ms = @import("clock.zig").ms;
 const records = @import("../backend/fsevents/records.zig");
 const Kind = lookout.Kind;
 const Watcher = lookout.Watcher;
@@ -54,10 +55,10 @@ const Tally = struct {
         };
     }
 
-    fn drain(t: *Tally, watcher: *Watcher, quiet_ms: u32) !void {
+    fn drain(t: *Tally, io: std.Io, watcher: *Watcher, quiet_ms: u32) !void {
         var idle: u32 = 0;
         while (idle < quiet_ms) {
-            const events = try watcher.poll(200);
+            const events = try watcher.poll(io, ms(200));
             if (events.len == 0) {
                 idle += 200;
                 continue;
@@ -90,13 +91,13 @@ test "a change inside a renamed directory is not a creation" {
         try tmp.dir.createDirPath(io, "sub");
         try tmp.dir.writeFile(io, .{ .sub_path = "sub/a.txt", .data = "one" });
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{ .recursive = true });
-        while ((try watcher.poll(200)).len != 0) {}
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{ .recursive = true });
+        while ((try watcher.poll(io, ms(200))).len != 0) {}
 
         const moved = try std.Io.Dir.path.join(gpa, &.{ root, "sub2" });
         defer gpa.free(moved);
@@ -110,14 +111,14 @@ test "a change inside a renamed directory is not a creation" {
         var settled = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !settled) : (waited += 200) {
-            for (try watcher.poll(200)) |event| {
+            for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow) lost = true;
                 if (std.mem.startsWith(u8, event.path, moved)) settled = true;
             }
         }
         try std.testing.expect(settled or lost);
         while (true) {
-            const events = try watcher.poll(400);
+            const events = try watcher.poll(io, ms(400));
             if (events.len == 0) break;
             for (events) |event| {
                 if (event.kind == .overflow) lost = true;
@@ -137,7 +138,7 @@ test "a change inside a renamed directory is not a creation" {
         var saw_modified = false;
         waited = 0;
         while (waited < timeout_ms and !saw_modified) : (waited += 200) {
-            for (try watcher.poll(200)) |event| {
+            for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow) lost = true;
                 if (!std.mem.eql(u8, event.path, wanted)) continue;
                 if (event.kind == .created) saw_created = true;
@@ -177,16 +178,16 @@ test "a watch spelled in another case than the disk still reports" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
         });
-        defer watcher.deinit();
+        defer watcher.deinit(io);
 
         // Asked for in upper case; created in lower case.
         const asked = try std.Io.Dir.path.join(gpa, &.{ root, "TARGET" });
         defer gpa.free(asked);
-        _ = try watcher.add(asked, .{ .pending = true, .recursive = true });
+        _ = try watcher.add(io, asked, .{ .pending = true, .recursive = true });
 
         try tmp.dir.createDirPath(io, "target");
 
@@ -195,7 +196,7 @@ test "a watch spelled in another case than the disk still reports" {
         var promoted = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !promoted) : (waited += 200) {
-            for (try watcher.poll(200)) |event| {
+            for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .created and std.mem.eql(u8, event.path, asked)) promoted = true;
             }
         }
@@ -208,7 +209,7 @@ test "a watch spelled in another case than the disk still reports" {
         var found = false;
         waited = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try watcher.poll(200)) |event| {
+            for (try watcher.poll(io, ms(200))) |event| {
                 if (std.mem.endsWith(u8, event.path, "a.txt")) found = true;
             }
         }
@@ -231,16 +232,16 @@ test "an ignore pattern in another case than the disk still excludes" {
 
         try tmp.dir.createDirPath(io, "skip");
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{
             .recursive = true,
             .filter = .{ .ignore = &.{"SKIP"} },
         });
-        while ((try watcher.poll(200)).len != 0) {}
+        while ((try watcher.poll(io, ms(200))).len != 0) {}
 
         const ignored = try std.Io.Dir.path.join(gpa, &.{ root, "skip" });
         defer gpa.free(ignored);
@@ -253,7 +254,7 @@ test "an ignore pattern in another case than the disk still excludes" {
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try watcher.poll(200)) |event| {
+            for (try watcher.poll(io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, ignored));
                 if (std.mem.eql(u8, event.path, wanted)) found = true;
             }
@@ -277,16 +278,16 @@ test "a slow write is one event, and it arrives after the writing stops" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var watcher: Watcher = try .init(gpa, io, .{
+    var watcher: Watcher = try .init(gpa, .{
         .backend = .poll,
-        .poll_interval_ms = 20,
-        .settle_ms = 200,
-        .latency_ms = 0,
+        .poll_interval = .fromMilliseconds(20),
+        .settle = .fromMilliseconds(200),
+        .latency = .fromMilliseconds(0),
     });
-    defer watcher.deinit();
+    defer watcher.deinit(io);
     try tmp.dir.writeFile(io, .{ .sub_path = "big.bin", .data = "" });
-    _ = try watcher.add(root, .{});
-    while ((try watcher.poll(200)).len != 0) {}
+    _ = try watcher.add(io, root, .{});
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
 
     const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "big.bin" });
     defer gpa.free(wanted);
@@ -319,7 +320,7 @@ test "a slow write is one event, and it arrives after the writing stops" {
     var seen: usize = 0;
     var waited: u32 = 0;
     while (waited < timeout_ms and seen == 0) : (waited += 100) {
-        for (try watcher.poll(100)) |event| {
+        for (try watcher.poll(io, ms(100))) |event| {
             if (!std.mem.eql(u8, event.path, wanted)) continue;
             try std.testing.expectEqual(Kind.modified, event.kind);
             seen += 1;
@@ -373,13 +374,13 @@ test "a burst of renames is paired across the reads it is split over" {
         });
     }
 
-    var watcher: Watcher = try .init(gpa, io, .{
+    var watcher: Watcher = try .init(gpa, .{
         .backend = backend,
         .max_dir_entries = 1_000_000,
     });
-    defer watcher.deinit();
-    _ = try watcher.add(root, .{});
-    while ((try watcher.poll(200)).len != 0) {}
+    defer watcher.deinit(io);
+    _ = try watcher.add(io, root, .{});
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
 
     for (0..pairs) |i| {
         var from: [64]u8 = undefined;
@@ -397,7 +398,7 @@ test "a burst of renames is paired across the reads it is split over" {
     var overflow: usize = 0;
     var idle: u32 = 0;
     while (idle < 1_000) {
-        const events = try watcher.poll(200);
+        const events = try watcher.poll(io, ms(200));
         if (events.len == 0) {
             idle += 200;
             continue;
@@ -462,14 +463,14 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
             try tmp.dir.createDirPath(io, std.mem.print(&name, "d{d}", .{d}) catch unreachable);
         }
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 512,
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{ .recursive = true });
-        while ((try watcher.poll(200)).len != 0) {}
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{ .recursive = true });
+        while ((try watcher.poll(io, ms(200))).len != 0) {}
 
         // Drained as it goes, so that what is being measured is the
         // budget and not the kernel's own patience with a burst.
@@ -482,9 +483,9 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
                     .data = "x",
                 });
             }
-            try tally.drain(&watcher, 200);
+            try tally.drain(io, &watcher, 200);
         }
-        try tally.drain(&watcher, 400);
+        try tally.drain(io, &watcher, 400);
         if (tally.overflow != 0) {
             std.debug.print("{s}: {d} overflow for 12 x 150 under a 512 budget\n", .{
                 @tagName(backend), tally.overflow,
@@ -521,20 +522,20 @@ test "a root deleted and recreated inside one window is not a move" {
         const target = try std.Io.Dir.path.join(gpa, &.{ root, "target" });
         defer gpa.free(target);
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
         });
-        defer watcher.deinit();
-        _ = try watcher.add(target, .{});
-        while ((try watcher.poll(200)).len != 0) {}
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, target, .{});
+        while ((try watcher.poll(io, ms(200))).len != 0) {}
 
         try tmp.dir.deleteDir(io, "target");
         try tmp.dir.createDirPath(io, "target");
 
         var waited: u32 = 0;
         while (waited < 2_000) : (waited += 200) {
-            for (try watcher.poll(200)) |event| {
+            for (try watcher.poll(io, ms(200))) |event| {
                 if (!std.mem.eql(u8, event.path, target)) continue;
                 if (event.kind != .renamed) continue;
                 try std.testing.expectEqual(
@@ -575,21 +576,21 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var watcher: Watcher = try .init(gpa, io, .{
+    var watcher: Watcher = try .init(gpa, .{
         .backend = .inotify,
         .max_dir_entries = 1_000_000,
         .max_events = 0,
     });
-    defer watcher.deinit();
-    _ = try watcher.add(root, .{});
-    while ((try watcher.poll(200)).len != 0) {}
+    defer watcher.deinit(io);
+    _ = try watcher.add(io, root, .{});
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
 
     try writeBurst(tmp.dir, limit + 1);
 
     // The kernel keeps one overflow record and queues it once, however
     // much was dropped while it sat there.
     var tally: Tally = .{};
-    try tally.drain(&watcher, 1_000);
+    try tally.drain(io, &watcher, 1_000);
     try std.testing.expectEqual(@as(usize, 1), tally.overflow);
     try std.testing.expect(tally.created <= limit);
 
@@ -600,7 +601,7 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
     var found = false;
     var waited: u32 = 0;
     while (waited < timeout_ms and !found) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
     }
@@ -640,20 +641,20 @@ test "the delivery buffer is the size the caller asked for" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = .fsevents,
             .buffer_bytes = 64 * 1024,
             .max_dir_entries = 1_000_000,
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{});
         try writeBurst(tmp.dir, burst);
 
         const held = try Held.await(&watcher, burst, .overflowed);
         try std.testing.expect(held.overflowed);
 
         var tally: Tally = .{};
-        tally.count(try watcher.poll(0));
+        tally.count(try watcher.poll(io, ms(0)));
         try std.testing.expect(tally.overflow > 0);
         try std.testing.expect(tally.created < burst);
     }
@@ -670,19 +671,19 @@ test "the delivery buffer is the size the caller asked for" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = .fsevents,
             .max_dir_entries = 1_000_000,
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{});
         try writeBurst(tmp.dir, burst);
 
         const held = try Held.await(&watcher, burst, .delivered);
         try std.testing.expect(!held.overflowed);
 
         var tally: Tally = .{};
-        tally.count(try watcher.poll(0));
+        tally.count(try watcher.poll(io, ms(0)));
         // What a caller is promised: every file, or an `overflow` saying
         // that some are missing. A file lost without one is a bug.
         if (tally.created != burst) try std.testing.expect(tally.overflow > 0);
@@ -763,26 +764,31 @@ const Held = struct {
 // A fresh watcher for each failure index makes every allocation in its
 // first delivery fallible, including allocations after a reported prefix.
 test "allocation failure during delivery on polling never leaves a quiet retry" {
-    try deliveryFailure(.poll);
+    const io = std.testing.io;
+    try deliveryFailure(io, .poll);
 }
 
 test "allocation failure during delivery on kqueue never leaves a quiet retry" {
-    try deliveryFailure(.kqueue);
+    const io = std.testing.io;
+    try deliveryFailure(io, .kqueue);
 }
 
 test "allocation failure during delivery on FSEvents never leaves a quiet retry" {
-    try deliveryFailure(.fsevents);
+    const io = std.testing.io;
+    try deliveryFailure(io, .fsevents);
 }
 
 test "allocation failure during delivery on inotify never leaves a quiet retry" {
-    try deliveryFailure(.inotify);
+    const io = std.testing.io;
+    try deliveryFailure(io, .inotify);
 }
 
 test "allocation failure during delivery on Windows never leaves a quiet retry" {
-    try deliveryFailure(.windows);
+    const io = std.testing.io;
+    try deliveryFailure(io, .windows);
 }
 
-fn deliveryFailure(backend: lookout.Backend) !void {
+fn deliveryFailure(io: std.Io, backend: lookout.Backend) !void {
     if (!lookout.supported(backend)) return error.SkipZigTest;
     const testing = std.testing;
     for ([_]enum { create, rename, remove, modify, adopt }{ .create, .rename, .remove, .modify, .adopt }) |scenario| {
@@ -797,14 +803,14 @@ fn deliveryFailure(backend: lookout.Backend) !void {
                 try tmp.dir.writeFile(testing.io, .{ .sub_path = "last", .data = "old" });
             }
             var failing = testing.FailingAllocator.init(testing.allocator, .{});
-            var watcher = try Watcher.init(failing.allocator(), testing.io, .{
+            var watcher = try Watcher.init(failing.allocator(), .{
                 .backend = backend,
-                .latency_ms = 0,
-                .poll_interval_ms = 1,
+                .latency = .fromMilliseconds(0),
+                .poll_interval = .fromMilliseconds(1),
             });
-            defer watcher.deinit();
-            const id = try watcher.add(root, .{ .recursive = true });
-            while ((try watcher.poll(0)).len != 0) {}
+            defer watcher.deinit(io);
+            const id = try watcher.add(io, root, .{ .recursive = true });
+            while ((try watcher.poll(io, ms(0))).len != 0) {}
             switch (scenario) {
                 .create, .modify => {
                     try tmp.dir.writeFile(testing.io, .{ .sub_path = "first", .data = "one more" });
@@ -825,7 +831,7 @@ fn deliveryFailure(backend: lookout.Backend) !void {
                 },
             }
             failing.fail_index = failing.alloc_index + fail_index;
-            const answer = watcher.poll(timeout_ms);
+            const answer = watcher.poll(io, ms(timeout_ms));
             failing.fail_index = std.math.maxInt(usize);
             if (answer) |events| {
                 try testing.expect(events.len != 0);
@@ -837,7 +843,7 @@ fn deliveryFailure(backend: lookout.Backend) !void {
             var first = false;
             var last = false;
             var overflow = false;
-            for (try watcher.poll(0)) |event| {
+            for (try watcher.poll(io, ms(0))) |event| {
                 try testing.expectEqual(id, event.id);
                 if (event.kind == .overflow) {
                     try testing.expectEqualStrings(root, event.path);
@@ -854,7 +860,7 @@ fn deliveryFailure(backend: lookout.Backend) !void {
             var saw_after = false;
             var waited: u32 = 0;
             while (!saw_after and waited < timeout_ms) : (waited += 200) {
-                for (try watcher.poll(200)) |event| {
+                for (try watcher.poll(io, ms(200))) |event| {
                     if (event.kind == .created and std.mem.endsWith(u8, event.path, "after")) saw_after = true;
                 }
             }
@@ -865,6 +871,7 @@ fn deliveryFailure(backend: lookout.Backend) !void {
 }
 
 test "allocation failure during delivery keeps every root pending through failed recovery" {
+    const io = std.testing.io;
     const testing = std.testing;
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
@@ -877,29 +884,29 @@ test "allocation failure during delivery keeps every root pending through failed
         const b = try tmp.dir.realPathFileAlloc(testing.io, "b", testing.allocator);
         defer testing.allocator.free(b);
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
-        var watcher = try Watcher.init(failing.allocator(), testing.io, .{
+        var watcher = try Watcher.init(failing.allocator(), .{
             .backend = .poll,
-            .debounce_ms = 60_000,
-            .latency_ms = 0,
+            .debounce = .fromMilliseconds(60_000),
+            .latency = .fromMilliseconds(0),
         });
-        defer watcher.deinit();
-        const first = try watcher.add(a, .{});
-        const last = try watcher.add(b, .{});
+        defer watcher.deinit(io);
+        const first = try watcher.add(io, a, .{});
+        const last = try watcher.add(io, b, .{});
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "a/change", .data = "x" });
         failing.fail_index = failing.alloc_index;
-        try testing.expectError(error.OutOfMemory, watcher.poll(0));
+        try testing.expectError(error.OutOfMemory, watcher.poll(io, ms(0)));
         failing.fail_index = failing.alloc_index + fail_index;
         watcher.wake();
-        const answer = watcher.poll(0);
+        const answer = watcher.poll(io, ms(0));
         failing.fail_index = std.math.maxInt(usize);
         if (answer) |events| {
             try expectRecoveredRoots(events, first, last);
             break;
         } else |err| try testing.expectEqual(error.OutOfMemory, err);
         watcher.wake();
-        try expectRecoveredRoots(try watcher.poll(0), first, last);
-        watcher.remove(first);
-        try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+        try expectRecoveredRoots(try watcher.poll(io, ms(0)), first, last);
+        watcher.remove(io, first);
+        try testing.expectEqual(@as(usize, 0), (try watcher.poll(io, ms(0))).len);
     }
     try testing.expect(fail_index > 0);
 }
@@ -916,6 +923,7 @@ fn expectRecoveredRoots(events: []const lookout.Event, first: lookout.WatchId, l
 }
 
 test "recovery remains visible while a watch is waiting for its path" {
+    const io = std.testing.io;
     const testing = std.testing;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -924,17 +932,17 @@ test "recovery remains visible while a watch is waiting for its path" {
     const waiting = try std.Io.Dir.path.join(testing.allocator, &.{ root, "later" });
     defer testing.allocator.free(waiting);
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
-    var watcher = try Watcher.init(failing.allocator(), testing.io, .{
+    var watcher = try Watcher.init(failing.allocator(), .{
         .backend = .poll,
-        .latency_ms = 20,
-        .poll_interval_ms = 1,
+        .latency = .fromMilliseconds(20),
+        .poll_interval = .fromMilliseconds(1),
     });
-    defer watcher.deinit();
-    const id = try watcher.add(waiting, .{ .pending = true });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, waiting, .{ .pending = true });
     failing.fail_index = failing.alloc_index;
-    try testing.expectError(error.OutOfMemory, watcher.poll(0));
+    try testing.expectError(error.OutOfMemory, watcher.poll(io, ms(0)));
     failing.fail_index = std.math.maxInt(usize);
-    const events = try watcher.poll(1);
+    const events = try watcher.poll(io, ms(1));
     try testing.expectEqual(@as(usize, 1), events.len);
     try testing.expectEqual(id, events[0].id);
     try testing.expectEqual(Kind.overflow, events[0].kind);

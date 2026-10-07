@@ -19,7 +19,7 @@
 //!   that pipe, so a program with a wait loop of its own still works.
 //!   How much that buffer holds is `@import("../options.zig").Options.buffer_bytes`.
 //! * FSEvents coalesces on its own, before lookout sees anything. Its
-//!   stream uses `@import("../options.zig").Options.latency_ms` for that window and
+//!   stream uses `@import("../options.zig").Options.latency` for that window and
 //!   `NoDefer`, so the first event is requested without waiting for the
 //!   rest of the window. Passing zero removes lookout's delay, but macOS
 //!   still imposed a measured 10.459 ms median (11.714 ms p99) delivery
@@ -56,6 +56,7 @@ const Checkpoint = @import("../Checkpoint.zig");
 const Options = @import("../options.zig").Options;
 const contract = @import("../watch_contract.zig");
 const AddOptions = @import("../options.zig").AddOptions;
+const milliseconds = @import("../options.zig").milliseconds;
 const builtin = @import("builtin");
 const Record = records.Record;
 const Target = lookout.Target;
@@ -65,7 +66,6 @@ const flag = records.flag;
 const FsEvents = @This();
 
 gpa: Allocator,
-io: Io,
 /// The serial queue every stream delivers on.
 queue: c.dispatch_queue_t,
 /// Shared with the delivery thread. Heap-allocated because its address is
@@ -104,7 +104,7 @@ paths: *CheckpointPaths,
 /// path it holds is owned here -- see `records.Half`.
 pairing: records.Pairing,
 /// FSEvents' coalescing window, in seconds. The stream takes the same
-/// window as `@import("../options.zig").Options.latency_ms`; `NoDefer` still makes its
+/// window as `@import("../options.zig").Options.latency`; `NoDefer` still makes its
 /// first event immediate.
 stream_latency: f64,
 
@@ -309,7 +309,7 @@ const lost_track: u32 = flag.must_scan_sub_dirs | flag.user_dropped | flag.kerne
 
 /// Creates the delivery queue, the buffer it fills, and the pipe the
 /// watcher is woken through.
-pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!FsEvents {
+pub fn init(gpa: Allocator, options: Options) contract.InitError!FsEvents {
     var fds: [2]posix.fd_t = undefined;
     if (std.c.pipe(&fds) != 0) return switch (posix.errno(@as(c_int, -1))) {
         .MFILE => error.ProcessFdQuotaExceeded,
@@ -362,28 +362,28 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!FsEvent
     const paths = try CheckpointPaths.init(gpa);
     return .{
         .gpa = gpa,
-        .io = io,
         .queue = queue,
         .sink = sink,
         .streams = .empty,
         .staging = .empty,
-        .budget = .init(gpa, io, options.max_dir_entries),
+        .budget = .init(gpa, options.max_dir_entries),
         .restarting = restarting,
         .resume_used = resume_used,
         .paths = paths,
         .known = .empty,
         .pairing = .{},
-        .stream_latency = latencySeconds(options.latency_ms),
+        .stream_latency = latencySeconds(milliseconds(options.latency)),
     };
 }
 
-fn latencySeconds(milliseconds: u32) f64 {
-    return @as(f64, @floatFromInt(milliseconds)) / std.time.ms_per_s;
+fn latencySeconds(ms: u32) f64 {
+    return @as(f64, @floatFromInt(ms)) / std.time.ms_per_s;
 }
 
 /// Stops every stream, waits for the delivery thread to be done with
 /// them, and closes the pipe.
-pub fn deinit(f: *FsEvents) void {
+pub fn deinit(f: *FsEvents, io: Io) void {
+    _ = io; // Every backend takes it; this one closes nothing through it.
     for (f.streams.values()) |stream| f.destroy(stream);
     f.streams.deinit(f.gpa);
     f.staging.deinit(f.gpa);
@@ -508,33 +508,34 @@ pub fn registrationCount(f: *const FsEvents) usize {
 /// Registers `abs_path`, a copy of which the backend keeps.
 pub fn add(
     f: *FsEvents,
+    io: Io,
     id: WatchId,
     abs_path: []const u8,
     options: AddOptions,
     batch: *Batch,
 ) contract.AddError!void {
-    return f.addFor(id, abs_path, abs_path, options, batch);
+    return f.addFor(io, id, abs_path, abs_path, options, batch);
 }
 
 /// The caller's root identifies a resume watch even when its registration
 /// is parked on an ancestor while that root is absent.
-pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: AddOptions, batch: *Batch) contract.AddError!void {
+pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested: []const u8, options: AddOptions, batch: *Batch) contract.AddError!void {
     try f.streams.ensureUnusedCapacity(f.gpa, 1);
-    var stream = try f.startStream(id, abs_path, requested, options, false);
+    var stream = try f.startStream(io, id, abs_path, requested, options, false);
     // The table owns the started stream and its initial state. If the
     // baseline cannot be built, remove stops delivery before releasing
     // the stream, its names, and counts no other watch needs.
     f.streams.putAssumeCapacity(id, stream);
-    errdefer f.remove(id);
+    errdefer f.remove(io, id);
     errdefer batch.discard(f.gpa, id);
-    const cross_device = f.seedKnown(stream) catch |err| switch (err) {
+    const cross_device = f.seedKnown(io, stream) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
     if (cross_device) {
         if (stream.resume_index != null) return error.InvalidCheckpoint;
         try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
-        try f.useLiveStream(id);
+        try f.useLiveStream(io, id);
         stream = f.streams.get(id).?;
     }
     if (stream.resume_index) |index| {
@@ -552,7 +553,7 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
             try before.put(f.gpa, subject, {});
             if (!stream.keeps(subject)) continue;
             if (f.known.contains(.{ .id = id, .path = subject })) continue;
-            const there = f.exists(subject) orelse {
+            const there = pathExists(io, subject) orelse {
                 try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
                 continue;
             };
@@ -560,7 +561,7 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
         }
         for (saved.changes) |change| try restoreChange(f.gpa, batch, stream, change);
         if (saved.half) |half| if (stream.keeps(half.path)) {
-            try f.resolveHeld(batch);
+            try f.resolveHeld(io, batch);
             const owned = try f.gpa.dupe(u8, half.path);
             f.pairing.held = .{ .id = id, .path = owned, .flags = half.flags, .event = half.event };
         };
@@ -596,8 +597,8 @@ fn samePatterns(a: []const []const u8, b: []const []const u8) bool {
 
 /// Creates and starts a stream, transferring ownership only on success.
 /// Seeding happens after start so changes during the walk stay queued.
-fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []const u8, options: AddOptions, force_live: bool) contract.AddError!*Stream {
-    const stat = try Io.Dir.cwd().statFile(f.io, abs_path, .{});
+fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested: []const u8, options: AddOptions, force_live: bool) contract.AddError!*Stream {
+    const stat = try Io.Dir.cwd().statFile(io, abs_path, .{});
     const scope: Stream.Scope = if (stat.kind != .directory)
         .file
     else if (options.recursive)
@@ -637,7 +638,7 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     const root = try f.gpa.dupe(u8, abs_path);
     errdefer f.gpa.free(root);
     var filter = try options.filter.dupe(f.gpa);
-    errdefer filter.deinit(f.gpa);
+    errdefer filter.deinit();
     stream.* = .{
         .id = id,
         .sink = f.sink,
@@ -718,16 +719,17 @@ fn createStream(
 /// A tree crossing a mount needs the host's live namespace. A host cursor
 /// cannot be persisted safely. The caller reports the registration gap as
 /// loss in its own delivery phase; checkpoints stay unavailable for this watch.
-fn useLiveStream(f: *FsEvents, id: WatchId) contract.AddError!void {
+fn useLiveStream(f: *FsEvents, io: Io, id: WatchId) contract.AddError!void {
     const old = f.streams.get(id).?;
     if (!old.persistent) return;
-    const next = try f.startStream(id, old.root, old.root, .{ .recursive = old.scope == .tree, .filter = old.filter }, true);
+    const next = try f.startStream(io, id, old.root, old.root, .{ .recursive = old.scope == .tree, .filter = old.filter }, true);
     f.streams.getPtr(id).?.* = next;
     f.destroy(old);
 }
 
 /// Stops watching `id`.
-pub fn remove(f: *FsEvents, id: WatchId) void {
+pub fn remove(f: *FsEvents, io: Io, id: WatchId) void {
+    _ = io; // Every backend takes it; this one closes nothing through it.
     const entry = f.streams.fetchSwapRemove(id) orelse return;
     f.budget.release(*const FsEvents, stillCounted, entry.value.root, f);
     f.forgetWatch(id);
@@ -767,16 +769,16 @@ fn withoutStream(bytes: []u8, id: WatchId) usize {
 
 /// Replaces the delivery filter, retaining the stream unless newly reached
 /// mounts require the host namespace.
-pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
+pub fn refilter(f: *FsEvents, io: Io, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     const stream = f.streams.get(id) orelse return error.UnknownWatch;
     const replacement = try next.dupe(f.gpa);
     var previous = stream.filter;
     stream.filter = replacement;
     errdefer {
-        stream.filter.deinit(f.gpa);
+        stream.filter.deinit();
         stream.filter = previous;
     }
-    const cross_device = f.seedKnown(stream) catch |err| switch (err) {
+    const cross_device = f.seedKnown(io, stream) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
@@ -799,12 +801,12 @@ pub fn refilter(f: *FsEvents, id: WatchId, next: lookout.Filter, batch: *Batch) 
                 !r.stream.filter.prunes(r.stream.root, dir);
         }
     };
-    f.budget.reread(NewlyReached, NewlyReached.includes, .{ .stream = stream, .old = previous });
+    f.budget.reread(NewlyReached, NewlyReached.includes, io, .{ .stream = stream, .old = previous });
     if (cross_device) {
         try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
-        try f.useLiveStream(id);
+        try f.useLiveStream(io, id);
     }
-    previous.deinit(f.gpa);
+    previous.deinit();
 }
 
 /// Whether a watch still held reports the entries of `dir`, so that its
@@ -841,7 +843,7 @@ fn destroy(f: *FsEvents, stream: *Stream) void {
     stream.volume.deinit(f.gpa);
     if (stream.before) |*before| before.deinit(f.gpa);
     f.gpa.free(stream.root);
-    stream.filter.deinit(f.gpa);
+    stream.filter.deinit();
     f.gpa.destroy(stream);
 }
 
@@ -891,25 +893,25 @@ fn deliver(
 
 /// Waits on the wake pipe until the drain produces something `batch` did
 /// not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+pub fn wait(f: *FsEvents, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     // A drain takes the delivery thread's records and decides what each
     // one was, asking the file system as it goes, so nothing in here is a
     // place to stop: see `Watcher.poll`. The wait itself is out of
     // `std.Io`'s reach.
-    const protection = f.io.swapCancelProtection(.blocked);
-    defer _ = f.io.swapCancelProtection(protection);
-    try f.collect(batch, timeout_ms);
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    try f.collect(io, batch, timeout_ms);
     // Whatever is still held when the wait is over never found its
     // partner, however many deliveries it waited through.
-    try f.resolveHeld(batch);
+    try f.resolveHeld(io, batch);
 }
 
-fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+fn collect(f: *FsEvents, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
     const before = batch.revision;
-    const deadline: Deadline = .start(f.io, timeout_ms);
+    const deadline: Deadline = .fromMs(io, timeout_ms);
 
     while (true) {
-        try f.drain(batch);
+        try f.drain(io, batch);
         if (f.sink.woken.swap(false, .acquire)) return;
         if (batch.revision != before or f.pairing.held != null) {
             // A rename with no partner yet is worth waiting a moment
@@ -919,20 +921,20 @@ fn collect(f: *FsEvents, batch: *Batch, timeout_ms: ?u32) contract.PollError!voi
             var round: usize = 0;
             while (f.pairing.held != null and round < grace_rounds) : (round += 1) {
                 if (!f.readable(grace_ms)) break;
-                try f.drain(batch);
+                try f.drain(io, batch);
             }
             // A half alone, its partner not come within the grace, is
             // decided now rather than when the next delivery happens to
             // arrive, which a wait with no deadline could make never: a
             // file saved by a rename and then deleted carries the rename
             // in its flags.
-            try f.resolveHeld(batch);
+            try f.resolveHeld(io, batch);
             if (batch.revision != before) return;
         }
         // Clamped rather than returned on, so that a `timeout_ms` of zero
         // still performs one non-blocking check.
-        if (!f.readable(deadline.pollMs())) {
-            if (!deadline.expired()) continue;
+        if (!f.readable(deadline.pollMs(io))) {
+            if (!deadline.expired(io)) continue;
             return;
         }
     }
@@ -950,10 +952,10 @@ fn readable(f: *FsEvents, timeout: i32) bool {
 
 /// Takes everything the delivery thread has left and turns it into
 /// events.
-fn drain(f: *FsEvents, batch: *Batch) contract.PollError!void {
+fn drain(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!void {
     // A failed drain keeps its bytes. Replaying can repeat bookkeeping,
     // which Watcher.poll covers with its conservative recovery notice.
-    errdefer f.budget.reread(void, everyDirectory, {});
+    errdefer f.budget.reread(void, everyDirectory, io, {});
     var overflowed = f.staging_overflowed;
     var deliveries: usize = 0;
     var dropped: usize = 0;
@@ -983,8 +985,8 @@ fn drain(f: *FsEvents, batch: *Batch) contract.PollError!void {
             // A delivery that did not fit may have carried the sentinel,
             // and a stream waiting for one that was dropped would catch
             // up for ever.
-            if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
-            try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
+            if (stream.replayed == null) stream.replayed = .now(io, .awake);
+            try batch.push(f.gpa, io, stream.id, stream.root, .overflow, stream.rootTarget());
         }
     }
 
@@ -1015,7 +1017,7 @@ fn drain(f: *FsEvents, batch: *Batch) contract.PollError!void {
     @memset(used, false);
 
     // The half held from the last drain looks for its partner here.
-    try f.rejoin(batch, delivered.items, used);
+    try f.rejoin(io, batch, delivered.items, used);
 
     // Where the system said it lost track, and of which watch. The paths
     // are slices of `staging`, which lives until the next drain.
@@ -1024,7 +1026,7 @@ fn drain(f: *FsEvents, batch: *Batch) contract.PollError!void {
 
     for (delivered.items, 0..) |_, i| {
         if (used[i]) continue;
-        try f.report(batch, delivered.items, used, i, &losses);
+        try f.report(io, batch, delivered.items, used, i, &losses);
     }
     for (delivered.items) |record| {
         if (f.streams.get(record.id)) |stream| stream.cursor = @max(stream.cursor, record.event);
@@ -1037,9 +1039,9 @@ fn drain(f: *FsEvents, batch: *Batch) contract.PollError!void {
     // in and then count them again from their records.
     if (overflowed) {
         // A delivery that did not fit was every watch's.
-        f.budget.reread(void, everyDirectory, {});
+        f.budget.reread(void, everyDirectory, io, {});
     } else if (losses.items.len != 0) {
-        f.budget.reread(Losses, Losses.stale, .{ .f = f, .items = losses.items });
+        f.budget.reread(Losses, Losses.stale, io, .{ .f = f, .items = losses.items });
     }
     // Mount records belong to the old stream, as do loss pointers above.
     // Replace it only after the delivery and budget rereads finish.
@@ -1048,8 +1050,8 @@ fn drain(f: *FsEvents, batch: *Batch) contract.PollError!void {
         const stream = f.streams.get(record.id) orelse continue;
         if (stream.scope != .tree or !stream.concerns(record.path)) continue;
         if (!stream.persistent) continue;
-        try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
-        f.useLiveStream(record.id) catch |err| switch (err) {
+        try batch.push(f.gpa, io, record.id, stream.root, .overflow, stream.rootTarget());
+        f.useLiveStream(io, record.id) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.Unexpected,
         };
@@ -1087,29 +1089,29 @@ fn everyDirectory(_: void, _: []const u8) bool {
 
 /// Joins the half held from the last drain to its partner in this one,
 /// or gives up on it.
-fn rejoin(f: *FsEvents, batch: *Batch, delivered: []const Record, used: []bool) contract.PollError!void {
-    const taken = f.pairing.take(delivered, used, Asking{ .f = f }) orelse return;
+fn rejoin(f: *FsEvents, io: Io, batch: *Batch, delivered: []const Record, used: []bool) contract.PollError!void {
+    const taken = f.pairing.take(delivered, used, Asking{ .f = f, .io = io }) orelse return;
     errdefer {
         f.pairing.held = taken.half;
         if (taken.partner) |at| used[at] = false;
     }
-    try f.reportTaken(batch, delivered, taken);
+    try f.reportTaken(io, batch, delivered, taken);
     f.gpa.free(taken.half.path);
 }
 
 /// The pairing owns the half until reporting it and its partner succeeds.
-fn reportTaken(f: *FsEvents, batch: *Batch, delivered: []const Record, taken: records.Pairing.Taken) contract.PollError!void {
-    const at = taken.partner orelse return f.reportHalf(batch, taken.half);
-    const stream = f.streams.get(taken.half.id) orelse return f.reportHalf(batch, taken.half);
+fn reportTaken(f: *FsEvents, io: Io, batch: *Batch, delivered: []const Record, taken: records.Pairing.Taken) contract.PollError!void {
+    const at = taken.partner orelse return f.reportHalf(io, batch, taken.half);
+    const stream = f.streams.get(taken.half.id) orelse return f.reportHalf(io, batch, taken.half);
 
     const partner = delivered[at];
-    const there = f.exists(partner.path) orelse return f.incomplete(batch, stream);
+    const there = pathExists(io, partner.path) orelse return f.incomplete(io, batch, stream);
     if (there) {
-        try f.joined(batch, stream, partner.path, taken.half.path, partner.target());
+        try f.joined(io, batch, stream, partner.path, taken.half.path, partner.target());
     } else {
-        try f.joined(batch, stream, taken.half.path, partner.path, partner.target());
+        try f.joined(io, batch, stream, taken.half.path, partner.path, partner.target());
     }
-    try f.recount(batch, partner.path, .unchanged, stream);
+    try f.recount(io, batch, partner.path, .unchanged, stream);
 }
 
 /// What the matching in src/backend/fsevents/records.zig asks the
@@ -1124,6 +1126,8 @@ fn reportTaken(f: *FsEvents, batch: *Batch, delivered: []const Record, taken: re
 /// name carries nothing in them that says it changed.
 pub const Asking = struct {
     f: *FsEvents,
+    /// What the questions of this one delivery go through.
+    io: Io,
 
     pub fn wanted(a: Asking, id: WatchId, subject: []const u8) bool {
         const stream = a.f.streams.get(id) orelse return false;
@@ -1131,7 +1135,7 @@ pub const Asking = struct {
     }
 
     pub fn exists(a: Asking, subject: []const u8) ?bool {
-        return a.f.exists(subject);
+        return pathExists(a.io, subject);
     }
 };
 
@@ -1139,6 +1143,7 @@ pub const Asking = struct {
 /// is half of a rename.
 fn report(
     f: *FsEvents,
+    io: Io,
     batch: *Batch,
     delivered: []const Record,
     used: []bool,
@@ -1157,7 +1162,7 @@ fn report(
     // a loss at.
     if (record.flags & lost_track != 0 and stream.concerns(record.path)) {
         trace.log("fsevents push overflow root={s} at={s}", .{ stream.root, record.path });
-        try batch.push(f.gpa, record.id, stream.root, .overflow, stream.rootTarget());
+        try batch.push(f.gpa, io, record.id, stream.root, .overflow, stream.rootTarget());
         try losses.append(f.gpa, .{ .stream = stream, .at = record.path });
     }
     // The marker that the system has finished reading its log back to
@@ -1166,7 +1171,7 @@ fn report(
     // rather than left to look like a change to the watch root. The persisted path baseline, rather than this marker or its
     // arrival time, establishes which missing paths must be reported.
     if (record.flags & flag.history_done != 0) {
-        if (stream.replayed == null) stream.replayed = .now(f.io, .awake);
+        if (stream.replayed == null) stream.replayed = .now(io, .awake);
         if (stream.before) |*before| before.deinit(f.gpa);
         stream.before = null;
         trace.log("fsevents history done root={s}", .{stream.root});
@@ -1189,26 +1194,26 @@ fn report(
     // path again.
     if (record.flags & flag.root_changed != 0) {
         trace.log("fsevents push removed root={s}", .{stream.root});
-        try batch.push(f.gpa, record.id, stream.root, .removed, stream.rootTarget());
+        try batch.push(f.gpa, io, record.id, stream.root, .removed, stream.rootTarget());
         return;
     }
 
-    if (f.unchangedInitial(record) orelse return f.incomplete(batch, stream)) return;
+    if (f.unchangedInitial(io, record) orelse return f.incomplete(io, batch, stream)) return;
 
     // A rename is paired before the filter is asked, because the filter
     // is about the two names and the pair is one change: see `joined`.
     if (record.renamed()) {
-        if (records.partnerOf(record, delivered, used, at + 1, Asking{ .f = f })) |partner_at| {
+        if (records.partnerOf(record, delivered, used, at + 1, Asking{ .f = f, .io = io })) |partner_at| {
             used[partner_at] = true;
             const partner = delivered[partner_at];
-            const there = f.exists(partner.path) orelse return f.incomplete(batch, stream);
+            const there = pathExists(io, partner.path) orelse return f.incomplete(io, batch, stream);
             if (there) {
-                try f.joined(batch, stream, partner.path, record.path, partner.target());
+                try f.joined(io, batch, stream, partner.path, record.path, partner.target());
             } else {
-                try f.joined(batch, stream, record.path, partner.path, record.target());
+                try f.joined(io, batch, stream, record.path, partner.path, record.target());
             }
-            try f.recount(batch, record.path, .unchanged, stream);
-            try f.recount(batch, partner.path, .unchanged, stream);
+            try f.recount(io, batch, record.path, .unchanged, stream);
+            try f.recount(io, batch, partner.path, .unchanged, stream);
             return;
         }
         // No partner in this delivery. On a name the filter excludes,
@@ -1223,7 +1228,7 @@ fn report(
         // It may be in the next one, so the decision waits: calling it
         // now would turn one `renamed` into a removal and a creation on
         // a backend that pairs them.
-        try f.hold(batch, record);
+        try f.hold(io, batch, record);
         return;
     }
 
@@ -1234,7 +1239,7 @@ fn report(
         return;
     }
 
-    try f.reportPlain(batch, record, stream);
+    try f.reportPlain(io, batch, record, stream);
 }
 
 /// Reports a record that is not half of a rename, by resolving the
@@ -1247,6 +1252,7 @@ fn report(
 /// and whether lookout has seen it before.
 fn reportPlain(
     f: *FsEvents,
+    io: Io,
     batch: *Batch,
     record: Record,
     stream: *const Stream,
@@ -1263,7 +1269,7 @@ fn reportPlain(
     // ambiguous cases: accumulated removal flags and an unknown path
     // whose flags do not say it was created.
     const there = if (needsExistenceCheck(record.flags, seen))
-        f.exists(record.path) orelse return f.incomplete(batch, stream)
+        pathExists(io, record.path) orelse return f.incomplete(io, batch, stream)
     else
         true;
 
@@ -1273,10 +1279,10 @@ fn reportPlain(
         // and went between two polls, and the tree is as it was.
         if (seen) {
             trace.log("fsevents push removed path={s}", .{record.path});
-            try batch.push(f.gpa, record.id, record.path, .removed, record.target());
+            try batch.push(f.gpa, io, record.id, record.path, .removed, record.target());
             f.forget(record.id, record.path);
             if (record.target() == .directory) f.forgetSubtree(record.id, record.path);
-            try f.recount(batch, record.path, .vanished, stream);
+            try f.recount(io, batch, record.path, .vanished, stream);
         } else {
             trace.log("fsevents drop gone-unknown path={s}", .{record.path});
         }
@@ -1284,7 +1290,7 @@ fn reportPlain(
     }
     if (!seen) {
         trace.log("fsevents push created path={s}", .{record.path});
-        try batch.push(f.gpa, record.id, record.path, .created, record.target());
+        try batch.push(f.gpa, io, record.id, record.path, .created, record.target());
         try f.remember(record.id, record.path);
         // A directory can arrive with a tree already inside it -- an
         // archive unpacked, or a rename this backend could not pair --
@@ -1294,9 +1300,9 @@ fn reportPlain(
         // be the first lookout had heard of the path and would be
         // reported as its creation.
         if (record.target() == .directory and stream.scope == .tree) {
-            try f.adopt(batch, record.id, record.path, stream);
+            try f.adopt(io, batch, record.id, record.path, stream);
         }
-        try f.recount(batch, record.path, .appeared, stream);
+        try f.recount(io, batch, record.path, .appeared, stream);
         return;
     }
     // Both flags on a path that still exists and was already known mean
@@ -1309,9 +1315,9 @@ fn reportPlain(
     // no content or metadata flag, and was otherwise not reported at all.
     if (wasReplaced(record.flags) or record.flags & flag.item_removed != 0) {
         trace.log("fsevents push replaced-as-removed path={s}", .{record.path});
-        try batch.push(f.gpa, record.id, record.path, .removed, record.target());
-        if (record.target() == .directory) try f.refreshKnown(record.id, record.path, stream);
-        try f.recount(batch, record.path, .unchanged, stream);
+        try batch.push(f.gpa, io, record.id, record.path, .removed, record.target());
+        if (record.target() == .directory) try f.refreshKnown(io, record.id, record.path, stream);
+        try f.recount(io, batch, record.path, .unchanged, stream);
         return;
     }
     // Contents and metadata, but not a directory's. A directory's own
@@ -1324,14 +1330,14 @@ fn reportPlain(
     if (record.target() != .directory) {
         if (record.flags & flag.item_modified != 0) {
             trace.log("fsevents push modified path={s}", .{record.path});
-            try batch.push(f.gpa, record.id, record.path, .modified, .file);
+            try batch.push(f.gpa, io, record.id, record.path, .modified, .file);
         } else if (record.flags & (flag.item_inode_meta_mod |
             flag.item_change_owner |
             flag.item_xattr_mod |
             flag.item_finder_info_mod) != 0)
         {
             trace.log("fsevents push attributes path={s}", .{record.path});
-            try batch.push(f.gpa, record.id, record.path, .attributes, .file);
+            try batch.push(f.gpa, io, record.id, record.path, .attributes, .file);
         } else if (record.renamed() and
             record.flags & (flag.item_created | flag.item_removed) == 0)
         {
@@ -1341,7 +1347,7 @@ fn reportPlain(
             // it, or excluded by its filter. The file is a new one, and
             // `inotify` and Windows say `created` for the same move.
             trace.log("fsevents push created renamed-over path={s}", .{record.path});
-            try batch.push(f.gpa, record.id, record.path, .created, .file);
+            try batch.push(f.gpa, io, record.id, record.path, .created, .file);
         } else {
             trace.log("fsevents drop known-no-change path={s}", .{record.path});
         }
@@ -1368,6 +1374,7 @@ fn wasReplaced(flags: u32) bool {
 /// remembers it.
 fn adopt(
     f: *FsEvents,
+    io: Io,
     batch: *Batch,
     id: WatchId,
     root: []const u8,
@@ -1377,6 +1384,7 @@ fn adopt(
     defer f.budget.end();
     const Adopting = struct {
         f: *FsEvents,
+        io: Io,
         batch: *Batch,
         id: WatchId,
         stream: *const Stream,
@@ -1389,14 +1397,14 @@ fn adopt(
             if (a.stream.filter.prunes(a.stream.root, entry.path)) return .over;
             if (a.f.known.contains(.{ .id = a.id, .path = entry.path })) return .into;
             if (!a.stream.filter.excludes(a.stream.root, entry.path)) {
-                try a.batch.push(a.f.gpa, a.id, entry.path, .created, .of(entry.kind));
+                try a.batch.push(a.f.gpa, a.io, a.id, entry.path, .created, .of(entry.kind));
             }
             try a.f.remember(a.id, entry.path);
             return .into;
         }
     };
-    var adopting: Adopting = .{ .f = f, .batch = batch, .id = id, .stream = stream };
-    walk.tree(*Adopting, Adopting.visit, f.gpa, f.io, root, &adopting) catch |err| switch (err) {
+    var adopting: Adopting = .{ .f = f, .io = io, .batch = batch, .id = id, .stream = stream };
+    walk.tree(*Adopting, Adopting.visit, f.gpa, io, root, &adopting) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
@@ -1419,6 +1427,7 @@ fn adopt(
 /// as a creation.
 fn joined(
     f: *FsEvents,
+    io: Io,
     batch: *Batch,
     stream: *const Stream,
     to: []const u8,
@@ -1431,7 +1440,7 @@ fn joined(
     f.budget.forget(from);
     if (keeps_to and keeps_from) {
         trace.log("fsevents push renamed path={s} from={s}", .{ to, from });
-        try batch.pushRename(f.gpa, id, to, from, target);
+        try batch.pushRename(f.gpa, io, id, to, from, target);
         try f.rekey(id, from, to);
         return;
     }
@@ -1441,14 +1450,14 @@ fn joined(
     if (target == .directory) f.forgetSubtree(id, from);
     if (keeps_to) {
         trace.log("fsevents push created renamed-in path={s} from={s}", .{ to, from });
-        try batch.push(f.gpa, id, to, .created, target);
+        try batch.push(f.gpa, io, id, to, .created, target);
         try f.remember(id, to);
         // As for any directory that arrives with a tree in it: what is
         // inside is as new to the caller as the directory is.
-        if (target == .directory and stream.scope == .tree) try f.adopt(batch, id, to, stream);
+        if (target == .directory and stream.scope == .tree) try f.adopt(io, batch, id, to, stream);
     } else if (keeps_from) {
         trace.log("fsevents push removed renamed-out path={s} to={s}", .{ from, to });
-        try batch.push(f.gpa, id, from, .removed, target);
+        try batch.push(f.gpa, io, id, from, .removed, target);
     } else {
         trace.log("fsevents drop filtered renamed path={s} from={s}", .{ to, from });
     }
@@ -1456,13 +1465,13 @@ fn joined(
 
 /// Holds an unpaired rename until the next delivery arrives. Anything
 /// already held has waited as long as it is going to.
-fn hold(f: *FsEvents, batch: *Batch, record: Record) contract.PollError!void {
+fn hold(f: *FsEvents, io: Io, batch: *Batch, record: Record) contract.PollError!void {
     // Copied first: the buffer the record points into is emptied before
     // the next delivery is read, and a dupe that fails must leave what
     // is already held where it was.
     const owned = try f.gpa.dupe(u8, record.path);
     errdefer f.gpa.free(owned);
-    try f.resolveHeld(batch);
+    try f.resolveHeld(io, batch);
     trace.log("fsevents hold renamed path={s}", .{record.path});
     f.pairing.held = .{
         .id = record.id,
@@ -1474,9 +1483,9 @@ fn hold(f: *FsEvents, batch: *Batch, record: Record) contract.PollError!void {
 
 /// Gives up on a half that never found its partner, at the end of the
 /// whole wait rather than at the end of one delivery.
-fn resolveHeld(f: *FsEvents, batch: *Batch) contract.PollError!void {
+fn resolveHeld(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!void {
     const half = f.pairing.held orelse return;
-    try f.reportHalf(batch, half);
+    try f.reportHalf(io, batch, half);
     f.pairing.held = null;
     f.gpa.free(half.path);
 }
@@ -1485,10 +1494,10 @@ fn resolveHeld(f: *FsEvents, batch: *Batch) contract.PollError!void {
 /// out of the watch, or renamed and then deleted, and what is left is
 /// the removal or the creation the other backends would give. A half on
 /// a name the filter excludes is never held -- see `report`.
-fn reportHalf(f: *FsEvents, batch: *Batch, half: records.Half) contract.PollError!void {
+fn reportHalf(f: *FsEvents, io: Io, batch: *Batch, half: records.Half) contract.PollError!void {
     const stream = f.streams.get(half.id) orelse return;
     trace.log("fsevents unpaired renamed path={s}", .{half.path});
-    try f.reportPlain(batch, half.record(), stream);
+    try f.reportPlain(io, batch, half.record(), stream);
 }
 
 /// Records that a path exists.
@@ -1515,14 +1524,14 @@ fn rememberNew(f: *FsEvents, id: WatchId, subject: []const u8) Allocator.Error!?
 
 /// Seeding on an ordinary add is a baseline, not a change to report.
 /// `listed` is the metadata the walk read with the name, if it could.
-fn rememberInitial(f: *FsEvents, stream: *const Stream, subject: []const u8, listed: ?Initial) !void {
+fn rememberInitial(f: *FsEvents, io: Io, stream: *const Stream, subject: []const u8, listed: ?Initial) !void {
     if (stream.resumed) return f.remember(stream.id, subject);
     const initial = try f.rememberNew(stream.id, subject) orelse return;
     if (listed) |meta| {
         initial.* = meta;
         return;
     }
-    const stat = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch |err| {
+    const stat = Io.Dir.cwd().statFile(io, subject, .{ .follow_symlinks = false }) catch |err| {
         // Gone already, or not remembered at all: drop the entry just made.
         f.paths.remove(f.known.pop().?.key.history.?);
         switch (err) {
@@ -1535,10 +1544,10 @@ fn rememberInitial(f: *FsEvents, stream: *const Stream, subject: []const u8, lis
 
 /// Old replay flags on an unchanged seeded path say nothing new. A missing
 /// path or changed inode, contents or metadata still goes through reporting.
-fn unchangedInitial(f: *FsEvents, record: Record) ?bool {
+fn unchangedInitial(f: *FsEvents, io: Io, record: Record) ?bool {
     const entry = f.known.getPtr(.{ .id = record.id, .path = record.path }) orelse return false;
     const initial = entry.* orelse return false;
-    const stat = Io.Dir.cwd().statFile(f.io, record.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+    const stat = Io.Dir.cwd().statFile(io, record.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {
             entry.* = null;
             return false;
@@ -1585,6 +1594,7 @@ fn forgetWatch(f: *FsEvents, id: WatchId) void {
 
 fn refreshKnown(
     f: *FsEvents,
+    io: Io,
     id: WatchId,
     root: []const u8,
     stream: *const Stream,
@@ -1606,7 +1616,7 @@ fn refreshKnown(
         }
     };
     var refreshing: Refreshing = .{ .f = f, .id = id, .stream = stream };
-    walk.tree(*Refreshing, Refreshing.visit, f.gpa, f.io, root, &refreshing) catch |err| switch (err) {
+    walk.tree(*Refreshing, Refreshing.visit, f.gpa, io, root, &refreshing) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
@@ -1657,12 +1667,12 @@ fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.
 ///
 /// Names and initial metadata only: no descriptor is kept, which is the
 /// difference between this and what the `kqueue` backend has to do.
-fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
+fn seedKnown(f: *FsEvents, io: Io, stream: *const Stream) !bool {
     // The root itself, before anything below it: FSEvents names the
     // watched path as readily as it names an entry, and a path the
     // backend has never heard of is a path it reports as created. This
     // is the whole of the seeding for a watch on a single file.
-    try f.rememberInitial(stream, stream.root, null);
+    try f.rememberInitial(io, stream, stream.root, null);
     if (stream.scope == .file) return false;
     try f.budget.begin(stream.root);
     defer f.budget.end();
@@ -1670,6 +1680,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
 
     const Seeding = struct {
         f: *FsEvents,
+        io: Io,
         stream: *const Stream,
         cross_device: bool = false,
 
@@ -1692,37 +1703,39 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
                 if (device != s.stream.volume.device) s.cross_device = true;
             }
             trace.log("fsevents seed remembered {s}", .{entry.path});
-            try s.f.rememberInitial(s.stream, entry.path, entry.meta);
+            try s.f.rememberInitial(s.io, s.stream, entry.path, entry.meta);
             return if (s.stream.scope == .tree) .into else .over;
         }
     };
-    var seeding: Seeding = .{ .f = f, .stream = stream };
-    try walk.treeWithMeta(*Seeding, Seeding.visit, f.gpa, f.io, stream.root, &seeding);
+    var seeding: Seeding = .{ .f = f, .io = io, .stream = stream };
+    try walk.treeWithMeta(*Seeding, Seeding.visit, f.gpa, io, stream.root, &seeding);
     return seeding.cross_device;
 }
 
 /// Unknown is distinct from absent: it cannot decide a rename or removal.
-fn exists(f: *const FsEvents, subject: []const u8) ?bool {
-    _ = Io.Dir.cwd().statFile(f.io, subject, .{ .follow_symlinks = false }) catch |err| switch (err) {
+fn pathExists(io: Io, subject: []const u8) ?bool {
+    _ = Io.Dir.cwd().statFile(io, subject, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return false,
         else => return null,
     };
     return true;
 }
 
-fn incomplete(f: *FsEvents, batch: *Batch, stream: *const Stream) Allocator.Error!void {
-    try batch.push(f.gpa, stream.id, stream.root, .overflow, stream.rootTarget());
+fn incomplete(f: *FsEvents, io: Io, batch: *Batch, stream: *const Stream) Allocator.Error!void {
+    try batch.push(f.gpa, io, stream.id, stream.root, .overflow, stream.rootTarget());
 }
 
 test "the wake pipe is closed on exec" {
-    var f = try FsEvents.init(std.testing.allocator, std.testing.io, .{});
-    defer f.deinit();
+    const io = std.testing.io;
+    var f = try FsEvents.init(std.testing.allocator, .{});
+    defer f.deinit(io);
     for ([_]posix.fd_t{ f.sink.wake_r, f.sink.wake_w }) |end| {
         try std.testing.expect(std.c.fcntl(end, c.f_getfd, @as(c_int, 0)) & c.fd_cloexec != 0);
     }
 }
 
 test "FSEvents refuses a watch whose initial names could not be remembered" {
+    const io = std.testing.io;
     const testing = std.testing;
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{ .iterate = true });
@@ -1734,13 +1747,13 @@ test "FSEvents refuses a watch whose initial names could not be remembered" {
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
-        var f = try FsEvents.init(gpa, testing.io, .{});
-        defer f.deinit();
+        var f = try FsEvents.init(gpa, .{});
+        defer f.deinit(io);
         f.gpa = failing.allocator();
         f.budget.gpa = failing.allocator();
-        var batch = Batch.init(testing.io, .{});
+        var batch = Batch.init(.{});
         defer batch.deinit(gpa);
-        if (f.add(@fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch)) |_| {
+        if (f.add(io, @fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch)) |_| {
             if (failing.has_induced_failure) std.debug.print("add succeeded after allocation {d} failed, with {d} remembered names\n", .{ fail_index, f.known.count() });
             try testing.expectEqual(false, failing.has_induced_failure);
             try testing.expectEqual(@as(usize, 4), f.known.count());
@@ -1766,11 +1779,11 @@ test "seeding remembers each entry with the metadata an lstat reads" {
     try tmp.dir.symLink(io, "top", "sub/link", .{});
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    var f = try FsEvents.init(gpa, io, .{});
-    defer f.deinit();
-    var batch = Batch.init(io, .{});
+    var f = try FsEvents.init(gpa, .{});
+    defer f.deinit(io);
+    var batch = Batch.init(.{});
     defer batch.deinit(gpa);
-    try f.add(@fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch);
+    try f.add(io, @fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch);
     // A replayed record is compared with a later lstat: the seeded value
     // must be exactly what that lstat reads for an unchanged entry.
     try testing.expectEqual(@as(usize, 6), f.known.count());
@@ -1781,20 +1794,21 @@ test "seeding remembers each entry with the metadata an lstat reads" {
 }
 
 test "removing an FSEvents stream releases its unreported delivery state" {
+    const io = std.testing.io;
     const testing = std.testing;
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var f = try FsEvents.init(gpa, testing.io, .{});
-    defer f.deinit();
-    var batch = Batch.init(testing.io, .{});
+    var f = try FsEvents.init(gpa, .{});
+    defer f.deinit(io);
+    var batch = Batch.init(.{});
     defer batch.deinit(gpa);
     const gone: WatchId = @fromBackingInt(@intCast(0));
     const kept: WatchId = @fromBackingInt(@intCast(1));
-    try f.add(gone, root, .{}, &batch);
-    try f.add(kept, root, .{}, &batch);
+    try f.add(io, gone, root, .{}, &batch);
+    try f.add(io, kept, root, .{}, &batch);
     // This test owns the two records below. Stop and join native replay
     // callbacks before constructing that exact delivery.
     c.FSEventStreamStop(f.streams.get(gone).?.ref);
@@ -1814,7 +1828,7 @@ test "removing an FSEvents stream releases its unreported delivery state" {
     const first = records.encode(f.staging.items, gone, flag.item_created, 3, root);
     _ = records.encode(f.staging.items[first..], kept, flag.item_modified, 4, root);
     f.pairing.held = .{ .id = gone, .path = try gpa.dupe(u8, root), .flags = flag.item_renamed, .event = 5 };
-    f.remove(gone);
+    f.remove(io, gone);
     try testing.expectEqual(@as(?records.Half, null), f.pairing.held);
     const held = try f.copyHeld(gpa);
     defer gpa.free(held.bytes);
@@ -1824,8 +1838,8 @@ test "removing an FSEvents stream releases its unreported delivery state" {
         try testing.expectEqual(kept, record.id);
         try testing.expectEqual(@as(?Record, null), try it.next());
     }
-    try f.add(gone, root, .{}, &batch);
-    try f.drain(&batch);
+    try f.add(io, gone, root, .{}, &batch);
+    try f.drain(io, &batch);
     for (batch.events.items) |event| try testing.expect(event.id != gone);
 }
 
@@ -1840,6 +1854,7 @@ test "removing an FSEvents stream releases its unreported delivery state" {
 /// every watch the change reached is told.
 fn recount(
     f: *FsEvents,
+    io: Io,
     batch: *Batch,
     subject: []const u8,
     move: Budget.Move,
@@ -1851,10 +1866,10 @@ fn recount(
     };
     const counting = Budget.counter(*Stream, Change, Change.reaches, f.streams.values(), change) orelse return;
     if (counting != stream) return;
-    if (!try f.budget.note(change.dir, std.Io.Dir.path.basename(subject), move)) return;
+    if (!try f.budget.note(io, change.dir, std.Io.Dir.path.basename(subject), move)) return;
     for (f.streams.values()) |other| {
         if (!change.reaches(other)) continue;
-        try batch.push(f.gpa, other.id, other.root, .overflow, other.rootTarget());
+        try batch.push(f.gpa, io, other.id, other.root, .overflow, other.rootTarget());
     }
 }
 
@@ -2021,13 +2036,14 @@ const c = struct {
 };
 
 test "a failed FSEvents rekey keeps every remembered name" {
+    const io = std.testing.io;
     const testing = std.testing;
     const id: WatchId = @fromBackingInt(@intCast(0));
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
-        var backend = try FsEvents.init(testing.allocator, testing.io, .{});
-        defer backend.deinit();
+        var backend = try FsEvents.init(testing.allocator, .{});
+        defer backend.deinit(io);
         try backend.remember(id, "/old");
         try backend.remember(id, "/old/child");
         backend.gpa = failing.allocator();
@@ -2049,6 +2065,7 @@ test "a failed FSEvents rekey keeps every remembered name" {
 }
 
 test "allocation failure during delivery retains FSEvents bytes and position" {
+    const io = std.testing.io;
     const testing = std.testing;
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
@@ -2061,12 +2078,12 @@ test "allocation failure during delivery retains FSEvents bytes and position" {
         const last = try std.Io.Dir.path.join(testing.allocator, &.{ root, "last" });
         defer testing.allocator.free(last);
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
-        var f = try FsEvents.init(failing.allocator(), testing.io, .{ .latency_ms = 0 });
-        defer f.deinit();
-        var batch = Batch.init(testing.io, .{});
+        var f = try FsEvents.init(failing.allocator(), .{ .latency = .fromMilliseconds(0) });
+        defer f.deinit(io);
+        var batch = Batch.init(.{});
         defer batch.deinit(failing.allocator());
         const id: WatchId = @fromBackingInt(@intCast(0));
-        try f.add(id, root, .{}, &batch);
+        try f.add(io, id, root, .{}, &batch);
         // No disk changes after registration: only this synthetic delivery.
         try synthesize(testing.allocator, f.streams.get(id).?, &.{
             .{ .path = first, .flags = flag.item_created },
@@ -2074,13 +2091,13 @@ test "allocation failure during delivery retains FSEvents bytes and position" {
         });
         const before = f.streams.get(id).?.cursor;
         failing.fail_index = failing.alloc_index + fail_index;
-        const answer = f.drain(&batch);
+        const answer = f.drain(io, &batch);
         failing.fail_index = std.math.maxInt(usize);
         if (answer) |_| break else |err| {
             try testing.expectEqual(error.OutOfMemory, err);
             try testing.expectEqual(before, f.streams.get(id).?.cursor);
         }
-        try f.drain(&batch);
+        try f.drain(io, &batch);
         var saw_first = false;
         var saw_last = false;
         for (batch.events.items) |event| {
@@ -2093,6 +2110,7 @@ test "allocation failure during delivery retains FSEvents bytes and position" {
 }
 
 test "a file stream accepts the replay sentinel outside its event scope" {
+    const io = std.testing.io;
     const testing = std.testing;
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{});
@@ -2101,16 +2119,16 @@ test "a file stream accepts the replay sentinel outside its event scope" {
     const root = try tmp.dir.realPathFileAlloc(testing.io, "file", gpa);
     defer gpa.free(root);
     const parent = std.Io.Dir.path.dirname(root).?;
-    var backend = try FsEvents.init(gpa, testing.io, .{});
-    defer backend.deinit();
-    var batch = Batch.init(testing.io, .{});
+    var backend = try FsEvents.init(gpa, .{});
+    defer backend.deinit(io);
+    var batch = Batch.init(.{});
     defer batch.deinit(gpa);
     const id: WatchId = @fromBackingInt(@intCast(0));
-    try backend.add(id, root, .{}, &batch);
+    try backend.add(io, id, root, .{}, &batch);
     const stream = backend.streams.get(id).?;
     stream.resumed = true;
     try synthesize(gpa, stream, &.{.{ .path = parent, .flags = flag.history_done }});
-    try backend.drain(&batch);
+    try backend.drain(io, &batch);
     if (stream.replayed == null) std.debug.print("file replay sentinel discarded root={s} parent={s} scope={s}\n", .{ root, parent, @tagName(stream.scope) });
     try testing.expect(stream.replayed != null);
     try testing.expectEqual(@as(usize, 0), batch.events.items.len);

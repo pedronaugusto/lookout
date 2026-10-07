@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const lookout = @import("../lookout.zig");
 const trace = @import("../trace.zig");
 const Deadline = @import("../Deadline.zig");
+const ms = @import("clock.zig").ms;
 const records = @import("../backend/fsevents/records.zig");
 
 const Kind = lookout.Kind;
@@ -42,8 +43,8 @@ const timeout_ms = 5_000;
 /// Sleeps `ms` on the test I/O from a thread the test started. Only a
 /// cancellation cuts a sleep short, and nothing cancels these threads; a
 /// nap cut short would only make its loop look at its condition sooner.
-fn nap(ms: i64) void {
-    std.testing.io.sleep(.fromMilliseconds(ms), .awake) catch |err| switch (err) {
+fn nap(millis: i64) void {
+    std.testing.io.sleep(.fromMilliseconds(millis), .awake) catch |err| switch (err) {
         error.Canceled => {},
     };
 }
@@ -52,6 +53,8 @@ fn nap(ms: i64) void {
 const Fixture = struct {
     tmp: std.testing.TmpDir,
     root: [:0]u8,
+    /// What every call on `watcher` goes through.
+    io: std.Io,
     watcher: Watcher,
     /// `Event.from` of the last event `expectEvents` matched, copied
     /// before the next poll invalidates it.
@@ -60,14 +63,14 @@ const Fixture = struct {
     fn init(backend: lookout.Backend) !Fixture {
         // A short interval keeps the poll backend's latency in the same
         // order as the kernel backends' so one timeout fits both.
-        return initOptions(.{ .backend = backend, .poll_interval_ms = 20 });
+        return initOptions(.{ .backend = backend, .poll_interval = .fromMilliseconds(20) });
     }
 
-    fn initOptions(options: lookout.Options) !Fixture {
+    fn initOptions(options: lookout.Watcher.Options) !Fixture {
         return initIo(std.testing.io, options);
     }
 
-    fn initIo(io: std.Io, options: lookout.Options) !Fixture {
+    fn initIo(io: std.Io, options: lookout.Watcher.Options) !Fixture {
         const gpa = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         errdefer tmp.cleanup();
@@ -79,14 +82,15 @@ const Fixture = struct {
         return .{
             .tmp = tmp,
             .root = root,
-            .watcher = try .init(gpa, io, options),
+            .io = io,
+            .watcher = try .init(gpa, options),
             .seen_from = null,
         };
     }
 
     fn deinit(f: *Fixture) void {
         trace.log("suite fixture close root={s}", .{f.root});
-        f.watcher.deinit();
+        f.watcher.deinit(f.io);
         if (f.seen_from) |from| std.testing.allocator.free(from);
         std.testing.allocator.free(f.root);
         f.tmp.cleanup();
@@ -156,7 +160,7 @@ const Fixture = struct {
 
         var waited: u32 = 0;
         while (waited < timeout_ms) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 trace.log("suite saw {s} {s}", .{ @tagName(event.kind), event.path });
                 for (wants, paths, seen) |want, p, *hit| {
                     if (event.kind != want.kind or !std.mem.eql(u8, event.path, p)) continue;
@@ -182,7 +186,7 @@ const Fixture = struct {
 
     /// Drains whatever is pending so the next assertion starts clean.
     fn settle(f: *Fixture) !void {
-        while ((try f.watcher.poll(120)).len != 0) {}
+        while ((try f.watcher.poll(f.io, ms(120))).len != 0) {}
     }
 };
 
@@ -191,8 +195,8 @@ test "every write immediately after add returns is reported" {
         for (0..200) |attempt| {
             var f = try Fixture.initOptions(.{
                 .backend = backend,
-                .poll_interval_ms = 20,
-                .latency_ms = 0,
+                .poll_interval = .fromMilliseconds(20),
+                .latency = .fromMilliseconds(0),
             });
             defer f.deinit();
             const file_watch = attempt % 3 == 1;
@@ -202,7 +206,7 @@ test "every write immediately after add returns is reported" {
             if (file_watch) try f.write(name, "before");
             const target = try f.path(name);
             defer std.testing.allocator.free(target);
-            _ = try f.watcher.add(if (file_watch) target else f.root, .{ .recursive = recursive });
+            _ = try f.watcher.add(f.io, if (file_watch) target else f.root, .{ .recursive = recursive });
             // No settling poll or sleep may separate registration and writing.
             if (file_watch) try f.overwrite(name, "after") else try f.write(name, "one");
             f.expectEvent(name, if (file_watch) .modified else .created) catch |err| {
@@ -221,14 +225,14 @@ test "a fresh watch reports nothing that was already there as new" {
         try f.tmp.dir.createDirPath(std.testing.io, "sub");
         try f.write("sub/deep.txt", "two");
 
-        _ = try f.watcher.add(f.root, .{ .recursive = true });
+        _ = try f.watcher.add(f.io, f.root, .{ .recursive = true });
 
         // A watch is about what changes from now on, so nothing that was
         // there when it was taken may arrive as a creation, and the
         // watched directory itself is not news at all. On a backend that
         // is handed accumulated flags rather than a sequence of facts,
         // that is the harder half of the contract.
-        for (try f.watcher.poll(400)) |event| {
+        for (try f.watcher.poll(f.io, ms(400))) |event| {
             try std.testing.expect(event.kind != .created);
             try std.testing.expect(!std.mem.eql(u8, event.path, f.root));
         }
@@ -239,7 +243,7 @@ test "a file appearing in a watched directory is created" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
 
         try f.write("a.txt", "one");
         try f.expectEvent("a.txt", .created);
@@ -251,7 +255,7 @@ test "a file written in a watched directory is modified" {
         var f = try Fixture.init(backend);
         defer f.deinit();
         try f.write("a.txt", "one");
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
 
         try f.write("a.txt", "one and two");
@@ -264,7 +268,7 @@ test "a file deleted from a watched directory is removed" {
         var f = try Fixture.init(backend);
         defer f.deinit();
         try f.write("a.txt", "one");
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
 
         try f.tmp.dir.deleteFile(std.testing.io, "a.txt");
@@ -277,7 +281,7 @@ test "a rename is reported in the shape the backend documents" {
         var f = try Fixture.init(backend);
         defer f.deinit();
         try f.write("before.txt", "one");
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
 
         try f.tmp.dir.rename("before.txt", f.tmp.dir, "after.txt", std.testing.io);
@@ -310,7 +314,7 @@ test "a file saved by a rename and then deleted is reported gone at once, in a l
         var f = try Fixture.init(backend);
         defer f.deinit();
         try f.write("next.md", "one");
-        _ = try f.watcher.add(f.root, .{ .recursive = true });
+        _ = try f.watcher.add(f.io, f.root, .{ .recursive = true });
         try f.settle();
 
         try f.write("next.new", "two");
@@ -322,7 +326,7 @@ test "a file saved by a rename and then deleted is reported gone at once, in a l
         defer std.testing.allocator.free(gone);
         var seen = false;
         while (!seen) {
-            const events = try f.watcher.poll(timeout_ms);
+            const events = try f.watcher.poll(f.io, ms(timeout_ms));
             if (events.len == 0) break;
             for (events) |event| {
                 if (std.mem.eql(u8, event.path, gone) and (event.kind == .removed or event.kind == .renamed)) seen = true;
@@ -355,7 +359,7 @@ fn expectWithout(f: *Fixture, sub_path: []const u8, kind: ?Kind, never: []const 
     var quiet = false;
     var waited: u32 = 0;
     while (waited < timeout_ms and !(seen and quiet)) : (waited += 200) {
-        const events = try f.watcher.poll(200);
+        const events = try f.watcher.poll(f.io, ms(200));
         quiet = seen and events.len == 0;
         for (events) |event| {
             trace.log("suite saw {s} {s}", .{ @tagName(event.kind), event.path });
@@ -392,7 +396,7 @@ test "a file saved by renaming another name over it is reported through an inclu
             var f = try Fixture.init(backend);
             defer f.deinit();
             try f.write("settings.toml", "one");
-            _ = try f.watcher.add(f.root, .{ .filter = filter });
+            _ = try f.watcher.add(f.io, f.root, .{ .filter = filter });
             try f.settle();
 
             try f.write("settings.new", "one and two");
@@ -409,7 +413,7 @@ test "a watched file renamed to a name an include list leaves out is removed" {
             var f = try Fixture.init(backend);
             defer f.deinit();
             try f.write("settings.toml", "one");
-            _ = try f.watcher.add(f.root, .{ .filter = filter });
+            _ = try f.watcher.add(f.io, f.root, .{ .filter = filter });
             try f.settle();
 
             try f.tmp.dir.rename("settings.toml", f.tmp.dir, "settings.old", std.testing.io);
@@ -427,7 +431,7 @@ test "a file renamed in from outside the watch over a watched one is created" {
         try f.write("outside.txt", "one and two");
         const watched = try f.path("watched");
         defer std.testing.allocator.free(watched);
-        _ = try f.watcher.add(watched, .{});
+        _ = try f.watcher.add(f.io, watched, .{});
         try f.settle();
 
         try f.tmp.dir.rename("outside.txt", f.tmp.dir, "watched/a.txt", std.testing.io);
@@ -444,7 +448,7 @@ test "a file renamed out of the watch is removed" {
         try f.write("watched/a.txt", "one");
         const watched = try f.path("watched");
         defer std.testing.allocator.free(watched);
-        _ = try f.watcher.add(watched, .{});
+        _ = try f.watcher.add(f.io, watched, .{});
         try f.settle();
 
         try f.tmp.dir.rename("watched/a.txt", f.tmp.dir, "outside.txt", std.testing.io);
@@ -471,8 +475,8 @@ test "inotify does not pair a move across separate watches" {
     const new = try f.path("b/file.txt");
     defer gpa.free(new);
 
-    const a_id = try f.watcher.add(a, .{});
-    const b_id = try f.watcher.add(b, .{});
+    const a_id = try f.watcher.add(f.io, a, .{});
+    const b_id = try f.watcher.add(f.io, b, .{});
     try f.settle();
     try f.tmp.dir.rename("a/file.txt", f.tmp.dir, "b/file.txt", std.testing.io);
 
@@ -480,7 +484,7 @@ test "inotify does not pair a move across separate watches" {
     var created = false;
     var waited: u32 = 0;
     while (waited < timeout_ms and !(removed and created)) : (waited += 200) {
-        for (try f.watcher.poll(200)) |event| {
+        for (try f.watcher.poll(f.io, ms(200))) |event| {
             try std.testing.expect(event.kind != .renamed);
             if (event.id == a_id and event.kind == .removed and std.mem.eql(u8, event.path, old)) {
                 removed = true;
@@ -511,13 +515,13 @@ test "settling holds a modification back until the writing stops" {
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     var f = try Fixture.initIo(io, .{
         .backend = .poll,
-        .settle_ms = 400,
-        .latency_ms = 0,
+        .settle = .fromMilliseconds(400),
+        .latency = .fromMilliseconds(0),
     });
     defer f.deinit();
     try f.write("a.txt", "one");
-    const id = try f.watcher.add(f.root, .{});
-    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+    const id = try f.watcher.add(f.io, f.root, .{});
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
 
     const wanted = try f.path("a.txt");
     defer std.testing.allocator.free(wanted);
@@ -529,16 +533,16 @@ test "settling holds a modification back until the writing stops" {
     for (chunks, 0..) |chunk, i| {
         Clock.milliseconds = first_write + @as(i96, @intCast(i)) * 200;
         try f.write("a.txt", chunk);
-        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
         Clock.milliseconds += 199;
-        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
     }
 
     const last_write = first_write + (chunks.len - 1) * 200;
     Clock.milliseconds = last_write + 399;
-    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
     Clock.milliseconds = last_write + 400;
-    const events = try f.watcher.poll(0);
+    const events = try f.watcher.poll(f.io, ms(0));
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqual(id, events[0].id);
     try std.testing.expectEqual(Kind.modified, events[0].kind);
@@ -547,9 +551,9 @@ test "settling holds a modification back until the writing stops" {
     try std.testing.expectEqual(first_write * std.time.ns_per_ms, events[0].time.nanoseconds);
 
     // The deadline hands the change out once, including in later windows.
-    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
     Clock.milliseconds += 400;
-    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
 }
 
 test "a watch on a single file reports writes to it" {
@@ -560,7 +564,7 @@ test "a watch on a single file reports writes to it" {
 
         const target = try f.path("a.txt");
         defer std.testing.allocator.free(target);
-        _ = try f.watcher.add(target, .{});
+        _ = try f.watcher.add(f.io, target, .{});
         try f.settle();
 
         try f.write("a.txt", "one and two");
@@ -576,14 +580,14 @@ test "removing a directly watched file reports a file target" {
 
         const target = try f.path("a.txt");
         defer std.testing.allocator.free(target);
-        const id = try f.watcher.add(target, .{});
+        const id = try f.watcher.add(f.io, target, .{});
         try f.settle();
         try f.tmp.dir.deleteFile(std.testing.io, "a.txt");
 
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 if (event.id != id or event.kind != .removed or
                     !std.mem.eql(u8, event.path, target)) continue;
                 try std.testing.expectEqual(lookout.Target.file, event.target);
@@ -603,7 +607,7 @@ test "a watch on a file that is already there does not call it new" {
         const gpa = std.testing.allocator;
         const target = try f.path("a.txt");
         defer gpa.free(target);
-        _ = try f.watcher.add(target, .{});
+        _ = try f.watcher.add(f.io, target, .{});
 
         // The same contract as for a directory, and the one a backend
         // that resolves accumulated flags against the file system has to
@@ -613,7 +617,7 @@ test "a watch on a file that is already there does not call it new" {
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 if (!std.mem.eql(u8, event.path, target)) continue;
                 try std.testing.expect(event.kind != .created);
                 found = true;
@@ -628,7 +632,7 @@ test "a burst of writes on one path is one event" {
         var f = try Fixture.init(backend);
         defer f.deinit();
         try f.write("a.txt", "one");
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
 
         // Each write leaves a different size, so no backend can miss one
@@ -644,7 +648,7 @@ test "a burst of writes on one path is one event" {
         var seen: usize = 0;
         var waited: u32 = 0;
         while (waited < timeout_ms) : (waited += 200) {
-            const events = try f.watcher.poll(200);
+            const events = try f.watcher.poll(f.io, ms(200));
             for (events) |event| {
                 if (std.mem.eql(u8, event.path, wanted)) seen += 1;
             }
@@ -655,18 +659,19 @@ test "a burst of writes on one path is one event" {
 }
 
 test "removing a watch stops its events" {
+    const io = std.testing.io;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        const id = try f.watcher.add(f.root, .{});
+        const id = try f.watcher.add(f.io, f.root, .{});
         try f.write("a.txt", "one");
         try f.expectEvent("a.txt", .created);
 
-        f.watcher.remove(id);
+        f.watcher.remove(io, id);
         try f.settle();
 
         try f.write("b.txt", "two");
-        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(400)).len);
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(400))).len);
     }
 }
 
@@ -674,7 +679,7 @@ test "a recursive watch follows directories created after it" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{ .recursive = true });
+        _ = try f.watcher.add(f.io, f.root, .{ .recursive = true });
 
         try f.tmp.dir.createDirPath(std.testing.io, "sub");
         try f.expectEvent("sub", .created);
@@ -688,7 +693,7 @@ test "a directory that arrives with a tree in it reports the tree" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{ .recursive = true });
+        _ = try f.watcher.add(f.io, f.root, .{ .recursive = true });
         try f.settle();
 
         // Built in one go, with no poll in between for the watcher to
@@ -720,7 +725,7 @@ test "a non-recursive watch ignores what happens below it" {
         var f = try Fixture.init(backend);
         defer f.deinit();
         try f.tmp.dir.createDirPath(std.testing.io, "sub");
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
 
         try f.write("sub/deep.txt", "one");
@@ -728,7 +733,7 @@ test "a non-recursive watch ignores what happens below it" {
         const gpa = std.testing.allocator;
         const wanted = try f.path("sub/deep.txt");
         defer gpa.free(wanted);
-        for (try f.watcher.poll(400)) |event| {
+        for (try f.watcher.poll(f.io, ms(400))) |event| {
             try std.testing.expect(!std.mem.eql(u8, event.path, wanted));
         }
     }
@@ -741,7 +746,7 @@ test "an ignored subtree is watched by nobody" {
         try f.tmp.dir.createDirPath(std.testing.io, "keep");
         try f.tmp.dir.createDirPath(std.testing.io, "skip/deeper");
 
-        _ = try f.watcher.add(f.root, .{
+        _ = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
             .filter = .{ .ignore = &.{ "skip", "*.tmp" } },
         });
@@ -766,7 +771,7 @@ test "an ignored subtree is watched by nobody" {
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, ignored));
                 try std.testing.expect(!std.mem.eql(u8, event.path, scratch));
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
@@ -784,13 +789,13 @@ test "refilter changes a live watch's admitted paths and registrations" {
         const gpa = std.testing.allocator;
         try f.tmp.dir.createDirPath(io, "old/deep");
         try f.tmp.dir.createDirPath(io, "new/deep");
-        const id = try f.watcher.add(f.root, .{
+        const id = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
             .filter = .{ .ignore = &.{"new"} },
         });
         try f.settle();
         const before = f.watcher.stats().registrations;
-        try f.watcher.refilter(id, .{ .ignore = &.{"old"} });
+        try f.watcher.refilter(f.io, id, .{ .ignore = &.{"old"} });
         try std.testing.expectEqual(before, f.watcher.stats().registrations);
         const infos = try f.watcher.watches(gpa);
         defer gpa.free(infos);
@@ -807,7 +812,7 @@ test "refilter changes a live watch's admitted paths and registrations" {
         var saw = false;
         var waited: u32 = 0;
         while (waited < timeout_ms) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, excluded));
                 if (event.id == id and event.kind == .created and
                     std.mem.eql(u8, event.path, admitted)) saw = true;
@@ -815,7 +820,7 @@ test "refilter changes a live watch's admitted paths and registrations" {
             if (saw) break;
         }
         try std.testing.expect(saw);
-        try std.testing.expectError(error.UnknownWatch, f.watcher.refilter(@fromBackingInt(@intCast(0xffffffff)), .none));
+        try std.testing.expectError(error.UnknownWatch, f.watcher.refilter(f.io, @fromBackingInt(@intCast(0xffffffff)), .none));
     }
 }
 
@@ -824,9 +829,9 @@ test "refilter reports writes to newly admitted files without recursion" {
         var f = try Fixture.init(backend);
         defer f.deinit();
         try f.write("admitted", "one");
-        const id = try f.watcher.add(f.root, .{ .filter = .{ .ignore = &.{"admitted"} } });
+        const id = try f.watcher.add(f.io, f.root, .{ .filter = .{ .ignore = &.{"admitted"} } });
         try f.settle();
-        try f.watcher.refilter(id, .none);
+        try f.watcher.refilter(f.io, id, .none);
         try f.overwrite("admitted", "two and three");
         try f.expectEvent("admitted", .modified);
     }
@@ -836,24 +841,24 @@ test "refilter seeds the entry budget of newly admitted directories" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 2,
         });
         defer f.deinit();
         try f.tmp.dir.createDirPath(std.testing.io, "new");
         try f.write("new/a", "x");
         try f.write("new/b", "x");
-        const id = try f.watcher.add(f.root, .{
+        const id = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
             .filter = .{ .ignore = &.{"new"} },
         });
         try f.settle();
-        try f.watcher.refilter(id, .none);
+        try f.watcher.refilter(f.io, id, .none);
         try f.write("new/c", "x");
         var overflowed = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !overflowed) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 if (event.id == id and event.kind == .overflow and
                     std.mem.eql(u8, event.path, f.root)) overflowed = true;
             }
@@ -866,12 +871,12 @@ test "refilter does not count a queued creation twice" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 2,
         });
         defer f.deinit();
         try f.tmp.dir.createDirPath(std.testing.io, "keep");
-        const id = try f.watcher.add(f.root, .{
+        const id = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
             .filter = .{ .ignore = &.{"*.tmp"} },
         });
@@ -883,14 +888,14 @@ test "refilter does not count a queued creation twice" {
         // filter changes. Reading its directory into the budget and then
         // counting the queued creation again would invent an overflow.
         try f.write("keep/live.tmp", "x");
-        try f.watcher.refilter(id, .none);
+        try f.watcher.refilter(f.io, id, .none);
         try f.write("keep/live.tmp", "xx");
         const subject = try f.path("keep/live.tmp");
         defer std.testing.allocator.free(subject);
         var saw = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !saw) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(event.id != id or event.kind != .overflow);
                 if (event.id == id and std.mem.eql(u8, event.path, subject) and
                     (event.kind == .created or event.kind == .modified)) saw = true;
@@ -953,7 +958,7 @@ test "writes after refilter are reported while a writer runs through the change"
         try f.tmp.dir.createDirPath(io, "keep");
         try f.tmp.dir.createDirPath(io, "new");
         try f.tmp.dir.createDirPath(io, "skip");
-        const id = try f.watcher.add(f.root, .{
+        const id = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
             .filter = .{ .ignore = &.{ "new", "skip" } },
         });
@@ -969,7 +974,7 @@ test "writes after refilter are reported while a writer runs through the change"
             while (writer.progress.load(.acquire) == 0 and !writer.failed.load(.acquire))
                 try io.sleep(.fromMilliseconds(1), .awake);
             try std.testing.expect(!writer.failed.load(.acquire));
-            try f.watcher.refilter(id, .{ .ignore = &.{"skip"} });
+            try f.watcher.refilter(f.io, id, .{ .ignore = &.{"skip"} });
             writer.phase.store(true, .release);
             thread.join();
         }
@@ -988,7 +993,7 @@ test "writes after refilter are reported while a writer runs through the change"
         var seen: [8]bool = @splat(false);
         var waited: u32 = 0;
         while (waited < timeout_ms and !std.mem.allEqual(bool, &seen, true)) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!lookout.path.within(excluded, event.path));
                 if (event.id != id or event.kind != .created) continue;
                 for (wanted, &seen) |path, *hit| {
@@ -1018,11 +1023,12 @@ fn dumpDelivery(f: *const Fixture, phase: []const u8) void {
 }
 
 test "refilter drops held events that the new filter excludes" {
+    const io = std.testing.io;
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
             .backend = backend,
-            .poll_interval_ms = 20,
-            .debounce_ms = 200,
+            .poll_interval = .fromMilliseconds(20),
+            .debounce = .fromMilliseconds(200),
         });
         defer f.deinit();
         var phase: []const u8 = "setup";
@@ -1031,7 +1037,7 @@ test "refilter drops held events that the new filter excludes" {
         try f.tmp.dir.createDirPath(std.testing.io, "new");
         try f.write("old/held.txt", "before");
         try f.write("new/after.txt", "before");
-        const id = try f.watcher.add(f.root, .{ .recursive = true });
+        const id = try f.watcher.add(f.io, f.root, .{ .recursive = true });
         try f.settle();
         const old = try f.path("old/held.txt");
         defer std.testing.allocator.free(old);
@@ -1044,11 +1050,11 @@ test "refilter drops held events that the new filter excludes" {
         // live 200 ms window races a descheduled test thread against promote.
         // An already due hold must also be discarded before the next poll.
         phase = "stage old hold";
-        try f.watcher.batch.push(std.testing.allocator, id, old, .modified, .file);
+        try f.watcher.batch.push(std.testing.allocator, io, id, old, .modified, .file);
         const held = f.watcher.batch.held.getPtr(.{ .id = id, .path = old }).?;
         held.last_ns -= 201 * std.time.ns_per_ms;
         phase = "refilter";
-        try f.watcher.refilter(id, .{ .ignore = &.{"old"} });
+        try f.watcher.refilter(f.io, id, .{ .ignore = &.{"old"} });
         for (f.watcher.batch.held.keys()) |key|
             try std.testing.expect(key.id != id or !lookout.path.within(excluded, key.path));
         phase = "observe admitted write";
@@ -1056,7 +1062,7 @@ test "refilter drops held events that the new filter excludes" {
         var saw = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !saw) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, old));
                 if (event.id == id and event.kind == .modified and
                     std.mem.eql(u8, event.path, new)) saw = true;
@@ -1104,7 +1110,7 @@ test "a folder appearing under a newly admitted path during refilter is reached"
         var f = try Fixture.init(backend);
         defer f.deinit();
         try f.tmp.dir.createDirPath(std.testing.io, "new");
-        const id = try f.watcher.add(f.root, .{
+        const id = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
             .filter = .{ .ignore = &.{"new"} },
         });
@@ -1121,7 +1127,7 @@ test "a folder appearing under a newly admitted path during refilter is reached"
                 // refilter does not invoke the caller's predicate itself.
                 gate.go.store(true, .release);
             }
-            try f.watcher.refilter(id, .{ .allow = Gate.allow, .context = &gate });
+            try f.watcher.refilter(f.io, id, .{ .allow = Gate.allow, .context = &gate });
             gate.go.store(true, .release);
             thread.join();
         }
@@ -1146,7 +1152,7 @@ test "a caller predicate excludes what a pattern cannot say" {
         defer f.deinit();
         try f.tmp.dir.createDirPath(std.testing.io, ".hidden");
 
-        _ = try f.watcher.add(f.root, .{
+        _ = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
             .filter = .{ .allow = notHidden },
         });
@@ -1164,7 +1170,7 @@ test "a caller predicate excludes what a pattern cannot say" {
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, hidden));
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
             }
@@ -1186,13 +1192,13 @@ test "an ignored subtree costs nothing where lookout does the recursion" {
         try tmp.dir.createDirPath(io, "skip/one");
         try tmp.dir.createDirPath(io, "skip/two");
 
-        var plain: Watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 });
-        defer plain.deinit();
-        _ = try plain.add(root, .{ .recursive = true });
+        var plain: Watcher = try .init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(20) });
+        defer plain.deinit(io);
+        _ = try plain.add(io, root, .{ .recursive = true });
 
-        var filtered: Watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 });
-        defer filtered.deinit();
-        _ = try filtered.add(root, .{
+        var filtered: Watcher = try .init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(20) });
+        defer filtered.deinit(io);
+        _ = try filtered.add(io, root, .{
             .recursive = true,
             .filter = .{ .ignore = &.{"skip"} },
         });
@@ -1242,7 +1248,7 @@ test "a tree the filter ignores gets no registration however it grows" {
         try f.write("src/wanted.txt", "one");
 
         var asked: usize = 0;
-        _ = try f.watcher.add(f.root, .{
+        _ = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
             .filter = .{
                 .ignore = &.{ "node_modules", "zig-*" },
@@ -1285,13 +1291,13 @@ test "a tree the filter ignores gets no registration however it grows" {
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 for (roots) |r| try std.testing.expect(!std.mem.startsWith(u8, event.path, r));
                 if (event.kind == .modified and std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
         try std.testing.expect(found);
-        for (try f.watcher.poll(200)) |event| {
+        for (try f.watcher.poll(f.io, ms(200))) |event| {
             for (roots) |r| try std.testing.expect(!std.mem.startsWith(u8, event.path, r));
         }
         try std.testing.expectEqual(before, f.watcher.stats().registrations);
@@ -1307,13 +1313,13 @@ test "a directory past the entry limit reports overflow against the watch root" 
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 2,
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{});
 
         for (0..6) |i| {
             var name: [8]u8 = undefined;
@@ -1326,7 +1332,7 @@ test "a directory past the entry limit reports overflow against the watch root" 
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try watcher.poll(200)) |event| {
+            for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) found = true;
             }
         }
@@ -1337,19 +1343,19 @@ test "a directory past the entry limit reports overflow against the watch root" 
 test "an overflow is returned before the debounce window closes" {
     var f = try Fixture.initOptions(.{
         .backend = .poll,
-        .poll_interval_ms = 20,
-        .debounce_ms = 300,
+        .poll_interval = .fromMilliseconds(20),
+        .debounce = .fromMilliseconds(300),
         .max_dir_entries = 2,
     });
     defer f.deinit();
-    const id = try f.watcher.add(f.root, .{});
+    const id = try f.watcher.add(f.io, f.root, .{});
     for (0..3) |i| {
         var name: [8]u8 = undefined;
         try f.write(try std.mem.print(&name, "f{d}", .{i}), "x");
     }
     // A non-blocking poll must return the scan's actual loss notice,
     // even though no ordinary change has had time to go quiet.
-    const events = try f.watcher.poll(0);
+    const events = try f.watcher.poll(f.io, ms(0));
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqual(Kind.overflow, events[0].kind);
     try std.testing.expectEqual(id, events[0].id);
@@ -1367,18 +1373,18 @@ test "what an overflow lost can be read back from a baseline" {
 
         // A budget of two entries, so the sixth file is certain to put
         // the watch past it and the watcher is certain to say so.
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 2,
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{});
 
         // Seeded where the watch is taken, which is the only moment the
         // two can be made to agree.
         var base: lookout.Baseline = try .seed(gpa, io, root, .{});
-        defer base.deinit(gpa);
+        defer base.deinit();
 
         for (0..6) |i| {
             var name: [8]u8 = undefined;
@@ -1391,7 +1397,7 @@ test "what an overflow lost can be read back from a baseline" {
         var overflowed = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !overflowed) : (waited += 200) {
-            for (try watcher.poll(200)) |event| {
+            for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
             }
         }
@@ -1400,7 +1406,7 @@ test "what an overflow lost can be read back from a baseline" {
         // The watcher said its record was incomplete and could not say
         // what was missing. The baseline can: all six, by name.
         var created: usize = 0;
-        for (try base.diff(gpa)) |change| {
+        for (try base.diff(io)) |change| {
             if (change.kind == .created) created += 1;
         }
         try std.testing.expectEqual(@as(usize, 6), created);
@@ -1411,12 +1417,12 @@ test "a finished write is reported where the backend is told about it" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .report_closes = true,
         });
         defer f.deinit();
         try f.write("a.txt", "one");
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
 
         const gpa = std.testing.allocator;
@@ -1431,7 +1437,7 @@ test "a finished write is reported where the backend is told about it" {
         var otherwise = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !(closed or otherwise)) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 if (!std.mem.eql(u8, event.path, wanted)) continue;
                 if (event.kind == .closed) closed = true else otherwise = true;
             }
@@ -1455,7 +1461,7 @@ test "closes are not reported unless they are asked for" {
         var f = try Fixture.init(backend);
         defer f.deinit();
         try f.write("a.txt", "one");
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
 
         const gpa = std.testing.allocator;
@@ -1469,7 +1475,7 @@ test "closes are not reported unless they are asked for" {
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(event.kind != .closed);
                 if (event.kind == .modified and std.mem.eql(u8, event.path, wanted)) found = true;
             }
@@ -1511,18 +1517,18 @@ test "the Windows read buffer is the size the caller asked for" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = .windows,
             .buffer_bytes = 4 * 1024,
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{});
         try writeBurst(tmp.dir, burst);
 
         var overflowed = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !overflowed) : (waited += 200) {
-            for (try watcher.poll(200)) |event| {
+            for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
             }
         }
@@ -1537,19 +1543,19 @@ test "the Windows read buffer is the size the caller asked for" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, io, .{
+        var watcher: Watcher = try .init(gpa, .{
             .backend = .windows,
             .buffer_bytes = 1024 * 1024,
         });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{});
         try writeBurst(tmp.dir, burst);
 
         var created: usize = 0;
         var overflowed = false;
         var waited: u32 = 0;
         while (waited < 2_000) : (waited += 200) {
-            for (try watcher.poll(200)) |event| {
+            for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
                 if (event.kind == .created) created += 1;
             }
@@ -1563,15 +1569,15 @@ test "the descriptor is present exactly when the backend has one" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
-    var polling: Watcher = try .init(gpa, io, .{ .backend = .poll });
-    defer polling.deinit();
+    var polling: Watcher = try .init(gpa, .{ .backend = .poll });
+    defer polling.deinit(io);
     try std.testing.expectEqual(lookout.Backend.poll, polling.backend());
     try std.testing.expectEqual(@as(?std.posix.fd_t, null), polling.fd());
 
     for (backends) |backend| {
         if (backend == .poll) continue;
-        var kernel: Watcher = try .init(gpa, io, .{ .backend = backend });
-        defer kernel.deinit();
+        var kernel: Watcher = try .init(gpa, .{ .backend = backend });
+        defer kernel.deinit(io);
         try std.testing.expectEqual(backend, kernel.backend());
         // Windows waits on a completion port, which nothing else can
         // wait on, so it has no descriptor to give either.
@@ -1581,12 +1587,11 @@ test "the descriptor is present exactly when the backend has one" {
 
 test "a backend this target was not built with is refused, not a compile error" {
     const gpa = std.testing.allocator;
-    const io = std.testing.io;
     const absent: lookout.Backend = if (lookout.supported(.inotify)) .kqueue else .inotify;
     try std.testing.expect(!lookout.supported(absent));
     try std.testing.expectError(
         error.BackendUnavailable,
-        Watcher.init(gpa, io, .{ .backend = absent }),
+        Watcher.init(gpa, .{ .backend = absent }),
     );
 }
 
@@ -1594,10 +1599,10 @@ test "one watcher watches a path once" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         try std.testing.expectError(
             error.PathAlreadyWatched,
-            f.watcher.add(f.root, .{}),
+            f.watcher.add(f.io, f.root, .{}),
         );
     }
 }
@@ -1614,8 +1619,8 @@ test "overlapping watches report the same path under both ids" {
         const changed = try f.path("child/file.txt");
         defer gpa.free(changed);
 
-        const parent_id = try f.watcher.add(f.root, .{ .recursive = true });
-        const child_id = try f.watcher.add(child, .{});
+        const parent_id = try f.watcher.add(f.io, f.root, .{ .recursive = true });
+        const child_id = try f.watcher.add(f.io, child, .{});
         try f.settle();
         try f.write("child/file.txt", "one");
 
@@ -1623,7 +1628,7 @@ test "overlapping watches report the same path under both ids" {
         var child_seen = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !(parent_seen and child_seen)) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 if (event.kind != .created or !std.mem.eql(u8, event.path, changed)) continue;
                 if (event.id == parent_id) parent_seen = true;
                 if (event.id == child_id) child_seen = true;
@@ -1640,31 +1645,32 @@ test "overlapping watches report the same path under both ids" {
 }
 
 test "removing a watch discards events held for a quiet window" {
+    const io = std.testing.io;
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
             .backend = backend,
-            .poll_interval_ms = 20,
-            .debounce_ms = 300,
+            .poll_interval = .fromMilliseconds(20),
+            .debounce = .fromMilliseconds(300),
         });
         defer f.deinit();
         try f.write("a.txt", "one");
-        const id = try f.watcher.add(f.root, .{});
+        const id = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
 
         try f.write("a.txt", "two");
         var waited: u32 = 0;
         while (f.watcher.stats().held == 0 and waited < timeout_ms) : (waited += 20) {
-            _ = try f.watcher.poll(0);
+            _ = try f.watcher.poll(f.io, ms(0));
             if (f.watcher.stats().held == 0) {
                 try std.testing.io.sleep(.fromMilliseconds(20), .awake);
             }
         }
         try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().held);
 
-        f.watcher.remove(id);
+        f.watcher.remove(io, id);
         try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().held);
         try std.testing.io.sleep(.fromMilliseconds(350), .awake);
-        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
     }
 }
 
@@ -1672,10 +1678,10 @@ test "a zero timeout is one check, not a refusal to look" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         // Nothing has happened, so a zero timeout must come straight back
         // empty rather than block.
-        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
 
         try f.write("a.txt", "one");
 
@@ -1689,7 +1695,7 @@ test "a zero timeout is one check, not a refusal to look" {
         const started: std.Io.Timestamp = .now(std.testing.io, .awake);
         var found = false;
         while (!found) {
-            for (try f.watcher.poll(0)) |event| {
+            for (try f.watcher.poll(f.io, ms(0))) |event| {
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
             }
             const elapsed = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake));
@@ -1710,12 +1716,12 @@ test "a path that does not exist yet can be watched" {
 
         // Two levels missing, and the options are the real watch's: they
         // are held until there is something to apply them to.
-        const id = try f.watcher.add(target, .{
+        const id = try f.watcher.add(f.io, target, .{
             .pending = true,
             .recursive = true,
             .filter = .{ .ignore = &.{"skip"} },
         });
-        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(200)).len);
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(200))).len);
 
         // The tree appears one level at a time; the watch steps down with
         // it and reports the path it was asked about, not the steps.
@@ -1749,7 +1755,7 @@ test "a path that does not exist yet can be watched" {
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, ignored));
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
             }
@@ -1770,8 +1776,8 @@ test "what is made in a pending path as it appears is reported by the watch it b
         const target = try f.path("later");
         defer gpa.free(target);
 
-        const id = try f.watcher.add(target, .{ .pending = true, .recursive = true });
-        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(200)).len);
+        const id = try f.watcher.add(f.io, target, .{ .pending = true, .recursive = true });
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(200))).len);
 
         try f.tmp.dir.createDirPath(std.testing.io, "later/sub");
         try f.write("later/a.txt", "one");
@@ -1787,7 +1793,7 @@ test "what is made in a pending path as it appears is reported by the watch it b
 
         // each once, whether the backend saw it as well or not
         while (true) {
-            const events = try f.watcher.poll(120);
+            const events = try f.watcher.poll(f.io, ms(120));
             if (events.len == 0) break;
             try ledger.note(events);
         }
@@ -1810,13 +1816,13 @@ test "a pending file is promoted with its file target" {
 
         const target = try f.path("later.txt");
         defer std.testing.allocator.free(target);
-        const id = try f.watcher.add(target, .{ .pending = true });
+        const id = try f.watcher.add(f.io, target, .{ .pending = true });
         try f.write("later.txt", "one");
 
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 if (event.id != id or event.kind != .created or
                     !std.mem.eql(u8, event.path, target)) continue;
                 try std.testing.expectEqual(lookout.Target.file, event.target);
@@ -1835,7 +1841,7 @@ test "what happens to the ancestor of a pending watch is not reported" {
         const gpa = std.testing.allocator;
         const target = try f.path("later");
         defer gpa.free(target);
-        _ = try f.watcher.add(target, .{ .pending = true });
+        _ = try f.watcher.add(f.io, target, .{ .pending = true });
 
         // The watch is parked on the directory the path will appear in,
         // which is busy with things the caller never asked about.
@@ -1845,7 +1851,7 @@ test "what happens to the ancestor of a pending watch is not reported" {
 
         var waited: u32 = 0;
         while (waited < 800) : (waited += 200) {
-            try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(200)).len);
+            try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(200))).len);
         }
 
         try f.tmp.dir.createDirPath(std.testing.io, "later");
@@ -1854,6 +1860,7 @@ test "what happens to the ancestor of a pending watch is not reported" {
 }
 
 test "a pending watch holds one watch and gives it back" {
+    const io = std.testing.io;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
@@ -1862,21 +1869,21 @@ test "a pending watch holds one watch and gives it back" {
         const target = try f.path("later");
         defer gpa.free(target);
 
-        const id = try f.watcher.add(target, .{ .pending = true });
+        const id = try f.watcher.add(f.io, target, .{ .pending = true });
         // Parked on an ancestor is still one watch, and one registration
         // -- a caller counting what it holds sees the same thing before
         // and after the path appears.
         try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().watches);
         try std.testing.expect(f.watcher.stats().registrations >= 1);
 
-        f.watcher.remove(id);
+        f.watcher.remove(io, id);
         try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().watches);
         try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().registrations);
 
         // And nothing is left waiting for it: the path appearing now is
         // nobody's business.
         try f.tmp.dir.createDirPath(std.testing.io, "later");
-        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(400)).len);
+        try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(400))).len);
     }
 }
 
@@ -1884,9 +1891,9 @@ test "a pending watch on a path that is already there is an ordinary watch" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{ .pending = true });
+        _ = try f.watcher.add(f.io, f.root, .{ .pending = true });
         // No creation is reported for something that was already there.
-        for (try f.watcher.poll(200)) |event| {
+        for (try f.watcher.poll(f.io, ms(200))) |event| {
             try std.testing.expect(event.kind != .created);
         }
         try f.write("a.txt", "one");
@@ -1937,7 +1944,7 @@ const Ledger = struct {
         const gpa = std.testing.allocator;
         var waited: u32 = 0;
         while (waited < timeout_ms) : (waited += 200) {
-            try l.note(try f.watcher.poll(200));
+            try l.note(try f.watcher.poll(f.io, ms(200)));
             var all = true;
             for (wants) |want| {
                 const p = try f.path(want.sub_path);
@@ -1964,7 +1971,7 @@ const Ledger = struct {
     fn drain(l: *Ledger, f: *Fixture) !void {
         var quiet: u32 = 0;
         while (quiet < 600) {
-            const events = try f.watcher.poll(200);
+            const events = try f.watcher.poll(f.io, ms(200));
             if (events.len == 0) {
                 quiet += 200;
                 continue;
@@ -1996,17 +2003,17 @@ test "a pending watch does not take the folder it waits in" {
         var waiting: lookout.WatchId = undefined;
         var folder: lookout.WatchId = undefined;
         if (pending_first) {
-            waiting = try f.watcher.add(later, .{ .pending = true });
-            folder = try f.watcher.add(dir, .{});
+            waiting = try f.watcher.add(f.io, later, .{ .pending = true });
+            folder = try f.watcher.add(f.io, dir, .{});
         } else {
-            folder = try f.watcher.add(dir, .{});
-            waiting = try f.watcher.add(later, .{ .pending = true });
+            folder = try f.watcher.add(f.io, dir, .{});
+            waiting = try f.watcher.add(f.io, later, .{ .pending = true });
         }
         // Parked with a registration of its own on the folder, not on
         // nothing: the kernel tells it when its path appears, rather than
         // the next poll happening to look.
         try std.testing.expect(f.watcher.table.get(waiting).?.registered != null);
-        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(dir, .{}));
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(f.io, dir, .{}));
         try f.settle();
 
         var ledger: Ledger = .{};
@@ -2067,8 +2074,8 @@ test "two pending watches may wait in one folder" {
         const two = try f.path("two");
         defer gpa.free(two);
 
-        const first = try f.watcher.add(one, .{ .pending = true });
-        const second = try f.watcher.add(two, .{ .pending = true });
+        const first = try f.watcher.add(f.io, one, .{ .pending = true });
+        const second = try f.watcher.add(f.io, two, .{ .pending = true });
         try std.testing.expect(f.watcher.table.get(first).?.registered != null);
         try std.testing.expect(f.watcher.table.get(second).?.registered != null);
 
@@ -2094,14 +2101,14 @@ test "the path a pending watch waits for is taken by it" {
         const later = try f.path("later");
         defer gpa.free(later);
 
-        const waiting = try f.watcher.add(later, .{ .pending = true });
+        const waiting = try f.watcher.add(f.io, later, .{ .pending = true });
         // Before it appears, a second wait for it is refused.
-        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(later, .{ .pending = true }));
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(f.io, later, .{ .pending = true }));
 
         try f.tmp.dir.createDirPath(std.testing.io, "later");
         // After it appears and before the promotion, so is a watch of it.
-        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(later, .{}));
-        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(later, .{ .pending = true }));
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(f.io, later, .{}));
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(f.io, later, .{ .pending = true }));
         try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().watches);
 
         var ledger: Ledger = .{};
@@ -2110,7 +2117,7 @@ test "the path a pending watch waits for is taken by it" {
         try f.settle();
         const registrations = f.watcher.stats().registrations;
         // And after the promotion too.
-        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(later, .{}));
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(f.io, later, .{}));
         try std.testing.expectEqual(registrations, f.watcher.stats().registrations);
 
         try f.write("later/a.txt", "one");
@@ -2142,13 +2149,13 @@ test "a pending path that leads to one already watched is not watched twice" {
         const through = try f.path("link/inside");
         defer gpa.free(through);
 
-        const held = try f.watcher.add(real, .{});
+        const held = try f.watcher.add(f.io, real, .{});
         try f.settle();
         const registrations = f.watcher.stats().registrations;
-        const waiting = try f.watcher.add(through, .{ .pending = true });
+        const waiting = try f.watcher.add(f.io, through, .{ .pending = true });
 
         try f.tmp.dir.symLink(io, "real", "link", .{ .is_directory = true });
-        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(through, .{}));
+        try std.testing.expectError(error.PathAlreadyWatched, f.watcher.add(f.io, through, .{}));
 
         var ledger: Ledger = .{};
         defer ledger.deinit();
@@ -2169,7 +2176,7 @@ test "a pending path that leads to one already watched is not watched twice" {
         const infos = try f.watcher.watches(gpa);
         defer gpa.free(infos);
         for (infos) |info| if (info.id == waiting) try std.testing.expect(!info.waiting);
-        f.watcher.remove(waiting);
+        f.watcher.remove(io, waiting);
         try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().watches);
     }
 }
@@ -2178,7 +2185,7 @@ test "a folder shared with a pending watch keeps its entry budget" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 2,
         });
         defer f.deinit();
@@ -2189,8 +2196,8 @@ test "a folder shared with a pending watch keeps its entry budget" {
         // Parked first, so on `inotify` it is the first owner of the one
         // kernel watch the two share, and it leaves every entry but its
         // own out. The count is the folder's, not the parked watch's.
-        _ = try f.watcher.add(later, .{ .pending = true });
-        const folder = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, later, .{ .pending = true });
+        const folder = try f.watcher.add(f.io, f.root, .{});
         for (0..6) |i| {
             var name: [8]u8 = undefined;
             try f.write(std.mem.print(&name, "f{d}", .{i}) catch unreachable, "x");
@@ -2200,7 +2207,7 @@ test "a folder shared with a pending watch keeps its entry budget" {
         defer ledger.deinit();
         var waited: u32 = 0;
         while (waited < timeout_ms and ledger.count(folder, .overflow, f.root) == 0) : (waited += 200) {
-            try ledger.note(try f.watcher.poll(200));
+            try ledger.note(try f.watcher.poll(f.io, ms(200)));
         }
         try std.testing.expect(ledger.count(folder, .overflow, f.root) > 0);
     }
@@ -2216,7 +2223,7 @@ test "a folder a pending watch alone held is counted true for the watch taken th
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 2,
         });
         defer f.deinit();
@@ -2224,14 +2231,14 @@ test "a folder a pending watch alone held is counted true for the watch taken th
         const later = try f.path("later");
         defer gpa.free(later);
 
-        _ = try f.watcher.add(later, .{ .pending = true });
+        _ = try f.watcher.add(f.io, later, .{ .pending = true });
         try f.settle();
         // two entries while only the parked watch is there: at the budget
         try f.write("f0", "x");
         try f.write("f1", "x");
         try f.settle();
 
-        const folder = try f.watcher.add(f.root, .{});
+        const folder = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
         // the third is past it
         try f.write("f2", "x");
@@ -2239,7 +2246,7 @@ test "a folder a pending watch alone held is counted true for the watch taken th
         defer ledger.deinit();
         var waited: u32 = 0;
         while (waited < timeout_ms and ledger.count(folder, .overflow, f.root) == 0) : (waited += 200) {
-            try ledger.note(try f.watcher.poll(200));
+            try ledger.note(try f.watcher.poll(f.io, ms(200)));
         }
         try std.testing.expect(ledger.count(folder, .overflow, f.root) > 0);
     }
@@ -2254,7 +2261,7 @@ test "a folder several watches share is counted once against its budget" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 4,
         });
         defer f.deinit();
@@ -2268,9 +2275,9 @@ test "a folder several watches share is counted once against its budget" {
         const later = try f.path("dir/later");
         defer gpa.free(later);
 
-        const tree = try f.watcher.add(f.root, .{ .recursive = true });
-        const folder = try f.watcher.add(dir, .{});
-        const waiting = try f.watcher.add(later, .{ .pending = true });
+        const tree = try f.watcher.add(f.io, f.root, .{ .recursive = true });
+        const folder = try f.watcher.add(f.io, dir, .{});
+        const waiting = try f.watcher.add(f.io, later, .{ .pending = true });
         try f.settle();
 
         var ledger: Ledger = .{};
@@ -2317,7 +2324,7 @@ test "a watch on a file holds no entry budget for its folder" {
     for (backends) |backend| {
         var f = try Fixture.initOptions(.{
             .backend = backend,
-            .poll_interval_ms = 20,
+            .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 4,
         });
         defer f.deinit();
@@ -2331,10 +2338,10 @@ test "a watch on a file holds no entry budget for its folder" {
         const file = try f.path("dir/file");
         defer gpa.free(file);
 
-        const first = try f.watcher.add(dir, .{});
-        const single = try f.watcher.add(file, .{});
+        const first = try f.watcher.add(f.io, dir, .{});
+        const single = try f.watcher.add(f.io, file, .{});
         try f.settle();
-        f.watcher.remove(first);
+        f.watcher.remove(io, first);
 
         // Two entries more while only the file is watched: four, at the
         // budget. The file's watch hears nothing of them.
@@ -2344,7 +2351,7 @@ test "a watch on a file holds no entry budget for its folder" {
 
         var ledger: Ledger = .{};
         defer ledger.deinit();
-        const again = try f.watcher.add(dir, .{});
+        const again = try f.watcher.add(f.io, dir, .{});
         try ledger.drain(&f);
         try std.testing.expectEqual(@as(usize, 0), ledger.count(again, .overflow, dir));
 
@@ -2366,20 +2373,20 @@ test "a watch on a file holds no entry budget for its folder" {
 test "adding a path that does not exist fails" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    var watcher: Watcher = try .init(gpa, io, .{});
-    defer watcher.deinit();
+    var watcher: Watcher = try .init(gpa, .{});
+    defer watcher.deinit(io);
     try std.testing.expectError(
         error.FileNotFound,
-        watcher.add("lookout-no-such-path-exists-here", .{}),
+        watcher.add(io, "lookout-no-such-path-exists-here", .{}),
     );
 }
 
 test "polling a watcher with nothing to report returns nothing" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    var watcher: Watcher = try .init(gpa, io, .{ .poll_interval_ms = 20 });
-    defer watcher.deinit();
-    try std.testing.expectEqual(@as(usize, 0), (try watcher.poll(100)).len);
+    var watcher: Watcher = try .init(gpa, .{ .poll_interval = .fromMilliseconds(20) });
+    defer watcher.deinit(io);
+    try std.testing.expectEqual(@as(usize, 0), (try watcher.poll(io, ms(100))).len);
 }
 
 test "the watched path's own removal is reported against it" {
@@ -2390,7 +2397,7 @@ test "the watched path's own removal is reported against it" {
 
         const target = try f.path("target");
         defer std.testing.allocator.free(target);
-        _ = try f.watcher.add(target, .{});
+        _ = try f.watcher.add(f.io, target, .{});
         try f.settle();
 
         try f.tmp.dir.deleteDir(std.testing.io, "target");
@@ -2406,7 +2413,7 @@ test "the watched path's own move is reported in the shape the backend documents
 
         const target = try f.path("target");
         defer std.testing.allocator.free(target);
-        _ = try f.watcher.add(target, .{});
+        _ = try f.watcher.add(f.io, target, .{});
         try f.settle();
 
         try f.tmp.dir.rename("target", f.tmp.dir, "moved", std.testing.io);
@@ -2423,7 +2430,7 @@ test "the watched path's own move is reported in the shape the backend documents
             .silent => {
                 var waited: u32 = 0;
                 while (waited < 1_000) : (waited += 200) {
-                    for (try f.watcher.poll(200)) |event| {
+                    for (try f.watcher.poll(f.io, ms(200))) |event| {
                         try std.testing.expect(!std.mem.eql(u8, event.path, target));
                     }
                 }
@@ -2440,7 +2447,7 @@ test "Windows retires a renamed root before reporting stale child paths" {
     try f.tmp.dir.createDirPath(std.testing.io, "target");
     const target = try f.path("target");
     defer std.testing.allocator.free(target);
-    _ = try f.watcher.add(target, .{ .recursive = true });
+    _ = try f.watcher.add(f.io, target, .{ .recursive = true });
     try f.settle();
 
     try f.tmp.dir.rename("target", f.tmp.dir, "moved", std.testing.io);
@@ -2449,7 +2456,7 @@ test "Windows retires a renamed root before reporting stale child paths" {
     var unwatched = false;
     var waited: u32 = 0;
     while (waited < timeout_ms and !unwatched) : (waited += 200) {
-        for (try f.watcher.poll(200)) |event| {
+        for (try f.watcher.poll(f.io, ms(200))) |event| {
             if (event.kind == .unwatched and std.mem.eql(u8, event.path, target)) {
                 unwatched = true;
             } else {
@@ -2462,6 +2469,7 @@ test "Windows retires a renamed root before reporting stale child paths" {
 }
 
 test "stats count what the watcher holds" {
+    const io = std.testing.io;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
@@ -2470,7 +2478,7 @@ test "stats count what the watcher holds" {
         try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().watches);
         try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().registrations);
 
-        const id = try f.watcher.add(f.root, .{ .recursive = true });
+        const id = try f.watcher.add(f.io, f.root, .{ .recursive = true });
         const added = f.watcher.stats();
         try std.testing.expectEqual(@as(usize, 1), added.watches);
         // How many registrations one watch costs is the whole difference
@@ -2479,7 +2487,7 @@ test "stats count what the watcher holds" {
         // and releases all of them.
         try std.testing.expect(added.registrations >= 1);
 
-        f.watcher.remove(id);
+        f.watcher.remove(io, id);
         const removed = f.watcher.stats();
         try std.testing.expectEqual(@as(usize, 0), removed.watches);
         try std.testing.expectEqual(@as(usize, 0), removed.registrations);
@@ -2490,7 +2498,7 @@ test "an event carries when it was seen" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
 
         const before: std.Io.Timestamp = .now(std.testing.io, .awake);
         try f.write("a.txt", "one");
@@ -2519,7 +2527,7 @@ test "a symbolic link is an entry, not a doorway" {
         try f.tmp.dir.createDirPath(std.testing.io, "real");
         try f.tmp.dir.symLink(std.testing.io, "real", "link", .{ .is_directory = true });
 
-        _ = try f.watcher.add(f.root, .{ .recursive = true });
+        _ = try f.watcher.add(f.io, f.root, .{ .recursive = true });
         try f.settle();
 
         try f.write("real/inside.txt", "one");
@@ -2533,7 +2541,7 @@ test "a symbolic link is an entry, not a doorway" {
         defer gpa.free(through_link);
         var waited: u32 = 0;
         while (waited < 600) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, through_link) or
                     event.path.len == through_link.len);
             }
@@ -2547,12 +2555,12 @@ test "debouncing reports one event per path carrying the kind seen last" {
     // tested lives in `Batch` and is the same code under every backend.
     var f = try Fixture.initOptions(.{
         .backend = .poll,
-        .poll_interval_ms = 20,
-        .debounce_ms = 300,
-        .latency_ms = 0,
+        .poll_interval = .fromMilliseconds(20),
+        .debounce = .fromMilliseconds(300),
+        .latency = .fromMilliseconds(0),
     });
     defer f.deinit();
-    _ = try f.watcher.add(f.root, .{});
+    _ = try f.watcher.add(f.io, f.root, .{});
 
     const gpa = std.testing.allocator;
     const wanted = try f.path("a.txt");
@@ -2562,14 +2570,14 @@ test "debouncing reports one event per path carrying the kind seen last" {
     // `created`, which outranks `modified`; a debounce reports the end
     // state, which is the whole point of having both.
     try f.write("a.txt", "one");
-    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(100)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(100))).len);
     try f.write("a.txt", "one and two");
 
     var seen: usize = 0;
     var kind: Kind = undefined;
     var waited: u32 = 0;
     while (waited < timeout_ms and seen == 0) : (waited += 100) {
-        for (try f.watcher.poll(100)) |event| {
+        for (try f.watcher.poll(f.io, ms(100))) |event| {
             if (!std.mem.eql(u8, event.path, wanted)) continue;
             kind = event.kind;
             seen += 1;
@@ -2589,11 +2597,11 @@ test "a watcher torn down with deliveries in flight does not outlive them" {
             const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
             defer gpa.free(root);
 
-            var watcher: Watcher = try .init(gpa, io, .{
+            var watcher: Watcher = try .init(gpa, .{
                 .backend = backend,
-                .poll_interval_ms = 20,
+                .poll_interval = .fromMilliseconds(20),
             });
-            _ = try watcher.add(root, .{ .recursive = true });
+            _ = try watcher.add(io, root, .{ .recursive = true });
 
             // A burst that is never polled for, so that whatever the
             // operating system delivers is still in flight when the
@@ -2607,7 +2615,7 @@ test "a watcher torn down with deliveries in flight does not outlive them" {
                     .data = "x",
                 });
             }
-            watcher.deinit();
+            watcher.deinit(io);
         }
     }
 }
@@ -2622,12 +2630,12 @@ test "watches taken and dropped in quick succession keep working" {
             const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
             defer gpa.free(root);
 
-            var watcher: Watcher = try .init(gpa, io, .{
+            var watcher: Watcher = try .init(gpa, .{
                 .backend = backend,
-                .poll_interval_ms = 20,
+                .poll_interval = .fromMilliseconds(20),
             });
-            defer watcher.deinit();
-            _ = try watcher.add(root, .{});
+            defer watcher.deinit(io);
+            _ = try watcher.add(io, root, .{});
 
             try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
             const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "a.txt" });
@@ -2640,7 +2648,7 @@ test "watches taken and dropped in quick succession keep working" {
             var found = false;
             var waited: u32 = 0;
             while (waited < 2_000 and !found) : (waited += 100) {
-                for (try watcher.poll(100)) |event| {
+                for (try watcher.poll(io, ms(100))) |event| {
                     if (std.mem.eql(u8, event.path, wanted)) found = true;
                 }
             }
@@ -2669,7 +2677,7 @@ test "an event says whether the path is a file or a directory" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{ .recursive = true });
+        _ = try f.watcher.add(f.io, f.root, .{ .recursive = true });
 
         const gpa = std.testing.allocator;
         const dir_path = try f.path("made");
@@ -2684,7 +2692,7 @@ test "an event says whether the path is a file or a directory" {
         var file_target: ?lookout.Target = null;
         var waited: u32 = 0;
         while (waited < timeout_ms and (dir_target == null or file_target == null)) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 if (std.mem.eql(u8, event.path, dir_path)) dir_target = event.target;
                 if (std.mem.eql(u8, event.path, file_path)) file_target = event.target;
             }
@@ -2719,7 +2727,7 @@ test "a watch that cannot cover a subtree says so instead of going quiet" {
         // Put it back before the fixture tries to delete the tree.
         defer f.tmp.dir.setFilePermissions(io, "closed", .default_dir, .{}) catch {};
 
-        _ = try f.watcher.add(f.root, .{ .recursive = true });
+        _ = try f.watcher.add(f.io, f.root, .{ .recursive = true });
 
         // A subtree lookout cannot see into is a hole in the watch. It
         // used to be swallowed, and the only sign of it was a part of
@@ -2732,7 +2740,7 @@ test "a watcher can be woken from another thread" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
 
         const Waker = struct {
             watcher: *Watcher,
@@ -2752,7 +2760,7 @@ test "a watcher can be woken from another thread" {
         // Nothing is going to happen to the tree, so without the wake
         // this blocks for as long as the caller is prepared to wait --
         // and with `null`, forever.
-        const events = try f.watcher.poll(null);
+        const events = try f.watcher.poll(f.io, .none);
         try std.testing.expectEqual(@as(usize, 0), events.len);
         try std.testing.expectEqual(@as(usize, 1), waker.calls.load(.acquire));
 
@@ -2787,7 +2795,7 @@ fn Held(comptime Result: type, comptime then: anytype) type {
 }
 
 fn addOnce(self: anytype) Watcher.AddError!lookout.WatchId {
-    return self.watcher.add(self.path, .{});
+    return self.watcher.add(std.testing.io, self.path, .{});
 }
 
 test "a cancellation requested before poll gathers no work" {
@@ -2806,16 +2814,15 @@ test "a cancellation requested before poll gathers no work" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         var vtable = std.testing.io.vtable.*;
         vtable.checkCancel = Probe.checkCancel;
         vtable.now = Probe.now;
         Probe.checks = 0;
         Probe.clock_reads = 0;
-        f.watcher.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-        defer f.watcher.io = std.testing.io;
+        const probe: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
         const revision = f.watcher.batch.revision;
-        try std.testing.expectError(error.Canceled, f.watcher.poll(0));
+        try std.testing.expectError(error.Canceled, f.watcher.poll(probe, ms(0)));
         try std.testing.expectEqual(@as(usize, 1), Probe.checks);
         try std.testing.expectEqual(@as(usize, 0), Probe.clock_reads);
         try std.testing.expectEqual(revision, f.watcher.batch.revision);
@@ -2826,14 +2833,14 @@ test "a cancellation that arrives while a poll waits costs no event" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
 
         const Poller = struct {
-            fn run(watcher: *Watcher) Watcher.PollError![]const lookout.Event {
-                return watcher.poll(null);
+            fn run(io: std.Io, watcher: *Watcher) Watcher.PollError![]const lookout.Event {
+                return watcher.poll(io, .none);
             }
         };
-        var future = std.testing.io.concurrent(Poller.run, .{&f.watcher}) catch |err| switch (err) {
+        var future = std.testing.io.concurrent(Poller.run, .{ f.io, &f.watcher }) catch |err| switch (err) {
             error.ConcurrencyUnavailable => return error.SkipZigTest,
         };
         // The change comes after the cancellation has been asked for. On
@@ -2889,10 +2896,11 @@ test "a cancellation requested before add is refused, and nothing is added" {
 }
 
 test "a polling task is stopped by a flag and a wake on every backend" {
+    const io = std.testing.io;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
 
         // The recipe `Watcher.wake` gives, as written there.
         const Task = struct {
@@ -2906,7 +2914,7 @@ test "a polling task is stopped by a flag and a wake on every backend" {
             fn run(self: *Self) Watcher.PollError!void {
                 while (!self.stopping.load(.acquire)) {
                     self.entered.store(true, .release);
-                    _ = try self.watcher.poll(null);
+                    _ = try self.watcher.poll(io, .none);
                     self.polls += 1;
                 }
             }
@@ -2917,8 +2925,8 @@ test "a polling task is stopped by a flag and a wake on every backend" {
         };
         // Bound a task that never starts. Readiness, rather than a sleep,
         // puts stopping and wake after the task has entered its poll loop.
-        const deadline = Deadline.start(std.testing.io, timeout_ms);
-        while (!task.entered.load(.acquire) and !deadline.expired()) {
+        const deadline = Deadline.fromMs(std.testing.io, timeout_ms);
+        while (!task.entered.load(.acquire) and !deadline.expired(io)) {
             try std.testing.io.sleep(.fromMilliseconds(1), .awake);
         }
         const entered = task.entered.load(.acquire);
@@ -2932,6 +2940,7 @@ test "a polling task is stopped by a flag and a wake on every backend" {
 }
 
 test "a watcher says what it is watching" {
+    const io = std.testing.io;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
@@ -2939,8 +2948,8 @@ test "a watcher says what it is watching" {
 
         const later = try f.path("later");
         defer gpa.free(later);
-        const here = try f.watcher.add(f.root, .{ .recursive = true });
-        const waiting = try f.watcher.add(later, .{ .pending = true });
+        const here = try f.watcher.add(f.io, f.root, .{ .recursive = true });
+        const waiting = try f.watcher.add(f.io, later, .{ .pending = true });
 
         const held = try f.watcher.watches(gpa);
         defer gpa.free(held);
@@ -2956,7 +2965,7 @@ test "a watcher says what it is watching" {
         // what it has needs to be told which.
         try std.testing.expect(held[1].waiting);
 
-        f.watcher.remove(waiting);
+        f.watcher.remove(io, waiting);
         const after = try f.watcher.watches(gpa);
         defer gpa.free(after);
         try std.testing.expectEqual(@as(usize, 1), after.len);
@@ -2972,7 +2981,7 @@ test "the descriptor becomes readable when there is something to report" {
         var f = try Fixture.init(backend);
         defer f.deinit();
         const descriptor = f.watcher.fd() orelse continue;
-        _ = try f.watcher.add(f.root, .{});
+        _ = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
 
         try f.write("a.txt", "one");
@@ -3009,7 +3018,7 @@ test "the descriptor becomes readable when there is something to report" {
             fds[0].revents = 0;
             if (try std.posix.poll(&fds, 500) == 0) break;
             try std.testing.expect(wakes < 3);
-            try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(0)).len);
+            try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
             fds[0].revents = 0;
             try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 0));
         }
@@ -3032,12 +3041,12 @@ test "two watchers in one process do not disturb each other" {
         const second_root = try std.Io.Dir.path.join(gpa, &.{ root, "two" });
         defer gpa.free(second_root);
 
-        var first: Watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 });
-        defer first.deinit();
-        var second: Watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 });
-        defer second.deinit();
-        _ = try first.add(first_root, .{});
-        _ = try second.add(second_root, .{});
+        var first: Watcher = try .init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(20) });
+        defer first.deinit(io);
+        var second: Watcher = try .init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(20) });
+        defer second.deinit(io);
+        _ = try first.add(io, first_root, .{});
+        _ = try second.add(io, second_root, .{});
 
         try tmp.dir.writeFile(io, .{ .sub_path = "one/a.txt", .data = "one" });
         try tmp.dir.writeFile(io, .{ .sub_path = "two/b.txt", .data = "two" });
@@ -3051,11 +3060,11 @@ test "two watchers in one process do not disturb each other" {
         var saw_second = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !(saw_first and saw_second)) : (waited += 200) {
-            for (try first.poll(100)) |event| {
+            for (try first.poll(io, ms(100))) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, wanted_second));
                 if (std.mem.eql(u8, event.path, wanted_first)) saw_first = true;
             }
-            for (try second.poll(100)) |event| {
+            for (try second.poll(io, ms(100))) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, wanted_first));
                 if (std.mem.eql(u8, event.path, wanted_second)) saw_second = true;
             }
@@ -3066,6 +3075,7 @@ test "two watchers in one process do not disturb each other" {
 }
 
 test "a watch can be removed from inside a poll loop" {
+    const io = std.testing.io;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
@@ -3078,8 +3088,8 @@ test "a watch can be removed from inside a poll loop" {
         const second_root = try f.path("two");
         defer gpa.free(second_root);
 
-        const first = try f.watcher.add(first_root, .{});
-        _ = try f.watcher.add(second_root, .{});
+        const first = try f.watcher.add(f.io, first_root, .{});
+        _ = try f.watcher.add(f.io, second_root, .{});
         try f.settle();
 
         try f.write("one/a.txt", "one");
@@ -3091,9 +3101,9 @@ test "a watch can be removed from inside a poll loop" {
         var removed = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !removed) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 if (event.id == first) {
-                    f.watcher.remove(first);
+                    f.watcher.remove(io, first);
                     removed = true;
                 }
             }
@@ -3132,10 +3142,10 @@ test "what changed while nothing was watching is reported on resuming" {
     var token: []u8 = undefined;
     defer gpa.free(token);
     {
-        var watcher: Watcher = try .init(gpa, io, .{});
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{ .recursive = true });
-        while ((try watcher.poll(200)).len != 0) {}
+        var watcher: Watcher = try .init(gpa, .{});
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{ .recursive = true });
+        while ((try watcher.poll(io, ms(200))).len != 0) {}
         var where = (try watcher.checkpoint(gpa)).?;
         defer where.deinit();
         token = try where.token(gpa);
@@ -3149,9 +3159,9 @@ test "what changed while nothing was watching is reported on resuming" {
 
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: Watcher = try .init(gpa, io, .{ .checkpoint = checkpoint });
-    defer watcher.deinit();
-    _ = try watcher.add(root, .{ .recursive = true });
+    var watcher: Watcher = try .init(gpa, .{ .checkpoint = checkpoint });
+    defer watcher.deinit(io);
+    _ = try watcher.add(io, root, .{ .recursive = true });
 
     const appeared = try std.Io.Dir.path.join(gpa, &.{ root, "while-away.txt" });
     defer gpa.free(appeared);
@@ -3165,7 +3175,7 @@ test "what changed while nothing was watching is reported on resuming" {
     var saw_deleted = false;
     var waited: u32 = 0;
     while (waited < timeout_ms and !(saw_appeared and saw_changed and saw_deleted)) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (std.mem.eql(u8, event.path, appeared)) saw_appeared = true;
             if (std.mem.eql(u8, event.path, changed)) saw_changed = true;
             if (std.mem.eql(u8, event.path, deleted) and event.kind == .removed) saw_deleted = true;
@@ -3184,7 +3194,7 @@ test "an include list reports what it names and nothing else" {
         defer f.deinit();
         try f.tmp.dir.createDirPath(std.testing.io, "src/deep");
 
-        _ = try f.watcher.add(f.root, .{
+        _ = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
             .filter = .{ .only = &.{"src/**/*.zig"} },
         });
@@ -3206,7 +3216,7 @@ test "an include list reports what it names and nothing else" {
         var found = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !found) : (waited += 200) {
-            for (try f.watcher.poll(200)) |event| {
+            for (try f.watcher.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, unwanted));
                 if (std.mem.eql(u8, event.path, wanted)) found = true;
             }
@@ -3228,27 +3238,27 @@ test "resuming retains a debounced change that poll has not handed out" {
     var saved: lookout.Checkpoint = undefined;
     defer saved.deinit();
     {
-        var watcher = try Watcher.init(gpa, io, .{ .backend = .fsevents, .debounce_ms = 200, .latency_ms = 0 });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{});
+        var watcher = try Watcher.init(gpa, .{ .backend = .fsevents, .debounce = .fromMilliseconds(200), .latency = .fromMilliseconds(0) });
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{});
         try tmp.dir.writeFile(io, .{ .sub_path = "held.txt", .data = "one" });
         // Read the backend without promoting: stage the pending delivery
         // deterministically, independent of a pause in the test thread.
-        const deadline = Deadline.start(io, timeout_ms);
-        while (watcher.batch.held.count() == 0 and !deadline.expired()) {
-            try watcher.impl.fsevents.wait(&watcher.batch, 0);
+        const deadline = Deadline.fromMs(io, timeout_ms);
+        while (watcher.batch.held.count() == 0 and !deadline.expired(io)) {
+            try watcher.impl.fsevents.wait(io, &watcher.batch, 0);
             try io.sleep(.fromMilliseconds(1), .awake);
         }
         try std.testing.expect(watcher.batch.held.count() != 0);
         saved = (try watcher.checkpoint(gpa)).?;
     }
-    var resumed = try Watcher.init(gpa, io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
-    defer resumed.deinit();
-    _ = try resumed.add(root, .{});
+    var resumed = try Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = saved, .latency = .fromMilliseconds(0) });
+    defer resumed.deinit(io);
+    _ = try resumed.add(io, root, .{});
     var saw = false;
     var waited: u32 = 0;
     while (!saw and waited < timeout_ms) : (waited += 200) {
-        for (try resumed.poll(200)) |event| {
+        for (try resumed.poll(io, ms(200))) |event| {
             if (std.mem.eql(u8, event.path, wanted)) saw = true;
         }
     }
@@ -3260,17 +3270,17 @@ test "checkpoints keep settling and rename changes beside handed deliveries" {
     if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    for ([_]lookout.Options{ .{ .settle_ms = 200 }, .{ .debounce_ms = 200 } }) |holding| {
+    for ([_]lookout.Watcher.Options{ .{ .settle = .fromMilliseconds(200) }, .{ .debounce = .fromMilliseconds(200) } }) |holding| {
         var f = try Fixture.initOptions(.{
             .backend = .fsevents,
-            .latency_ms = 0,
-            .settle_ms = holding.settle_ms,
-            .debounce_ms = holding.debounce_ms,
+            .latency = .fromMilliseconds(0),
+            .settle = holding.settle,
+            .debounce = holding.debounce,
         });
         defer f.deinit();
         try f.write("held.txt", "one");
         try f.write("from.txt", "one");
-        const id = try f.watcher.add(f.root, .{});
+        const id = try f.watcher.add(f.io, f.root, .{});
         try f.settle();
         const held = try f.path("held.txt");
         defer gpa.free(held);
@@ -3282,13 +3292,13 @@ test "checkpoints keep settling and rename changes beside handed deliveries" {
         defer gpa.free(handed);
 
         try f.watcher.batch.deferChange(gpa, id, handed, .overflow, null, .file);
-        const delivered = try f.watcher.poll(0);
+        const delivered = try f.watcher.poll(f.io, ms(0));
         try std.testing.expectEqual(@as(usize, 1), delivered.len);
         // The next changes are unhanded even though a prior delivery
         // remains borrowed by the caller. Staging avoids clock races.
-        try f.watcher.batch.push(gpa, id, held, .modified, .file);
-        if (holding.debounce_ms != 0) {
-            try f.watcher.batch.pushRename(gpa, id, to, from, .file);
+        try f.watcher.batch.push(gpa, io, id, held, .modified, .file);
+        if (holding.debounce.nanoseconds != 0) {
+            try f.watcher.batch.pushRename(gpa, io, id, to, from, .file);
         } else {
             const stream = f.watcher.impl.fsevents.streams.get(id).?;
             f.watcher.impl.fsevents.pairing.held = .{
@@ -3305,14 +3315,14 @@ test "checkpoints keep settling and rename changes beside handed deliveries" {
         var parsed = try lookout.Checkpoint.parse(gpa, text);
         defer parsed.deinit();
         // Changing holding options must not lose the pending changes.
-        var resumed = try Watcher.init(gpa, io, .{ .backend = .fsevents, .checkpoint = parsed, .latency_ms = 0 });
-        defer resumed.deinit();
-        const restored = try resumed.add(f.root, .{});
-        if (holding.settle_ms != 0) {
+        var resumed = try Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = parsed, .latency = .fromMilliseconds(0) });
+        defer resumed.deinit(io);
+        const restored = try resumed.add(io, f.root, .{});
+        if (holding.settle.nanoseconds != 0) {
             try std.testing.expectEqualStrings(from, resumed.impl.fsevents.pairing.held.?.path);
-            try resumed.impl.fsevents.wait(&resumed.batch, 0);
+            try resumed.impl.fsevents.wait(io, &resumed.batch, 0);
         }
-        const events = try resumed.poll(0);
+        const events = try resumed.poll(io, ms(0));
         var saw_modified = false;
         var saw_rename = false;
         for (events) |event| {
@@ -3325,7 +3335,7 @@ test "checkpoints keep settling and rename changes beside handed deliveries" {
             }
         }
         try std.testing.expect(saw_modified);
-        if (holding.debounce_ms != 0) {
+        if (holding.debounce.nanoseconds != 0) {
             try std.testing.expect(saw_rename);
         } else {
             // A raw half, unlike a completed rename, is restored to the
@@ -3337,11 +3347,12 @@ test "checkpoints keep settling and rename changes beside handed deliveries" {
 }
 
 test "a crash before checkpoint persistence replays the uncommitted delivery" {
+    const io = std.testing.io;
     if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
-    var f = try Fixture.initOptions(.{ .backend = .fsevents, .latency_ms = 0 });
+    var f = try Fixture.initOptions(.{ .backend = .fsevents, .latency = .fromMilliseconds(0) });
     defer f.deinit();
-    _ = try f.watcher.add(f.root, .{});
+    _ = try f.watcher.add(f.io, f.root, .{});
     try f.settle();
     var before = (try f.watcher.checkpoint(gpa)).?;
     defer before.deinit();
@@ -3354,13 +3365,13 @@ test "a crash before checkpoint persistence replays the uncommitted delivery" {
     // The saved checkpoint is the commit boundary. Choosing the previous
     // one models a crash after delivery but before processing/persistence.
     for ([_]lookout.Checkpoint{ before, after }, [_]bool{ true, false }) |saved, should_replay| {
-        var resumed = try Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
-        defer resumed.deinit();
-        _ = try resumed.add(f.root, .{});
+        var resumed = try Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = saved, .latency = .fromMilliseconds(0) });
+        defer resumed.deinit(io);
+        _ = try resumed.add(io, f.root, .{});
         var saw = false;
         var waited: u32 = 0;
         while (waited < timeout_ms) : (waited += 200) {
-            for (try resumed.poll(200)) |event| {
+            for (try resumed.poll(io, ms(200))) |event| {
                 if (std.mem.eql(u8, event.path, wanted)) saw = true;
             }
             if (saw and should_replay) break;
@@ -3371,11 +3382,12 @@ test "a crash before checkpoint persistence replays the uncommitted delivery" {
 }
 
 test "checkpoint allocation failures leave the delivery and snapshot owned" {
+    const io = std.testing.io;
     if (comptime !lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var f = try Fixture.init(.fsevents);
     defer f.deinit();
-    const id = try f.watcher.add(f.root, .{});
+    const id = try f.watcher.add(f.io, f.root, .{});
     try f.watcher.batch.deferChange(gpa, id, f.root, .renamed, f.root, .directory);
     var failures: usize = 0;
     while (true) : (failures += 1) {
@@ -3399,9 +3411,9 @@ test "checkpoint allocation failures leave the delivery and snapshot owned" {
     failures = 0;
     while (true) : (failures += 1) {
         var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = failures });
-        if (Watcher.init(failing.allocator(), std.testing.io, .{ .backend = .fsevents, .checkpoint = saved })) |value| {
+        if (Watcher.init(failing.allocator(), .{ .backend = .fsevents, .checkpoint = saved })) |value| {
             var watcher = value;
-            watcher.deinit();
+            watcher.deinit(io);
             break;
         } else |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
@@ -3424,7 +3436,7 @@ test "checkpoint restoration rolls back a failed add and preserves prior slices"
     try f.tmp.dir.createDirPath(io, "later");
     const later = try f.path("later");
     defer gpa.free(later);
-    const id = try f.watcher.add(later, .{});
+    const id = try f.watcher.add(f.io, later, .{});
     const moved_to = try f.path("later/new");
     defer gpa.free(moved_to);
     const moved_from = try f.path("later/old");
@@ -3437,23 +3449,23 @@ test "checkpoint restoration rolls back a failed add and preserves prior slices"
         var failing = std.testing.FailingAllocator.init(gpa, .{});
         var succeeded = false;
         {
-            var resumed = try Watcher.init(failing.allocator(), io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
-            defer resumed.deinit();
-            const prior_id = try resumed.add(f.root, .{});
+            var resumed = try Watcher.init(failing.allocator(), .{ .backend = .fsevents, .checkpoint = saved, .latency = .fromMilliseconds(0) });
+            defer resumed.deinit(io);
+            const prior_id = try resumed.add(io, f.root, .{});
             try resumed.batch.deferChange(failing.allocator(), prior_id, f.root, .overflow, null, .directory);
-            const prior = try resumed.poll(0);
+            const prior = try resumed.poll(io, ms(0));
             try std.testing.expectEqual(@as(usize, 1), prior.len);
             const borrowed = prior.ptr;
             const borrowed_path = prior[0].path.ptr;
             failing.fail_index = failing.alloc_index + failures;
-            const answer = resumed.add(later, .{});
+            const answer = resumed.add(io, later, .{});
             failing.fail_index = std.math.maxInt(usize);
             try std.testing.expectEqual(borrowed, resumed.batch.events.items.ptr);
             try std.testing.expectEqual(borrowed_path, prior[0].path.ptr);
             try std.testing.expectEqualStrings(f.root, prior[0].path);
             if (answer) |_| {
                 var saw = false;
-                for (try resumed.poll(0)) |event| {
+                for (try resumed.poll(io, ms(0))) |event| {
                     if (std.mem.eql(u8, event.path, moved_to) and event.kind == .renamed) {
                         try std.testing.expectEqualStrings(moved_from, event.from.?);
                         saw = true;
@@ -3465,7 +3477,7 @@ test "checkpoint restoration rolls back a failed add and preserves prior slices"
                 try std.testing.expectEqual(error.OutOfMemory, err);
                 try std.testing.expectEqual(@as(usize, 1), resumed.stats().watches);
                 try std.testing.expectEqual(@as(usize, 0), resumed.batch.deferred.items.len);
-                _ = try resumed.add(later, .{});
+                _ = try resumed.add(io, later, .{});
                 try std.testing.expectEqual(@as(usize, 1), resumed.batch.deferred.items.len);
             }
         }
@@ -3476,6 +3488,7 @@ test "checkpoint restoration rolls back a failed add and preserves prior slices"
 }
 
 test "the watches are listed in the order they were added, after a removal too" {
+    const io = std.testing.io;
     const gpa = std.testing.allocator;
     var f = try Fixture.init(.poll);
     defer f.deinit();
@@ -3485,10 +3498,10 @@ test "the watches are listed in the order they were added, after a removal too" 
         const name = [_]u8{'a' + @as(u8, @intCast(i))};
         try f.tmp.dir.createDirPath(std.testing.io, &name);
         slot.* = try f.path(&name);
-        id.* = try f.watcher.add(slot.*, .{});
+        id.* = try f.watcher.add(f.io, slot.*, .{});
     }
     defer for (paths) |p| gpa.free(p);
-    f.watcher.remove(ids[0]);
+    f.watcher.remove(io, ids[0]);
     const held = try f.watcher.watches(gpa);
     defer gpa.free(held);
     try std.testing.expectEqual(@as(usize, 3), held.len);

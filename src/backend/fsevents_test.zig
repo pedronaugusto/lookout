@@ -2,6 +2,7 @@
 const std = @import("std");
 const Io = std.Io;
 const lookout = @import("../lookout.zig");
+const ms = @import("../testing/clock.zig").ms;
 const checkpoint_format = @import("../Checkpoint/format.zig");
 const Deadline = @import("../Deadline.zig");
 const path_cmp = @import("../path.zig");
@@ -33,9 +34,9 @@ test "FSEvents access failures preserve known paths and report an incomplete ans
     const kept = try std.Io.Dir.path.join(gpa, &.{ root, "kept" });
     defer gpa.free(kept);
 
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{});
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
     inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
@@ -46,18 +47,17 @@ test "FSEvents access failures preserve known paths and report an incomplete ans
                 return testing.io.vtable.dirStatFile(userdata, dir, path, options);
             }
         }.stat;
-        f.io.vtable = &vtable;
+        const failing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
         try testing.expect(!records.pairs(
             .{ .id = id, .path = kept, .flags = flag.item_renamed, .event = 0 },
             .{ .id = id, .path = root, .flags = flag.item_renamed, .event = 0 },
-            Asking{ .f = f },
+            Asking{ .f = f, .io = failing },
         ));
-        try access.reportPlain(f, &watcher.batch, .{ .id = id, .path = kept, .flags = flag.item_removed, .event = 0 }, stream);
+        try access.reportPlain(f, failing, &watcher.batch, .{ .id = id, .path = kept, .flags = flag.item_removed, .event = 0 }, stream);
         try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
         try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
         try testing.expectEqualStrings(root, watcher.batch.events.items[0].path);
         try testing.expect(f.known.contains(.{ .id = id, .path = kept }));
-        f.io = io;
         watcher.batch.reset(gpa);
     }
 }
@@ -90,13 +90,13 @@ test "the flags that say the system lost track are one overflow, and the watch g
 
     // The caller's half of the contract: seeded where the watch is taken.
     var baseline: Baseline = try .seed(gpa, io, root, .{ .recursive = true });
-    defer baseline.deinit(gpa);
+    defer baseline.deinit();
 
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const tree = try watcher.add(root, .{ .recursive = true });
-    const single = try watcher.add(file, .{});
-    while ((try watcher.poll(200)).len != 0) {}
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+    defer watcher.deinit(io);
+    const tree = try watcher.add(io, root, .{ .recursive = true });
+    const single = try watcher.add(io, file, .{});
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
     const f = &watcher.impl.fsevents;
 
     // What the lost events would have carried.
@@ -109,11 +109,11 @@ test "the flags that say the system lost track are one overflow, and the watch g
         .{ .path = sub, .flags = flag.must_scan_sub_dirs | flag.user_dropped },
         .{ .path = root, .flags = flag.must_scan_sub_dirs },
     });
-    try expectOneOverflow(&watcher, tree, root, .directory);
+    try expectOneOverflow(io, &watcher, tree, root, .directory);
 
     // The tree read again, which is what the event asks for.
     var recovered = false;
-    for (try baseline.diff(gpa)) |change| {
+    for (try baseline.diff(io)) |change| {
         if (change.kind == .created and std.mem.endsWith(u8, change.path, "missed.txt")) recovered = true;
     }
     try testing.expect(recovered);
@@ -124,13 +124,13 @@ test "the flags that say the system lost track are one overflow, and the watch g
     try synthesize(gpa, f.streams.get(single).?, &.{
         .{ .path = root, .flags = flag.must_scan_sub_dirs | flag.kernel_dropped },
     });
-    try expectOneOverflow(&watcher, single, file, .file);
+    try expectOneOverflow(io, &watcher, single, file, .file);
 
     // A loss coalesced above the root took the root's events with it.
     try synthesize(gpa, f.streams.get(tree).?, &.{
         .{ .path = std.Io.Dir.path.dirname(root).?, .flags = flag.user_dropped },
     });
-    try expectOneOverflow(&watcher, tree, root, .directory);
+    try expectOneOverflow(io, &watcher, tree, root, .directory);
 
     // And both watches are still watching.
     try tmp.dir.writeFile(io, .{ .sub_path = "after.txt", .data = "x" });
@@ -141,7 +141,7 @@ test "the flags that say the system lost track are one overflow, and the watch g
     var saw_file = false;
     var waited: u32 = 0;
     while (waited < 10_000 and !(saw_after and saw_file)) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.id == tree and event.kind == .created and std.mem.eql(u8, event.path, after)) saw_after = true;
             if (event.id == single and event.kind == .modified and std.mem.eql(u8, event.path, file)) saw_file = true;
         }
@@ -169,22 +169,22 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     const sub = try std.Io.Dir.path.join(gpa, &.{ root, "sub" });
     defer gpa.free(sub);
 
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .max_dir_entries = 3 });
-    defer watcher.deinit();
-    const tree = try watcher.add(root, .{ .recursive = true });
-    while ((try watcher.poll(200)).len != 0) {}
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .max_dir_entries = 3 });
+    defer watcher.deinit(io);
+    const tree = try watcher.add(io, root, .{ .recursive = true });
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
     const f = &watcher.impl.fsevents;
 
     for ([_][]const u8{ "sub/a", "sub/b", "sub/c" }) |name| try tmp.dir.createDirPath(io, name);
     var created: usize = 0;
     var waited: u32 = 0;
     while (waited < 10_000 and created < 3) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created) created += 1;
         }
     }
     try testing.expectEqual(@as(usize, 3), created);
-    while ((try watcher.poll(200)).len != 0) {}
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
     try testing.expectEqual(@as(usize, 3), f.budget.count(sub).?);
     const root_count = f.budget.count(root).?;
 
@@ -194,7 +194,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     try synthesize(gpa, f.streams.get(tree).?, &.{
         .{ .path = sub, .flags = flag.must_scan_sub_dirs | flag.user_dropped },
     });
-    try expectOneOverflow(&watcher, tree, root, .directory);
+    try expectOneOverflow(io, &watcher, tree, root, .directory);
     try testing.expectEqual(@as(usize, 3), f.budget.count(sub).?);
     try testing.expectEqual(root_count + 5, f.budget.count(root).?);
     try f.budget.misread(root, false, 0);
@@ -204,14 +204,14 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     var overflowed = false;
     waited = 0;
     while (waited < 10_000 and !overflowed) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == tree) overflowed = true;
         }
     }
     try testing.expect(overflowed);
     // `sub` is past the budget now, so each record left of `sub/d` says
     // so again; they are read out before the next loss is made.
-    while ((try watcher.poll(200)).len != 0) {}
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
 
     // A delivery that did not fit: every watch lost it, so every count
     // is read again.
@@ -222,7 +222,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
         f.sink.overflowed = true;
         access.signal(f.sink);
     }
-    try expectOneOverflow(&watcher, tree, root, .directory);
+    try expectOneOverflow(io, &watcher, tree, root, .directory);
     try testing.expectEqual(@as(usize, 4), f.budget.count(sub).?);
 }
 
@@ -277,9 +277,9 @@ test "a rename whose halves arrive in two deliveries is one rename" {
         gpa.free(a);
     };
 
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{});
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
 
@@ -289,17 +289,17 @@ test "a rename whose halves arrive in two deliveries is one rename" {
 
     const renamed = flag.item_renamed;
     try synthesize(gpa, stream, &.{.{ .path = before[0], .flags = renamed }});
-    try access.drain(f, &watcher.batch);
+    try access.drain(f, io, &watcher.batch);
     for (1..pairs) |i| {
         try synthesize(gpa, stream, &.{
             .{ .path = after[i - 1], .flags = renamed },
             .{ .path = before[i], .flags = renamed },
         });
-        try access.drain(f, &watcher.batch);
+        try access.drain(f, io, &watcher.batch);
     }
     try synthesize(gpa, stream, &.{.{ .path = after[pairs - 1], .flags = renamed }});
-    try access.drain(f, &watcher.batch);
-    try access.resolveHeld(f, &watcher.batch);
+    try access.drain(f, io, &watcher.batch);
+    try access.resolveHeld(f, io, &watcher.batch);
 
     // Every pair one `renamed`, from its old name to its new one, and
     // nothing else.
@@ -338,9 +338,9 @@ test "the entry budget is one directory's, with every creation delivered" {
         try tmp.dir.createDirPath(io, std.mem.print(&name, "d{d}", .{d}) catch unreachable);
     }
 
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .max_dir_entries = 512 });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{ .recursive = true });
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .max_dir_entries = 512 });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{ .recursive = true });
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
 
@@ -357,7 +357,7 @@ test "the entry budget is one directory's, with every creation delivered" {
             defer gpa.free(full);
             try synthesize(gpa, stream, &.{.{ .path = full, .flags = flag.item_created | flag.item_modified }});
         }
-        try access.drain(f, &watcher.batch);
+        try access.drain(f, io, &watcher.batch);
     }
 
     var created: usize = 0;
@@ -394,9 +394,9 @@ test "a poll that expires before the replay begins is not the end of it" {
     var token: []u8 = undefined;
     defer gpa.free(token);
     {
-        var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
-        defer watcher.deinit();
-        const first = try watcher.add(root, .{ .recursive = true });
+        var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+        defer watcher.deinit(io);
+        const first = try watcher.add(io, root, .{ .recursive = true });
         // Taken before the deletion, and holding nothing unread.
         stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(first).?);
         var checkpoint = (try watcher.checkpoint(gpa)).?;
@@ -412,30 +412,30 @@ test "a poll that expires before the replay begins is not the end of it" {
     const frozen = clock.frozen(io, &vtable);
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, frozen, .{
+    var watcher: lookout.Watcher = try .init(gpa, .{
         .backend = .fsevents,
         .checkpoint = checkpoint,
-        .latency_ms = 0,
+        .latency = .fromMilliseconds(0),
     });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{ .recursive = true });
+    defer watcher.deinit(frozen);
+    const id = try watcher.add(frozen, root, .{ .recursive = true });
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
 
     stopDeliveries(f, stream);
 
     // The boundary: a wait before the stream has said anything.
-    const initial = try watcher.poll(0);
+    const initial = try watcher.poll(frozen, ms(0));
     try testing.expectEqual(@as(usize, 1), initial.len);
     try testing.expectEqual(lookout.Kind.removed, initial[0].kind);
     try testing.expectEqualStrings(deleted, initial[0].path);
     // The sentinel, alone in its delivery: nothing happened to a path.
     try synthesize(gpa, stream, &.{.{ .path = root, .flags = flag.history_done }});
-    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(frozen, ms(0))).len);
     try testing.expect(stream.replayed != null);
     // The tail, live after the sentinel.
     try synthesize(gpa, stream, &.{.{ .path = deleted, .flags = flag.item_created | flag.item_removed }});
-    const events = try watcher.poll(0);
+    const events = try watcher.poll(frozen, ms(0));
     try testing.expectEqual(@as(usize, 0), events.len);
 }
 
@@ -457,9 +457,9 @@ test "a deletion numbered after the checkpoint marker is reported exactly once h
     var token: []u8 = undefined;
     defer gpa.free(token);
     {
-        var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
-        defer watcher.deinit();
-        const first = try watcher.add(root, .{ .recursive = true });
+        var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+        defer watcher.deinit(io);
+        const first = try watcher.add(io, root, .{ .recursive = true });
         // Taken before the deletion, and holding nothing unread.
         stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(first).?);
         var checkpoint = (try watcher.checkpoint(gpa)).?;
@@ -472,65 +472,66 @@ test "a deletion numbered after the checkpoint marker is reported exactly once h
     defer gpa.free(deleted);
 
     const Late = struct {
-        var ms: i96 = 1_000;
+        var now_ms: i96 = 1_000;
         fn now(_: ?*anyopaque, _: Io.Clock) Io.Timestamp {
-            return .{ .nanoseconds = ms * std.time.ns_per_ms };
+            return .{ .nanoseconds = now_ms * std.time.ns_per_ms };
         }
     };
-    Late.ms = 1_000;
+    Late.now_ms = 1_000;
     var vtable = io.vtable.*;
     vtable.now = Late.now;
     const frozen: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, frozen, .{
+    var watcher: lookout.Watcher = try .init(gpa, .{
         .backend = .fsevents,
         .checkpoint = checkpoint,
-        .latency_ms = 0,
+        .latency = .fromMilliseconds(0),
     });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{ .recursive = true });
+    defer watcher.deinit(frozen);
+    const id = try watcher.add(frozen, root, .{ .recursive = true });
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
 
     stopDeliveries(f, stream);
 
     // The boundary: a wait before the stream has said anything.
-    const initial = try watcher.poll(0);
+    const initial = try watcher.poll(frozen, ms(0));
     try testing.expectEqual(@as(usize, 1), initial.len);
     try testing.expectEqual(lookout.Kind.removed, initial[0].kind);
     try testing.expectEqualStrings(deleted, initial[0].path);
     // The sentinel, alone in its delivery: nothing happened to a path.
     try synthesize(gpa, stream, &.{.{ .path = root, .flags = flag.history_done }});
-    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(frozen, ms(0))).len);
     try testing.expect(stream.replayed != null);
     // Numbered after the checkpoint and sentinel, delivered well beyond the
     // former one-second replay window. No id-space barrier can bound it.
     const marker_at = stream.cursor + 1_000;
-    Late.ms += 15_000;
+    Late.now_ms += 15_000;
     // The tail, live after the sentinel.
     try synthesize(gpa, stream, &.{.{ .path = deleted, .flags = flag.item_created | flag.item_removed, .event = marker_at + 1 }});
-    const events = try watcher.poll(0);
+    const events = try watcher.poll(frozen, ms(0));
     try testing.expectEqual(@as(usize, 0), events.len);
     try synthesize(gpa, stream, &.{.{ .path = deleted, .flags = flag.item_removed, .event = marker_at + 2 }});
-    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(frozen, ms(0))).len);
 }
 
 test "checkpoints preserve independent cursors and unread stream records" {
+    const io = std.testing.io;
     if (!lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
+    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    defer watcher.deinit(io);
     try tmp.dir.createDirPath(std.testing.io, "first");
     try tmp.dir.createDirPath(std.testing.io, "second");
     const first = try tmp.dir.realPathFileAlloc(std.testing.io, "first", gpa);
     defer gpa.free(first);
     const second = try tmp.dir.realPathFileAlloc(std.testing.io, "second", gpa);
     defer gpa.free(second);
-    const a = try watcher.add(first, .{});
-    const b = try watcher.add(second, .{});
+    const a = try watcher.add(io, first, .{});
+    const b = try watcher.add(io, second, .{});
     const backend = &watcher.impl.fsevents;
     backend.streams.get(a).?.cursor = 101;
     backend.streams.get(b).?.cursor = 202;
@@ -542,25 +543,26 @@ test "checkpoints preserve independent cursors and unread stream records" {
     defer checkpoint.deinit();
     try std.testing.expectEqual(@as(u64, 101), checkpoint.state.value.watches[0].cursor);
     try std.testing.expectEqual(@as(u64, 202), checkpoint.state.value.watches[1].cursor);
-    var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = checkpoint });
-    defer resumed.deinit();
+    var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint });
+    defer resumed.deinit(io);
     // Registration order does not determine which cursor belongs to it.
-    const rb = try resumed.add(second, .{});
-    const ra = try resumed.add(first, .{});
+    const rb = try resumed.add(io, second, .{});
+    const ra = try resumed.add(io, first, .{});
     try std.testing.expectEqual(@as(u64, 101), resumed.impl.fsevents.streams.get(ra).?.cursor);
     try std.testing.expectEqual(@as(u64, 202), resumed.impl.fsevents.streams.get(rb).?.cursor);
 }
 
 test "a checkpoint refuses a different volume or FSEvents log before restoring changes" {
+    const io = std.testing.io;
     const testing = std.testing;
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
+    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{});
     try testing.expectEqual(watcher.impl.fsevents.streams.get(id).?.volume.device, c.FSEventStreamGetDeviceBeingWatched(watcher.impl.fsevents.streams.get(id).?.ref));
     try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
     var saved = (try watcher.checkpoint(gpa)).?;
@@ -570,9 +572,9 @@ test "a checkpoint refuses a different volume or FSEvents log before restoring c
         defer changed.deinit();
         const watches = @constCast(changed.value.watches);
         if (volume) watches[0].identity.volume[0] ^= 1 else watches[0].identity.log[0] ^= 1;
-        var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = .{ .state = changed } });
-        defer resumed.deinit();
-        try testing.expectError(error.InvalidCheckpoint, resumed.add(root, .{}));
+        var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = .{ .state = changed } });
+        defer resumed.deinit(io);
+        try testing.expectError(error.InvalidCheckpoint, resumed.add(io, root, .{}));
         try testing.expectEqual(@as(usize, 0), resumed.impl.fsevents.streams.count());
         try testing.expectEqual(@as(usize, 0), resumed.batch.held.count());
         try testing.expect(!resumed.impl.fsevents.resume_used[0]);
@@ -580,15 +582,16 @@ test "a checkpoint refuses a different volume or FSEvents log before restoring c
 }
 
 test "a checkpoint is unavailable without an unchanged persistent log" {
+    const io = std.testing.io;
     const testing = std.testing;
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
+    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{});
     const stream = watcher.impl.fsevents.streams.get(id).?;
     const original = stream.volume.identity;
     defer stream.volume.identity = original;
@@ -601,31 +604,32 @@ test "a checkpoint is unavailable without an unchanged persistent log" {
 }
 
 test "a recursive mount keeps live coverage and refuses a single-device checkpoint" {
+    const io = std.testing.io;
     const testing = std.testing;
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .latency_ms = 0 });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{ .recursive = true });
+    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .latency = .fromMilliseconds(0) });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{ .recursive = true });
     const backend = &watcher.impl.fsevents;
     try synthesize(gpa, backend.streams.get(id).?, &.{.{ .path = root, .flags = 0x40 }});
-    try access.drain(backend, &watcher.batch);
+    try access.drain(backend, io, &watcher.batch);
     try testing.expectEqual(@as(i32, 0), c.FSEventStreamGetDeviceBeingWatched(backend.streams.get(id).?.ref));
     try testing.expectEqual(@as(?Checkpoint, null), try watcher.checkpoint(gpa));
     try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
     try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
     try testing.expectEqualStrings(root, watcher.batch.events.items[0].path);
-    _ = try watcher.poll(0);
+    _ = try watcher.poll(io, ms(0));
     const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "live" });
     defer gpa.free(wanted);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "live", .data = "x" });
     var saw = false;
     var waited: u32 = 0;
     while (waited < 10_000 and !saw) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (std.mem.eql(u8, event.path, wanted) and event.kind == .created) saw = true;
         }
     }
@@ -633,6 +637,7 @@ test "a recursive mount keeps live coverage and refuses a single-device checkpoi
 }
 
 test "an absent pending root refuses a checkpoint from another volume" {
+    const io = std.testing.io;
     const testing = std.testing;
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{ .iterate = true });
@@ -641,21 +646,22 @@ test "an absent pending root refuses a checkpoint from another volume" {
     defer gpa.free(root);
     const absent = try std.Io.Dir.path.join(gpa, &.{ root, "absent" });
     defer gpa.free(absent);
-    var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    _ = try watcher.add(absent, .{ .pending = true });
+    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    defer watcher.deinit(io);
+    _ = try watcher.add(io, absent, .{ .pending = true });
     var saved = (try watcher.checkpoint(gpa)).?;
     defer saved.deinit();
     @constCast(saved.state.value.watches)[0].identity.volume[0] ^= 1;
-    var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = saved });
-    defer resumed.deinit();
-    try testing.expectError(error.InvalidCheckpoint, resumed.add(absent, .{ .pending = true }));
+    var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = saved });
+    defer resumed.deinit(io);
+    try testing.expectError(error.InvalidCheckpoint, resumed.add(io, absent, .{ .pending = true }));
     try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
     try testing.expectEqual(@as(usize, 0), resumed.table.count());
     try testing.expectEqual(@as(usize, 0), resumed.impl.fsevents.streams.count());
 }
 
 test "a pending promotion rescans when its saved log identity is refused" {
+    const io = std.testing.io;
     const testing = std.testing;
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{ .iterate = true });
@@ -664,27 +670,27 @@ test "a pending promotion rescans when its saved log identity is refused" {
     defer gpa.free(root);
     const absent = try std.Io.Dir.path.join(gpa, &.{ root, "absent" });
     defer gpa.free(absent);
-    var first = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
-    defer first.deinit();
-    _ = try first.add(absent, .{ .pending = true });
+    var first = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    defer first.deinit(io);
+    _ = try first.add(io, absent, .{ .pending = true });
     var saved = (try first.checkpoint(gpa)).?;
     defer saved.deinit();
-    var resumed = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents, .checkpoint = saved });
-    defer resumed.deinit();
-    const id = try resumed.add(absent, .{ .pending = true });
+    var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = saved });
+    defer resumed.deinit(io);
+    const id = try resumed.add(io, absent, .{ .pending = true });
     const backend = &resumed.impl.fsevents;
     // An anchor that had not consumed its snapshot encounters a different
     // log when the requested path appears. Force that identity transition.
     backend.resume_used[0] = false;
     @constCast(backend.restarting.?.state.value.watches)[0].identity.log[0] ^= 1;
     try tmp.dir.createDirPath(testing.io, "absent");
-    const events = try resumed.poll(0);
+    const events = try resumed.poll(io, ms(0));
     try testing.expectEqual(@as(usize, 1), events.len);
     try testing.expectEqual(lookout.Kind.overflow, events[0].kind);
     try testing.expectEqual(id, events[0].id);
     try testing.expectEqualStrings(absent, events[0].path);
     try testing.expect(backend.resume_used[0]);
-    _ = try resumed.poll(0);
+    _ = try resumed.poll(io, ms(0));
     try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
     try testing.expect(backend.streams.contains(id));
 }
@@ -704,16 +710,16 @@ test "fresh FSEvents replay reports no pre-add state or sibling paths" {
     defer gpa.free(old);
     const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "new.txt" });
     defer gpa.free(wanted);
-    var watcher = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents, .latency_ms = 0 });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
+    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .latency = .fromMilliseconds(0) });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{});
     try tmp.dir.writeFile(io, .{ .sub_path = "watched/new.txt", .data = "after" });
     try tmp.dir.writeFile(io, .{ .sub_path = "sibling.txt", .data = "after" });
     const stream = watcher.impl.fsevents.streams.get(id).?;
     var found = false;
-    const deadline = Deadline.start(io, 5_000);
-    while (!deadline.expired()) {
-        for (try watcher.poll(100)) |event| {
+    const deadline = Deadline.fromMs(io, 5_000);
+    while (!deadline.expired(io)) {
+        for (try watcher.poll(io, ms(100))) |event| {
             try testing.expectEqual(id, event.id);
             try testing.expect(path_cmp.within(root, event.path));
             try testing.expect(!path_cmp.eql(old, event.path));
@@ -727,11 +733,11 @@ test "fresh FSEvents replay reports no pre-add state or sibling paths" {
     try testing.expect(!stream.resumed);
 }
 
-fn expectOneOverflow(watcher: *lookout.Watcher, id: WatchId, root: []const u8, target: Target) !void {
+fn expectOneOverflow(io: Io, watcher: *lookout.Watcher, id: WatchId, root: []const u8, target: Target) !void {
     var overflows: usize = 0;
     var waited: u32 = 0;
     while (waited < 10_000 and overflows == 0) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind != .overflow) continue;
             try std.testing.expectEqual(id, event.id);
             try std.testing.expectEqualStrings(root, event.path);
@@ -741,7 +747,7 @@ fn expectOneOverflow(watcher: *lookout.Watcher, id: WatchId, root: []const u8, t
     }
     try std.testing.expectEqual(@as(usize, 1), overflows);
     while (true) {
-        const events = try watcher.poll(200);
+        const events = try watcher.poll(io, ms(200));
         if (events.len == 0) return;
         for (events) |event| try std.testing.expect(event.kind != .overflow);
     }
@@ -751,7 +757,6 @@ fn expectInitAllocationFailure(fail_index: usize) !void {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
     try std.testing.expectError(error.OutOfMemory, lookout.Watcher.init(
         failing.allocator(),
-        std.testing.io,
         .{ .backend = .fsevents },
     ));
 }
@@ -766,6 +771,7 @@ test "FSEvents initialization preserves buffer allocator failure" {
 
 fn expectHeldRenameFailure(comptime transfer: enum { resolve, replace, rejoin }) !void {
     const testing = std.testing;
+    const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "old", .data = "x" });
@@ -773,22 +779,22 @@ fn expectHeldRenameFailure(comptime transfer: enum { resolve, replace, rejoin })
     defer testing.allocator.free(root);
     const old = try std.Io.Dir.path.join(testing.allocator, &.{ root, "old" });
     defer testing.allocator.free(old);
-    var watcher = try lookout.Watcher.init(testing.allocator, testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
+    var watcher = try lookout.Watcher.init(testing.allocator, .{ .backend = .fsevents });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{});
     const backend = &watcher.impl.fsevents;
     try tmp.dir.deleteFile(testing.io, "old");
     const record: Record = .{ .id = id, .path = old, .flags = flag.item_renamed, .event = 1 };
-    try access.hold(backend, &watcher.batch, record);
+    try access.hold(backend, io, &watcher.batch, record);
     const original = backend.pairing.held.?.path.ptr;
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = if (transfer == .replace) 1 else 0 });
     backend.gpa = failing.allocator();
     defer backend.gpa = testing.allocator;
     var used: [0]bool = .{};
     const result = switch (transfer) {
-        .resolve => access.resolveHeld(backend, &watcher.batch),
-        .replace => access.hold(backend, &watcher.batch, record),
-        .rejoin => access.rejoin(backend, &watcher.batch, &.{}, &used),
+        .resolve => access.resolveHeld(backend, io, &watcher.batch),
+        .replace => access.hold(backend, io, &watcher.batch, record),
+        .rejoin => access.rejoin(backend, io, &watcher.batch, &.{}, &used),
     };
     try testing.expectError(error.OutOfMemory, result);
     try testing.expect(backend.pairing.held != null);
@@ -798,7 +804,7 @@ fn expectHeldRenameFailure(comptime transfer: enum { resolve, replace, rejoin })
     // allocation must still be held and the incoming copy released.
     try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     backend.gpa = testing.allocator;
-    try access.resolveHeld(backend, &watcher.batch);
+    try access.resolveHeld(backend, io, &watcher.batch);
     try testing.expect(backend.pairing.held == null);
     try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
     try testing.expectEqual(lookout.Kind.removed, watcher.batch.events.items[0].kind);
@@ -826,17 +832,17 @@ test "a recursive pending checkpoint resumes on its nonrecursive ancestor" {
     defer gpa.free(root);
     const absent = try std.Io.Dir.path.join(gpa, &.{ root, "pending" });
     defer gpa.free(absent);
-    var first = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents });
-    defer first.deinit();
-    _ = try first.add(absent, .{ .pending = true, .recursive = true });
+    var first = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    defer first.deinit(io);
+    _ = try first.add(io, absent, .{ .pending = true, .recursive = true });
     var checkpoint = (try first.checkpoint(gpa)).?;
     defer checkpoint.deinit();
-    var resumed = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint });
-    defer resumed.deinit();
-    const id = try resumed.add(absent, .{ .pending = true, .recursive = true });
+    var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint });
+    defer resumed.deinit(io);
+    const id = try resumed.add(io, absent, .{ .pending = true, .recursive = true });
     try testing.expectEqual(@as(usize, 1), resumed.pending.items.len);
     try tmp.dir.createDirPath(io, "pending/sub");
-    _ = try resumed.poll(0);
+    _ = try resumed.poll(io, ms(0));
     try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
     try testing.expectEqual(id, resumed.table.keys()[0]);
     try testing.expect(resumed.table.values()[0].recursive);
@@ -855,9 +861,9 @@ test "checkpoint capture allocation does not grow with the remembered tree" {
             var name: [32]u8 = undefined;
             try tmp.dir.writeFile(io, .{ .sub_path = try std.mem.print(&name, "file-{d}", .{i}), .data = "" });
         };
-        var watcher = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents });
-        defer watcher.deinit();
-        _ = try watcher.add(root, .{ .recursive = true });
+        var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+        defer watcher.deinit(io);
+        _ = try watcher.add(io, root, .{ .recursive = true });
         var counting: std.testing.FailingAllocator = .init(gpa, .{});
         var saved = (try watcher.checkpoint(counting.allocator())).?;
         defer saved.deinit();
@@ -876,11 +882,11 @@ test "a shared checkpoint token keeps its revision after the watch is removed" {
     defer gpa.free(root);
     var saved: lookout.Checkpoint = undefined;
     {
-        var watcher = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents });
-        defer watcher.deinit();
-        const id = try watcher.add(root, .{});
+        var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+        defer watcher.deinit(io);
+        const id = try watcher.add(io, root, .{});
         saved = (try watcher.checkpoint(gpa)).?;
-        watcher.remove(id);
+        watcher.remove(io, id);
         try tmp.dir.deleteFile(io, "kept");
     }
     defer saved.deinit();
@@ -889,21 +895,21 @@ test "a shared checkpoint token keeps its revision after the watch is removed" {
     var parsed = try lookout.Checkpoint.parse(gpa, token);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 2), parsed.state.value.watches[0].baseline.flat.len);
-    var resumed = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents, .checkpoint = saved, .latency_ms = 0 });
-    defer resumed.deinit();
-    const restored = try resumed.add(root, .{});
+    var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = saved, .latency = .fromMilliseconds(0) });
+    defer resumed.deinit(io);
+    const restored = try resumed.add(io, root, .{});
     stopDeliveries(&resumed.impl.fsevents, resumed.impl.fsevents.streams.get(restored).?);
-    const events = try resumed.poll(0);
+    const events = try resumed.poll(io, ms(0));
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqual(lookout.Kind.removed, events[0].kind);
 }
 
 /// A checkpoint of one recursive watch on `root`, holding `changes` and
 /// nothing unread, as a token.
-fn tokenWith(gpa: std.mem.Allocator, root: []const u8, filter: lookout.Filter, changes: []const checkpoint_format.Change) ![]u8 {
-    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{ .recursive = true, .filter = filter });
+fn tokenWith(gpa: std.mem.Allocator, io: Io, root: []const u8, filter: lookout.Filter, changes: []const checkpoint_format.Change) ![]u8 {
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{ .recursive = true, .filter = filter });
     stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(id).?);
     for (changes) |change| try watcher.batch.deferChange(gpa, id, change.path, change.kind, change.from, change.target);
     var checkpoint = (try watcher.checkpoint(gpa)).?;
@@ -939,7 +945,7 @@ test "a resumed checkpoint restores only the changes its watch reports" {
     // What a token edited by hand, or written under a broader filter,
     // could carry: a path outside the watch, a path the filter excludes,
     // and renames with one side excluded.
-    const token = try tokenWith(gpa, root, filter, &.{
+    const token = try tokenWith(gpa, io, root, filter, &.{
         .{ .path = kept, .kind = .modified, .target = .file },
         .{ .path = excluded, .kind = .modified, .target = .file },
         .{ .path = elsewhere, .kind = .modified, .target = .file },
@@ -950,11 +956,11 @@ test "a resumed checkpoint restores only the changes its watch reports" {
 
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency_ms = 0 });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{ .recursive = true, .filter = filter });
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency = .fromMilliseconds(0) });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{ .recursive = true, .filter = filter });
     stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(id).?);
-    const events = try watcher.poll(0);
+    const events = try watcher.poll(io, ms(0));
     try testing.expectEqual(@as(usize, 3), events.len);
     for (events) |event| {
         try testing.expect(event.from == null);
@@ -976,21 +982,21 @@ test "a checkpoint resumes only under the patterns it was taken with" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const token = try tokenWith(gpa, root, .{ .ignore = &.{"*.tmp"} }, &.{});
+    const token = try tokenWith(gpa, io, root, .{ .ignore = &.{"*.tmp"} }, &.{});
     defer gpa.free(token);
 
     for ([_]lookout.Filter{ .{}, .{ .ignore = &.{"*.log"} }, .{ .ignore = &.{"*.tmp"}, .only = &.{"*.zig"} } }) |other| {
         var checkpoint = try lookout.Checkpoint.parse(gpa, token);
         defer checkpoint.deinit();
-        var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint });
-        defer watcher.deinit();
-        try testing.expectError(error.InvalidCheckpoint, watcher.add(root, .{ .recursive = true, .filter = other }));
+        var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint });
+        defer watcher.deinit(io);
+        try testing.expectError(error.InvalidCheckpoint, watcher.add(io, root, .{ .recursive = true, .filter = other }));
     }
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint });
-    defer watcher.deinit();
-    _ = try watcher.add(root, .{ .recursive = true, .filter = .{ .ignore = &.{"*.tmp"} } });
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint });
+    defer watcher.deinit(io);
+    _ = try watcher.add(io, root, .{ .recursive = true, .filter = .{ .ignore = &.{"*.tmp"} } });
 }
 
 test "a token whose changes name a path through a dot component is refused" {
@@ -1009,7 +1015,7 @@ test "a token whose changes name a path through a dot component is refused" {
         .{ .path = climbing, .kind = .modified, .target = .file },
         .{ .path = inside, .kind = .renamed, .from = climbing, .target = .file },
     }) |change| {
-        const token = try tokenWith(gpa, root, .{}, &.{change});
+        const token = try tokenWith(gpa, io, root, .{}, &.{change});
         defer gpa.free(token);
         try testing.expectError(error.InvalidCheckpoint, lookout.Checkpoint.parse(gpa, token));
     }
@@ -1024,7 +1030,7 @@ test "a path made while nobody watched is created when the log names it" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
     try tmp.dir.writeFile(io, .{ .sub_path = "old.txt", .data = "one" });
-    const token = try tokenWith(gpa, root, .{}, &.{});
+    const token = try tokenWith(gpa, io, root, .{}, &.{});
     defer gpa.free(token);
     try tmp.dir.writeFile(io, .{ .sub_path = "missed.txt", .data = "while away" });
     try tmp.dir.writeFile(io, .{ .sub_path = "old.txt", .data = "two" });
@@ -1035,12 +1041,12 @@ test "a path made while nobody watched is created when the log names it" {
 
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency_ms = 0 });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{ .recursive = true });
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency = .fromMilliseconds(0) });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{ .recursive = true });
     const stream = watcher.impl.fsevents.streams.get(id).?;
     stopDeliveries(&watcher.impl.fsevents, stream);
-    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(io, ms(0))).len);
 
     // The log read back: the walk that seeded the stream found the new
     // file, and the baseline in the token says it was not there.
@@ -1049,7 +1055,7 @@ test "a path made while nobody watched is created when the log names it" {
         .{ .path = missed, .flags = both },
         .{ .path = old, .flags = flag.item_modified },
     });
-    const replayed = try watcher.poll(0);
+    const replayed = try watcher.poll(io, ms(0));
     try testing.expectEqual(@as(usize, 2), replayed.len);
     for (replayed) |event| {
         const expected: lookout.Kind = if (path_cmp.eql(event.path, missed)) .created else .modified;
@@ -1057,9 +1063,9 @@ test "a path made while nobody watched is created when the log names it" {
     }
     // Live, after the log: the file is one lookout knows.
     try synthesize(gpa, stream, &.{.{ .path = root, .flags = flag.history_done }});
-    try testing.expectEqual(@as(usize, 0), (try watcher.poll(0)).len);
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(io, ms(0))).len);
     try synthesize(gpa, stream, &.{.{ .path = missed, .flags = both }});
-    const live = try watcher.poll(0);
+    const live = try watcher.poll(io, ms(0));
     try testing.expectEqual(@as(usize, 1), live.len);
     try testing.expectEqual(lookout.Kind.modified, live[0].kind);
 }

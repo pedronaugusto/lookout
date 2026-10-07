@@ -2,6 +2,7 @@
 const std = @import("std");
 const windows = std.os.windows;
 const lookout = @import("../lookout.zig");
+const ms = @import("../testing/clock.zig").ms;
 const Target = lookout.Target;
 
 const access = @import("Windows.zig").test_access;
@@ -29,10 +30,10 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .windows });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    while ((try watcher.poll(200)).len != 0) {}
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .windows });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{});
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
     const w = &watcher.impl.windows;
     const watch = w.watches.get(id).?;
 
@@ -57,7 +58,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     var overflows: usize = 0;
     var waited: u32 = 0;
     while (waited < 10_000 and overflows == 0) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind != .overflow) continue;
             try testing.expectEqual(id, event.id);
             try testing.expectEqualStrings(root, event.path);
@@ -75,7 +76,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     var found = false;
     waited = 0;
     while (waited < 10_000 and !found) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
     }
@@ -99,10 +100,10 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .windows, .max_dir_entries = 3 });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
-    while ((try watcher.poll(200)).len != 0) {}
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .windows, .max_dir_entries = 3 });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{});
+    while ((try watcher.poll(io, ms(200))).len != 0) {}
     const w = &watcher.impl.windows;
     const watch = w.watches.get(id).?;
 
@@ -112,7 +113,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     var created: usize = 0;
     var waited: u32 = 0;
     while (waited < 10_000 and created < 3) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created) created += 1;
         }
     }
@@ -135,7 +136,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     var overflowed = false;
     waited = 0;
     while (waited < 10_000 and !overflowed) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow) overflowed = true;
         }
     }
@@ -148,7 +149,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     overflowed = false;
     waited = 0;
     while (waited < 10_000 and !overflowed) : (waited += 200) {
-        for (try watcher.poll(200)) |event| {
+        for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
     }
@@ -156,6 +157,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
 }
 
 test "allocation failure during delivery releases a removed Windows completion" {
+    const io = std.testing.io;
     if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var tmp = testing.tmpDir(.{ .iterate = true });
@@ -163,15 +165,15 @@ test "allocation failure during delivery releases a removed Windows completion" 
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(root);
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
-    var watcher = try lookout.Watcher.init(failing.allocator(), testing.io, .{ .backend = .windows });
-    defer watcher.deinit();
-    const id = try watcher.add(root, .{});
+    var watcher = try lookout.Watcher.init(failing.allocator(), .{ .backend = .windows });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, root, .{});
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "change", .data = "x" });
     failing.fail_index = failing.alloc_index;
-    try testing.expectError(error.OutOfMemory, watcher.poll(10_000));
+    try testing.expectError(error.OutOfMemory, watcher.poll(io, ms(10_000)));
     failing.fail_index = std.math.maxInt(usize);
     // The packet has been taken and no replacement read is outstanding.
     // Removing it has no later completion to wait for before freeing it.
-    watcher.remove(id);
+    watcher.remove(io, id);
     try testing.expect(watcher.impl.windows.retiring == null);
 }
