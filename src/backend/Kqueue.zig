@@ -43,7 +43,7 @@ tree: Tree,
 /// Only registrations the kernel has accepted. Files own their descriptor
 /// here; directory descriptors remain owned by Tree. A node missing from
 /// this table still needs registration, even after its creation was scanned.
-registrations: std.AutoArrayHashMapUnmanaged(Tree.NodeId, Registration),
+registrations: std.array_hash_map.Auto(Tree.NodeId, Registration),
 retry_registration: bool = false,
 
 /// EV_CLEAR has already removed these flags from the kernel queue.
@@ -74,7 +74,7 @@ const wake_ident: usize = 1;
 /// `O_EVTONLY` on Darwin opens a descriptor that does not count as a
 /// reference for unmounting, which is what a watcher wants. The other BSDs
 /// have no equivalent.
-const file_open_flags: posix.O = switch (builtin.os.tag) {
+const file_open_flags: posix.O = switch (builtin.target.os.tag) {
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => .{
         .ACCMODE = .RDONLY,
         .EVTONLY = true,
@@ -252,7 +252,7 @@ fn drain(k: *Kqueue, batch: *Batch) contract.PollError!bool {
 
 /// Turns one kernel event into lookout events.
 fn handle(k: *Kqueue, event: posix.Kevent, batch: *Batch) contract.PollError!void {
-    const node_id: Tree.NodeId = @enumFromInt(event.udata);
+    const node_id: Tree.NodeId = @fromBackingInt(@intCast(event.udata));
     const node = k.tree.nodes.get(node_id) orelse return;
     const flags = event.fflags;
 
@@ -350,7 +350,7 @@ fn register(k: *Kqueue, ids: []const Tree.NodeId, batch: *Batch) contract.AddErr
             .flags = std.c.EV.ADD | std.c.EV.CLEAR,
             .fflags = interest,
             .data = 0,
-            .udata = @intFromEnum(id),
+            .udata = @backingInt(id),
         };
         const rc = std.c.kevent(k.kq, (&change)[0..1], 1, undefined, 0, null);
         if (rc < 0) {
@@ -456,8 +456,8 @@ test "allocation failure during delivery retains unread kqueue flags" {
         defer k.deinit();
         var batch = Batch.init(testing.io, .{});
         defer batch.deinit(failing.allocator());
-        try k.add(@enumFromInt(0), first, .{}, &batch);
-        try k.add(@enumFromInt(1), last, .{}, &batch);
+        try k.add(@fromBackingInt(@intCast(0)), first, .{}, &batch);
+        try k.add(@fromBackingInt(@intCast(1)), last, .{}, &batch);
         try k.wait(&batch, 0);
         batch.reset(failing.allocator());
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "first", .data = "changed" });
@@ -489,12 +489,12 @@ test "a failed kqueue registration is retried before waiting again" {
     defer k.deinit();
     var batch = Batch.init(testing.io, .{});
     defer batch.deinit(failing.allocator());
-    try k.add(@enumFromInt(0), root, .{ .recursive = true }, &batch);
+    try k.add(@fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch);
     const parent = k.tree.nodes.keys()[0];
     try tmp.dir.createDirPath(testing.io, "child");
     for (0..40) |i| {
         var name: [64]u8 = undefined;
-        try tmp.dir.writeFile(testing.io, .{ .sub_path = try std.fmt.bufPrint(&name, "child/file{d}", .{i}), .data = "one" });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = try std.mem.print(&name, "child/file{d}", .{i}), .data = "one" });
     }
     var added: std.ArrayList(Tree.NodeId) = .empty;
     defer added.deinit(failing.allocator());
@@ -509,7 +509,7 @@ test "a failed kqueue registration is retried before waiting again" {
     batch.reset(failing.allocator());
     for (0..40) |i| {
         var name: [64]u8 = undefined;
-        try tmp.dir.writeFile(testing.io, .{ .sub_path = try std.fmt.bufPrint(&name, "child/file{d}", .{i}), .data = "changed size" });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = try std.mem.print(&name, "child/file{d}", .{i}), .data = "changed size" });
     }
     try k.wait(&batch, 0);
     var modified: usize = 0;

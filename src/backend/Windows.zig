@@ -53,7 +53,7 @@ gpa: Allocator,
 io: Io,
 /// The completion port every watch's reads land on.
 port: windows.HANDLE,
-watches: std.AutoArrayHashMapUnmanaged(WatchId, *Watch),
+watches: std.array_hash_map.Auto(WatchId, *Watch),
 /// Watches whose handle is closed but whose buffer the kernel may not
 /// have finished with. An intrusive list so retiring a watch cannot fail
 /// for want of an allocation while overlapped I/O still references it.
@@ -164,7 +164,7 @@ const Watch = struct {
     /// The directory the reads are posted on: `root`, or its parent
     /// for a watch on a file.
     fn dir(watch: *const Watch) []const u8 {
-        return if (watch.only == null) watch.root else std.fs.path.dirname(watch.root) orelse watch.root;
+        return if (watch.only == null) watch.root else std.Io.Dir.path.dirname(watch.root) orelse watch.root;
     }
 
     /// The directories whose entries this watch reports, and so whose
@@ -265,8 +265,8 @@ pub fn add(
 
     // `ReadDirectoryChangesW` reads directories, so a watch on a file is
     // a read on its parent filtered down to the one name.
-    const dir_path = if (is_dir) abs_path else std.fs.path.dirname(abs_path) orelse abs_path;
-    const only: ?[]u8 = if (is_dir) null else try w.gpa.dupe(u8, std.fs.path.basename(abs_path));
+    const dir_path = if (is_dir) abs_path else std.Io.Dir.path.dirname(abs_path) orelse abs_path;
+    const only: ?[]u8 = if (is_dir) null else try w.gpa.dupe(u8, std.Io.Dir.path.basename(abs_path));
     errdefer if (only) |name| w.gpa.free(name);
 
     const watch = try w.gpa.create(Watch);
@@ -301,7 +301,7 @@ pub fn add(
     };
     if (is_dir) try w.budget.seed(dir_path);
 
-    if (c.CreateIoCompletionPort(handle, w.port, @intFromEnum(id), 0) == null)
+    if (c.CreateIoCompletionPort(handle, w.port, @backingInt(id), 0) == null)
         return error.WatchLimitReached;
     try w.watches.put(w.gpa, id, watch);
     errdefer _ = w.watches.swapRemove(id);
@@ -530,7 +530,7 @@ fn take(w: *Windows, batch: *Batch, timeout: u32) contract.PollError!Taken {
         return .quiet;
     }
     if (key == wake_key) return .woken;
-    const id: WatchId = @enumFromInt(@as(u32, @truncate(key)));
+    const id: WatchId = @fromBackingInt(@intCast(@as(u32, @truncate(key))));
     const watch = w.live(id, overlapped) orelse {
         w.retire(overlapped);
         return .taken;
@@ -751,10 +751,10 @@ fn report(w: *Windows, watch: *Watch, transferred: u32, batch: *Batch) contract.
         defer w.gpa.free(relative);
         // The kernel spells a nested path with backslashes already, so
         // joining is only about the root.
-        const path = try std.fs.path.join(w.gpa, &.{ dir, relative });
+        const path = try std.Io.Dir.path.join(w.gpa, &.{ dir, relative });
         defer w.gpa.free(path);
         trace.log("windows record watch={d} action={s} path={s}", .{
-            @intFromEnum(watch.id), actionName(record.action), path,
+            @backingInt(watch.id), actionName(record.action), path,
         });
 
         // The kernel walked the tree whatever the filter says; what the
@@ -818,7 +818,7 @@ fn reportRemoval(w: *Windows, watch: *Watch, rest: records.Iterator, dir: []cons
 fn sameName(w: *Windows, record: records.Record, dir: []const u8, path: []const u8) Allocator.Error!bool {
     const relative = try record.wtf8Alloc(w.gpa);
     defer w.gpa.free(relative);
-    const there = try std.fs.path.join(w.gpa, &.{ dir, relative });
+    const there = try std.Io.Dir.path.join(w.gpa, &.{ dir, relative });
     defer w.gpa.free(there);
     return path_cmp.eql(there, path);
 }
@@ -949,11 +949,11 @@ fn reportOne(w: *Windows, watch: *Watch, action: u32, subject: []const u8, batch
 /// directory past the budget every watch the change reached is told.
 fn recount(w: *Windows, watch: *Watch, subject: []const u8, move: Budget.Move, batch: *Batch) contract.PollError!void {
     const change: Change = .{
-        .dir = std.fs.path.dirname(subject) orelse return,
+        .dir = std.Io.Dir.path.dirname(subject) orelse return,
         .subject = subject,
     };
     if (Budget.counter(*Watch, Change, Change.reaches, w.watches.values(), change) != watch) return;
-    if (!try w.budget.note(change.dir, std.fs.path.basename(subject), move)) return;
+    if (!try w.budget.note(change.dir, std.Io.Dir.path.basename(subject), move)) return;
     for (w.watches.values()) |other| {
         if (!change.reaches(other)) continue;
         try batch.push(w.gpa, other.id, other.root, .overflow, .directory);
@@ -977,7 +977,7 @@ const Change = struct {
 /// The Win32 surface lookout uses, declared against `std.os.windows`'
 /// types.
 ///
-/// `std.os.windows` in Zig 0.16.0 declares neither
+/// `std.os.windows` in Zig 0.17.0 declares neither
 /// `ReadDirectoryChangesW` nor the completion-port calls, so they are
 /// written out here. Hand-written rather than `@cImport`ed, for the same
 /// reason as everywhere else in this package: no C compilation step.
@@ -1101,9 +1101,9 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(root);
-    const old_path = try std.fs.path.join(testing.allocator, &.{ root, "old" });
+    const old_path = try std.Io.Dir.path.join(testing.allocator, &.{ root, "old" });
     defer testing.allocator.free(old_path);
-    const new_path = try std.fs.path.join(testing.allocator, &.{ root, "new" });
+    const new_path = try std.Io.Dir.path.join(testing.allocator, &.{ root, "new" });
     defer testing.allocator.free(new_path);
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     // Only the state used by these platform-independent transfers is live.
@@ -1115,7 +1115,7 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     backend.budget = .init(testing.allocator, testing.io, 8);
     defer backend.budget.deinit();
     var watch: Watch = undefined;
-    watch.id = @enumFromInt(0);
+    watch.id = @fromBackingInt(@intCast(0));
     watch.root = root;
     watch.only = null;
     watch.filter = .none;

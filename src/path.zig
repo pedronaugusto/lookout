@@ -38,7 +38,7 @@ const builtin = @import("builtin");
 /// one. That is the same choice the platform's own tools make, and the
 /// alternative, dropping every event on the volumes people actually
 /// have, is worse.
-pub const folds_case: bool = switch (builtin.os.tag) {
+pub const folds_case: bool = switch (builtin.target.os.tag) {
     .driverkit,
     .ios,
     .maccatalyst,
@@ -53,10 +53,10 @@ pub const folds_case: bool = switch (builtin.os.tag) {
 
 /// The separators a path can be spelled with. Windows takes either;
 /// everywhere else a backslash is an ordinary character in a name.
-pub const separators: []const u8 = if (builtin.os.tag == .windows) "\\/" else "/";
+pub const separators: []const u8 = if (builtin.target.os.tag == .windows) "\\/" else "/";
 
 pub fn isSep(c: u8) bool {
-    return std.mem.indexOfScalar(u8, separators, c) != null;
+    return std.mem.findScalar(u8, separators, c) != null;
 }
 
 /// Whether two paths name the same thing.
@@ -170,7 +170,7 @@ pub const ArrayMapContext = struct {
 
 /// A set of paths, compared as the file system compares them.
 pub fn Set(comptime V: type) type {
-    return std.ArrayHashMapUnmanaged([]const u8, V, ArrayMapContext, true);
+    return std.array_hash_map.Custom([]const u8, V, ArrayMapContext, true);
 }
 
 /// Yields the code points a path is compared by: one per character, with
@@ -347,13 +347,21 @@ test "the folded hash agrees with the folded comparison" {
 
 test "the folded hash is one hash of every folded code point, however long the path" {
     if (!folds_case) return error.SkipZigTest;
-    const long = "/Users/Someone/Documents/" ++ "Caf\u{e9}/" ** 30 ++ "\xff/Ending.TXT";
+    const long = "/Users/Someone/Documents/" ++ comptime repeated("Caf\u{e9}/", 30) ++ "\xff/Ending.TXT";
     for ([_][]const u8{ "", "a", "/A/\u{c9}", long, long[0..63], long[0..64], long[0..65], long[0..130] }) |p| {
         var reference: std.hash.Wyhash = .init(0);
         var folder: Folder = .init(p);
         while (folder.next()) |cp| reference.update(&std.mem.toBytes(cp));
         try std.testing.expectEqual(reference.final(), hash(p));
     }
+}
+
+/// `text` written `count` times over, at compile time.
+fn repeated(comptime text: []const u8, comptime count: usize) *const [text.len * count]u8 {
+    var out: [text.len * count]u8 = undefined;
+    for (0..count) |i| @memcpy(out[i * text.len ..][0..text.len], text);
+    const final = out;
+    return &final;
 }
 
 test "what is below a root is found by comparison, not by offset" {
@@ -375,7 +383,7 @@ test "what is below a root is found by comparison, not by offset" {
 test "a filesystem root contains its descendants" {
     try testing.expectEqualStrings("tmp/a", relative("/", "/tmp/a").?);
     try testing.expect(within("/", "/tmp/a"));
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         try testing.expectEqualStrings("tmp\\a", relative("C:\\", "C:\\tmp\\a").?);
     }
 }
@@ -389,7 +397,7 @@ test "a name that is not valid UTF-8 is still itself" {
 }
 
 test "a separator is a separator whichever one the caller wrote" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     try testing.expect(eql("C:\\w\\a", "C:/w/a"));
     try testing.expectEqualStrings("a", relative("C:\\w", "C:/w/a").?);
 }

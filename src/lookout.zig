@@ -261,7 +261,7 @@ pub const Watcher = struct {
     /// them. Kept here rather than in the backends because all five had
     /// the same table and the same linear scan over it, and because a
     /// watch's root is what `Kind.overflow` is reported against.
-    table: std.AutoArrayHashMapUnmanaged(WatchId, Held),
+    table: std.array_hash_map.Auto(WatchId, Held),
     /// Watches whose path does not exist yet. See `AddOptions.pending`.
     pending: std.ArrayList(*Pending),
     /// The links each watch with `AddOptions.follow_symlinks` follows.
@@ -492,7 +492,7 @@ pub const Watcher = struct {
     fn register(w: *Watcher, abs: []const u8, options: AddOptions) AddError!WatchId {
         if (w.claimed(abs)) return error.PathAlreadyWatched;
         const stat = try Io.Dir.cwd().statFile(w.io, abs, .{ .follow_symlinks = false });
-        const id: WatchId = @enumFromInt(w.next_id);
+        const id: WatchId = @fromBackingInt(@intCast(w.next_id));
         const owned = try w.gpa.dupe(u8, abs);
         errdefer w.gpa.free(owned);
         const mirror = try w.gpa.dupe(u8, abs);
@@ -516,7 +516,7 @@ pub const Watcher = struct {
         }
         // Issued once: held from here, and below every id still to come.
         assert(w.table.contains(id));
-        assert(@intFromEnum(id) < w.next_id);
+        assert(@backingInt(id) < w.next_id);
         return id;
     }
 
@@ -595,7 +595,7 @@ pub const Watcher = struct {
         var filter = try options.filter.dupe(w.gpa);
         errdefer filter.deinit(w.gpa);
 
-        const id: WatchId = @enumFromInt(w.next_id);
+        const id: WatchId = @fromBackingInt(@intCast(w.next_id));
         const owned = try w.gpa.dupe(u8, target);
         errdefer w.gpa.free(owned);
         try w.table.put(w.gpa, id, .{
@@ -630,10 +630,10 @@ pub const Watcher = struct {
     /// does not exist has no symbolic links to resolve.
     fn absentPath(w: *Watcher, requested: []const u8) AddError![]u8 {
         const lexical = lexical: {
-            if (std.fs.path.isAbsolute(requested)) break :lexical try std.fs.path.resolve(w.gpa, &.{requested});
+            if (std.Io.Dir.path.isAbsolute(requested)) break :lexical try std.Io.Dir.path.resolveAlloc(w.gpa, &.{requested});
             const here = try Io.Dir.cwd().realPathFileAlloc(w.io, ".", w.gpa);
             defer w.gpa.free(here);
-            break :lexical try std.fs.path.resolve(w.gpa, &.{ here, requested });
+            break :lexical try std.Io.Dir.path.resolveAlloc(w.gpa, &.{ here, requested });
         };
         errdefer w.gpa.free(lexical);
 
@@ -642,11 +642,11 @@ pub const Watcher = struct {
         defer w.gpa.free(real);
 
         var rest = lexical[present.len..];
-        while (rest.len != 0 and std.fs.path.isSep(rest[0])) rest = rest[1..];
+        while (rest.len != 0 and std.Io.Dir.path.isSep(rest[0])) rest = rest[1..];
         const joined = if (rest.len == 0)
             try w.gpa.dupe(u8, real)
         else
-            try std.fs.path.join(w.gpa, &.{ real, rest });
+            try std.Io.Dir.path.join(w.gpa, &.{ real, rest });
         w.gpa.free(lexical);
         return joined;
     }
@@ -656,7 +656,7 @@ pub const Watcher = struct {
         var candidate = requested;
         while (true) {
             if (w.exists(candidate)) return candidate;
-            candidate = std.fs.path.dirname(candidate) orelse return null;
+            candidate = std.Io.Dir.path.dirname(candidate) orelse return null;
         }
     }
 
@@ -750,8 +750,8 @@ pub const Watcher = struct {
     fn nextStep(target: []const u8, at: usize) usize {
         assert(at <= target.len);
         var i = at;
-        while (i < target.len and std.fs.path.isSep(target[i])) i += 1;
-        while (i < target.len and !std.fs.path.isSep(target[i])) i += 1;
+        while (i < target.len and std.Io.Dir.path.isSep(target[i])) i += 1;
+        while (i < target.len and !std.Io.Dir.path.isSep(target[i])) i += 1;
         return i;
     }
 
@@ -1319,7 +1319,7 @@ pub const Watcher = struct {
 
         fn issue(context: *anyopaque) WatchId {
             const w = of(context);
-            const id: WatchId = @enumFromInt(w.next_id);
+            const id: WatchId = @fromBackingInt(@intCast(w.next_id));
             w.next_id += 1;
             return id;
         }
@@ -1464,11 +1464,11 @@ test {
     // tests of its own. They are found when the backend is analysed,
     // which the suite causes and a filtered run does not, so they are
     // named here for `zig test --test-filter` to find them.
-    inline for (@typeInfo(Watcher.Impl).@"union".fields) |field| _ = field.type;
+    inline for (@typeInfo(Watcher.Impl).@"union".field_types) |Built| _ = Built;
 }
 
 test "the Apple default preserves paired renames" {
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .driverkit,
         .ios,
         .maccatalyst,
@@ -1492,7 +1492,7 @@ test "a failed pending promotion keeps each registered path owned" {
         defer tmp.cleanup();
         const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
         defer testing.allocator.free(root);
-        const target = try std.fs.path.join(testing.allocator, &.{ root, "later" });
+        const target = try std.Io.Dir.path.join(testing.allocator, &.{ root, "later" });
         defer testing.allocator.free(target);
         // Keep freed storage mapped so a duplicate release can be counted
         // without dereferencing freed memory or crashing the test runner.
@@ -1534,7 +1534,7 @@ test "a pending promotion refused its checkpoint releases its path once under al
         defer tmp.cleanup();
         const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
         defer testing.allocator.free(root);
-        const target = try std.fs.path.join(testing.allocator, &.{ root, "later" });
+        const target = try std.Io.Dir.path.join(testing.allocator, &.{ root, "later" });
         defer testing.allocator.free(target);
         var first = try Watcher.init(testing.allocator, testing.io, .{ .backend = .fsevents });
         defer first.deinit();
@@ -1573,7 +1573,7 @@ test "a pending promotion refused its checkpoint releases its path once under al
 }
 
 test "a pending watch whose way down cannot be watched says so" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const testing = std.testing;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -1582,9 +1582,9 @@ test "a pending watch whose way down cannot be watched says so" {
     try tmp.dir.createDirPath(io, "locked");
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const locked = try std.fs.path.join(gpa, &.{ root, "locked" });
+    const locked = try std.Io.Dir.path.join(gpa, &.{ root, "locked" });
     defer gpa.free(locked);
-    const target = try std.fs.path.join(gpa, &.{ locked, "later" });
+    const target = try std.Io.Dir.path.join(gpa, &.{ locked, "later" });
     defer gpa.free(target);
     try tmp.dir.setFilePermissions(io, "locked", .fromMode(0o300), .{});
     defer tmp.dir.setFilePermissions(io, "locked", .fromMode(0o755), .{}) catch {};
@@ -1651,7 +1651,7 @@ test "auto chooses polling per network or FUSE watch and explicit backends retai
         defer w.deinit();
         var ids: [3]WatchId = undefined;
         for ([_][]const u8{ "local", "remote", "fuse" }, 0..) |name, index| {
-            const absolute = try std.fs.path.join(gpa, &.{ root, name });
+            const absolute = try std.Io.Dir.path.join(gpa, &.{ root, name });
             defer gpa.free(absolute);
             ids[index] = try w.add(absolute, .{ .recursive = true });
             const caps = w.capabilities(ids[index]).?;
@@ -1694,7 +1694,7 @@ test "pending watches recheck filesystem facts when they move to their root" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const absent = try std.fs.path.join(gpa, &.{ root, "appeared" });
+    const absent = try std.Io.Dir.path.join(gpa, &.{ root, "appeared" });
     defer gpa.free(absent);
     var w = try Watcher.init(gpa, io, .{ .latency_ms = 0 });
     defer w.deinit();

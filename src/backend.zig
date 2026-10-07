@@ -22,7 +22,7 @@ pub const Poll = @import("backend/Poll.zig");
 /// Every backend this target was built with, one of which a watcher
 /// chose. The tag names match `Backend`'s, which is what lets
 /// `Watcher.init`, `supported` and `Watcher.backend` be one line each.
-pub const Impl = switch (builtin.os.tag) {
+pub const Impl = switch (builtin.target.os.tag) {
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => union(enum) {
         fsevents: FsEvents,
         kqueue: Kqueue,
@@ -49,10 +49,9 @@ pub const Impl = switch (builtin.os.tag) {
 // two lists are held to each other here: a backend is built exactly where
 // `supported` says it is.
 comptime {
-    for (@typeInfo(Backend).@"enum".fields) |field| {
-        const backend: Backend = @enumFromInt(field.value);
+    for (std.enums.values(Backend)) |backend| {
         if (backend == .auto) continue;
-        std.debug.assert(@hasField(Impl, field.name) == types.supported(backend));
+        std.debug.assert(@hasField(Impl, @tagName(backend)) == types.supported(backend));
     }
 }
 

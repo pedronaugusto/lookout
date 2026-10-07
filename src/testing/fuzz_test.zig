@@ -105,7 +105,7 @@ fn fuzzInotify(_: void, smith: *testing.Smith) !void {
         try testing.expect(name.len != 0);
         // The kernel pads the name with NULs and the length counts the
         // padding; what comes back is the name without it.
-        try testing.expect(std.mem.indexOfScalar(u8, name, 0) == null);
+        try testing.expect(std.mem.findScalar(u8, name, 0) == null);
     }
 }
 
@@ -163,7 +163,7 @@ fn writeDelivery(smith: *testing.Smith, out: []u8) usize {
     const path_len = smith.slice(&path);
     return fsevents_records.encode(
         out,
-        @enumFromInt(smith.value(u2)),
+        @fromBackingInt(@intCast(smith.value(u2))),
         flagsOf(smith),
         smith.value(u16),
         path[0..path_len],
@@ -556,20 +556,20 @@ fn referenceExcludes(gpa: std.mem.Allocator, root: []const u8, pattern: []const 
     if (pattern.len == 0) return false;
     const rest = path_cmp.relative(root, subject) orelse return false;
     const base = subject.len - rest.len;
-    const bare = std.mem.indexOfAny(u8, pattern, path_cmp.separators) == null;
+    const bare = std.mem.findAny(u8, pattern, path_cmp.separators) == null;
     var end: usize = 0;
     while (end < rest.len) {
         end = std.mem.findAnyPos(u8, rest, end + 1, path_cmp.separators) orelse rest.len;
-        const named = if (std.fs.path.isAbsolute(pattern)) subject[0 .. base + end] else rest[0..end];
+        const named = if (std.Io.Dir.path.isAbsolute(pattern)) subject[0 .. base + end] else rest[0..end];
         if (try referenceMatches(gpa, pattern, named)) return true;
-        if (bare and try referenceMatches(gpa, pattern, std.fs.path.basename(named))) return true;
+        if (bare and try referenceMatches(gpa, pattern, std.Io.Dir.path.basename(named))) return true;
     }
     return false;
 }
 
 test "an ignore list agrees with the reference over every short pattern and path" {
     const gpa = testing.allocator;
-    const root = if (builtin.os.tag == .windows) "C:\\w" else "/w";
+    const root = if (builtin.target.os.tag == .windows) "C:\\w" else "/w";
     const pieces = [_][]const u8{ "a", "*", "**", "?", "/" };
     // `/` is the digit 0, which a number never ends in, and no path ends
     // in a separator.
@@ -596,18 +596,18 @@ test "an ignore list agrees with the reference over every short pattern and path
         var name: usize = 0;
         while (name < 3 * 3 * 3 * 3) : (name += 1) {
             @memcpy(subject_buf[0..root.len], root);
-            subject_buf[root.len] = std.fs.path.sep;
+            subject_buf[root.len] = std.Io.Dir.path.sep;
             var end = root.len + 1;
             var digits = name;
             var valid = true;
             while (digits != 0) : (digits /= 3) {
                 const c = letters[digits % 3];
                 const previous = subject_buf[end - 1];
-                if (c == '/' and (previous == std.fs.path.sep or end == root.len + 1)) valid = false;
-                subject_buf[end] = if (c == '/') std.fs.path.sep else c;
+                if (c == '/' and (previous == std.Io.Dir.path.sep or end == root.len + 1)) valid = false;
+                subject_buf[end] = if (c == '/') std.Io.Dir.path.sep else c;
                 end += 1;
             }
-            if (!valid or end == root.len + 1 or subject_buf[end - 1] == std.fs.path.sep) continue;
+            if (!valid or end == root.len + 1 or subject_buf[end - 1] == std.Io.Dir.path.sep) continue;
             const subject = subject_buf[0..end];
             const ignore: Filter = .{ .ignore = &.{pattern} };
             testing.expectEqual(try referenceExcludes(gpa, root, pattern, subject), ignore.excludes(root, subject)) catch |err| {
@@ -636,13 +636,13 @@ fn generatePattern(smith: *testing.Smith, buf: []u8) []u8 {
 /// A path below `/w`, one to four components of the same letters.
 fn generateBelow(smith: *testing.Smith, buf: []u8) []u8 {
     @disableInstrumentation();
-    const root = if (builtin.os.tag == .windows) "C:\\w" else "/w";
+    const root = if (builtin.target.os.tag == .windows) "C:\\w" else "/w";
     const names = [_][]const u8{ "a", "b", "ab", "ba", "A", "\u{e9}", "e\u{301}", "a.b", "aa" };
     @memcpy(buf[0..root.len], root);
     var end: usize = root.len;
     const depth = smith.valueRangeAtMost(u8, 1, 4);
     for (0..depth) |_| {
-        buf[end] = std.fs.path.sep;
+        buf[end] = std.Io.Dir.path.sep;
         end += 1;
         const parts = smith.valueRangeAtMost(u8, 1, 2);
         for (0..parts) |_| {
@@ -657,7 +657,7 @@ fn generateBelow(smith: *testing.Smith, buf: []u8) []u8 {
 /// The pattern with `/` as the platform spells a separator.
 fn native(buf: []u8, pattern: []const u8) []const u8 {
     @memcpy(buf[0..pattern.len], pattern);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, buf[0..pattern.len], '/', '\\');
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, buf[0..pattern.len], '/', '\\');
     return buf[0..pattern.len];
 }
 
@@ -668,7 +668,7 @@ test "a filter keeps what its patterns name and walks to it" {
 fn fuzzFilter(_: void, smith: *testing.Smith) !void {
     @disableInstrumentation();
     const gpa = testing.allocator;
-    const root = if (builtin.os.tag == .windows) "C:\\w" else "/w";
+    const root = if (builtin.target.os.tag == .windows) "C:\\w" else "/w";
     var pattern_buf: [48]u8 = undefined;
     var native_buf: [48]u8 = undefined;
     const pattern = native(&native_buf, generatePattern(smith, &pattern_buf));
@@ -681,9 +681,9 @@ fn fuzzFilter(_: void, smith: *testing.Smith) !void {
     // name alone.
     const ignore: Filter = .{ .ignore = &.{pattern} };
     const only: Filter = .{ .only = &.{pattern} };
-    const bare = std.mem.indexOfAny(u8, pattern, path_cmp.separators) == null;
+    const bare = std.mem.findAny(u8, pattern, path_cmp.separators) == null;
     const named = pattern.len != 0 and (try referenceMatches(gpa, pattern, rel) or
-        (bare and try referenceMatches(gpa, pattern, std.fs.path.basename(rel))));
+        (bare and try referenceMatches(gpa, pattern, std.Io.Dir.path.basename(rel))));
 
     // An ignore list excludes exactly what the reference names, on the
     // path or on any directory above it.
@@ -793,9 +793,9 @@ fn generateModel(a: std.mem.Allocator, smith: *testing.Smith) !Model {
         };
         const parent = dirs[smith.index(dirs.len)];
         const name = model_names[smith.index(model_names.len)];
-        const key = if (parent.len == 0) try a.dupe(u8, name) else try std.fs.path.join(a, &.{ parent, name });
+        const key = if (parent.len == 0) try a.dupe(u8, name) else try std.Io.Dir.path.join(a, &.{ parent, name });
         if (model.contains(key)) continue;
-        const contents: ?[]const u8 = if (smith.boolWeighted(1, 2)) null else try a.dupe(u8, "x" ** 3);
+        const contents: ?[]const u8 = if (smith.boolWeighted(1, 2)) null else try a.dupe(u8, "xxx");
         try model.put(a, key, contents);
     }
     return model;
@@ -837,7 +837,7 @@ fn changeModel(a: std.mem.Allocator, smith: *testing.Smith, dir: std.Io.Dir, mod
             },
             else => if (model.values()[at] == null) {
                 const name = model_names[smith.index(model_names.len)];
-                const child = try std.fs.path.join(a, &.{ key, name });
+                const child = try std.Io.Dir.path.join(a, &.{ key, name });
                 if (!model.contains(child)) {
                     try model.put(a, child, "new");
                     try dir.writeFile(io, .{ .sub_path = child, .data = "new" });
@@ -855,7 +855,7 @@ fn expectDiff(a: std.mem.Allocator, before: *const Model, after: *const Model, r
     var expected: std.array_hash_map.String(Expected) = .empty;
     const visible = struct {
         fn f(key: []const u8, deep: bool) bool {
-            return deep or std.mem.indexOfAny(u8, key, path_cmp.separators) == null;
+            return deep or std.mem.findAny(u8, key, path_cmp.separators) == null;
         }
     }.f;
     for (after.keys(), after.values()) |key, value| {
@@ -914,7 +914,7 @@ test "a checkpoint token reads back as itself or not at all" {
 fn fuzzCheckpoint(_: void, smith: *testing.Smith) !void {
     @disableInstrumentation();
     const gpa = testing.allocator;
-    const absolute = if (builtin.os.tag == .windows) "\"C:\\\\w\"" else "\"/w\"";
+    const absolute = if (builtin.target.os.tag == .windows) "\"C:\\\\w\"" else "\"/w\"";
     const pieces = [_][]const u8{
         "{\"version\":2,\"backend\":\"fsevents\",\"watches\":[",                                                             "]}",
         "{\"root\":" ++ absolute ++ ",\"cursor\":1,\"recursive\":true,\"baseline\":[],\"identity\":{\"volume\":[",           "],\"log\":[",
@@ -982,7 +982,7 @@ fn fuzzBaselineStorage(_: void, smith: *testing.Smith) !void {
     // Generate a structured checksummed input as well: mutation alone cannot
     // find a cryptographic checksum or the whole JSON schema.
     if (smith.boolWeighted(1, 1)) {
-        const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
+        const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
         const meta: Snapshot.Meta = .{ .size = smith.value(u64), .mtime_ns = smith.value(i96), .ctime_ns = smith.value(i96), .file_kind = .file };
         const wrapped = try baseline_format.encode(gpa, .{ .platform = baseline_format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{.{ .path = root, .truncated = false, .check_contents = false, .entries = &.{.{ .name = bytes, .meta = meta }} }} });
         defer gpa.free(wrapped);

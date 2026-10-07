@@ -37,7 +37,7 @@ pub fn enabled() bool {
     }
     const asked = if (builtin.link_libc)
         std.c.getenv("LOOKOUT_TRACE") != null
-    else if (builtin.os.tag == .windows)
+    else if (builtin.target.os.tag == .windows)
         windowsHas("LOOKOUT_TRACE")
     else
         false;

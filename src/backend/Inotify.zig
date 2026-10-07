@@ -55,9 +55,9 @@ ifd: posix.fd_t,
 wake_r: posix.fd_t,
 wake_w: posix.fd_t,
 /// The caller's watches.
-watches: std.AutoArrayHashMapUnmanaged(WatchId, Watch),
+watches: std.array_hash_map.Auto(WatchId, Watch),
 /// Kernel watch descriptor to the directory or file it stands for.
-wds: std.AutoArrayHashMapUnmanaged(i32, Registration),
+wds: std.array_hash_map.Auto(i32, Registration),
 /// How many entries each watched directory holds, against
 /// `@import("../options.zig").Options.max_dir_entries`.
 budget: Budget,
@@ -77,7 +77,7 @@ mask: u32,
 /// whole wait is over -- see `flushRenames` -- and what stays behind
 /// then is a path that moved out of the watch, which from inside the
 /// watch is a removal.
-pending_renames: std.AutoArrayHashMapUnmanaged(PendingKey, Pending),
+pending_renames: std.array_hash_map.Auto(PendingKey, Pending),
 /// A read belongs to the backend until all its records are accounted for.
 read_buffer: [read_buffer_len]u8 align(@alignOf(linux.inotify_event)) = undefined,
 read_len: usize = 0,
@@ -615,7 +615,7 @@ fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u
     errdefer n.gpa.free(base);
 
     const full = if (event.name) |name|
-        try std.fs.path.join(n.gpa, &.{ base, name })
+        try std.Io.Dir.path.join(n.gpa, &.{ base, name })
     else
         try n.gpa.dupe(u8, base);
     errdefer n.gpa.free(full);
@@ -730,7 +730,7 @@ fn bookkeep(
     // is what the listing backends do. The count itself moved in
     // `handle`, once for the folder. A change to a watched file is no
     // entry of anything: the file is no directory, and has no count.
-    if (change.named and try n.budget.note(change.dir, std.fs.path.basename(change.path), .unchanged)) {
+    if (change.named and try n.budget.note(change.dir, std.Io.Dir.path.basename(change.path), .unchanged)) {
         const watch = n.watches.get(change.watch) orelse return;
         try batch.push(n.gpa, change.watch, watch.root, .overflow, watch.target);
     }

@@ -72,7 +72,7 @@ queue: c.dispatch_queue_t,
 /// handed to the streams and must outlive any reordering of this struct.
 sink: *Sink,
 /// One stream per watch.
-streams: std.AutoArrayHashMapUnmanaged(WatchId, *Stream),
+streams: std.array_hash_map.Auto(WatchId, *Stream),
 /// Scratch the drain copies the sink into, reused between polls.
 staging: std.ArrayList(u8),
 /// The staging delivery's loss flag stays with its bytes until reporting
@@ -97,7 +97,7 @@ resume_used: []bool,
 /// apart is whether lookout has seen the path before. It costs a string
 /// and initial metadata per watched file -- still nothing against `kqueue`'s descriptor per
 /// watched file, which is the comparison that matters on this platform.
-known: std.ArrayHashMapUnmanaged(KnownKey, ?Initial, KnownKeyContext, true),
+known: std.array_hash_map.Custom(KnownKey, ?Initial, KnownKeyContext, true),
 /// Paths and retained revisions share storage; known keys borrow their nodes.
 paths: *CheckpointPaths,
 /// The half of a rename whose partner has not been delivered yet. The
@@ -123,7 +123,7 @@ pub const KnownKey = struct {
 
 pub const KnownKeyContext = struct {
     pub fn hash(_: KnownKeyContext, key: KnownKey) u32 {
-        return @truncate(path_cmp.hashOwned(@intFromEnum(key.id), key.path));
+        return @truncate(path_cmp.hashOwned(@backingInt(key.id), key.path));
     }
 
     pub fn eql(_: KnownKeyContext, a: KnownKey, b: KnownKey, _: usize) bool {
@@ -264,7 +264,7 @@ const Stream = struct {
         if (rest.len == 0) return true;
         if (st.scope == .file) return false;
         if (st.scope == .tree) return true;
-        return std.mem.indexOfAny(u8, rest, path_cmp.separators) == null;
+        return std.mem.findAny(u8, rest, path_cmp.separators) == null;
     }
 
     /// The directories whose entries this stream reports, and so whose
@@ -422,7 +422,7 @@ pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_
         const stream = f.streams.get(root.id) orelse return null;
         if (!stream.persistent) return null;
         const identity = stream.volume.identity orelse return null;
-        const name = try gpa.dupeZ(u8, stream.root);
+        const name = try gpa.dupeSentinel(u8, stream.root, 0);
         defer gpa.free(name);
         const current = Volume.readIdentity(name, stream.volume.device) orelse return null;
         if (!Volume.matches(identity, current)) return null;
@@ -567,7 +567,7 @@ pub fn addFor(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []cons
         stream.before = before;
         f.resume_used[index] = true;
     }
-    trace.log("fsevents seeded watch={d} known={d}", .{ @intFromEnum(id), f.known.count() });
+    trace.log("fsevents seeded watch={d} known={d}", .{ @backingInt(id), f.known.count() });
 }
 
 /// Queues a change a checkpoint carried, as the watch resuming it would
@@ -608,7 +608,7 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     // FSEvents watches directories, so a watch on a file is a stream on
     // its parent filtered down to the one name.
     const stream_path = if (scope == .file)
-        std.fs.path.dirname(abs_path) orelse abs_path
+        std.Io.Dir.path.dirname(abs_path) orelse abs_path
     else
         abs_path;
 
@@ -655,7 +655,7 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     stream.published.store(true, .release);
 
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
-        @intFromEnum(id), @tagName(scope), abs_path, stream_path,
+        @backingInt(id), @tagName(scope), abs_path, stream_path,
     });
     stream.ref = try createStream(stream, if (stream.persistent) volume.relative(stream_path) else stream_path, since, f.stream_latency);
     // Invalidation is what unschedules a stream, and it requires one that
@@ -667,7 +667,7 @@ fn startStream(f: *FsEvents, id: WatchId, abs_path: []const u8, requested: []con
     c.FSEventStreamSetDispatchQueue(stream.ref, f.queue);
     if (c.FSEventStreamStart(stream.ref) == 0) return error.WatchLimitReached;
     trace.log("fsevents started watch={d} since={d} latency={d} streams={d} latest={d} dev={d} now={d}", .{
-        @intFromEnum(id),                            since,
+        @backingInt(id),                             since,
         f.stream_latency,                            f.streams.count() + 1,
         c.FSEventStreamGetLatestEventId(stream.ref), c.FSEventStreamGetDeviceBeingWatched(stream.ref),
         c.FSEventsGetCurrentEventId(),
@@ -819,7 +819,7 @@ fn stillCounted(f: *const FsEvents, dir: []const u8) bool {
 
 fn destroy(f: *FsEvents, stream: *Stream) void {
     trace.log("fsevents stop watch={d} root={s} streams={d}", .{
-        @intFromEnum(stream.id), stream.root, f.streams.count(),
+        @backingInt(stream.id), stream.root, f.streams.count(),
     });
     // Stop, invalidate, release, in that order and with nothing between.
     // `FSEventStreamInvalidate` is what unschedules the stream from the
@@ -1000,7 +1000,7 @@ fn drain(f: *FsEvents, batch: *Batch) contract.PollError!void {
             error.TruncatedRecord => break,
         } orelse break;
         trace.log("fsevents record watch={d} event={d} flags=0x{x} path={s}", .{
-            @intFromEnum(record.id), record.event, record.flags, record.path,
+            @backingInt(record.id), record.event, record.flags, record.path,
         });
         try delivered.append(f.gpa, record);
     }
@@ -1147,7 +1147,7 @@ fn report(
 ) contract.PollError!void {
     const record = delivered[at];
     const stream = f.streams.get(record.id) orelse {
-        trace.log("fsevents drop no-stream watch={d} path={s}", .{ @intFromEnum(record.id), record.path });
+        trace.log("fsevents drop no-stream watch={d} path={s}", .{ @backingInt(record.id), record.path });
         return;
     };
     // Before the scope check, not after it: the path a loss is reported
@@ -1631,7 +1631,7 @@ fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.
         const renamed = if (rest.len == 0)
             try f.gpa.dupe(u8, new)
         else
-            try std.fs.path.join(f.gpa, &.{ new, rest });
+            try std.Io.Dir.path.join(f.gpa, &.{ new, rest });
         errdefer f.gpa.free(renamed);
         const node = try f.paths.prepareOwned(id, renamed);
         errdefer f.paths.gpa.destroy(node);
@@ -1683,7 +1683,7 @@ fn seedKnown(f: *FsEvents, stream: *const Stream) !bool {
                 return .over;
             }
             if (entry.kind == .directory and s.stream.scope == .tree) {
-                const name = try s.f.gpa.dupeZ(u8, entry.path);
+                const name = try s.f.gpa.dupeSentinel(u8, entry.path, 0);
                 defer s.f.gpa.free(name);
                 const device = Volume.deviceOf(name) orelse {
                     s.cross_device = true;
@@ -1740,7 +1740,7 @@ test "FSEvents refuses a watch whose initial names could not be remembered" {
         f.budget.gpa = failing.allocator();
         var batch = Batch.init(testing.io, .{});
         defer batch.deinit(gpa);
-        if (f.add(@enumFromInt(0), root, .{ .recursive = true }, &batch)) |_| {
+        if (f.add(@fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch)) |_| {
             if (failing.has_induced_failure) std.debug.print("add succeeded after allocation {d} failed, with {d} remembered names\n", .{ fail_index, f.known.count() });
             try testing.expectEqual(false, failing.has_induced_failure);
             try testing.expectEqual(@as(usize, 4), f.known.count());
@@ -1770,7 +1770,7 @@ test "seeding remembers each entry with the metadata an lstat reads" {
     defer f.deinit();
     var batch = Batch.init(io, .{});
     defer batch.deinit(gpa);
-    try f.add(@enumFromInt(0), root, .{ .recursive = true }, &batch);
+    try f.add(@fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch);
     // A replayed record is compared with a later lstat: the seeded value
     // must be exactly what that lstat reads for an unchanged entry.
     try testing.expectEqual(@as(usize, 6), f.known.count());
@@ -1791,8 +1791,8 @@ test "removing an FSEvents stream releases its unreported delivery state" {
     defer f.deinit();
     var batch = Batch.init(testing.io, .{});
     defer batch.deinit(gpa);
-    const gone: WatchId = @enumFromInt(0);
-    const kept: WatchId = @enumFromInt(1);
+    const gone: WatchId = @fromBackingInt(@intCast(0));
+    const kept: WatchId = @fromBackingInt(@intCast(1));
     try f.add(gone, root, .{}, &batch);
     try f.add(kept, root, .{}, &batch);
     // This test owns the two records below. Stop and join native replay
@@ -1846,12 +1846,12 @@ fn recount(
     stream: *const Stream,
 ) contract.PollError!void {
     const change: Change = .{
-        .dir = std.fs.path.dirname(subject) orelse return,
+        .dir = std.Io.Dir.path.dirname(subject) orelse return,
         .subject = subject,
     };
     const counting = Budget.counter(*Stream, Change, Change.reaches, f.streams.values(), change) orelse return;
     if (counting != stream) return;
-    if (!try f.budget.note(change.dir, std.fs.path.basename(subject), move)) return;
+    if (!try f.budget.note(change.dir, std.Io.Dir.path.basename(subject), move)) return;
     for (f.streams.values()) |other| {
         if (!change.reaches(other)) continue;
         try batch.push(f.gpa, other.id, other.root, .overflow, other.rootTarget());
@@ -1917,7 +1917,7 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
     var filled: usize = 0;
     defer for (paths[0..filled]) |path| gpa.free(std.mem.span(path));
     for (items) |item| {
-        paths[filled] = try gpa.dupeZ(u8, if (stream.persistent) stream.volume.relative(item.path) else item.path);
+        paths[filled] = try gpa.dupeSentinel(u8, if (stream.persistent) stream.volume.relative(item.path) else item.path, 0);
         flags[filled] = item.flags;
         ids[filled] = item.event orelse c.FSEventsGetCurrentEventId();
         filled += 1;
@@ -2022,7 +2022,7 @@ const c = struct {
 
 test "a failed FSEvents rekey keeps every remembered name" {
     const testing = std.testing;
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
@@ -2056,16 +2056,16 @@ test "allocation failure during delivery retains FSEvents bytes and position" {
         defer tmp.cleanup();
         const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
         defer testing.allocator.free(root);
-        const first = try std.fs.path.join(testing.allocator, &.{ root, "first" });
+        const first = try std.Io.Dir.path.join(testing.allocator, &.{ root, "first" });
         defer testing.allocator.free(first);
-        const last = try std.fs.path.join(testing.allocator, &.{ root, "last" });
+        const last = try std.Io.Dir.path.join(testing.allocator, &.{ root, "last" });
         defer testing.allocator.free(last);
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
         var f = try FsEvents.init(failing.allocator(), testing.io, .{ .latency_ms = 0 });
         defer f.deinit();
         var batch = Batch.init(testing.io, .{});
         defer batch.deinit(failing.allocator());
-        const id: WatchId = @enumFromInt(0);
+        const id: WatchId = @fromBackingInt(@intCast(0));
         try f.add(id, root, .{}, &batch);
         // No disk changes after registration: only this synthetic delivery.
         try synthesize(testing.allocator, f.streams.get(id).?, &.{
@@ -2100,12 +2100,12 @@ test "a file stream accepts the replay sentinel outside its event scope" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "file", .data = "one" });
     const root = try tmp.dir.realPathFileAlloc(testing.io, "file", gpa);
     defer gpa.free(root);
-    const parent = std.fs.path.dirname(root).?;
+    const parent = std.Io.Dir.path.dirname(root).?;
     var backend = try FsEvents.init(gpa, testing.io, .{});
     defer backend.deinit();
     var batch = Batch.init(testing.io, .{});
     defer batch.deinit(gpa);
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try backend.add(id, root, .{}, &batch);
     const stream = backend.streams.get(id).?;
     stream.resumed = true;

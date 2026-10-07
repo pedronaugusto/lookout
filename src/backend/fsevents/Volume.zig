@@ -11,7 +11,7 @@ prefix: []u8,
 identity: ?format.Identity,
 
 pub fn read(gpa: std.mem.Allocator, root: []const u8) !Volume {
-    const name = try gpa.dupeZ(u8, root);
+    const name = try gpa.dupeSentinel(u8, root, 0);
     defer gpa.free(name);
     var attrs: AttrList = .{ .common = 0x2, .volume = 0x80001000 }; // DEVID, VOL_INFO | MOUNTPOINT
     var mount: Mount = undefined;

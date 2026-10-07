@@ -40,7 +40,7 @@ track_entries: bool,
 /// Polling enables content checks for timestamps within the snapshot tick.
 check_contents: bool = false,
 /// Every registered path, keyed by an id that is never reused.
-nodes: std.AutoArrayHashMapUnmanaged(NodeId, Node),
+nodes: std.array_hash_map.Auto(NodeId, Node),
 /// The node of each watch at each path, so that asking whether a path
 /// is registered, or finding its node, costs one lookup rather than a
 /// pass over every node: a tree of fifty thousand files once took
@@ -48,7 +48,7 @@ nodes: std.AutoArrayHashMapUnmanaged(NodeId, Node),
 /// a key holds is the node's own. One node per watch and path: a node
 /// made where another is -- the name now naming an object of another
 /// kind -- replaces it. See `insert`.
-index: std.ArrayHashMapUnmanaged(Key, NodeId, KeyContext, true),
+index: std.array_hash_map.Custom(Key, NodeId, KeyContext, true),
 /// Whether `dropped` is kept, for a backend that holds something per
 /// node -- `kqueue`'s file descriptors -- and must let go of it when
 /// the node goes.
@@ -60,7 +60,7 @@ dropped: std.ArrayList(NodeId) = .empty,
 /// known, and the backend has to look at all of its own.
 dropped_lost: bool = false,
 /// The caller's watches, keyed by the id `lookout.Watcher.add` returned.
-watches: std.AutoArrayHashMapUnmanaged(WatchId, Watch),
+watches: std.array_hash_map.Auto(WatchId, Watch),
 next_node: u64,
 /// Scratch reused by every scan so that a steady-state watcher does not
 /// allocate per event.
@@ -77,7 +77,7 @@ pub const Key = struct {
 
 pub const KeyContext = struct {
     pub fn hash(_: KeyContext, key: Key) u32 {
-        return @truncate(path_cmp.hashOwned(@intFromEnum(key.watch), key.path));
+        return @truncate(path_cmp.hashOwned(@backingInt(key.watch), key.path));
     }
 
     pub fn eql(_: KeyContext, a: Key, b: Key, _: usize) bool {
@@ -120,7 +120,7 @@ pub const Node = struct {
     parent: ?NodeId,
     /// The nodes listed in this one, so that dropping a directory costs
     /// what is below it and not a pass over every node.
-    children: std.AutoArrayHashMapUnmanaged(NodeId, void) = .empty,
+    children: std.array_hash_map.Auto(NodeId, void) = .empty,
 
     /// What a node stands for.
     pub const Role = enum { file, directory };
@@ -244,7 +244,7 @@ fn descend(t: *Tree, parent_id: NodeId, added: *std.ArrayList(NodeId), batch: *B
         if (i >= node.snapshot.entries.count()) break;
         if (node.snapshot.entries.values()[i].file_kind != .directory) continue;
         const name = node.snapshot.entries.keys()[i];
-        const child_path = try std.fs.path.join(t.gpa, &.{ parent_path, name });
+        const child_path = try std.Io.Dir.path.join(t.gpa, &.{ parent_path, name });
         errdefer t.gpa.free(child_path);
         // An excluded directory is not opened and not registered, which
         // is the whole point of filtering here rather than on the way
@@ -279,7 +279,7 @@ fn createDirectory(t: *Tree, watch: WatchId, parent: ?NodeId, path: []u8, added:
     var dir = try Io.Dir.openDirAbsolute(t.io, path, .{ .iterate = true });
     errdefer dir.close(t.io);
 
-    const id: NodeId = @enumFromInt(t.next_node);
+    const id: NodeId = @fromBackingInt(@intCast(t.next_node));
     try t.insert(id, .{
         .watch = watch,
         .path = path,
@@ -336,7 +336,7 @@ fn trackEntries(t: *Tree, dir_id: NodeId, added: *std.ArrayList(NodeId)) AddErro
         const meta = dir_node.snapshot.entries.values()[i];
         if (meta.file_kind != .file) continue;
         const name = dir_node.snapshot.entries.keys()[i];
-        const child = try std.fs.path.join(t.gpa, &.{ dir_node.path, name });
+        const child = try std.Io.Dir.path.join(t.gpa, &.{ dir_node.path, name });
         errdefer t.gpa.free(child);
         if (t.excluded(dir_node.watch, child)) {
             t.gpa.free(child);
@@ -351,7 +351,7 @@ fn trackEntries(t: *Tree, dir_id: NodeId, added: *std.ArrayList(NodeId)) AddErro
 }
 
 fn createFile(t: *Tree, watch: WatchId, parent: ?NodeId, path: []u8, meta: Snapshot.Meta, added: *std.ArrayList(NodeId)) Allocator.Error!NodeId {
-    const id: NodeId = @enumFromInt(t.next_node);
+    const id: NodeId = @fromBackingInt(@intCast(t.next_node));
     try t.insert(id, .{
         .watch = watch,
         .path = path,
@@ -655,7 +655,7 @@ pub fn rescanDirectory(
         if (change.file_kind == .directory and
             (change.kind == .modified or change.kind == .attributes)) continue;
 
-        const child = try std.fs.path.join(t.gpa, &.{ dir_path, change.name });
+        const child = try std.Io.Dir.path.join(t.gpa, &.{ dir_path, change.name });
         defer t.gpa.free(child);
         // Excluded before it is reported and before a node is made for
         // it, so an excluded directory never becomes a registration.
@@ -753,7 +753,7 @@ fn adopt(
             const name = node.snapshot.entries.keys()[j];
             const file_kind = node.snapshot.entries.values()[j].file_kind;
 
-            const entry = try std.fs.path.join(t.gpa, &.{ current, name });
+            const entry = try std.Io.Dir.path.join(t.gpa, &.{ current, name });
             errdefer t.gpa.free(entry);
             if (t.pruned(watch, entry)) {
                 t.gpa.free(entry);
@@ -807,7 +807,7 @@ test "tree access failures keep registrations and report no removals" {
     try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "one" });
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const file = try std.fs.path.join(gpa, &.{ root, "kept" });
+    const file = try std.Io.Dir.path.join(gpa, &.{ root, "kept" });
     defer gpa.free(file);
 
     inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
@@ -817,9 +817,9 @@ test "tree access failures keep registrations and report no removals" {
         defer batch.deinit(gpa);
         var added: std.ArrayList(NodeId) = .empty;
         defer added.deinit(gpa);
-        try tree.addWatch(@enumFromInt(0), root, .{}, &added, &batch);
+        try tree.addWatch(@fromBackingInt(@intCast(0)), root, .{}, &added, &batch);
         const directory_id = added.items[0];
-        try tree.addWatch(@enumFromInt(1), file, .{}, &added, &batch);
+        try tree.addWatch(@fromBackingInt(@intCast(1)), file, .{}, &added, &batch);
         const file_id = added.items[1];
 
         var vtable = io.vtable.*;
@@ -862,7 +862,7 @@ test "a failed tree registration releases every snapshot and path" {
             defer added.deinit(gpa);
             var batch: Batch = .init(std.testing.io, .{});
             defer batch.deinit(gpa);
-            if (tree.addWatch(@enumFromInt(0), root, .{}, &added, &batch)) |_| {
+            if (tree.addWatch(@fromBackingInt(@intCast(0)), root, .{}, &added, &batch)) |_| {
                 break;
             } else |err| {
                 try std.testing.expectEqual(error.OutOfMemory, err);
@@ -891,13 +891,13 @@ test "a failed tree adoption releases every unregistered path" {
             var tree: Tree = .init(gpa, testing.io, 8, false);
             defer tree.deinit();
             defer {
-                const watch = tree.watches.fetchSwapRemove(@enumFromInt(0)).?.value;
+                const watch = tree.watches.fetchSwapRemove(@fromBackingInt(@intCast(0))).?.value;
                 testing.allocator.free(watch.root);
                 tree.watches.deinit(testing.allocator);
                 tree.watches = .empty;
             }
             // Adoption needs the watch policy, but not a parent node.
-            try tree.watches.put(testing.allocator, @enumFromInt(0), .{
+            try tree.watches.put(testing.allocator, @fromBackingInt(@intCast(0)), .{
                 .root = try testing.allocator.dupe(u8, root),
                 .target = .directory,
                 .recursive = true,
@@ -907,7 +907,7 @@ test "a failed tree adoption releases every unregistered path" {
             defer added.deinit(gpa);
             var batch: Batch = .init(testing.io, .{});
             defer batch.deinit(gpa);
-            if (tree.adopt(@enumFromInt(0), null, root, &batch, &added)) |_| {
+            if (tree.adopt(@fromBackingInt(@intCast(0)), null, root, &batch, &added)) |_| {
                 succeeded = true;
             } else |err| try testing.expectEqual(error.OutOfMemory, err);
         }
@@ -934,7 +934,7 @@ test "a failed tree scan keeps its directory baseline and retries adoption" {
             defer batch.deinit(failing.allocator());
             var added: std.ArrayList(NodeId) = .empty;
             defer added.deinit(failing.allocator());
-            try tree.addWatch(@enumFromInt(0), root, .{ .recursive = true }, &added, &batch);
+            try tree.addWatch(@fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &added, &batch);
             const parent = added.items[0];
             added.clearRetainingCapacity();
             try tmp.dir.createDirPath(testing.io, "child/deeper");
@@ -978,7 +978,7 @@ test "a failed tree scan keeps file metadata until reporting succeeds" {
     defer batch.deinit(failing.allocator());
     var added: std.ArrayList(NodeId) = .empty;
     defer added.deinit(failing.allocator());
-    try tree.addWatch(@enumFromInt(0), root, .{}, &added, &batch);
+    try tree.addWatch(@fromBackingInt(@intCast(0)), root, .{}, &added, &batch);
     const id = added.items[0];
     const before = tree.nodes.get(id).?.meta;
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "file", .data = "changed size" });
@@ -1006,7 +1006,7 @@ test "refilter registers newly admitted files without recursion" {
     defer batch.deinit(gpa);
     var added: std.ArrayList(NodeId) = .empty;
     defer added.deinit(gpa);
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try tree.addWatch(id, root, .{ .filter = .{ .only = &.{"old"} } }, &added, &batch);
     try testing.expectEqual(@as(usize, 2), tree.nodes.count());
     added.clearRetainingCapacity();
@@ -1014,7 +1014,7 @@ test "refilter registers newly admitted files without recursion" {
     try testing.expectEqual(@as(usize, 1), added.items.len);
     const node = tree.nodes.get(added.items[0]).?;
     try testing.expectEqual(Node.Role.file, node.role);
-    try testing.expectEqualStrings("new", std.fs.path.basename(node.path));
+    try testing.expectEqualStrings("new", std.Io.Dir.path.basename(node.path));
     try testing.expectEqual(@as(usize, 2), tree.nodes.count());
 }
 
@@ -1032,7 +1032,7 @@ test "refilter releases files that only lead to an included path" {
     defer batch.deinit(gpa);
     var added: std.ArrayList(NodeId) = .empty;
     defer added.deinit(gpa);
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try tree.addWatch(id, root, .{}, &added, &batch);
     try testing.expectEqual(@as(usize, 2), tree.nodes.count());
     added.clearRetainingCapacity();
@@ -1051,7 +1051,7 @@ fn expectLinked(tree: *const Tree) !void {
         try testing.expectEqual(id, tree.index.get(.{ .watch = node.watch, .path = node.path }).?);
         if (node.parent) |parent| {
             try testing.expect(tree.nodes.get(parent).?.children.contains(id));
-            try testing.expect(path_cmp.eql(std.fs.path.dirname(node.path).?, tree.nodes.get(parent).?.path));
+            try testing.expect(path_cmp.eql(std.Io.Dir.path.dirname(node.path).?, tree.nodes.get(parent).?.path));
         } else {
             try testing.expect(path_cmp.eql(node.path, tree.watchRoot(node.watch)));
         }
@@ -1080,14 +1080,14 @@ test "removing a directory drops its subtree and only it, and says which nodes w
     defer batch.deinit(gpa);
     var added: std.ArrayList(NodeId) = .empty;
     defer added.deinit(gpa);
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try tree.addWatch(id, root, .{ .recursive = true }, &added, &batch);
     // The root, four directories and five files.
     try testing.expectEqual(@as(usize, 10), tree.nodes.count());
     try expectLinked(&tree);
     tree.clearDropped();
 
-    const gone = try std.fs.path.join(gpa, &.{ root, "gone" });
+    const gone = try std.Io.Dir.path.join(gpa, &.{ root, "gone" });
     defer gpa.free(gone);
     tree.removeSubtree(id, gone);
     try expectLinked(&tree);
@@ -1096,7 +1096,7 @@ test "removing a directory drops its subtree and only it, and says which nodes w
     for (tree.takeDropped().?) |dropped| try testing.expect(!tree.nodes.contains(dropped));
     for (tree.nodes.values()) |node| try testing.expect(!path_cmp.within(gone, node.path));
     for ([_][]const u8{ "gone-sibling", "gone-sibling/d", "kept/c", "e" }) |name| {
-        const path = try std.fs.path.join(gpa, &.{ root, name });
+        const path = try std.Io.Dir.path.join(gpa, &.{ root, name });
         defer gpa.free(path);
         try testing.expect(tree.hasNode(id, path));
     }
@@ -1126,7 +1126,7 @@ test "a name that comes back as another kind replaces its node" {
     defer batch.deinit(gpa);
     var added: std.ArrayList(NodeId) = .empty;
     defer added.deinit(gpa);
-    try tree.addWatch(@enumFromInt(0), root, .{ .recursive = true }, &added, &batch);
+    try tree.addWatch(@fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &added, &batch);
     const directory = added.items[0];
     try testing.expectEqual(@as(usize, 2), tree.nodes.count());
 
@@ -1138,7 +1138,7 @@ test "a name that comes back as another kind replaces its node" {
     try expectLinked(&tree);
     // The root, the directory where the file was, and the file in it.
     try testing.expectEqual(@as(usize, 3), tree.nodes.count());
-    const name = try std.fs.path.join(gpa, &.{ root, "name" });
+    const name = try std.Io.Dir.path.join(gpa, &.{ root, "name" });
     defer gpa.free(name);
-    try testing.expectEqual(Node.Role.directory, tree.nodes.get(tree.index.get(.{ .watch = @enumFromInt(0), .path = name }).?).?.role);
+    try testing.expectEqual(Node.Role.directory, tree.nodes.get(tree.index.get(.{ .watch = @fromBackingInt(@intCast(0)), .path = name }).?).?.role);
 }

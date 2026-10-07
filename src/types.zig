@@ -40,16 +40,16 @@ pub const Backend = enum {
 pub fn supported(backend: Backend) bool {
     return switch (backend) {
         .auto, .poll => true,
-        .fsevents => switch (builtin.os.tag) {
+        .fsevents => switch (builtin.target.os.tag) {
             .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => true,
             else => false,
         },
-        .kqueue => switch (builtin.os.tag) {
+        .kqueue => switch (builtin.target.os.tag) {
             .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .dragonfly, .freebsd, .netbsd, .openbsd => true,
             else => false,
         },
-        .inotify => builtin.os.tag == .linux,
-        .windows => builtin.os.tag == .windows,
+        .inotify => builtin.target.os.tag == .linux,
+        .windows => builtin.target.os.tag == .windows,
     };
 }
 
@@ -172,7 +172,7 @@ pub fn prunesIgnored(backend: Backend) bool {
 /// renames. `kqueue` remains explicitly selectable when lower latency on
 /// a small tree matters more than either property; it reports a rename as
 /// a removal and a creation.
-pub const default_backend: Backend = switch (builtin.os.tag) {
+pub const default_backend: Backend = switch (builtin.target.os.tag) {
     .driverkit,
     .ios,
     .maccatalyst,

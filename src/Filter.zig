@@ -198,12 +198,12 @@ fn outside(f: Filter, root: []const u8, subject: []const u8, purpose: Purpose) b
 fn ignores(f: Filter, relative: []const u8, absolute: []const u8) bool {
     for (f.ignore) |pattern| {
         if (pattern.len == 0) continue;
-        const subject = if (std.fs.path.isAbsolute(pattern)) absolute else relative;
+        const subject = if (std.Io.Dir.path.isAbsolute(pattern)) absolute else relative;
         if (matches(pattern, subject)) return true;
         // A pattern naming no directory is about the name alone, so that
         // one written once excludes the thing wherever it turns up.
-        if (std.mem.indexOfAny(u8, pattern, path.separators) == null and
-            matches(pattern, std.fs.path.basename(subject))) return true;
+        if (std.mem.findAny(u8, pattern, path.separators) == null and
+            matches(pattern, std.Io.Dir.path.basename(subject))) return true;
     }
     return false;
 }
@@ -215,14 +215,14 @@ fn ignores(f: Filter, relative: []const u8, absolute: []const u8) bool {
 fn wanted(only: []const []const u8, relative: []const u8, absolute: []const u8, purpose: Purpose) bool {
     for (only) |pattern| {
         if (pattern.len == 0) continue;
-        const rooted = std.fs.path.isAbsolute(pattern);
+        const rooted = std.Io.Dir.path.isAbsolute(pattern);
         const subject = if (rooted) absolute else relative;
         if (matches(pattern, subject)) return true;
-        const bare = !rooted and std.mem.indexOfAny(u8, pattern, path.separators) == null;
+        const bare = !rooted and std.mem.findAny(u8, pattern, path.separators) == null;
         // A pattern naming no directory is about the name alone, so it
         // can turn up at any depth -- which makes every directory one
         // on the way to it.
-        if (bare and matches(pattern, std.fs.path.basename(subject))) return true;
+        if (bare and matches(pattern, std.Io.Dir.path.basename(subject))) return true;
         if (purpose == .walk and (bare or leadsTo(pattern, subject))) return true;
     }
     return false;
@@ -349,7 +349,7 @@ const testing = std.testing;
 const builtin = @import("builtin");
 
 fn sep(comptime p: []const u8) []const u8 {
-    if (builtin.os.tag != .windows) return p;
+    if (builtin.target.os.tag != .windows) return p;
     comptime var buffer: [p.len]u8 = undefined;
     comptime for (p, &buffer) |c, *slot| {
         slot.* = if (c == '/') '\\' else c;
@@ -492,7 +492,7 @@ fn spellRun(buf: []u8, root: []const u8, count: usize, len: usize) []u8 {
     @memcpy(buf[0..root.len], root);
     var end = root.len;
     for (0..count) |_| {
-        buf[end] = std.fs.path.sep;
+        buf[end] = std.Io.Dir.path.sep;
         @memset(buf[end + 1 ..][0..len], 'a');
         end += 1 + len;
     }
@@ -520,7 +520,7 @@ test "the predicate is asked about every ancestor" {
         fn allow(context: ?*anyopaque, p: []const u8) bool {
             const calls: *usize = @ptrCast(@alignCast(context.?));
             calls.* += 1;
-            return std.mem.indexOf(u8, p, "private") == null;
+            return std.mem.find(u8, p, "private") == null;
         }
     };
     var calls: usize = 0;

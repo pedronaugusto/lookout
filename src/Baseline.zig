@@ -43,7 +43,7 @@ max_dir_entries: usize,
 filter: Filter,
 /// One remembered listing per directory, keyed by absolute path. Keys
 /// owned here.
-dirs: std.StringArrayHashMapUnmanaged(Remembered),
+dirs: std.array_hash_map.String(Remembered),
 /// What the last `diff` found. Every path is owned here and is dropped by
 /// the next `diff` or by `deinit`.
 changes: std.ArrayList(Change),
@@ -177,7 +177,7 @@ pub const SaveOptions = struct {
 /// happens after replacement, so the new file may already be visible.
 pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8, options: SaveOptions) Baseline.SaveError!void {
     if (b.filter.allow != null) return error.UnsupportedBaselineFilter;
-    if (options.durable and builtin.os.tag == .windows) return error.UnsupportedBaselineDurability;
+    if (options.durable and builtin.target.os.tag == .windows) return error.UnsupportedBaselineDurability;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -192,11 +192,11 @@ pub fn saveWithOptions(b: *const Baseline, gpa: Allocator, filename: []const u8,
     // cwd may be the POSIX AT_FDCWD sentinel rather than an open descriptor.
     // Iteration also avoids Linux O_PATH, which cannot be fsynced.
     const parent: ?Io.Dir = if (options.durable)
-        try Io.Dir.cwd().openDir(b.io, std.fs.path.dirname(filename) orelse ".", .{ .iterate = true })
+        try Io.Dir.cwd().openDir(b.io, std.Io.Dir.path.dirname(filename) orelse ".", .{ .iterate = true })
     else
         null;
     defer if (parent) |dir| dir.close(b.io);
-    var file = try (parent orelse Io.Dir.cwd()).createFileAtomic(b.io, if (parent != null) std.fs.path.basename(filename) else filename, .{ .replace = true });
+    var file = try (parent orelse Io.Dir.cwd()).createFileAtomic(b.io, if (parent != null) std.Io.Dir.path.basename(filename) else filename, .{ .replace = true });
     defer file.deinit(b.io);
     try file.file.writePositionalAll(b.io, bytes, 0);
     if (options.durable) try file.file.sync(b.io);
@@ -222,7 +222,7 @@ pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, opti
     defer parsed.deinit();
     const state = parsed.value;
     const real = Io.Dir.cwd().realPathFileAlloc(io, root, gpa) catch |err| switch (err) {
-        error.FileNotFound => if (std.fs.path.isAbsolute(root)) try gpa.dupeZ(u8, root) else return err,
+        error.FileNotFound => if (std.Io.Dir.path.isAbsolute(root)) try gpa.dupeSentinel(u8, root, 0) else return err,
         else => return err,
     };
     defer gpa.free(real);
@@ -275,7 +275,7 @@ fn scan(b: *Baseline, gpa: Allocator, report: bool) Error!void {
 /// scan options belong to the baseline, which is borrowed until commit.
 const Scan = struct {
     baseline: *const Baseline,
-    dirs: std.StringArrayHashMapUnmanaged(Remembered) = .empty,
+    dirs: std.array_hash_map.String(Remembered) = .empty,
     changes: std.ArrayList(Change) = .empty,
     scratch: std.ArrayList(Snapshot.Change),
 
@@ -337,7 +337,7 @@ const Scan = struct {
             const snapshot = &s.dirs.values()[index].snapshot;
             for (snapshot.entries.keys(), snapshot.entries.values()) |name, meta| {
                 if (meta.file_kind != .directory) continue;
-                const child = try std.fs.path.join(gpa, &.{ path, name });
+                const child = try std.Io.Dir.path.join(gpa, &.{ path, name });
                 errdefer gpa.free(child);
                 if (b.filter.prunes(b.root, child)) {
                     gpa.free(child);
@@ -364,7 +364,7 @@ const Scan = struct {
             if (change.file_kind == .directory and
                 (change.kind == .modified or change.kind == .attributes)) continue;
 
-            const child = try std.fs.path.join(gpa, &.{ path, change.name });
+            const child = try std.Io.Dir.path.join(gpa, &.{ path, change.name });
             defer gpa.free(child);
             if (b.filter.excludes(b.root, child)) continue;
             try s.record(gpa, child, change.kind, .of(change.file_kind));
@@ -379,7 +379,7 @@ const Scan = struct {
         for (b.dirs.keys(), b.dirs.values()) |path, remembered| {
             if (s.dirs.contains(path)) continue;
             for (remembered.snapshot.entries.keys(), remembered.snapshot.entries.values()) |name, meta| {
-                const child = try std.fs.path.join(gpa, &.{ path, name });
+                const child = try std.Io.Dir.path.join(gpa, &.{ path, name });
                 defer gpa.free(child);
                 if (b.filter.excludes(b.root, child)) continue;
                 try s.record(gpa, child, .removed, .of(meta.file_kind));
@@ -433,7 +433,7 @@ fn holds(changes: []const Change, root: []const u8, sub_path: []const u8, kind: 
     try parts.append(gpa, root);
     var it = std.mem.splitScalar(u8, sub_path, '/');
     while (it.next()) |part| try parts.append(gpa, part);
-    const wanted = try std.fs.path.join(gpa, parts.items);
+    const wanted = try std.Io.Dir.path.join(gpa, parts.items);
     defer gpa.free(wanted);
 
     for (changes) |change| {
@@ -543,7 +543,7 @@ fn targetOf(changes: []const Change, root: []const u8, sub_path: []const u8) !Ta
     try parts.append(gpa, root);
     var it = std.mem.splitScalar(u8, sub_path, '/');
     while (it.next()) |part| try parts.append(gpa, part);
-    const wanted = try std.fs.path.join(gpa, parts.items);
+    const wanted = try std.Io.Dir.path.join(gpa, parts.items);
     defer gpa.free(wanted);
     var found: ?Target = null;
     for (changes) |change| if (std.mem.eql(u8, change.path, wanted)) {
@@ -651,7 +651,7 @@ test "a directory past the entry limit says the diff is incomplete" {
     for (0..6) |i| {
         var name: [8]u8 = undefined;
         try tmp.dir.writeFile(io, .{
-            .sub_path = std.fmt.bufPrint(&name, "f{d}", .{i}) catch unreachable,
+            .sub_path = std.mem.print(&name, "f{d}", .{i}) catch unreachable,
             .data = "x",
         });
     }
@@ -733,7 +733,7 @@ test "directory access failures are not removals" {
             var vtable = io.vtable.*;
             vtable.dirOpenDir = struct {
                 fn open(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-                    if (!subtree or std.mem.eql(u8, std.fs.path.basename(path), "blocked")) return failure;
+                    if (!subtree or std.mem.eql(u8, std.Io.Dir.path.basename(path), "blocked")) return failure;
                     return testing.io.vtable.dirOpenDir(userdata, dir, path, options);
                 }
             }.open;
@@ -763,7 +763,7 @@ test "a failed baseline traversal leaves changes for the retry" {
     var vtable = io.vtable.*;
     vtable.dirOpenDir = struct {
         fn open(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-            if (std.mem.eql(u8, std.fs.path.basename(path), "blocked")) return error.AccessDenied;
+            if (std.mem.eql(u8, std.Io.Dir.path.basename(path), "blocked")) return error.AccessDenied;
             return testing.io.vtable.dirOpenDir(userdata, dir, path, options);
         }
     }.open;
@@ -849,7 +849,7 @@ test "a saved baseline reports changes since last run and replaces its file" {
     defer gpa.free(root);
     const parent = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(parent);
-    const file = try std.fs.path.join(gpa, &.{ parent, "baseline" });
+    const file = try std.Io.Dir.path.join(gpa, &.{ parent, "baseline" });
     defer gpa.free(file);
     const options: Options = .{ .recursive = true, .filter = .{ .ignore = &.{"*.tmp"} } };
     {
@@ -885,7 +885,7 @@ test "a saved baseline reports changes since last run and replaces its file" {
 
 test "baseline storage refuses corrupt foreign and old files by name" {
     const gpa = testing.allocator;
-    const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
+    const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
     const state: format.State = .{ .platform = format.platform, .root = root, .recursive = false, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{} };
     const bytes = try format.encode(gpa, state);
     defer gpa.free(bytes);
@@ -911,7 +911,7 @@ test "a failed baseline replacement leaves the previous file intact" {
     defer gpa.free(root);
     const parent = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(parent);
-    const filename = try std.fs.path.join(gpa, &.{ parent, "saved" });
+    const filename = try std.Io.Dir.path.join(gpa, &.{ parent, "saved" });
     defer gpa.free(filename);
     var b = try seed(gpa, io, root, .{});
     defer b.deinit(gpa);
@@ -941,8 +941,8 @@ test "a failed baseline replacement leaves the previous file intact" {
 
 test "baseline storage validates checksummed paths before trusting them" {
     const gpa = testing.allocator;
-    const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
-    const bad = try std.fs.path.join(gpa, &.{ root, "..", "outside" });
+    const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
+    const bad = try std.Io.Dir.path.join(gpa, &.{ root, "..", "outside" });
     defer gpa.free(bad);
     const directory: format.Directory = .{ .path = bad, .truncated = false, .check_contents = false, .entries = &.{} };
     const state: format.State = .{ .platform = format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{directory} };
@@ -961,7 +961,7 @@ test "durable baseline saves sync before and after replacement and preserve name
     defer gpa.free(root);
     const parent = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(parent);
-    const filename = try std.fs.path.join(gpa, &.{ parent, "saved" });
+    const filename = try std.Io.Dir.path.join(gpa, &.{ parent, "saved" });
     defer gpa.free(filename);
     var b = try seed(gpa, io, root, .{});
     defer b.deinit(gpa);
@@ -970,7 +970,7 @@ test "durable baseline saves sync before and after replacement and preserve name
     defer gpa.free(original);
     try tmp.dir.writeFile(io, .{ .sub_path = "tree/new", .data = "one" });
     _ = try b.diff(gpa);
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         try testing.expectError(error.UnsupportedBaselineDurability, b.saveWithOptions(gpa, filename, .{ .durable = true }));
         const after = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
         defer gpa.free(after);

@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
     // The module.
     //
     // Pure Zig, no dependencies, nothing to link: which backend is
-    // compiled in is decided by `builtin.os.tag` inside src/lookout.zig, so
+    // compiled in is decided by `builtin.target.os.tag` inside src/lookout.zig, so
     // a consumer adds the import and nothing else.
     //=====================================================================
 
@@ -16,29 +16,29 @@ pub fn build(b: *std.Build) void {
     // the only thing in the package that needs a system library. Every
     // other target stays free-standing Zig.
     const darwin = target.result.os.tag.isDarwin();
+
+    // Zig finds the host's SDK by itself for a native build and not for a
+    // named target, so `-Dtarget=aarch64-macos` fails to find CoreServices
+    // even on a Mac. A named Apple target links against the SDK given here
+    // (`-Dmacos-sdk=$(xcrun --show-sdk-path)`) or, without one, against the
+    // pinned framework SDK. build.zig cannot ask xcrun itself: the build
+    // configuration is cached, and a path read from a process at configure
+    // time would outlive the SDK it names.
+    const macos_sdk = b.option([]const u8, "macos-sdk", "The Apple SDK to link a named Apple target against");
     const bundled_sdk = b.option(bool, "bundled-macos-sdk", "Use the pinned framework SDK for cross-linking Apple targets") orelse
-        (b.graph.host.result.os.tag != .macos);
+        (macos_sdk == null and !target.query.isNative());
 
-    // Cross-compiling to an Apple target from an Apple host: Zig finds
-    // the SDK by itself for a native build and not for a named one, so
-    // `-Dtarget=aarch64-macos` would fail to find CoreServices on the
-    // very machine that has it. Asking the host where its SDK is costs
-    // nothing when there is no SDK to find.
-    const frameworks: ?std.Build.LazyPath = frameworks: {
-        if (!darwin) break :frameworks null;
-        if (b.sysroot) |root| break :frameworks .{
-            .cwd_relative = b.pathJoin(&.{ root, "System", "Library", "Frameworks" }),
+    const sdk: ?Sdk = sdk: {
+        if (!darwin) break :sdk null;
+        if (macos_sdk) |root| break :sdk .{
+            .frameworks = .{ .cwd_relative = b.pathJoin(&.{ root, "System", "Library", "Frameworks" }) },
+            .include = .{ .cwd_relative = b.pathJoin(&.{ root, "usr", "include" }) },
+            .lib = .{ .cwd_relative = b.pathJoin(&.{ root, "usr", "lib" }) },
         };
-        if (bundled_sdk) break :frameworks null;
-        const sdk = std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target.result) orelse
-            break :frameworks null;
-        b.sysroot = sdk;
-        break :frameworks .{
-            .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }),
-        };
+        if (!bundled_sdk) break :sdk null;
+        const pinned = b.dependencyLazy("macos_sdk", .{}) catch break :sdk null;
+        break :sdk .{ .frameworks = pinned.path("Frameworks"), .include = pinned.path("include"), .lib = pinned.path("lib") };
     };
-
-    const sdk_dep = if (darwin and bundled_sdk and b.sysroot == null) b.lazyDependency("macos_sdk", .{}) else null;
 
     const module = b.addModule("lookout", .{
         .root_source_file = b.path("src/lookout.zig"),
@@ -47,8 +47,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = darwin,
     });
     if (darwin) {
-        if (frameworks) |path| module.addSystemFrameworkPath(path);
-        if (sdk_dep) |sdk| addSdkPaths(module, sdk);
+        if (sdk) |paths| paths.addTo(module);
         module.linkFramework("CoreServices", .{});
     }
 
@@ -80,15 +79,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = darwin,
             .sanitize_thread = if (thread_sanitizer) true else null,
-            // The fuzz targets in src/testing/fuzz_test.zig are the reason: the
-            // fuzzing runner in Zig 0.16.0 will not build a module that
-            // carries error return traces.
-            .error_tracing = false,
         }),
     });
     if (darwin) {
-        if (frameworks) |path| tests.root_module.addSystemFrameworkPath(path);
-        if (sdk_dep) |sdk| addSdkPaths(tests.root_module, sdk);
+        if (sdk) |paths| paths.addTo(tests.root_module);
         tests.root_module.linkFramework("CoreServices", .{});
     }
 
@@ -114,7 +108,7 @@ pub fn build(b: *std.Build) void {
     const examples_step = b.step("examples", "Build and run the examples");
     for (example_sources) |source| {
         const example = b.addExecutable(.{
-            .name = std.fs.path.stem(source),
+            .name = std.Io.Dir.path.stem(source),
             .root_module = b.createModule(.{
                 .root_source_file = b.path(source),
                 .target = target,
@@ -173,9 +167,15 @@ const example_sources = [_][]const u8{
     "examples/since.zig",
 };
 
-// Framework search paths come from the pinned package root.
-fn addSdkPaths(module: *std.Build.Module, sdk: *std.Build.Dependency) void {
-    module.addSystemFrameworkPath(sdk.path("Frameworks"));
-    module.addSystemIncludePath(sdk.path("include"));
-    module.addLibraryPath(sdk.path("lib"));
-}
+/// Where an Apple SDK keeps what CoreServices links against.
+const Sdk = struct {
+    frameworks: std.Build.LazyPath,
+    include: std.Build.LazyPath,
+    lib: std.Build.LazyPath,
+
+    fn addTo(sdk: Sdk, module: *std.Build.Module) void {
+        module.addSystemFrameworkPath(sdk.frameworks);
+        module.addSystemIncludePath(sdk.include);
+        module.addLibraryPath(sdk.lib);
+    }
+};

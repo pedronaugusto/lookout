@@ -13,16 +13,16 @@ pub const test_access = if (builtin.is_test) struct {
 
 pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
     if (builtin.is_test) if (test_access.source) |source| return source(gpa, io, path);
-    if (builtin.os.tag == .windows) return readWindows(gpa, io, path);
-    if (builtin.os.tag == .dragonfly) {
-        const name = gpa.dupeZ(u8, path) catch return .unknown;
+    if (builtin.target.os.tag == .windows) return readWindows(gpa, io, path);
+    if (builtin.target.os.tag == .dragonfly) {
+        const name = gpa.dupeSentinel(u8, path, 0) catch return .unknown;
         defer gpa.free(name);
         var stat: DragonflyStatfs = undefined;
         if (dragonfly.statfs(name, &stat) != 0) return .unknown;
         return named(std.mem.sliceTo(&stat.name, 0), stat.flags & 0x1000 != 0);
     }
-    if (builtin.os.tag == .linux) {
-        const name = gpa.dupeZ(u8, path) catch return .unknown;
+    if (builtin.target.os.tag == .linux) {
+        const name = gpa.dupeSentinel(u8, path, 0) catch return .unknown;
         defer gpa.free(name);
         // statfs writes a native-word structure; its first word is f_type.
         // This storage exceeds every Linux ABI's statfs structure.
@@ -31,26 +31,122 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
         if (std.os.linux.errno(rc) != .SUCCESS) return .unknown;
         return linuxType(storage[0]);
     }
-    if (builtin.os.tag.isDarwin() or builtin.os.tag == .freebsd or builtin.os.tag == .openbsd or builtin.os.tag == .netbsd) {
-        const c = @cImport({
-            if (builtin.os.tag == .netbsd) @cDefine("_Pragma(x)", "");
-            @cInclude("sys/param.h");
-            if (builtin.os.tag == .netbsd) @cInclude("sys/statvfs.h") else @cInclude("sys/mount.h");
-        });
-        const name = gpa.dupeZ(u8, path) catch return .unknown;
+    if (mount != void) {
+        const name = gpa.dupeSentinel(u8, path, 0) catch return .unknown;
         defer gpa.free(name);
-        if (builtin.os.tag == .netbsd) {
-            var stat: c.struct_statvfs = undefined;
-            if (c.statvfs(name, &stat) != 0) return .unknown;
-            return named(std.mem.sliceTo(&stat.f_fstypename, 0), stat.f_flag & 0x1000 != 0);
-        } else {
-            var stat: c.struct_statfs = undefined;
-            if (c.statfs(name, &stat) != 0) return .unknown;
-            return named(std.mem.sliceTo(&stat.f_fstypename, 0), stat.f_flags & 0x1000 != 0);
-        }
+        var stat: mount.Stat = undefined;
+        if (mount.stat(name, &stat) != 0) return .unknown;
+        return named(std.mem.sliceTo(&stat.type_name, 0), stat.flags & mount.local != 0);
     }
     return .unknown;
 }
+
+/// The BSD mount query, declared by hand: lookout compiles no C, and std
+/// declares none of it. Each `Stat` is the system header's structure field
+/// for field, under shorter names for the two fields read.
+const mount = switch (builtin.target.os.tag) {
+    .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => struct {
+        /// `struct statfs` with 64-bit inodes, the only layout on arm64.
+        const Stat = extern struct {
+            block_size: u32,
+            io_size: i32,
+            counts: [5]u64,
+            fsid: [2]i32,
+            owner: u32,
+            type: u32,
+            flags: u32,
+            subtype: u32,
+            type_name: [16]u8,
+            mounted_on: [1024]u8,
+            mounted_from: [1024]u8,
+            flags_ext: u32,
+            reserved: [7]u32,
+        };
+        const local = 0x1000; // MNT_LOCAL
+        // x86_64 keeps the 32-bit inode layout under the plain name.
+        const stat = if (builtin.target.cpu.arch == .x86_64) externs.@"statfs$INODE64" else externs.statfs;
+        const externs = struct {
+            extern "c" fn statfs(path: [*:0]const u8, buf: *Stat) c_int;
+            extern "c" fn @"statfs$INODE64"(path: [*:0]const u8, buf: *Stat) c_int;
+        };
+    },
+    .freebsd => struct {
+        /// `struct statfs` as of STATFS_VERSION 0x20140518.
+        const Stat = extern struct {
+            version: u32,
+            type: u32,
+            flags: u64,
+            sizes: [2]u64,
+            counts: [5]u64,
+            io_counts: [4]u64,
+            vnodes: u32,
+            spare0: u32,
+            spare: [9]u64,
+            name_max: u32,
+            owner: u32,
+            fsid: [2]i32,
+            char_spare: [80]u8,
+            type_name: [16]u8,
+            mounted_from: [1024]u8,
+            mounted_on: [1024]u8,
+        };
+        const local = 0x1000; // MNT_LOCAL
+        const stat = externs.statfs;
+        const externs = struct {
+            extern "c" fn statfs(path: [*:0]const u8, buf: *Stat) c_int;
+        };
+    },
+    .openbsd => struct {
+        const Stat = extern struct {
+            flags: u32,
+            block_size: u32,
+            io_size: u32,
+            counts: [6]u64,
+            io_counts: [4]u64,
+            fsid: [2]i32,
+            name_max: u32,
+            owner: u32,
+            ctime: u64,
+            type_name: [16]u8,
+            mounted_on: [90]u8,
+            mounted_from: [90]u8,
+            mounted_spec: [90]u8,
+            /// `union mount_info`, whose largest member is its 160-byte
+            /// `__align`.
+            mount_info: extern union { bytes: [160]u8, alignment: u64 },
+        };
+        const local = 0x1000; // MNT_LOCAL
+        const stat = externs.statfs;
+        const externs = struct {
+            extern "c" fn statfs(path: [*:0]const u8, buf: *Stat) c_int;
+        };
+    },
+    .netbsd => struct {
+        /// `struct statvfs` of NetBSD 10, the one `__statvfs90` fills.
+        const Stat = extern struct {
+            flags: c_ulong,
+            sizes: [3]c_ulong,
+            counts: [8]u64,
+            io_counts: [4]u64,
+            fsidx: [2]i32,
+            fsid: c_ulong,
+            name_max: c_ulong,
+            owner: u32,
+            spare: [4]u64,
+            type_name: [32]u8,
+            mounted_on: [1024]u8,
+            mounted_from: [1024]u8,
+            mounted_label: [1024]u8,
+        };
+        const local = 0x1000; // ST_LOCAL
+        // The header renames statvfs; the plain name is the old ABI.
+        const stat = externs.__statvfs90;
+        const externs = struct {
+            extern "c" fn __statvfs90(path: [*:0]const u8, buf: *Stat) c_int;
+        };
+    },
+    else => void,
+};
 
 fn linuxType(number: usize) Kind {
     return switch (number) {
@@ -61,7 +157,7 @@ fn linuxType(number: usize) Kind {
 }
 
 fn named(name: []const u8, local: bool) Kind {
-    if (std.mem.indexOf(u8, name, "fuse") != null or std.mem.indexOf(u8, name, "puffs") != null) return .fuse;
+    if (std.mem.find(u8, name, "fuse") != null or std.mem.find(u8, name, "puffs") != null) return .fuse;
     return if (local) .local else .network;
 }
 
@@ -131,16 +227,16 @@ pub const Identity = struct {
 /// The identity of what `path` names, symbolic links followed. Null when it
 /// cannot be read, or on a target with no way to ask.
 pub fn identity(io: std.Io, path: []const u8) ?Identity {
-    if (builtin.os.tag == .windows) return identityWindows(io, path);
+    if (builtin.target.os.tag == .windows) return identityWindows(io, path);
     const name = std.posix.toPosixPath(path) catch return null;
-    if (builtin.os.tag == .linux) {
+    if (builtin.target.os.tag == .linux) {
         const linux = std.os.linux;
         var stat: linux.Statx = undefined;
         const rc = linux.statx(linux.AT.FDCWD, &name, 0, .{ .INO = true }, &stat);
         if (linux.errno(rc) != .SUCCESS) return null;
         return .{ .device = @as(u64, stat.dev_major) << 32 | stat.dev_minor, .file = stat.ino };
     }
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => {
             var stat: std.c.Stat = undefined;
             if (std.c.fstatat(std.c.AT.FDCWD, &name, &stat, 0) != 0) return null;
@@ -182,7 +278,7 @@ test "filesystem types select network and FUSE without misclassifying tmpfs" {
 }
 
 test "a real scratch filesystem is local on each supported host" {
-    if (!(builtin.os.tag.isDarwin() or builtin.os.tag == .linux or builtin.os.tag == .windows or builtin.os.tag == .freebsd or builtin.os.tag == .netbsd or builtin.os.tag == .openbsd or builtin.os.tag == .dragonfly)) return error.SkipZigTest;
+    if (!(builtin.target.os.tag.isDarwin() or builtin.target.os.tag == .linux or builtin.target.os.tag == .windows or builtin.target.os.tag == .freebsd or builtin.target.os.tag == .netbsd or builtin.target.os.tag == .openbsd or builtin.target.os.tag == .dragonfly)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -206,13 +302,13 @@ test "one directory has one identity by every name, and another has its own" {
     try tmp.dir.createDirPath(io, "two");
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const one = try std.fs.path.join(gpa, &.{ root, "one" });
+    const one = try std.Io.Dir.path.join(gpa, &.{ root, "one" });
     defer gpa.free(one);
-    const again = try std.fs.path.join(gpa, &.{ root, "one", "inner", ".." });
+    const again = try std.Io.Dir.path.join(gpa, &.{ root, "one", "inner", ".." });
     defer gpa.free(again);
-    const two = try std.fs.path.join(gpa, &.{ root, "two" });
+    const two = try std.Io.Dir.path.join(gpa, &.{ root, "two" });
     defer gpa.free(two);
-    const missing = try std.fs.path.join(gpa, &.{ root, "missing" });
+    const missing = try std.Io.Dir.path.join(gpa, &.{ root, "missing" });
     defer gpa.free(missing);
 
     const first = identity(io, one) orelse return error.SkipZigTest;

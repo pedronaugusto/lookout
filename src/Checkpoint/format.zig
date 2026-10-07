@@ -114,7 +114,7 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {
 /// without a NUL, and without `.` or `..` components that would let it
 /// name something other than what it spells.
 fn sound(subject: []const u8) bool {
-    if (!std.fs.path.isAbsolute(subject) or std.mem.indexOfScalar(u8, subject, 0) != null) return false;
+    if (!std.Io.Dir.path.isAbsolute(subject) or std.mem.findScalar(u8, subject, 0) != null) return false;
     var components = std.mem.tokenizeAny(u8, subject, path_cmp.separators);
     while (components.next()) |component| {
         if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return false;

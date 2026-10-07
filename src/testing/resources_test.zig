@@ -7,11 +7,10 @@ const Watcher = lookout.Watcher;
 
 /// Every backend this target was built with.
 const backends: []const lookout.Backend = all: {
-    const names = @typeInfo(lookout.Backend).@"enum".fields;
-    var list: [names.len]lookout.Backend = undefined;
+    const values = std.enums.values(lookout.Backend);
+    var list: [values.len]lookout.Backend = undefined;
     var len: usize = 0;
-    for (names) |field| {
-        const backend: lookout.Backend = @enumFromInt(field.value);
+    for (values) |backend| {
         if (backend == .auto or !lookout.supported(backend)) continue;
         list[len] = backend;
         len += 1;
@@ -106,7 +105,7 @@ test "poll reports each change from another thread" {
                 w_io.sleep(.fromMilliseconds(150), .awake) catch return;
                 var name: [32]u8 = undefined;
                 self.dir.writeFile(w_io, .{
-                    .sub_path = std.fmt.bufPrint(&name, "w{d}.txt", .{self.round}) catch unreachable,
+                    .sub_path = std.mem.print(&name, "w{d}.txt", .{self.round}) catch unreachable,
                     .data = "x",
                 }) catch |err| {
                     self.failed = err;
@@ -119,7 +118,7 @@ test "poll reports each change from another thread" {
             var toucher: Toucher = .{ .dir = tmp.dir, .round = round };
             const thread = try std.Thread.spawn(.{}, Toucher.run, .{&toucher});
             var name: [32]u8 = undefined;
-            const expected = try std.fs.path.join(gpa, &.{ root, try std.fmt.bufPrint(&name, "w{d}.txt", .{round}) });
+            const expected = try std.Io.Dir.path.join(gpa, &.{ root, try std.mem.print(&name, "w{d}.txt", .{round}) });
             defer gpa.free(expected);
             var seen = false;
             while (!seen) {
@@ -160,7 +159,7 @@ test "a burst arrives whole, or says what it lost" {
         for (0..burst) |i| {
             var name: [64]u8 = undefined;
             try tmp.dir.writeFile(io, .{
-                .sub_path = std.fmt.bufPrint(&name, "a-name-long-enough-to-measure-{d}.txt", .{i}) catch unreachable,
+                .sub_path = std.mem.print(&name, "a-name-long-enough-to-measure-{d}.txt", .{i}) catch unreachable,
                 .data = "x",
             });
         }
@@ -224,11 +223,11 @@ test "a watched directory costs what it is budgeted" {
 
         for (0..dirs) |d| {
             var name: [32]u8 = undefined;
-            try tmp.dir.createDirPath(io, std.fmt.bufPrint(&name, "d{d}", .{d}) catch unreachable);
+            try tmp.dir.createDirPath(io, std.mem.print(&name, "d{d}", .{d}) catch unreachable);
             for (0..4) |i| {
                 var entry: [48]u8 = undefined;
                 try tmp.dir.writeFile(io, .{
-                    .sub_path = std.fmt.bufPrint(&entry, "d{d}/f{d}.txt", .{ d, i }) catch unreachable,
+                    .sub_path = std.mem.print(&entry, "d{d}/f{d}.txt", .{ d, i }) catch unreachable,
                     .data = "x",
                 });
             }

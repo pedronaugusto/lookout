@@ -9,7 +9,7 @@ const builtin = @import("builtin");
 const c = access.c;
 
 test "a read that completes with nothing is an overflow, and the watch reads on" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     // ReadDirectoryChangesW: "If the number of changes exceeds the
     // buffer size, the entire contents of the buffer are discarded, the
     // lpBytesReturned parameter contains zero". Through a completion
@@ -52,7 +52,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
             if (overlapped == &watch.overlapped) break;
         }
     }
-    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, @intFromEnum(id), &watch.overlapped) != 0);
+    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, @backingInt(id), &watch.overlapped) != 0);
 
     var overflows: usize = 0;
     var waited: u32 = 0;
@@ -70,7 +70,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     // Re-armed: the watch is still held, and the next change is read.
     try testing.expect(w.watches.contains(id));
     try tmp.dir.writeFile(io, .{ .sub_path = "after.txt", .data = "x" });
-    const after = try std.fs.path.join(gpa, &.{ root, "after.txt" });
+    const after = try std.Io.Dir.path.join(gpa, &.{ root, "after.txt" });
     defer gpa.free(after);
     var found = false;
     waited = 0;
@@ -83,7 +83,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
 }
 
 test "a lost read reads the entry counts again, so the budget holds after it" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     // Three creations, read and counted; then the count set back to what
     // it would have been had the kernel discarded them, which is what a
     // read it could not hold does ("the entire contents of the buffer
@@ -130,7 +130,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
             if (overlapped == &watch.overlapped) break;
         }
     }
-    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, @intFromEnum(id), &watch.overlapped) != 0);
+    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, @backingInt(id), &watch.overlapped) != 0);
 
     var overflowed = false;
     waited = 0;
@@ -156,7 +156,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
 }
 
 test "allocation failure during delivery releases a removed Windows completion" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();

@@ -22,11 +22,10 @@ const Watcher = lookout.Watcher;
 /// checkable: a program written against `lookout.Watcher` sees the same
 /// events whichever mechanism is underneath.
 const backends: []const lookout.Backend = all: {
-    const names = @typeInfo(lookout.Backend).@"enum".fields;
-    var list: [names.len]lookout.Backend = undefined;
+    const values = std.enums.values(lookout.Backend);
+    var list: [values.len]lookout.Backend = undefined;
     var len: usize = 0;
-    for (names) |field| {
-        const backend: lookout.Backend = @enumFromInt(field.value);
+    for (values) |backend| {
         if (backend == .auto or !lookout.supported(backend)) continue;
         list[len] = backend;
         len += 1;
@@ -118,7 +117,7 @@ const Fixture = struct {
         try parts.append(gpa, f.root);
         var it = std.mem.splitScalar(u8, sub_path, '/');
         while (it.next()) |part| try parts.append(gpa, part);
-        return std.fs.path.join(gpa, parts.items);
+        return std.Io.Dir.path.join(gpa, parts.items);
     }
 
     /// One event the suite is waiting for.
@@ -816,7 +815,7 @@ test "refilter changes a live watch's admitted paths and registrations" {
             if (saw) break;
         }
         try std.testing.expect(saw);
-        try std.testing.expectError(error.UnknownWatch, f.watcher.refilter(@enumFromInt(0xffffffff), .none));
+        try std.testing.expectError(error.UnknownWatch, f.watcher.refilter(@fromBackingInt(@intCast(0xffffffff)), .none));
     }
 }
 
@@ -927,9 +926,9 @@ test "writes after refilter are reported while a writer runs through the change"
                 var keep_buf: [40]u8 = undefined;
                 var new_buf: [40]u8 = undefined;
                 var skip_buf: [40]u8 = undefined;
-                const keep = std.fmt.bufPrint(&keep_buf, "keep/post-{d}.txt", .{j}) catch unreachable;
-                const new = std.fmt.bufPrint(&new_buf, "new/post-{d}.txt", .{j}) catch unreachable;
-                const skip = std.fmt.bufPrint(&skip_buf, "skip/post-{d}.txt", .{j}) catch unreachable;
+                const keep = std.mem.print(&keep_buf, "keep/post-{d}.txt", .{j}) catch unreachable;
+                const new = std.mem.print(&new_buf, "new/post-{d}.txt", .{j}) catch unreachable;
+                const skip = std.mem.print(&skip_buf, "skip/post-{d}.txt", .{j}) catch unreachable;
                 dir.writeFile(std.testing.io, .{ .sub_path = keep, .data = "x" }) catch {
                     self.failed.store(true, .release);
                     return;
@@ -980,8 +979,8 @@ test "writes after refilter are reported while a writer runs through the change"
         for (0..4) |j| {
             var keep_buf: [40]u8 = undefined;
             var new_buf: [40]u8 = undefined;
-            wanted[2 * j] = try f.path(try std.fmt.bufPrint(&keep_buf, "keep/post-{d}.txt", .{j}));
-            wanted[2 * j + 1] = try f.path(try std.fmt.bufPrint(&new_buf, "new/post-{d}.txt", .{j}));
+            wanted[2 * j] = try f.path(try std.mem.print(&keep_buf, "keep/post-{d}.txt", .{j}));
+            wanted[2 * j + 1] = try f.path(try std.mem.print(&new_buf, "new/post-{d}.txt", .{j}));
         }
         defer for (wanted) |path| gpa.free(path);
         const excluded = try f.path("skip");
@@ -1008,12 +1007,12 @@ fn dumpDelivery(f: *const Fixture, phase: []const u8) void {
     });
     for (f.watcher.batch.events.items) |event| {
         std.debug.print("event id={d} kind={s} path={s} from={?s}\n", .{
-            @intFromEnum(event.id), @tagName(event.kind), event.path, event.from,
+            @backingInt(event.id), @tagName(event.kind), event.path, event.from,
         });
     }
     for (f.watcher.batch.held.keys(), f.watcher.batch.held.values()) |key, held| {
         std.debug.print("held id={d} kind={s} path={s} from={?s} last_ns={d} size={?d}\n", .{
-            @intFromEnum(key.id), @tagName(held.kind), key.path, held.from, held.last_ns, held.size,
+            @backingInt(key.id), @tagName(held.kind), key.path, held.from, held.last_ns, held.size,
         });
     }
 }
@@ -1077,7 +1076,7 @@ test "a folder appearing under a newly admitted path during refilter is reached"
 
         fn allow(context: ?*anyopaque, subject: []const u8) bool {
             const gate: *Self = @ptrCast(@alignCast(context.?));
-            if (std.mem.eql(u8, std.fs.path.basename(subject), "new") and
+            if (std.mem.eql(u8, std.Io.Dir.path.basename(subject), "new") and
                 !gate.go.swap(true, .acq_rel))
             {
                 while (!gate.done.load(.acquire))
@@ -1138,7 +1137,7 @@ test "a folder appearing under a newly admitted path during refilter is reached"
 /// rule a pattern list cannot state and a caller can.
 fn notHidden(context: ?*anyopaque, path: []const u8) bool {
     _ = context;
-    return !std.mem.startsWith(u8, std.fs.path.basename(path), ".");
+    return !std.mem.startsWith(u8, std.Io.Dir.path.basename(path), ".");
 }
 
 test "a caller predicate excludes what a pattern cannot say" {
@@ -1225,7 +1224,7 @@ test "a tree the filter ignores gets no registration however it grows" {
         fn allow(context: ?*anyopaque, path: []const u8) bool {
             const asked: *usize = @ptrCast(@alignCast(context.?));
             asked.* += 1;
-            const name = std.fs.path.basename(path);
+            const name = std.Io.Dir.path.basename(path);
             return !std.mem.eql(u8, name, "build") and !std.mem.eql(u8, name, "generated");
         }
     };
@@ -1319,7 +1318,7 @@ test "a directory past the entry limit reports overflow against the watch root" 
         for (0..6) |i| {
             var name: [8]u8 = undefined;
             try tmp.dir.writeFile(io, .{
-                .sub_path = std.fmt.bufPrint(&name, "f{d}", .{i}) catch unreachable,
+                .sub_path = std.mem.print(&name, "f{d}", .{i}) catch unreachable,
                 .data = "x",
             });
         }
@@ -1346,7 +1345,7 @@ test "an overflow is returned before the debounce window closes" {
     const id = try f.watcher.add(f.root, .{});
     for (0..3) |i| {
         var name: [8]u8 = undefined;
-        try f.write(try std.fmt.bufPrint(&name, "f{d}", .{i}), "x");
+        try f.write(try std.mem.print(&name, "f{d}", .{i}), "x");
     }
     // A non-blocking poll must return the scan's actual loss notice,
     // even though no ordinary change has had time to go quiet.
@@ -1384,7 +1383,7 @@ test "what an overflow lost can be read back from a baseline" {
         for (0..6) |i| {
             var name: [8]u8 = undefined;
             try tmp.dir.writeFile(io, .{
-                .sub_path = std.fmt.bufPrint(&name, "f{d}", .{i}) catch unreachable,
+                .sub_path = std.mem.print(&name, "f{d}", .{i}) catch unreachable,
                 .data = "x",
             });
         }
@@ -1485,7 +1484,7 @@ test "closes are not reported unless they are asked for" {
 fn writeBurst(dir: std.Io.Dir, count: usize) !void {
     for (0..count) |i| {
         var name: [96]u8 = undefined;
-        const sub_path = std.fmt.bufPrint(
+        const sub_path = std.mem.print(
             &name,
             "a-rather-long-name-so-that-one-record-is-not-small-{d}.txt",
             .{i},
@@ -1910,7 +1909,7 @@ const Ledger = struct {
 
     fn note(l: *Ledger, events: []const lookout.Event) !void {
         for (events) |event| {
-            trace.log("suite ledger id={d} {s} {s}", .{ @intFromEnum(event.id), @tagName(event.kind), event.path });
+            trace.log("suite ledger id={d} {s} {s}", .{ @backingInt(event.id), @tagName(event.kind), event.path });
             try l.seen.append(std.testing.allocator, .{
                 .id = event.id,
                 .kind = event.kind,
@@ -1952,7 +1951,7 @@ const Ledger = struct {
             defer gpa.free(p);
             if (l.count(want.id, want.kind, p) == 0) {
                 std.debug.print("{s}: no {s} for watch {d} at {s} within {d} ms\n", .{
-                    @tagName(f.watcher.backend()), @tagName(want.kind), @intFromEnum(want.id), p, timeout_ms,
+                    @tagName(f.watcher.backend()), @tagName(want.kind), @backingInt(want.id), p, timeout_ms,
                 });
             }
         }
@@ -2131,7 +2130,7 @@ test "a pending path that leads to one already watched is not watched twice" {
     // rather than registering the path a second time under another name.
     // Windows makes a symbolic link only with a privilege a test cannot
     // count on.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
@@ -2194,7 +2193,7 @@ test "a folder shared with a pending watch keeps its entry budget" {
         const folder = try f.watcher.add(f.root, .{});
         for (0..6) |i| {
             var name: [8]u8 = undefined;
-            try f.write(std.fmt.bufPrint(&name, "f{d}", .{i}) catch unreachable, "x");
+            try f.write(std.mem.print(&name, "f{d}", .{i}) catch unreachable, "x");
         }
 
         var ledger: Ledger = .{};
@@ -2291,7 +2290,7 @@ test "a folder several watches share is counted once against its budget" {
         for (ledger.seen.items) |key| {
             if (key.kind == .overflow) {
                 std.debug.print("{s}: watch {d} overflowed at {s} with four entries under a budget of four\n", .{
-                    @tagName(backend), @intFromEnum(key.id), key.path,
+                    @tagName(backend), @backingInt(key.id), key.path,
                 });
             }
             try std.testing.expect(key.kind != .overflow);
@@ -2512,7 +2511,7 @@ test "an event carries when it was seen" {
 test "a symbolic link is an entry, not a doorway" {
     // Creating one on Windows needs a privilege the CI runner does not
     // have, and the claim being tested is about the POSIX backends.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     for (backends) |backend| {
         var f = try Fixture.init(backend);
@@ -2604,7 +2603,7 @@ test "a watcher torn down with deliveries in flight does not outlive them" {
             for (0..24) |j| {
                 var name: [16]u8 = undefined;
                 try tmp.dir.writeFile(io, .{
-                    .sub_path = std.fmt.bufPrint(&name, "f{d}", .{j}) catch unreachable,
+                    .sub_path = std.mem.print(&name, "f{d}", .{j}) catch unreachable,
                     .data = "x",
                 });
             }
@@ -2631,7 +2630,7 @@ test "watches taken and dropped in quick succession keep working" {
             _ = try watcher.add(root, .{});
 
             try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
-            const wanted = try std.fs.path.join(gpa, &.{ root, "a.txt" });
+            const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "a.txt" });
             defer gpa.free(wanted);
 
             // Every watch has to work, not most of them. A registration
@@ -2658,10 +2657,10 @@ test "the watch limit is one error, named the same on every backend" {
     // one, which a test may not assume. What a test can hold is the
     // shape: one error, in the set `add` publishes, whichever backend is
     // underneath -- so a caller writes one arm and not five.
-    const set = @typeInfo(Watcher.AddError).error_set.?;
+    const set = @typeInfo(Watcher.AddError).error_set.error_names.?;
     var named = false;
-    for (set) |err| {
-        if (std.mem.eql(u8, err.name, "WatchLimitReached")) named = true;
+    for (set) |name| {
+        if (std.mem.eql(u8, name, "WatchLimitReached")) named = true;
     }
     try std.testing.expect(named);
 }
@@ -2700,7 +2699,7 @@ test "an event says whether the path is a file or a directory" {
 test "a watch that cannot cover a subtree says so instead of going quiet" {
     // Running as a user who is refused nothing makes an unreadable
     // directory readable, and there is nothing to report.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const euid = if (builtin.link_libc)
         std.c.geteuid()
     else
@@ -2716,7 +2715,7 @@ test "a watch that cannot cover a subtree says so instead of going quiet" {
         var f = try Fixture.init(backend);
         defer f.deinit();
         const io = std.testing.io;
-        try f.tmp.dir.createDir(io, "closed", @enumFromInt(0o000));
+        try f.tmp.dir.createDir(io, "closed", @fromBackingInt(@intCast(0o000)));
         // Put it back before the fixture tries to delete the tree.
         defer f.tmp.dir.setFilePermissions(io, "closed", .default_dir, .{}) catch {};
 
@@ -2967,7 +2966,7 @@ test "a watcher says what it is watching" {
 test "the descriptor becomes readable when there is something to report" {
     // A completion port is not a descriptor anything else can wait on,
     // and `std.posix.poll` is not the call to wait for one with.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     for (backends) |backend| {
         var f = try Fixture.init(backend);
@@ -3028,9 +3027,9 @@ test "two watchers in one process do not disturb each other" {
         try tmp.dir.createDirPath(io, "one");
         try tmp.dir.createDirPath(io, "two");
 
-        const first_root = try std.fs.path.join(gpa, &.{ root, "one" });
+        const first_root = try std.Io.Dir.path.join(gpa, &.{ root, "one" });
         defer gpa.free(first_root);
-        const second_root = try std.fs.path.join(gpa, &.{ root, "two" });
+        const second_root = try std.Io.Dir.path.join(gpa, &.{ root, "two" });
         defer gpa.free(second_root);
 
         var first: Watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval_ms = 20 });
@@ -3043,9 +3042,9 @@ test "two watchers in one process do not disturb each other" {
         try tmp.dir.writeFile(io, .{ .sub_path = "one/a.txt", .data = "one" });
         try tmp.dir.writeFile(io, .{ .sub_path = "two/b.txt", .data = "two" });
 
-        const wanted_first = try std.fs.path.join(gpa, &.{ first_root, "a.txt" });
+        const wanted_first = try std.Io.Dir.path.join(gpa, &.{ first_root, "a.txt" });
         defer gpa.free(wanted_first);
-        const wanted_second = try std.fs.path.join(gpa, &.{ second_root, "b.txt" });
+        const wanted_second = try std.Io.Dir.path.join(gpa, &.{ second_root, "b.txt" });
         defer gpa.free(wanted_second);
 
         var saw_first = false;
@@ -3154,11 +3153,11 @@ test "what changed while nothing was watching is reported on resuming" {
     defer watcher.deinit();
     _ = try watcher.add(root, .{ .recursive = true });
 
-    const appeared = try std.fs.path.join(gpa, &.{ root, "while-away.txt" });
+    const appeared = try std.Io.Dir.path.join(gpa, &.{ root, "while-away.txt" });
     defer gpa.free(appeared);
-    const changed = try std.fs.path.join(gpa, &.{ root, "kept.txt" });
+    const changed = try std.Io.Dir.path.join(gpa, &.{ root, "kept.txt" });
     defer gpa.free(changed);
-    const deleted = try std.fs.path.join(gpa, &.{ root, "gone.txt" });
+    const deleted = try std.Io.Dir.path.join(gpa, &.{ root, "gone.txt" });
     defer gpa.free(deleted);
 
     var saw_appeared = false;
@@ -3224,7 +3223,7 @@ test "resuming retains a debounced change that poll has not handed out" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const wanted = try std.fs.path.join(gpa, &.{ root, "held.txt" });
+    const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "held.txt" });
     defer gpa.free(wanted);
     var saved: lookout.Checkpoint = undefined;
     defer saved.deinit();

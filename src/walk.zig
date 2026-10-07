@@ -120,9 +120,9 @@ fn walk(
         const current = frontier.items[i];
         var dir = Io.Dir.openDirAbsolute(io, current, .{ .iterate = true }) catch continue;
         defer dir.close(io);
-        var it = if (with_meta and builtin.os.tag.isDarwin()) Bulk.init(dir) else dir.iterate();
+        var it = if (with_meta and builtin.target.os.tag.isDarwin()) Bulk.init(dir) else dir.iterate();
         while (it.next(io) catch null) |listed| {
-            const child = try std.fs.path.join(gpa, &.{ current, listed.name });
+            const child = try std.Io.Dir.path.join(gpa, &.{ current, listed.name });
             var kept = false;
             defer if (!kept) gpa.free(child);
 
@@ -238,7 +238,7 @@ const Bulk = struct {
 
     /// Fields are packed at four-byte alignment.
     fn read(b: *const Bulk, comptime T: type, at: usize) T {
-        return std.mem.readInt(T, b.buffer[at..][0..@sizeOf(T)], builtin.cpu.arch.endian());
+        return std.mem.readInt(T, b.buffer[at..][0..@sizeOf(T)], builtin.target.cpu.arch.endian());
     }
 
     fn time(b: *const Bulk, at: usize) i96 {
@@ -327,7 +327,7 @@ test "a walk of an empty or unreadable tree visits nothing and does not fail" {
     try tree(*Count, Count.visit, gpa, io, root, &count);
     try testing.expectEqual(@as(usize, 0), count.seen);
 
-    const absent = try std.fs.path.join(gpa, &.{ root, "not-there" });
+    const absent = try std.Io.Dir.path.join(gpa, &.{ root, "not-there" });
     defer gpa.free(absent);
     try tree(*Count, Count.visit, gpa, io, absent, &count);
     try testing.expectEqual(@as(usize, 0), count.seen);
@@ -340,11 +340,11 @@ test "a walk with metadata reads what lstat reads, across listing batches" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "dir");
     try tmp.dir.writeFile(io, .{ .sub_path = "dir/file", .data = "contents" });
-    if (builtin.os.tag != .windows) try tmp.dir.symLink(io, "file", "dir/link", .{});
+    if (builtin.target.os.tag != .windows) try tmp.dir.symLink(io, "file", "dir/link", .{});
     // Long names so one directory takes several bulk listings.
     var name_buffer: [200]u8 = undefined;
     for (0..300) |i| {
-        const name = try std.fmt.bufPrint(&name_buffer, "{d:0>3}{s}", .{ i, "n" ** 190 });
+        const name = try std.mem.print(&name_buffer, "{d:0>3}{s}", .{ i, &@as([190]u8, @splat('n')) });
         try tmp.dir.writeFile(io, .{ .sub_path = name, .data = name[0 .. i % name.len] });
     }
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
@@ -364,7 +364,7 @@ test "a walk with metadata reads what lstat reads, across listing batches" {
     };
     var check: Check = .{};
     try treeWithMeta(*Check, Check.visit, gpa, io, root, &check);
-    const links: usize = if (builtin.os.tag == .windows) 0 else 1;
+    const links: usize = if (builtin.target.os.tag == .windows) 0 else 1;
     try testing.expectEqual(300 + 2 + links, check.seen);
 }
 

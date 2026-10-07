@@ -18,11 +18,10 @@ const gpa = testing.allocator;
 const io = testing.io;
 
 const backends: []const lookout.Backend = all: {
-    const names = @typeInfo(lookout.Backend).@"enum".fields;
-    var list: [names.len]lookout.Backend = undefined;
+    const values = std.enums.values(lookout.Backend);
+    var list: [values.len]lookout.Backend = undefined;
     var len: usize = 0;
-    for (names) |field| {
-        const backend: lookout.Backend = @enumFromInt(field.value);
+    for (values) |backend| {
         if (backend == .auto or !lookout.supported(backend)) continue;
         list[len] = backend;
         len += 1;
@@ -68,7 +67,7 @@ const Fixture = struct {
         try parts.append(gpa, f.root);
         var it = std.mem.splitScalar(u8, sub_path, '/');
         while (it.next()) |part| try parts.append(gpa, part);
-        return std.fs.path.join(gpa, parts.items);
+        return std.Io.Dir.path.join(gpa, parts.items);
     }
 
     fn watch(f: *Fixture, options: lookout.AddOptions) !lookout.WatchId {
@@ -92,7 +91,7 @@ const Fixture = struct {
     fn link(f: *Fixture, target: []const u8, at: []const u8) !void {
         const absolute = if (std.mem.eql(u8, target, ".")) try gpa.dupe(u8, f.root) else try f.path(target);
         defer gpa.free(absolute);
-        if (builtin.os.tag != .windows) return f.tmp.dir.symLink(io, absolute, at, .{ .is_directory = true });
+        if (builtin.target.os.tag != .windows) return f.tmp.dir.symLink(io, absolute, at, .{ .is_directory = true });
         try f.tmp.dir.createDir(io, at, .default_dir);
         const spelled = try f.path(at);
         defer gpa.free(spelled);
@@ -100,7 +99,7 @@ const Fixture = struct {
     }
 
     fn unlink(f: *Fixture, at: []const u8) !void {
-        if (builtin.os.tag == .windows) return f.tmp.dir.deleteDir(io, at);
+        if (builtin.target.os.tag == .windows) return f.tmp.dir.deleteDir(io, at);
         try f.tmp.dir.deleteFile(io, at);
     }
 
@@ -214,7 +213,7 @@ fn junction(at: []const u8, target: []const u8) !void {
     const names = (substitute.len + 1 + print.len + 1) * 2;
     var data: std.ArrayList(u8) = .empty;
     defer data.deinit(gpa);
-    const little = std.builtin.Endian.little;
+    const little = std.lang.Endian.little;
     try appendInt(u32, &data, 0xA000_0003, little);
     try appendInt(u16, &data, @intCast(8 + names), little);
     try appendInt(u16, &data, 0, little);
@@ -232,7 +231,7 @@ fn junction(at: []const u8, target: []const u8) !void {
     }
 }
 
-fn appendInt(comptime T: type, data: *std.ArrayList(u8), value: T, endian: std.builtin.Endian) !void {
+fn appendInt(comptime T: type, data: *std.ArrayList(u8), value: T, endian: std.lang.Endian) !void {
     var bytes: [@sizeOf(T)]u8 = undefined;
     std.mem.writeInt(T, &bytes, value, endian);
     try data.appendSlice(gpa, &bytes);

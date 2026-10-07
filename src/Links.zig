@@ -188,8 +188,8 @@ pub fn consider(l: *const Links, subject: []const u8) Allocator.Error!Verdict {
 /// of them, or it holds one of them -- a link back to an ancestor.
 fn reaches(l: *const Links, target: []const u8, identity: Identity) bool {
     if (l.holds(identity)) return true;
-    var above = std.fs.path.dirname(target);
-    while (above) |dir| : (above = std.fs.path.dirname(dir)) {
+    var above = std.Io.Dir.path.dirname(target);
+    while (above) |dir| : (above = std.Io.Dir.path.dirname(dir)) {
         if (l.holds(filesystem.identity(l.io, dir) orelse continue)) return true;
     }
     if (isAbove(l.io, identity, l.root)) return true;
@@ -206,8 +206,8 @@ fn holds(l: *const Links, identity: Identity) bool {
 
 /// Whether the directory that is `identity` is a proper ancestor of `inner`.
 fn isAbove(io: Io, identity: Identity, inner: []const u8) bool {
-    var above = std.fs.path.dirname(inner);
-    while (above) |dir| : (above = std.fs.path.dirname(dir)) {
+    var above = std.Io.Dir.path.dirname(inner);
+    while (above) |dir| : (above = std.Io.Dir.path.dirname(dir)) {
         const there = filesystem.identity(io, dir) orelse continue;
         if (there.eql(identity)) return true;
     }
@@ -501,7 +501,7 @@ test "a link is followed only into a directory the watch does not reach" {
     try tmp.dir.writeFile(io, .{ .sub_path = "root/plain", .data = "x" });
     const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(base);
-    const root = try std.fs.path.join(gpa, &.{ base, "root" });
+    const root = try std.Io.Dir.path.join(gpa, &.{ base, "root" });
     defer gpa.free(root);
 
     const Case = struct { link: []const u8, target: []const u8, verdict: std.meta.Tag(Verdict) };
@@ -514,13 +514,13 @@ test "a link is followed only into a directory the watch does not reach" {
         .{ .link = "dangling", .target = "missing", .verdict = .idle },
     };
     for (cases) |case| {
-        const target = try std.fs.path.join(gpa, &.{ base, case.target });
+        const target = try std.Io.Dir.path.join(gpa, &.{ base, case.target });
         defer gpa.free(target);
-        const at = try std.fs.path.join(gpa, &.{ "root", case.link });
+        const at = try std.Io.Dir.path.join(gpa, &.{ "root", case.link });
         defer gpa.free(at);
         tmp.dir.symLink(io, target, at, .{ .is_directory = case.verdict != .idle }) catch |err| {
             // Windows asks for a privilege to make a symbolic link.
-            if (builtin.os.tag == .windows) return error.SkipZigTest;
+            if (builtin.target.os.tag == .windows) return error.SkipZigTest;
             return err;
         };
     }
@@ -537,22 +537,22 @@ test "a link is followed only into a directory the watch does not reach" {
     };
     var nothing: u8 = 0;
     const idle: Host = .{ .context = &nothing, .issue_fn = Idle.issue, .register_fn = Idle.register, .unregister_fn = Idle.unregister };
-    const l = (try create(gpa, io, @enumFromInt(0), root, .none, 64)) orelse return error.SkipZigTest;
+    const l = (try create(gpa, io, @fromBackingInt(@intCast(0)), root, .none, 64)) orelse return error.SkipZigTest;
     defer l.destroy(idle);
     for (cases) |case| {
-        const subject = try std.fs.path.join(gpa, &.{ root, case.link });
+        const subject = try std.Io.Dir.path.join(gpa, &.{ root, case.link });
         defer gpa.free(subject);
         const verdict = try l.consider(subject);
         defer if (verdict == .follow) gpa.free(verdict.follow.target);
         try testing.expectEqual(case.verdict, std.meta.activeTag(verdict));
     }
-    const plain = try std.fs.path.join(gpa, &.{ root, "plain" });
+    const plain = try std.Io.Dir.path.join(gpa, &.{ root, "plain" });
     defer gpa.free(plain);
     try testing.expectEqual(Verdict.none, try l.consider(plain));
 
     // Past the most a watch follows, the one link that would be followed is not.
     l.max = 0;
-    const out = try std.fs.path.join(gpa, &.{ root, "out" });
+    const out = try std.Io.Dir.path.join(gpa, &.{ root, "out" });
     defer gpa.free(out);
     try testing.expectEqual(Verdict.full, try l.consider(out));
 }

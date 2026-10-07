@@ -50,7 +50,7 @@ index: std.HashMapUnmanaged(EventKey, u32, EventKeyContext, std.hash_map.default
 /// reported. Survives `reset`, because a file still being written is not
 /// news that expires with the poll that noticed it. Keys are owned here,
 /// and so is each `Held.from`.
-held: std.ArrayHashMapUnmanaged(EventKey, Held, EventKeyArrayContext, true),
+held: std.array_hash_map.Custom(EventKey, Held, EventKeyArrayContext, true),
 /// The most events one window may hold, or zero for no ceiling. See
 /// `@import("options.zig").Options.max_events`.
 limit: usize,
@@ -61,17 +61,17 @@ deferred: std.ArrayList(Deferred),
 /// `lookout.Watcher.poll` answers with `lookout.Kind.overflow` against
 /// their roots -- the batch knows it had to stop, and only the watcher
 /// knows what to say so against.
-dropped: std.AutoArrayHashMapUnmanaged(WatchId, void),
+dropped: std.array_hash_map.Auto(WatchId, void),
 /// Registrations on the directories followed links lead to, by the id
 /// the backend knows each one by. Their changes are spelled under the
 /// link and recorded as the watch's the link is in. Borrowed: the
 /// watcher owns each alias and takes it out of here before freeing it.
 /// See `@import("options.zig").AddOptions.follow_symlinks`.
-aliases: std.AutoArrayHashMapUnmanaged(WatchId, *const Alias) = .empty,
+aliases: std.array_hash_map.Auto(WatchId, *const Alias) = .empty,
 /// The watches that follow links. A change to a name under one of them is
 /// noted for the watcher, which looks for links appearing, changing and
 /// going there.
-noting: std.AutoArrayHashMapUnmanaged(WatchId, void) = .empty,
+noting: std.array_hash_map.Auto(WatchId, void) = .empty,
 /// What has changed under `noting` watches since the watcher last took
 /// the notes. Paths owned here.
 notes: std.ArrayList(Note) = .empty,
@@ -120,7 +120,7 @@ pub const Alias = struct {
         if (length > buffer.len) return null;
         @memcpy(buffer[0..alias.logical.len], alias.logical);
         if (rest.len != 0) {
-            buffer[alias.logical.len] = std.fs.path.sep;
+            buffer[alias.logical.len] = std.Io.Dir.path.sep;
             @memcpy(buffer[alias.logical.len + 1 ..][0..rest.len], rest);
         }
         return buffer[0..length];
@@ -132,7 +132,7 @@ pub const Alias = struct {
         const spelled = if (rest.len == 0)
             try gpa.dupe(u8, alias.logical)
         else
-            try std.fs.path.join(gpa, &.{ alias.logical, rest });
+            try std.Io.Dir.path.join(gpa, &.{ alias.logical, rest });
         return spelled;
     }
 
@@ -191,7 +191,7 @@ pub const EventKey = struct {
 
 pub const EventKeyContext = struct {
     pub fn hash(_: EventKeyContext, key: EventKey) u64 {
-        return path_cmp.hashOwned(@intFromEnum(key.id), key.path);
+        return path_cmp.hashOwned(@backingInt(key.id), key.path);
     }
 
     pub fn eql(_: EventKeyContext, a: EventKey, b: EventKey) bool {
@@ -824,7 +824,7 @@ test "one event per path, strongest kind wins" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{});
     defer b.deinit(gpa);
 
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try b.push(gpa, id, "/tmp/a", .modified, .file);
     try b.push(gpa, id, "/tmp/a", .created, .file);
     try b.push(gpa, id, "/tmp/a", .attributes, .file);
@@ -842,7 +842,7 @@ test "removal outranks creation and overflow outranks everything" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{});
     defer b.deinit(gpa);
 
-    const id: WatchId = @enumFromInt(7);
+    const id: WatchId = @fromBackingInt(@intCast(7));
     try b.push(gpa, id, "/tmp/a", .created, .file);
     try b.push(gpa, id, "/tmp/a", .removed, .file);
     try testing.expectEqual(Kind.removed, b.events.items[0].kind);
@@ -857,7 +857,7 @@ test "a finished write outranks the writing, and a creation outranks both" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{});
     defer b.deinit(gpa);
 
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try b.push(gpa, id, "/tmp/a", .modified, .file);
     try b.push(gpa, id, "/tmp/a", .closed, .file);
     // The window says the writing is over rather than that it happened,
@@ -876,10 +876,10 @@ test "reset drops the previous window" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{});
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/a", .created, .file);
     b.reset(gpa);
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/a", .modified, .file);
     try testing.expectEqual(Kind.modified, b.events.items[0].kind);
 }
 
@@ -889,7 +889,7 @@ test "a paired rename is one event carrying where it came from" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{});
     defer b.deinit(gpa);
 
-    try b.pushRename(gpa, @enumFromInt(0), "/tmp/new", "/tmp/old", .file);
+    try b.pushRename(gpa, @fromBackingInt(@intCast(0)), "/tmp/new", "/tmp/old", .file);
     try testing.expectEqual(@as(usize, 1), b.events.items.len);
     try testing.expectEqual(Kind.renamed, b.events.items[0].kind);
     try testing.expectEqualStrings("/tmp/new", b.events.items[0].path);
@@ -902,7 +902,7 @@ test "a stronger non-rename clears an earlier rename source" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{});
     defer b.deinit(gpa);
 
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try b.pushRename(gpa, id, "/tmp/new", "/tmp/old", .file);
     try b.push(gpa, id, "/tmp/new", .removed, .file);
 
@@ -918,7 +918,7 @@ test "every event carries when it was seen" {
     defer b.deinit(gpa);
 
     const before: Io.Timestamp = .now(b.io, .awake);
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/a", .created, .file);
     const after: Io.Timestamp = .now(b.io, .awake);
 
     const stamped = b.events.items[0].time;
@@ -932,7 +932,7 @@ test "a settling modification is held back until it is due" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/a", .modified, .file);
     try b.promote(gpa);
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
     try testing.expect(b.nextDueMs().? > 0);
@@ -952,15 +952,15 @@ test "a name event settles the question of the contents" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified, .file);
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .removed, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/a", .modified, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/a", .removed, .file);
     try testing.expectEqual(@as(usize, 0), b.held.count());
     try testing.expectEqual(Kind.removed, b.events.items[0].kind);
 }
 
 test "loss notices bypass holding and displace held changes" {
     const gpa = testing.allocator;
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     for ([_]Options{
         .{ .debounce_ms = 50, .max_events = 1 },
         .{ .settle_ms = 50, .max_events = 1 },
@@ -989,7 +989,7 @@ test "loss notices bypass holding and displace held changes" {
 
 test "loss notices keep their precedence in a debounced delivery" {
     const gpa = testing.allocator;
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     const kinds = std.enums.values(Kind);
     for (kinds) |first| {
         for (kinds) |last| {
@@ -1016,7 +1016,7 @@ test "debouncing holds ordinary kinds and reports the one seen last" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try b.push(gpa, id, "/tmp/a", .created, .file);
     try b.push(gpa, id, "/tmp/a", .modified, .file);
     try b.push(gpa, id, "/tmp/a", .removed, .file);
@@ -1040,8 +1040,8 @@ test "a debounced rename keeps where it came from" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/new", .modified, .file);
-    try b.pushRename(gpa, @enumFromInt(0), "/tmp/new", "/tmp/old", .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/new", .modified, .file);
+    try b.pushRename(gpa, @fromBackingInt(@intCast(0)), "/tmp/new", "/tmp/old", .file);
     b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
     try b.promote(gpa);
 
@@ -1055,9 +1055,9 @@ test "debouncing stamps an event with when the path first changed" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/a", .created, .file);
     const first = b.held.values()[0].first_ns;
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .modified, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/a", .modified, .file);
     b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
     try b.promote(gpa);
 
@@ -1071,7 +1071,7 @@ test "a push that is held still moves the revision" {
     defer b.deinit(gpa);
 
     const before = b.revision;
-    try b.push(gpa, @enumFromInt(0), "/tmp/a", .created, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/a", .created, .file);
     try testing.expect(b.revision > before);
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
 }
@@ -1082,8 +1082,8 @@ test "discarding a watch takes its events and its held paths with it" {
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .debounce_ms = 50 });
     defer b.deinit(gpa);
 
-    const kept: WatchId = @enumFromInt(1);
-    const dropped: WatchId = @enumFromInt(2);
+    const kept: WatchId = @fromBackingInt(@intCast(1));
+    const dropped: WatchId = @fromBackingInt(@intCast(2));
     try b.push(gpa, kept, "/tmp/a", .created, .file);
     try b.push(gpa, dropped, "/tmp/b", .created, .file);
     try b.push(gpa, kept, "/tmp/c", .created, .file);
@@ -1124,7 +1124,7 @@ test "a held modification that is still growing is not reported yet" {
     var b: Batch = .init(clock.frozen(io, &vtable), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), target, .modified, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), target, .modified, .file);
     try testing.expectEqual(@as(usize, 1), b.held.count());
 
     // The window closes, and the file is bigger than it was when it
@@ -1150,7 +1150,7 @@ test "a path that cannot be measured is still reported when it goes quiet" {
 
     // Nothing is at this path, so there is no size to compare and the
     // quiet window is the whole of the answer.
-    try b.push(gpa, @enumFromInt(0), "/tmp/lookout-no-such-file", .modified, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/lookout-no-such-file", .modified, .file);
     b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
     try b.promote(gpa);
     try testing.expectEqual(@as(usize, 1), b.events.items.len);
@@ -1161,7 +1161,7 @@ test "the ceiling turns events away and says which watch lost them" {
     var b: Batch = .init(testing.io, .{ .max_events = 2 });
     defer b.deinit(gpa);
 
-    const id: WatchId = @enumFromInt(3);
+    const id: WatchId = @fromBackingInt(@intCast(3));
     try b.push(gpa, id, "/tmp/a", .created, .file);
     try b.push(gpa, id, "/tmp/b", .created, .file);
     try b.push(gpa, id, "/tmp/c", .created, .file);
@@ -1185,7 +1185,7 @@ test "the ceiling includes paths held for debouncing" {
     var b: Batch = .init(testing.io, .{ .max_events = 2, .debounce_ms = 50 });
     defer b.deinit(gpa);
 
-    const id: WatchId = @enumFromInt(3);
+    const id: WatchId = @fromBackingInt(@intCast(3));
     try b.push(gpa, id, "/tmp/a", .created, .file);
     try b.push(gpa, id, "/tmp/b", .created, .file);
     try b.push(gpa, id, "/tmp/c", .created, .file);
@@ -1203,8 +1203,8 @@ test "no ceiling means no ceiling" {
         var name: [32]u8 = undefined;
         try b.push(
             gpa,
-            @enumFromInt(0),
-            std.fmt.bufPrint(&name, "/tmp/f{d}", .{i}) catch unreachable,
+            @fromBackingInt(@intCast(0)),
+            std.mem.print(&name, "/tmp/f{d}", .{i}) catch unreachable,
             .created,
             .file,
         );
@@ -1218,17 +1218,17 @@ test "an event says whether the path was a file or a directory" {
     var b: Batch = .init(testing.io, .{});
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/d", .created, .directory);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/d", .created, .directory);
     try testing.expectEqual(lookout.Target.directory, b.events.items[0].target);
 
     // A backend that could not say does not overwrite one that could.
-    try b.push(gpa, @enumFromInt(0), "/tmp/d", .modified, .unknown);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/d", .modified, .unknown);
     try testing.expectEqual(lookout.Target.directory, b.events.items[0].target);
 
     // And one that could fills in for one that could not.
-    try b.push(gpa, @enumFromInt(0), "/tmp/e", .removed, .unknown);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/e", .removed, .unknown);
     try testing.expectEqual(lookout.Target.unknown, b.events.items[1].target);
-    try b.push(gpa, @enumFromInt(0), "/tmp/e", .removed, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/e", .removed, .file);
     try testing.expectEqual(lookout.Target.file, b.events.items[1].target);
 }
 
@@ -1237,8 +1237,8 @@ test "two spellings of one path are one event" {
     var b: Batch = .init(testing.io, .{});
     defer b.deinit(gpa);
 
-    try b.push(gpa, @enumFromInt(0), "/tmp/Notes.txt", .modified, .file);
-    try b.push(gpa, @enumFromInt(0), "/tmp/notes.txt", .removed, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/Notes.txt", .modified, .file);
+    try b.push(gpa, @fromBackingInt(@intCast(0)), "/tmp/notes.txt", .removed, .file);
 
     const merged: usize = if (path_cmp.folds_case) 1 else 2;
     try testing.expectEqual(merged, b.events.items.len);
@@ -1253,7 +1253,7 @@ test "a failed batch flush leaves trouble queued for the retry" {
     var vtable: Io.VTable = undefined;
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{});
     defer b.deinit(gpa);
-    try b.trouble(gpa, @enumFromInt(0), root, .directory);
+    try b.trouble(gpa, @fromBackingInt(@intCast(0)), root, .directory);
     var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, b.flush(failing.allocator()));
     try testing.expectEqual(@as(usize, 1), b.deferred.items.len);
@@ -1273,7 +1273,7 @@ test "a failed batch promotion leaves the rename held for the retry" {
     var vtable: Io.VTable = undefined;
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .debounce_ms = 1 });
     defer b.deinit(gpa);
-    try b.pushRename(gpa, @enumFromInt(0), root, "before", .directory);
+    try b.pushRename(gpa, @fromBackingInt(@intCast(0)), root, "before", .directory);
     b.held.values()[0].last_ns -= std.time.ns_per_s;
     var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, b.promote(failing.allocator()));
@@ -1295,7 +1295,7 @@ test "a failed batch replacement leaves the settling event held" {
     var vtable: Io.VTable = undefined;
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .settle_ms = 1 });
     defer b.deinit(gpa);
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try b.push(gpa, id, root, .modified, .directory);
     var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, b.push(failing.allocator(), id, root, .created, .directory));
@@ -1310,7 +1310,7 @@ test "a paired rename ends the source path's settling hold" {
     var vtable: Io.VTable = undefined;
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try b.push(gpa, id, "/watch/old", .modified, .file);
     try b.pushRename(gpa, id, "/watch/new", "/watch/old", .file);
     try testing.expectEqual(@as(usize, 0), b.held.count());
@@ -1324,7 +1324,7 @@ test "a debounced rename replaces its source within the same event ceiling" {
     var vtable: Io.VTable = undefined;
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .debounce_ms = 50, .max_events = 1 });
     defer b.deinit(gpa);
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try b.push(gpa, id, "/watch/old", .modified, .file);
     try b.deferChange(gpa, id, "/watch/new", .renamed, "/watch/old", .file);
     try b.flush(gpa);
@@ -1339,7 +1339,7 @@ test "a failed rename leaves its source hold available for retry" {
     var vtable: Io.VTable = undefined;
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{ .settle_ms = 50 });
     defer b.deinit(gpa);
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try b.push(gpa, id, "/watch/old", .modified, .file);
     var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, b.pushRename(failing.allocator(), id, "/watch/new", "/watch/old", .file));
@@ -1355,16 +1355,16 @@ test "a change below a followed link is its watch's, spelled under the link" {
     var vtable: Io.VTable = undefined;
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{});
     defer b.deinit(gpa);
-    const sep = std.fs.path.sep_str;
+    const sep = std.Io.Dir.path.sep_str;
     const filter: lookout.Filter = .{ .ignore = &.{"*.tmp"} };
     const alias: Alias = .{
-        .owner = @enumFromInt(0),
+        .owner = @fromBackingInt(@intCast(0)),
         .root = sep ++ "watch",
         .filter = &filter,
         .physical = sep ++ "elsewhere" ++ sep ++ "target",
         .logical = sep ++ "watch" ++ sep ++ "link",
     };
-    const registration: WatchId = @enumFromInt(9);
+    const registration: WatchId = @fromBackingInt(@intCast(9));
     try b.aliases.put(gpa, registration, &alias);
     try b.noting.put(gpa, alias.owner, {});
 
@@ -1402,7 +1402,7 @@ test "a lost note is said to be lost, and the change is still recorded" {
     var vtable: Io.VTable = undefined;
     var b = Batch.init(clock.frozen(testing.io, &vtable), .{});
     defer b.deinit(gpa);
-    const id: WatchId = @enumFromInt(0);
+    const id: WatchId = @fromBackingInt(@intCast(0));
     try b.noting.put(gpa, id, {});
     var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     b.note(failing.allocator(), id, "/watch/link", .created, null);

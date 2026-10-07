@@ -11,14 +11,13 @@ const assert = std.debug.assert;
 const Io = std.Io;
 
 const lookout = @import("types.zig");
-const builtin = @import("builtin");
 const Kind = lookout.Kind;
 
 const Snapshot = @This();
 
 /// One remembered directory entry, keyed by name. Keys are owned by the
 /// snapshot.
-entries: std.StringArrayHashMapUnmanaged(Meta),
+entries: std.array_hash_map.String(Meta),
 /// Set when the directory held more entries than the scan was allowed to
 /// track, so the comparison above is known to be incomplete.
 truncated: bool,
@@ -84,10 +83,6 @@ fn hashContent(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat) ?u64 {
     // Never open a special file or follow a symlink to hash its target.
     if (stat.kind != .file or stat.size > content_hash_cap) return null;
     var file = dir.openFile(io, path, .{ .follow_symlinks = false, .allow_directory = false }) catch return null;
-    // Zig 0.16's std.Io.Threaded.dirOpenFileWtf16 opens no-follow handles
-    // asynchronously but returns nonblocking = false. Match the handle so
-    // positional reads wait for completion; remove when std fixes the flag.
-    if (builtin.os.tag == .windows) file.flags.nonblocking = true;
     defer file.close(io);
     var hash = std.hash.Wyhash.init(0);
     var buffer: [8192]u8 = undefined;
@@ -386,7 +381,7 @@ test "a directory over the limit is tracked up to it and marked truncated" {
     for (0..8) |i| {
         var name: [16]u8 = undefined;
         try tmp.dir.writeFile(io, .{
-            .sub_path = std.fmt.bufPrint(&name, "f{d}", .{i}) catch unreachable,
+            .sub_path = std.mem.print(&name, "f{d}", .{i}) catch unreachable,
             .data = "x",
         });
     }

@@ -235,7 +235,7 @@ pub fn misread(b: *Budget, dir: []const u8, forget_real: bool, made_up: usize) A
     var i: usize = 0;
     while (i < names.count()) {
         const name = names.keys()[i];
-        if (forget_real or std.mem.indexOfScalar(u8, name, 0) != null) {
+        if (forget_real or std.mem.findScalar(u8, name, 0) != null) {
             b.gpa.free(name);
             names.swapRemoveAt(i);
         } else i += 1;
@@ -245,7 +245,7 @@ pub fn misread(b: *Budget, dir: []const u8, forget_real: bool, made_up: usize) A
     comptime std.debug.assert(prefix.len + std.fmt.count("{d}", .{std.math.maxInt(usize)}) <= buf.len);
     for (0..made_up) |k| {
         // unreachable: the assertion above sizes the buffer for the prefix and any usize
-        const name = std.fmt.bufPrint(&buf, prefix ++ "{d}", .{k}) catch unreachable;
+        const name = std.mem.print(&buf, prefix ++ "{d}", .{k}) catch unreachable;
         try addName(b.gpa, names, name);
     }
 }
@@ -351,7 +351,7 @@ pub fn counter(
 
 fn rank(id: anytype) u64 {
     return switch (@typeInfo(@TypeOf(id))) {
-        .@"enum" => @intFromEnum(id),
+        .@"enum" => @backingInt(id),
         else => id,
     };
 }
@@ -440,9 +440,9 @@ test "each directory has its own budget" {
     try tmp.dir.createDirPath(io, "one");
     try tmp.dir.createDirPath(io, "two");
 
-    const one = try std.fs.path.join(gpa, &.{ root, "one" });
+    const one = try std.Io.Dir.path.join(gpa, &.{ root, "one" });
     defer gpa.free(one);
-    const two = try std.fs.path.join(gpa, &.{ root, "two" });
+    const two = try std.Io.Dir.path.join(gpa, &.{ root, "two" });
     defer gpa.free(two);
 
     var b: Budget = .init(gpa, io, 2);
@@ -471,9 +471,9 @@ test "a watch removed leaves the counts another watch still holds" {
     defer gpa.free(root);
     try tmp.dir.createDirPath(io, "kept");
     try tmp.dir.createDirPath(io, "gone");
-    const kept = try std.fs.path.join(gpa, &.{ root, "kept" });
+    const kept = try std.Io.Dir.path.join(gpa, &.{ root, "kept" });
     defer gpa.free(kept);
-    const gone = try std.fs.path.join(gpa, &.{ root, "gone" });
+    const gone = try std.Io.Dir.path.join(gpa, &.{ root, "gone" });
     defer gpa.free(gone);
 
     var b: Budget = .init(gpa, io, 8);
@@ -507,9 +507,9 @@ test "a lost read has its counts read again from disk, and only those" {
     defer gpa.free(root);
     try tmp.dir.createDirPath(io, "lost");
     try tmp.dir.createDirPath(io, "kept");
-    const lost = try std.fs.path.join(gpa, &.{ root, "lost" });
+    const lost = try std.Io.Dir.path.join(gpa, &.{ root, "lost" });
     defer gpa.free(lost);
-    const kept = try std.fs.path.join(gpa, &.{ root, "kept" });
+    const kept = try std.Io.Dir.path.join(gpa, &.{ root, "kept" });
     defer gpa.free(kept);
 
     var b: Budget = .init(gpa, io, 2);
@@ -603,7 +603,7 @@ test "a second walk of a directory already counted adds nothing" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const sub = try std.fs.path.join(gpa, &.{ root, "sub" });
+    const sub = try std.Io.Dir.path.join(gpa, &.{ root, "sub" });
     defer gpa.free(sub);
 
     var b: Budget = .init(gpa, io, 3);
@@ -643,7 +643,7 @@ test "a change every watch reads its own copy of is counted once" {
     const parent = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(parent);
     try tmp.dir.createDirPath(io, "folder");
-    const folder = try std.fs.path.join(gpa, &.{ parent, "folder" });
+    const folder = try std.Io.Dir.path.join(gpa, &.{ parent, "folder" });
     defer gpa.free(folder);
 
     const Watch = struct {

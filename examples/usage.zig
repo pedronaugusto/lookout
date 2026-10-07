@@ -81,7 +81,7 @@ pub fn main() !void {
     // A watch on a path that is not there yet. It is parked on the
     // nearest existing ancestor, steps down as the path appears, and is
     // promoted to the real watch with the appearance reported against it.
-    const later = try std.fs.path.join(gpa, &.{ dir_path, "later", "inside" });
+    const later = try std.Io.Dir.path.join(gpa, &.{ dir_path, "later", "inside" });
     defer gpa.free(later);
     var pending: lookout.Watcher = try .init(gpa, io, .{});
     defer pending.deinit();

@@ -34,7 +34,7 @@ const header_size = 44;
 comptime {
     assert(header_size == digest_at + Sha256.digest_length);
 }
-pub const platform = @tagName(builtin.os.tag);
+pub const platform = @tagName(builtin.target.os.tag);
 pub const file_limit = 256 * 1024 * 1024;
 
 pub fn encode(gpa: std.mem.Allocator, state: State) std.mem.Allocator.Error![]u8 {
@@ -60,8 +60,8 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!std.json.Pars
     };
     errdefer parsed.deinit();
     const state = parsed.value;
-    if (!std.mem.eql(u8, state.platform, @tagName(builtin.os.tag))) return error.ForeignBaseline;
-    if (!std.fs.path.isAbsolute(state.root) or !safePath(state.root)) return error.InvalidBaseline;
+    if (!std.mem.eql(u8, state.platform, @tagName(builtin.target.os.tag))) return error.ForeignBaseline;
+    if (!std.Io.Dir.path.isAbsolute(state.root) or !safePath(state.root)) return error.InvalidBaseline;
     var dirs: std.StringHashMapUnmanaged(void) = .empty;
     defer dirs.deinit(gpa);
     for (state.dirs) |dir| {
@@ -72,7 +72,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!std.json.Pars
         var names: std.StringHashMapUnmanaged(void) = .empty;
         defer names.deinit(gpa);
         for (dir.entries) |entry| {
-            if (entry.name.len == 0 or !safePath(entry.name) or std.mem.indexOfAny(u8, entry.name, path.separators) != null) return error.InvalidBaseline;
+            if (entry.name.len == 0 or !safePath(entry.name) or std.mem.findAny(u8, entry.name, path.separators) != null) return error.InvalidBaseline;
             const named = try names.getOrPut(gpa, entry.name);
             if (named.found_existing) return error.InvalidBaseline;
         }
@@ -82,7 +82,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!std.json.Pars
 }
 
 fn safePath(text: []const u8) bool {
-    if (std.mem.indexOfScalar(u8, text, 0) != null) return false;
+    if (std.mem.findScalar(u8, text, 0) != null) return false;
     var it = std.mem.tokenizeAny(u8, text, path.separators);
     while (it.next()) |component| {
         if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return false;

@@ -21,7 +21,7 @@ pub const header_len = 16;
 
 comptime {
     assert(header_len == 4 * @sizeOf(u32));
-    if (builtin.os.tag == .linux) assert(header_len == @sizeOf(std.os.linux.inotify_event));
+    if (builtin.target.os.tag == .linux) assert(header_len == @sizeOf(std.os.linux.inotify_event));
 }
 
 /// One kernel event.
@@ -56,7 +56,7 @@ pub const Iterator = struct {
         if (rest.len == 0) return null;
         if (rest.len < header_len) return error.TruncatedRecord;
 
-        const endian = builtin.cpu.arch.endian();
+        const endian = builtin.target.cpu.arch.endian();
         const len = std.mem.readInt(u32, rest[12..16], endian);
         if (len > rest.len - header_len) return error.TruncatedRecord;
 
@@ -83,7 +83,7 @@ pub fn iterate(bytes: []const u8) Iterator {
 pub fn encode(out: []u8, record: Record) usize {
     const name = record.name orelse "";
     assert(out.len >= header_len + name.len);
-    const endian = builtin.cpu.arch.endian();
+    const endian = builtin.target.cpu.arch.endian();
     std.mem.writeInt(i32, out[0..4], record.wd, endian);
     std.mem.writeInt(u32, out[4..8], record.mask, endian);
     std.mem.writeInt(u32, out[8..12], record.cookie, endian);

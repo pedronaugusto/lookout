@@ -278,17 +278,17 @@ pub const Iterator = struct {
 test "path revisions survive removal, recreation and owner release" {
     const gpa = std.testing.allocator;
     const h = try init(gpa);
-    const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
-    const first = try h.prepare(@enumFromInt(1), root);
+    const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
+    const first = try h.prepare(@fromBackingInt(@intCast(1)), root);
     h.publish(first);
-    const before = try h.snapshot(gpa, @enumFromInt(1), root);
+    const before = try h.snapshot(gpa, @fromBackingInt(@intCast(1)), root);
     defer before.release();
     h.remove(first);
-    const absent = try h.snapshot(gpa, @enumFromInt(1), root);
+    const absent = try h.snapshot(gpa, @fromBackingInt(@intCast(1)), root);
     defer absent.release();
-    const replacement = try h.prepare(@enumFromInt(1), root);
+    const replacement = try h.prepare(@fromBackingInt(@intCast(1)), root);
     h.publish(replacement);
-    const after = try h.snapshot(gpa, @enumFromInt(1), root);
+    const after = try h.snapshot(gpa, @fromBackingInt(@intCast(1)), root);
     defer after.release();
     h.release();
     for ([_]Paths{ before, absent, after }, [_]usize{ 1, 0, 1 }) |snapshot_paths, count| {
@@ -307,19 +307,19 @@ test "releasing the oldest revision compacts obsolete paths" {
     const gpa = std.testing.allocator;
     const h = try init(gpa);
     defer h.release();
-    const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
-    const node = try h.prepare(@enumFromInt(1), root);
+    const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
+    const node = try h.prepare(@fromBackingInt(@intCast(1)), root);
     h.publish(node);
-    const before = try h.snapshot(gpa, @enumFromInt(1), root);
+    const before = try h.snapshot(gpa, @fromBackingInt(@intCast(1)), root);
     h.remove(node);
-    const after = try h.snapshot(gpa, @enumFromInt(1), root);
+    const after = try h.snapshot(gpa, @fromBackingInt(@intCast(1)), root);
     defer after.release();
     try std.testing.expectEqual(@as(usize, 1), h.tombstones);
     before.release();
     // Released on whatever thread held it, the tombstone is freed by the
     // next change the watcher's thread makes, and never by the release.
     try std.testing.expectEqual(@as(usize, 1), h.tombstones);
-    const later = try h.prepare(@enumFromInt(1), root);
+    const later = try h.prepare(@fromBackingInt(@intCast(1)), root);
     h.publish(later);
     try std.testing.expectEqual(@as(usize, 0), h.tombstones);
     try std.testing.expectEqual(later, h.first.?);
@@ -330,13 +330,13 @@ test "a lease read on another thread while the watcher changes the history" {
     const gpa = std.testing.allocator;
     const h = try init(gpa);
     defer h.release();
-    const root = if (builtin.os.tag == .windows) "C:\\tree" else "/tree";
+    const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
     var nodes: [64]*Node = undefined;
     for (&nodes) |*slot| {
-        slot.* = try h.prepare(@enumFromInt(1), root);
+        slot.* = try h.prepare(@fromBackingInt(@intCast(1)), root);
         h.publish(slot.*);
     }
-    const leased = try h.snapshot(gpa, @enumFromInt(1), root);
+    const leased = try h.snapshot(gpa, @fromBackingInt(@intCast(1)), root);
     const Reader = struct {
         fn read(p: Paths, count: *usize) void {
             for (0..50) |_| {
@@ -354,7 +354,7 @@ test "a lease read on another thread while the watcher changes the history" {
     // Removals and new paths race the reader; what the lease sees does not
     // move, and the watcher's thread frees what it no longer can.
     for (nodes[0..32]) |node| h.remove(node);
-    for (0..32) |_| h.publish(try h.prepare(@enumFromInt(1), root));
+    for (0..32) |_| h.publish(try h.prepare(@fromBackingInt(@intCast(1)), root));
     reader.join();
     try std.testing.expectEqual(@as(usize, nodes.len), seen);
     for (nodes[32..]) |node| h.remove(node);

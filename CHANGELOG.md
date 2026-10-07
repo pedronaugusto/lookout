@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Requires Zig 0.17.0; Zig 0.16 no longer builds lookout. On the BSDs and Apple targets the mount query is declared in Zig instead of imported from C headers, and a named Apple target links against `-Dmacos-sdk=<path>` or the pinned framework SDK; the build no longer asks the host for its SDK at configure time.
+
 - Glob patterns match in time proportional to the pattern and the name, however many `*` and `**` they hold. Each `*` used to retry the rest of the pattern at every position, so a file name chosen against a pattern such as `*a*a*a*a*b` could stall the watcher's thread for most of a minute.
 
 - Resuming an FSEvents checkpoint reports only what the watch would report live: a saved change outside the watch or excluded by its filter is dropped, and a saved rename with one side left out is the creation or removal of the other. Token paths must be absolute, without NUL or `.`/`..` components, or the token is `error.InvalidCheckpoint`.

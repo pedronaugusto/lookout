@@ -25,7 +25,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
     try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
-    const file = try std.fs.path.join(gpa, &.{ root, "a.txt" });
+    const file = try std.Io.Dir.path.join(gpa, &.{ root, "a.txt" });
     defer gpa.free(file);
 
     var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify });
@@ -151,7 +151,7 @@ test "a watch on a file keeps no count keyed by the file" {
     try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "x" });
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const file = try std.fs.path.join(gpa, &.{ root, "file" });
+    const file = try std.Io.Dir.path.join(gpa, &.{ root, "file" });
     defer gpa.free(file);
 
     var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .inotify });

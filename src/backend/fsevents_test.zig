@@ -30,7 +30,7 @@ test "FSEvents access failures preserve known paths and report an incomplete ans
     try tmp.dir.writeFile(io, .{ .sub_path = "kept", .data = "one" });
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const kept = try std.fs.path.join(gpa, &.{ root, "kept" });
+    const kept = try std.Io.Dir.path.join(gpa, &.{ root, "kept" });
     defer gpa.free(kept);
 
     var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents });
@@ -42,7 +42,7 @@ test "FSEvents access failures preserve known paths and report an incomplete ans
         var vtable = io.vtable.*;
         vtable.dirStatFile = struct {
             fn stat(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
-                if (std.mem.eql(u8, std.fs.path.basename(path), "kept")) return failure;
+                if (std.mem.eql(u8, std.Io.Dir.path.basename(path), "kept")) return failure;
                 return testing.io.vtable.dirStatFile(userdata, dir, path, options);
             }
         }.stat;
@@ -83,9 +83,9 @@ test "the flags that say the system lost track are one overflow, and the watch g
     defer gpa.free(root);
     try tmp.dir.createDirPath(io, "sub");
     try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
-    const sub = try std.fs.path.join(gpa, &.{ root, "sub" });
+    const sub = try std.Io.Dir.path.join(gpa, &.{ root, "sub" });
     defer gpa.free(sub);
-    const file = try std.fs.path.join(gpa, &.{ root, "a.txt" });
+    const file = try std.Io.Dir.path.join(gpa, &.{ root, "a.txt" });
     defer gpa.free(file);
 
     // The caller's half of the contract: seeded where the watch is taken.
@@ -128,14 +128,14 @@ test "the flags that say the system lost track are one overflow, and the watch g
 
     // A loss coalesced above the root took the root's events with it.
     try synthesize(gpa, f.streams.get(tree).?, &.{
-        .{ .path = std.fs.path.dirname(root).?, .flags = flag.user_dropped },
+        .{ .path = std.Io.Dir.path.dirname(root).?, .flags = flag.user_dropped },
     });
     try expectOneOverflow(&watcher, tree, root, .directory);
 
     // And both watches are still watching.
     try tmp.dir.writeFile(io, .{ .sub_path = "after.txt", .data = "x" });
     try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one and two" });
-    const after = try std.fs.path.join(gpa, &.{ root, "after.txt" });
+    const after = try std.Io.Dir.path.join(gpa, &.{ root, "after.txt" });
     defer gpa.free(after);
     var saw_after = false;
     var saw_file = false;
@@ -166,7 +166,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
     try tmp.dir.createDirPath(io, "sub");
-    const sub = try std.fs.path.join(gpa, &.{ root, "sub" });
+    const sub = try std.Io.Dir.path.join(gpa, &.{ root, "sub" });
     defer gpa.free(sub);
 
     var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .max_dir_entries = 3 });
@@ -268,8 +268,8 @@ test "a rename whose halves arrive in two deliveries is one rename" {
     var after: [pairs][]u8 = undefined;
     for (0..pairs) |i| {
         var name: [32]u8 = undefined;
-        before[i] = try std.fs.path.join(gpa, &.{ root, std.fmt.bufPrint(&name, "before-{d}.txt", .{i}) catch unreachable });
-        after[i] = try std.fs.path.join(gpa, &.{ root, std.fmt.bufPrint(&name, "after-{d}.txt", .{i}) catch unreachable });
+        before[i] = try std.Io.Dir.path.join(gpa, &.{ root, std.mem.print(&name, "before-{d}.txt", .{i}) catch unreachable });
+        after[i] = try std.Io.Dir.path.join(gpa, &.{ root, std.mem.print(&name, "after-{d}.txt", .{i}) catch unreachable });
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = before[i], .data = "x" });
     }
     defer for (before, after) |b, a| {
@@ -335,7 +335,7 @@ test "the entry budget is one directory's, with every creation delivered" {
     defer gpa.free(root);
     for (0..dirs) |d| {
         var name: [16]u8 = undefined;
-        try tmp.dir.createDirPath(io, std.fmt.bufPrint(&name, "d{d}", .{d}) catch unreachable);
+        try tmp.dir.createDirPath(io, std.mem.print(&name, "d{d}", .{d}) catch unreachable);
     }
 
     var watcher: lookout.Watcher = try .init(gpa, io, .{ .backend = .fsevents, .max_dir_entries = 512 });
@@ -351,9 +351,9 @@ test "the entry budget is one directory's, with every creation delivered" {
     for (0..dirs) |d| {
         for (0..files) |i| {
             var name: [32]u8 = undefined;
-            const sub_path = std.fmt.bufPrint(&name, "d{d}/f{d}.txt", .{ d, i }) catch unreachable;
+            const sub_path = std.mem.print(&name, "d{d}/f{d}.txt", .{ d, i }) catch unreachable;
             try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = "x" });
-            const full = try std.fs.path.join(gpa, &.{ root, sub_path });
+            const full = try std.Io.Dir.path.join(gpa, &.{ root, sub_path });
             defer gpa.free(full);
             try synthesize(gpa, stream, &.{.{ .path = full, .flags = flag.item_created | flag.item_modified }});
         }
@@ -371,7 +371,7 @@ test "the entry budget is one directory's, with every creation delivered" {
     try testing.expectEqual(@as(usize, dirs * files), created);
     for (0..dirs) |d| {
         var name: [16]u8 = undefined;
-        const dir = try std.fs.path.join(gpa, &.{ root, std.fmt.bufPrint(&name, "d{d}", .{d}) catch unreachable });
+        const dir = try std.Io.Dir.path.join(gpa, &.{ root, std.mem.print(&name, "d{d}", .{d}) catch unreachable });
         defer gpa.free(dir);
         try testing.expectEqual(@as(usize, files), f.budget.count(dir).?);
     }
@@ -405,7 +405,7 @@ test "a poll that expires before the replay begins is not the end of it" {
     }
 
     try tmp.dir.deleteFile(io, "gone.txt");
-    const deleted = try std.fs.path.join(gpa, &.{ root, "gone.txt" });
+    const deleted = try std.Io.Dir.path.join(gpa, &.{ root, "gone.txt" });
     defer gpa.free(deleted);
 
     var vtable: Io.VTable = undefined;
@@ -468,7 +468,7 @@ test "a deletion numbered after the checkpoint marker is reported exactly once h
     }
 
     try tmp.dir.deleteFile(io, "gone.txt");
-    const deleted = try std.fs.path.join(gpa, &.{ root, "gone.txt" });
+    const deleted = try std.Io.Dir.path.join(gpa, &.{ root, "gone.txt" });
     defer gpa.free(deleted);
 
     const Late = struct {
@@ -619,7 +619,7 @@ test "a recursive mount keeps live coverage and refuses a single-device checkpoi
     try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);
     try testing.expectEqualStrings(root, watcher.batch.events.items[0].path);
     _ = try watcher.poll(0);
-    const wanted = try std.fs.path.join(gpa, &.{ root, "live" });
+    const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "live" });
     defer gpa.free(wanted);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "live", .data = "x" });
     var saw = false;
@@ -639,7 +639,7 @@ test "an absent pending root refuses a checkpoint from another volume" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    const absent = try std.fs.path.join(gpa, &.{ root, "absent" });
+    const absent = try std.Io.Dir.path.join(gpa, &.{ root, "absent" });
     defer gpa.free(absent);
     var watcher = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
     defer watcher.deinit();
@@ -662,7 +662,7 @@ test "a pending promotion rescans when its saved log identity is refused" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    const absent = try std.fs.path.join(gpa, &.{ root, "absent" });
+    const absent = try std.Io.Dir.path.join(gpa, &.{ root, "absent" });
     defer gpa.free(absent);
     var first = try lookout.Watcher.init(gpa, testing.io, .{ .backend = .fsevents });
     defer first.deinit();
@@ -700,9 +700,9 @@ test "fresh FSEvents replay reports no pre-add state or sibling paths" {
     try tmp.dir.writeFile(io, .{ .sub_path = "sibling.txt", .data = "before" });
     const root = try tmp.dir.realPathFileAlloc(io, "watched", gpa);
     defer gpa.free(root);
-    const old = try std.fs.path.join(gpa, &.{ root, "old.txt" });
+    const old = try std.Io.Dir.path.join(gpa, &.{ root, "old.txt" });
     defer gpa.free(old);
-    const wanted = try std.fs.path.join(gpa, &.{ root, "new.txt" });
+    const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "new.txt" });
     defer gpa.free(wanted);
     var watcher = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents, .latency_ms = 0 });
     defer watcher.deinit();
@@ -771,7 +771,7 @@ fn expectHeldRenameFailure(comptime transfer: enum { resolve, replace, rejoin })
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "old", .data = "x" });
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(root);
-    const old = try std.fs.path.join(testing.allocator, &.{ root, "old" });
+    const old = try std.Io.Dir.path.join(testing.allocator, &.{ root, "old" });
     defer testing.allocator.free(old);
     var watcher = try lookout.Watcher.init(testing.allocator, testing.io, .{ .backend = .fsevents });
     defer watcher.deinit();
@@ -824,7 +824,7 @@ test "a recursive pending checkpoint resumes on its nonrecursive ancestor" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const absent = try std.fs.path.join(gpa, &.{ root, "pending" });
+    const absent = try std.Io.Dir.path.join(gpa, &.{ root, "pending" });
     defer gpa.free(absent);
     var first = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents });
     defer first.deinit();
@@ -853,7 +853,7 @@ test "checkpoint capture allocation does not grow with the remembered tree" {
     for (0..2) |round| {
         if (round == 1) for (0..256) |i| {
             var name: [32]u8 = undefined;
-            try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&name, "file-{d}", .{i}), .data = "" });
+            try tmp.dir.writeFile(io, .{ .sub_path = try std.mem.print(&name, "file-{d}", .{i}), .data = "" });
         };
         var watcher = try lookout.Watcher.init(gpa, io, .{ .backend = .fsevents });
         defer watcher.deinit();
@@ -922,7 +922,7 @@ test "a resumed checkpoint restores only the changes its watch reports" {
     const filter: lookout.Filter = .{ .ignore = &.{"*.tmp"} };
     const at = struct {
         fn join(a: std.mem.Allocator, r: []const u8, name: []const u8) ![]u8 {
-            return std.fs.path.join(a, &.{ r, name });
+            return std.Io.Dir.path.join(a, &.{ r, name });
         }
     }.join;
     const kept = try at(gpa, root, "kept.txt");
@@ -933,7 +933,7 @@ test "a resumed checkpoint restores only the changes its watch reports" {
     defer gpa.free(moved_in);
     const moved_out = try at(gpa, root, "out.txt");
     defer gpa.free(moved_out);
-    const elsewhere = try at(gpa, std.fs.path.dirname(root).?, "elsewhere.txt");
+    const elsewhere = try at(gpa, std.Io.Dir.path.dirname(root).?, "elsewhere.txt");
     defer gpa.free(elsewhere);
 
     // What a token edited by hand, or written under a broader filter,
@@ -1001,9 +1001,9 @@ test "a token whose changes name a path through a dot component is refused" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const climbing = try std.fs.path.join(gpa, &.{ root, "..", "x" });
+    const climbing = try std.Io.Dir.path.join(gpa, &.{ root, "..", "x" });
     defer gpa.free(climbing);
-    const inside = try std.fs.path.join(gpa, &.{ root, "x" });
+    const inside = try std.Io.Dir.path.join(gpa, &.{ root, "x" });
     defer gpa.free(inside);
     for ([_]checkpoint_format.Change{
         .{ .path = climbing, .kind = .modified, .target = .file },
@@ -1028,9 +1028,9 @@ test "a path made while nobody watched is created when the log names it" {
     defer gpa.free(token);
     try tmp.dir.writeFile(io, .{ .sub_path = "missed.txt", .data = "while away" });
     try tmp.dir.writeFile(io, .{ .sub_path = "old.txt", .data = "two" });
-    const missed = try std.fs.path.join(gpa, &.{ root, "missed.txt" });
+    const missed = try std.Io.Dir.path.join(gpa, &.{ root, "missed.txt" });
     defer gpa.free(missed);
-    const old = try std.fs.path.join(gpa, &.{ root, "old.txt" });
+    const old = try std.Io.Dir.path.join(gpa, &.{ root, "old.txt" });
     defer gpa.free(old);
 
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);

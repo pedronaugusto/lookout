@@ -90,7 +90,7 @@ test "polling racy entries compare bytes even when size and timestamps match" {
     defer gpa.free(root);
     const nested = try tmp.dir.realPathFileAlloc(io, "nested", gpa);
     defer gpa.free(nested);
-    const file_path = try std.fs.path.join(gpa, &.{ root, "nested", "file" });
+    const file_path = try std.Io.Dir.path.join(gpa, &.{ root, "nested", "file" });
     defer gpa.free(file_path);
 
     // Hold both stat timestamps fixed across positional writes. The clock
@@ -106,7 +106,7 @@ test "polling racy entries compare bytes even when size and timestamps match" {
             var batch: Batch = .init(io, .{});
             defer batch.deinit(gpa);
             const watch_path = if (scope == 2) file_path else if (scope == 1) root else nested;
-            try p.add(@enumFromInt(0), watch_path, .{ .recursive = scope == 1 }, &batch);
+            try p.add(@fromBackingInt(@intCast(0)), watch_path, .{ .recursive = scope == 1 }, &batch);
             try p.scan(&batch);
             try testing.expectEqual(@as(usize, 0), batch.events.items.len);
 
@@ -317,7 +317,7 @@ test "a failed polling removal allocation releases its staged path" {
     defer poll.deinit();
     var batch: Batch = .init(testing.io, .{});
     defer batch.deinit(testing.allocator);
-    try poll.add(@enumFromInt(0), root, .{}, &batch);
+    try poll.add(@fromBackingInt(@intCast(0)), root, .{}, &batch);
     try tmp.dir.deleteFile(testing.io, "gone");
 
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });

@@ -17,11 +17,10 @@ const timeout_ms = 10_000;
 
 /// Every backend this target was built with.
 const backends: []const lookout.Backend = all: {
-    const names = @typeInfo(lookout.Backend).@"enum".fields;
-    var list: [names.len]lookout.Backend = undefined;
+    const values = std.enums.values(lookout.Backend);
+    var list: [values.len]lookout.Backend = undefined;
     var len: usize = 0;
-    for (names) |field| {
-        const backend: lookout.Backend = @enumFromInt(field.value);
+    for (values) |backend| {
         if (backend == .auto or !lookout.supported(backend)) continue;
         list[len] = backend;
         len += 1;
@@ -34,7 +33,7 @@ fn writeBurst(dir: std.Io.Dir, count: usize) !void {
     for (0..count) |i| {
         var name: [64]u8 = undefined;
         try dir.writeFile(std.testing.io, .{
-            .sub_path = std.fmt.bufPrint(&name, "burst-entry-{d}.txt", .{i}) catch unreachable,
+            .sub_path = std.mem.print(&name, "burst-entry-{d}.txt", .{i}) catch unreachable,
             .data = "x",
         });
     }
@@ -99,7 +98,7 @@ test "a change inside a renamed directory is not a creation" {
         _ = try watcher.add(root, .{ .recursive = true });
         while ((try watcher.poll(200)).len != 0) {}
 
-        const moved = try std.fs.path.join(gpa, &.{ root, "sub2" });
+        const moved = try std.Io.Dir.path.join(gpa, &.{ root, "sub2" });
         defer gpa.free(moved);
 
         try tmp.dir.rename("sub", tmp.dir, "sub2", io);
@@ -131,7 +130,7 @@ test "a change inside a renamed directory is not a creation" {
 
         try tmp.dir.writeFile(io, .{ .sub_path = "sub2/a.txt", .data = "one and two" });
 
-        const wanted = try std.fs.path.join(gpa, &.{ root, "sub2", "a.txt" });
+        const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "sub2", "a.txt" });
         defer gpa.free(wanted);
 
         var saw_created = false;
@@ -185,7 +184,7 @@ test "a watch spelled in another case than the disk still reports" {
         defer watcher.deinit();
 
         // Asked for in upper case; created in lower case.
-        const asked = try std.fs.path.join(gpa, &.{ root, "TARGET" });
+        const asked = try std.Io.Dir.path.join(gpa, &.{ root, "TARGET" });
         defer gpa.free(asked);
         _ = try watcher.add(asked, .{ .pending = true, .recursive = true });
 
@@ -243,9 +242,9 @@ test "an ignore pattern in another case than the disk still excludes" {
         });
         while ((try watcher.poll(200)).len != 0) {}
 
-        const ignored = try std.fs.path.join(gpa, &.{ root, "skip" });
+        const ignored = try std.Io.Dir.path.join(gpa, &.{ root, "skip" });
         defer gpa.free(ignored);
-        const wanted = try std.fs.path.join(gpa, &.{ root, "kept.txt" });
+        const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "kept.txt" });
         defer gpa.free(wanted);
 
         try tmp.dir.writeFile(io, .{ .sub_path = "skip/a.txt", .data = "one" });
@@ -289,7 +288,7 @@ test "a slow write is one event, and it arrives after the writing stops" {
     _ = try watcher.add(root, .{});
     while ((try watcher.poll(200)).len != 0) {}
 
-    const wanted = try std.fs.path.join(gpa, &.{ root, "big.bin" });
+    const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "big.bin" });
     defer gpa.free(wanted);
 
     const Writer = struct {
@@ -300,7 +299,7 @@ test "a slow write is one event, and it arrives after the writing stops" {
 
         fn run(self: *Self) void {
             const w_io = std.testing.io;
-            const chunk = "x" ** (64 * 1024);
+            const chunk: *const [64 * 1024]u8 = &@splat('x');
             var file = self.dir.createFile(w_io, "big.bin", .{ .truncate = false }) catch return;
             defer file.close(w_io);
             var buffer: [4096]u8 = undefined;
@@ -369,7 +368,7 @@ test "a burst of renames is paired across the reads it is split over" {
     for (0..pairs) |i| {
         var name: [64]u8 = undefined;
         try tmp.dir.writeFile(io, .{
-            .sub_path = std.fmt.bufPrint(&name, "before-{d}.txt", .{i}) catch unreachable,
+            .sub_path = std.mem.print(&name, "before-{d}.txt", .{i}) catch unreachable,
             .data = "x",
         });
     }
@@ -386,9 +385,9 @@ test "a burst of renames is paired across the reads it is split over" {
         var from: [64]u8 = undefined;
         var to: [64]u8 = undefined;
         try tmp.dir.rename(
-            std.fmt.bufPrint(&from, "before-{d}.txt", .{i}) catch unreachable,
+            std.mem.print(&from, "before-{d}.txt", .{i}) catch unreachable,
             tmp.dir,
-            std.fmt.bufPrint(&to, "after-{d}.txt", .{i}) catch unreachable,
+            std.mem.print(&to, "after-{d}.txt", .{i}) catch unreachable,
             io,
         );
     }
@@ -411,8 +410,8 @@ test "a burst of renames is paired across the reads it is split over" {
                     continue;
                 };
                 // Each new name joined to its own old one.
-                const to_name = std.fs.path.basename(event.path);
-                const from_name = std.fs.path.basename(from);
+                const to_name = std.Io.Dir.path.basename(event.path);
+                const from_name = std.Io.Dir.path.basename(from);
                 try std.testing.expect(std.mem.startsWith(u8, to_name, "after-"));
                 try std.testing.expect(std.mem.startsWith(u8, from_name, "before-"));
                 try std.testing.expectEqualStrings(from_name["before-".len..], to_name["after-".len..]);
@@ -460,7 +459,7 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
 
         for (0..12) |d| {
             var name: [16]u8 = undefined;
-            try tmp.dir.createDirPath(io, std.fmt.bufPrint(&name, "d{d}", .{d}) catch unreachable);
+            try tmp.dir.createDirPath(io, std.mem.print(&name, "d{d}", .{d}) catch unreachable);
         }
 
         var watcher: Watcher = try .init(gpa, io, .{
@@ -479,7 +478,7 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
             for (0..150) |i| {
                 var name: [32]u8 = undefined;
                 try tmp.dir.writeFile(io, .{
-                    .sub_path = std.fmt.bufPrint(&name, "d{d}/f{d}.txt", .{ d, i }) catch unreachable,
+                    .sub_path = std.mem.print(&name, "d{d}/f{d}.txt", .{ d, i }) catch unreachable,
                     .data = "x",
                 });
             }
@@ -519,7 +518,7 @@ test "a root deleted and recreated inside one window is not a move" {
         defer gpa.free(root);
 
         try tmp.dir.createDirPath(io, "target");
-        const target = try std.fs.path.join(gpa, &.{ root, "target" });
+        const target = try std.Io.Dir.path.join(gpa, &.{ root, "target" });
         defer gpa.free(target);
 
         var watcher: Watcher = try .init(gpa, io, .{
@@ -596,7 +595,7 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
 
     // The watch is what it was: what happens next is reported.
     try tmp.dir.writeFile(io, .{ .sub_path = "after.txt", .data = "x" });
-    const after = try std.fs.path.join(gpa, &.{ root, "after.txt" });
+    const after = try std.Io.Dir.path.join(gpa, &.{ root, "after.txt" });
     defer gpa.free(after);
     var found = false;
     var waited: u32 = 0;
@@ -627,7 +626,7 @@ test "the delivery buffer is the size the caller asked for" {
     // measured pausing up to eight seconds in the middle of one, and
     // after losing track it reports the files it rescanned late and out
     // of order, after a file created once the burst was written.
-    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    if (comptime !builtin.target.os.tag.isDarwin()) return error.SkipZigTest;
     if (!lookout.supported(.fsevents)) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -724,7 +723,7 @@ const Held = struct {
     fn await(watcher: *Watcher, burst: usize, until: Until) !Held {
         const gpa = std.testing.allocator;
         const io = std.testing.io;
-        var seen = try std.DynamicBitSetUnmanaged.initEmpty(gpa, burst);
+        var seen = try std.bit_set.Dynamic.initEmpty(gpa, burst);
         defer seen.deinit(gpa);
 
         var waited: u32 = 0;
@@ -738,7 +737,7 @@ const Held = struct {
                 const lost = records.flag.must_scan_sub_dirs | records.flag.user_dropped | records.flag.kernel_dropped;
                 if (record.flags & lost != 0) held.lost_track = true;
                 if (record.flags & records.flag.item_created == 0) continue;
-                const name = std.fs.path.basename(record.path);
+                const name = std.Io.Dir.path.basename(record.path);
                 if (!std.mem.startsWith(u8, name, "burst-entry-")) continue;
                 const number = name["burst-entry-".len .. name.len - ".txt".len];
                 const i = std.fmt.parseInt(usize, number, 10) catch continue;
@@ -922,7 +921,7 @@ test "recovery remains visible while a watch is waiting for its path" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(root);
-    const waiting = try std.fs.path.join(testing.allocator, &.{ root, "later" });
+    const waiting = try std.Io.Dir.path.join(testing.allocator, &.{ root, "later" });
     defer testing.allocator.free(waiting);
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
     var watcher = try Watcher.init(failing.allocator(), testing.io, .{
