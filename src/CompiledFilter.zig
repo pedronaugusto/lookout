@@ -218,9 +218,11 @@ const Matcher = struct {
         if (path.folds_case) m.scratch = try gpa.alloc(u8, foldedCapacity(max_subject));
         for (&builders, &m.parts) |*b, *part| {
             const builder = if (b.*) |*builder| builder else continue;
-            // The set is in its place before a cache is made for it, and
-            // never moves after.
-            part.* = .{ .set = try builder.build(), .cache = undefined };
+            // Built aside: a `try` inside the literal would mark the slot
+            // filled before the set is there. The set is in its place
+            // before a cache is made for it, and never moves after.
+            const set = try builder.build();
+            part.* = .{ .set = set, .cache = undefined };
             const made = &part.*.?;
             made.cache = sweep.Set.Cache.init(gpa, &made.set, cache_options) catch |err| {
                 made.set.deinit();
