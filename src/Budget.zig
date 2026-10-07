@@ -382,6 +382,7 @@ fn freeNames(gpa: Allocator, names: *Names) void {
 }
 
 const testing = std.testing;
+const shakedown = @import("shakedown");
 
 test "a failed first budget count leaves no directory for the retry" {
     var tmp = testing.tmpDir(.{ .iterate = true });
@@ -778,13 +779,13 @@ test "a failed budget reread keeps its names and reports uncertainty until compl
     defer budget.deinit();
     try budget.seed(io, root);
     try tmp.dir.writeFile(io, .{ .sub_path = "three", .data = "x" });
-    var vtable = io.vtable.*;
-    vtable.dirRead = struct {
-        fn read(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
-            return error.AccessDenied;
-        }
-    }.read;
-    const failing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const fio = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{.{
+        .at = .{ .nth = .{ .call = .dirRead, .n = 1 } },
+        .fault = .{ .fail = error.AccessDenied },
+        .times = 0,
+    }} });
+    defer fio.deinit();
+    const failing = fio.io();
     budget.reread(void, struct {
         fn stale(_: void, _: []const u8) bool {
             return true;

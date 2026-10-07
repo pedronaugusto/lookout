@@ -19,9 +19,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const airlock = @import("airlock");
 
 const lookout = @import("types.zig");
 const Filter = @import("Filter.zig");
+const CompiledFilter = @import("CompiledFilter.zig");
 const Snapshot = @import("Snapshot.zig");
 const builtin = @import("builtin");
 const path_cmp = @import("path.zig");
@@ -40,7 +42,7 @@ recursive: bool,
 /// Mirrors `Options.max_dir_entries`.
 max_dir_entries: usize,
 /// Mirrors `Options.filter`, copied.
-filter: Filter,
+filter: CompiledFilter,
 /// One remembered listing per directory, keyed by absolute path. Keys
 /// owned here.
 dirs: std.array_hash_map.String(Remembered),
@@ -94,11 +96,12 @@ pub const Change = struct {
 
 /// Errors `seed` can return, on top of the file-system errors of reading
 /// the tree.
-pub const SeedError = Allocator.Error || Io.Dir.OpenError ||
-    Io.Dir.RealPathFileAllocError || Snapshot.RefreshError;
+/// `InvalidPattern` and `PatternTooLong` name a filter pattern refused.
+pub const SeedError = DiffError || CompiledFilter.Error;
 
 /// Errors `diff` can return: the reads `seed` makes, made again.
-pub const DiffError = SeedError;
+pub const DiffError = Allocator.Error || Io.Dir.OpenError ||
+    Io.Dir.RealPathFileAllocError || Snapshot.RefreshError;
 
 /// Remembers what is in `path` now, so that a later `diff` can say what
 /// has changed since.
@@ -125,7 +128,7 @@ pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Baseline
         .scratch = .empty,
     };
     errdefer b.deinit();
-    b.filter = try options.filter.dupe(gpa);
+    b.filter = try .compile(gpa, options.filter);
     try b.scan(gpa, io, false);
     return b;
 }
@@ -159,30 +162,35 @@ pub fn diff(b: *Baseline, io: Io) Baseline.DiffError![]const Change {
 }
 
 /// Errors `save` can return.
-pub const SaveError = Allocator.Error || Io.Dir.CreateFileAtomicError || Io.File.WritePositionalError ||
-    Io.File.Atomic.ReplaceError || Io.Dir.OpenError || Io.File.SyncError ||
-    error{ UnsupportedBaselineFilter, UnsupportedBaselineDurability };
+pub const SaveError = Allocator.Error || airlock.WriteFileError || error{UnsupportedBaselineFilter};
 /// Errors `load` can return.
 pub const LoadError = format.ParseError || Io.Dir.ReadFileAllocError || Io.Dir.RealPathFileAllocError ||
-    error{UnsupportedBaselineFilter};
+    CompiledFilter.Error || error{UnsupportedBaselineFilter};
 
 /// How `save` writes the file.
 pub const SaveOptions = struct {
-    /// Sync the temporary file before replacement and its parent directory
-    /// afterwards. Windows returns UnsupportedBaselineDurability before writing:
-    /// std.Io cannot promise a durable directory replacement there.
+    /// Make the new file survive a power cut once `save` returns: its
+    /// contents are synced before it replaces the old one, and its
+    /// directory after. A filesystem that refuses those syncs is
+    /// `error.LevelUnavailable` and the old file stays; Linux learns that
+    /// a directory refuses only after the replacement, which is then
+    /// `error.PublishedNotDurable`.
     durable: bool = false,
 };
 
+/// The prefix of the temporary file `save` writes next to the baseline.
+/// A crash during a save can leave one behind; `airlock.pruneTemps`
+/// removes them by this prefix.
+pub const temp_prefix = ".lookout-";
+
 /// Atomically replaces the caller-named file with this baseline, without
-/// walking again. Keep it outside the watched tree. Predicate filters cannot
-/// be serialized and return UnsupportedBaselineFilter. Replacement is atomic;
-/// power-loss durability (fsync) is `SaveOptions.durable`, off by default. A
-/// failure of the directory sync happens after replacement, so the new file
-/// may already be visible.
+/// walking again: readers see the old file or the new one. Keep it outside
+/// the watched tree. Predicate filters cannot be serialized and return
+/// UnsupportedBaselineFilter. A failure before the replacement leaves the
+/// old file as it was; `error.PublishedNotDurable` means the new file is
+/// in place and its directory's sync failed.
 pub fn save(b: *const Baseline, io: Io, filename: []const u8, options: SaveOptions) Baseline.SaveError!void {
     if (b.filter.allow != null) return error.UnsupportedBaselineFilter;
-    if (options.durable and builtin.target.os.tag == .windows) return error.UnsupportedBaselineDurability;
     var arena: std.heap.ArenaAllocator = .init(b.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -193,23 +201,10 @@ pub fn save(b: *const Baseline, io: Io, filename: []const u8, options: SaveOptio
         dir.* = .{ .path = path, .truncated = remembered.snapshot.truncated, .check_contents = remembered.snapshot.check_contents, .entries = entries };
     }
     const bytes = try format.encode(a, .{ .platform = format.platform, .root = b.root, .recursive = b.recursive, .max_dir_entries = b.max_dir_entries, .ignore = b.filter.ignore, .only = b.filter.only, .dirs = dirs });
-    // An explicit parent handle is needed for fsync even for a relative name;
-    // cwd may be the POSIX AT_FDCWD sentinel rather than an open descriptor.
-    // Iteration also avoids Linux O_PATH, which cannot be fsynced.
-    const parent: ?Io.Dir = if (options.durable)
-        try Io.Dir.cwd().openDir(io, std.Io.Dir.path.dirname(filename) orelse ".", .{ .iterate = true })
-    else
-        null;
-    defer if (parent) |dir| dir.close(io);
-    var file = try (parent orelse Io.Dir.cwd()).createFileAtomic(io, if (parent != null) std.Io.Dir.path.basename(filename) else filename, .{ .replace = true });
-    defer file.deinit(io);
-    try file.file.writePositionalAll(io, bytes, 0);
-    if (options.durable) try file.file.sync(io);
-    try file.replace(io);
-    if (parent) |dir| {
-        const directory: Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
-        try directory.sync(io);
-    }
+    _ = try airlock.writeFile(io, Io.Dir.cwd(), filename, bytes, .{
+        .create = .{ .temp = .{ .random = temp_prefix } },
+        .commit = .{ .level = if (options.durable) .data else .none, .fallback = .refuse },
+    });
 }
 
 /// Loads an owned baseline without walking. The root, scope, budget and
@@ -237,7 +232,7 @@ pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, opti
         !samePatterns(options.filter.only, state.only)) return error.ForeignBaseline;
     var b: Baseline = .{ .gpa = gpa, .root = try gpa.dupe(u8, state.root), .recursive = state.recursive, .max_dir_entries = state.max_dir_entries, .filter = .none, .dirs = .empty, .changes = .empty, .scratch = .empty };
     errdefer b.deinit();
-    b.filter = try options.filter.dupe(gpa);
+    b.filter = try .compile(gpa, options.filter);
     for (state.dirs) |dir| {
         const owned = try gpa.dupe(u8, dir.path);
         errdefer gpa.free(owned);
@@ -422,6 +417,7 @@ fn forgetAll(b: *Baseline, gpa: Allocator) void {
 }
 
 const testing = std.testing;
+const shakedown = @import("shakedown");
 
 /// How many changes of `kind` the diff holds, and the path of the first.
 fn count(changes: []const Change, kind: Kind) usize {
@@ -736,15 +732,13 @@ test "directory access failures are not removals" {
             var base = try Baseline.seed(gpa, io, root, .{ .recursive = true });
             defer base.deinit();
             const before = base.dirs.count();
-            var vtable = io.vtable.*;
-            vtable.dirOpenDir = struct {
-                fn open(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-                    if (!subtree or std.mem.eql(u8, std.Io.Dir.path.basename(path), "blocked")) return failure;
-                    return testing.io.vtable.dirOpenDir(userdata, dir, path, options);
-                }
-            }.open;
-            const failing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-            try testing.expectError(failure, base.diff(failing));
+            const fio = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{.{
+                .at = .{ .nth = .{ .call = .dirOpenDir, .n = 1, .path = if (subtree) .{ .suffix = "blocked" } else .any } },
+                .fault = .{ .fail = failure },
+                .times = 0,
+            }} });
+            defer fio.deinit();
+            try testing.expectError(failure, base.diff(fio.io()));
             try testing.expectEqual(before, base.dirs.count());
             try testing.expectEqual(@as(usize, 0), count(base.changes.items, .removed));
             try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
@@ -765,15 +759,13 @@ test "a failed baseline traversal leaves changes for the retry" {
     try tmp.dir.writeFile(io, .{ .sub_path = "new", .data = "one" });
     try tmp.dir.writeFile(io, .{ .sub_path = "blocked/new", .data = "two" });
 
-    var vtable = io.vtable.*;
-    vtable.dirOpenDir = struct {
-        fn open(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-            if (std.mem.eql(u8, std.Io.Dir.path.basename(path), "blocked")) return error.AccessDenied;
-            return testing.io.vtable.dirOpenDir(userdata, dir, path, options);
-        }
-    }.open;
-    const failing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    try testing.expectError(error.AccessDenied, base.diff(failing));
+    const fio = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{.{
+        .at = .{ .nth = .{ .call = .dirOpenDir, .n = 1, .path = .{ .suffix = "blocked" } } },
+        .fault = .{ .fail = error.AccessDenied },
+        .times = 0,
+    }} });
+    defer fio.deinit();
+    try testing.expectError(error.AccessDenied, base.diff(fio.io()));
     const changes = try base.diff(io);
     try testing.expect(try holds(changes, root, "new", .created));
     try testing.expect(try holds(changes, root, "blocked/new", .created));
@@ -925,24 +917,17 @@ test "a failed baseline replacement leaves the previous file intact" {
     try b.save(io, filename, .{});
     const original = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
     defer gpa.free(original);
-    const Broken = struct {
-        fn write(context: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
-            // Write only a prefix into the temporary file, then fail.
-            if (offset != 0) return error.NoSpaceLeft;
-            return testing.io.vtable.fileWritePositional(context, file, header, &.{data[0][0..8]}, splat, offset);
-        }
-    };
-    var vtable = io.vtable.*;
-    vtable.fileWritePositional = Broken.write;
-    const broken: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    try testing.expectError(error.NoSpaceLeft, b.save(broken, filename, .{}));
+    // Write only a prefix into the temporary file, then fail.
+    const fio = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{
+        .{ .at = .{ .nth = .{ .call = .fileWritePositional, .n = 1 } }, .fault = .{ .short = 8 } },
+        .{ .at = .{ .nth = .{ .call = .fileWritePositional, .n = 2 } }, .fault = .{ .fail = error.NoSpaceLeft } },
+    } });
+    defer fio.deinit();
+    try testing.expectError(error.NoSpaceLeft, b.save(fio.io(), filename, .{}));
     const after = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
     defer gpa.free(after);
     try testing.expectEqualSlices(u8, original, after);
-    var it = tmp.dir.iterate();
-    var entries: usize = 0;
-    while (try it.next(io)) |_| entries += 1;
-    try testing.expectEqual(@as(usize, 2), entries); // tree and saved; no leaked temporary file
+    try testing.expectEqual(@as(usize, 2), try countEntries(tmp.dir)); // tree and saved; no leaked temporary file
 }
 
 test "baseline storage validates checksummed paths before trusting them" {
@@ -957,7 +942,7 @@ test "baseline storage validates checksummed paths before trusting them" {
     try testing.expectError(error.InvalidBaseline, format.parse(gpa, bytes));
 }
 
-test "durable baseline saves sync before and after replacement and preserve named failures" {
+test "a durable save syncs the file before the replacement and its directory after" {
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
@@ -976,42 +961,123 @@ test "durable baseline saves sync before and after replacement and preserve name
     defer gpa.free(original);
     try tmp.dir.writeFile(io, .{ .sub_path = "tree/new", .data = "one" });
     _ = try b.diff(io);
-    if (builtin.target.os.tag == .windows) {
-        try testing.expectError(error.UnsupportedBaselineDurability, b.save(io, filename, .{ .durable = true }));
-        const after = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
-        defer gpa.free(after);
-        try testing.expectEqualSlices(u8, original, after);
-        return;
-    }
-    const Sync = struct {
-        var calls: usize = 0;
-        var fail_at: usize = 0;
-        fn sync(context: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
-            calls += 1;
-            if (calls == fail_at) return error.NoSpaceLeft;
-            return testing.io.vtable.fileSync(context, file);
-        }
+
+    const Call = airlock.sys.Call;
+    const io_error: airlock.sys.Code = if (builtin.target.os.tag == .windows) .IO_DEVICE_ERROR else .IO;
+    // The temp's sync is whichever call the platform makes for it, the
+    // first of these on a path with the temp's prefix.
+    const temp: shakedown.Match = .{ .prefix = temp_prefix };
+    const file_sync = [_]Seam.Plan.Entry{
+        .{ .at = .{ .nth = .{ .call = .sync_data, .n = 1, .path = temp } }, .fault = .{ .code = io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_full, .n = 1, .path = temp } }, .fault = .{ .code = io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_barrier, .n = 1, .path = temp } }, .fault = .{ .code = io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_plain, .n = 1, .path = temp } }, .fault = .{ .code = io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_writeout, .n = 1, .path = temp } }, .fault = .{ .code = io_error } },
     };
-    var vtable = io.vtable.*;
-    vtable.fileSync = Sync.sync;
-    const syncing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    Sync.calls = 0;
-    Sync.fail_at = 1;
-    try testing.expectError(error.NoSpaceLeft, b.save(syncing, filename, .{ .durable = true }));
-    const unchanged = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
-    defer gpa.free(unchanged);
-    try testing.expectEqualSlices(u8, original, unchanged);
-    Sync.calls = 0;
-    Sync.fail_at = 2;
-    try testing.expectError(error.NoSpaceLeft, b.save(syncing, filename, .{ .durable = true }));
-    var replaced = try load(gpa, io, filename, root, .{});
-    defer replaced.deinit();
-    try testing.expectEqual(@as(usize, 0), (try replaced.diff(io)).len);
-    Sync.calls = 0;
-    Sync.fail_at = 0;
-    try b.save(syncing, filename, .{ .durable = true });
-    try testing.expectEqual(@as(usize, 2), Sync.calls);
-    Sync.calls = 0;
-    try b.save(syncing, filename, .{});
-    try testing.expectEqual(@as(usize, 0), Sync.calls);
+    const dir_sync = [_]Seam.Plan.Entry{
+        .{ .at = .{ .nth = .{ .call = Call.sync_dir, .n = 1 } }, .fault = .{ .code = io_error } },
+    };
+
+    // A failed sync of the new contents leaves the old file, and no temp.
+    {
+        var seam: Seam = undefined;
+        const hooked = seam.init(io, &file_sync);
+        try testing.expectError(error.InputOutput, b.save(hooked, filename, .{ .durable = true }));
+        const unchanged = try tmp.dir.readFileAlloc(io, "saved", gpa, .unlimited);
+        defer gpa.free(unchanged);
+        try testing.expectEqualSlices(u8, original, unchanged);
+        try testing.expectEqual(@as(usize, 2), try countEntries(tmp.dir));
+    }
+    // A failed directory sync comes after the replacement: the new file
+    // is what a reader sees, and the save says it is not durable.
+    {
+        var seam: Seam = undefined;
+        const hooked = seam.init(io, &dir_sync);
+        try testing.expectError(error.PublishedNotDurable, b.save(hooked, filename, .{ .durable = true }));
+        var replaced = try load(gpa, io, filename, root, .{});
+        defer replaced.deinit();
+        try testing.expectEqual(@as(usize, 0), (try replaced.diff(io)).len);
+    }
+    // Two syncs make a durable save, on every platform, and none a plain one.
+    {
+        var seam: Seam = undefined;
+        const hooked = seam.init(io, &.{});
+        try b.save(hooked, filename, .{ .durable = true });
+        try testing.expectEqual(@as(u32, 2), seam.syncs);
+        seam.syncs = 0;
+        try b.save(hooked, filename, .{});
+        try testing.expectEqual(@as(u32, 0), seam.syncs);
+        try testing.expectEqual(@as(usize, 2), try countEntries(tmp.dir));
+    }
+}
+
+/// airlock's raw calls, decided by a plan and counted: the `Io` its test
+/// seam reads.
+const Seam = struct {
+    plan: Plan,
+    steps: shakedown.Steps,
+    counters: [8]u32,
+    hook: airlock.sys.Hook,
+    layer: Hooked,
+    /// The syncs airlock made, of a file or a directory.
+    syncs: u32,
+
+    const Plan = shakedown.Plan(airlock.sys.Call, airlock.sys.Result);
+    const Hooked = shakedown.Layer(airlock.sys.HookedState, .{ .fileSync = airlock.sys.hookedSync });
+
+    /// The seam must not move after this.
+    fn init(s: *Seam, base: Io, entries: []const Plan.Entry) Io {
+        s.steps = .init();
+        s.syncs = 0;
+        s.plan = .init(entries, .{ .steps = &s.steps, .counters = &s.counters });
+        s.hook = .{ .ctx = s, .call = decide, .base = base };
+        s.layer = .init(base, .{ .hook = &s.hook });
+        return s.layer.io();
+    }
+
+    fn decide(ctx: *anyopaque, call: airlock.sys.Call, path: ?[]const u8) ?airlock.sys.Result {
+        const s: *Seam = @ptrCast(@alignCast(ctx)); // safe: the hook's ctx is its seam
+        switch (call) {
+            .sync_full, .sync_barrier, .sync_data, .sync_plain, .sync_writeout, .sync_dir => s.syncs += 1,
+            else => {},
+        }
+        return s.plan.decide(call, path);
+    }
+};
+
+/// How many entries `dir` holds.
+fn countEntries(dir: Io.Dir) !usize {
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (try it.next(testing.io)) |_| n += 1;
+    return n;
+}
+
+test "a save keeps the permissions of the baseline it replaces" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "tree");
+    const root = try tmp.dir.realPathFileAlloc(io, "tree", gpa);
+    defer gpa.free(root);
+    const parent = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(parent);
+    const filename = try std.Io.Dir.path.join(gpa, &.{ parent, "saved" });
+    defer gpa.free(filename);
+    var b = try seed(gpa, io, root, .{});
+    defer b.deinit();
+    try b.save(io, filename, .{});
+    {
+        const file = try tmp.dir.openFile(io, "saved", .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o600));
+    }
+    // A replace never widens who can read the baseline.
+    for ([_]bool{ false, true }) |durable| {
+        try b.save(io, filename, .{ .durable = durable });
+        const stat = try tmp.dir.statFile(io, "saved", .{});
+        try testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+    }
 }

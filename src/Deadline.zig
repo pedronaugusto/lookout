@@ -67,11 +67,11 @@ pub fn windowsMs(d: Deadline, io: Io) u32 {
 }
 
 const testing = std.testing;
-const clock = @import("testing/clock.zig");
+const shakedown = @import("shakedown");
 
 test "no timeout never expires and never clamps" {
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     const d: Deadline = .start(io, .none);
     try testing.expectEqual(@as(?u32, null), d.remainingMs(io));
     try testing.expect(!d.expired(io));
@@ -80,12 +80,12 @@ test "no timeout never expires and never clamps" {
 }
 
 test "a timeout that has run out clamps to zero rather than going negative" {
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var d: Deadline = .fromMs(io, 10);
-    // Reaching back in time is the same as waiting, and a test that
-    // waits on a wall clock is a test that fails on a loaded machine.
-    d.due.?.raw.nanoseconds -= 100 * std.time.ns_per_ms;
+    // The window passes on the test's clock, not on a wall clock that
+    // a loaded machine stretches.
+    clock.advance(.fromMilliseconds(100));
     try testing.expectEqual(@as(?u32, 0), d.remainingMs(io));
     try testing.expect(d.expired(io));
     try testing.expectEqual(@as(i32, 0), d.pollMs(io));
@@ -93,16 +93,16 @@ test "a timeout that has run out clamps to zero rather than going negative" {
 }
 
 test "a deadline in the future has time left on it" {
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     const d: Deadline = .fromMs(io, 2_500);
     try testing.expectEqual(@as(?u32, 2_500), d.remainingMs(io));
     try testing.expect(!d.expired(io));
 }
 
 test "what is left rounds up, so a wait never ends before its deadline" {
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     const d: Deadline = .start(io, .{ .duration = .{ .raw = .fromNanoseconds(1), .clock = .awake } });
     try testing.expectEqual(@as(?u32, 1), d.remainingMs(io));
     const past: Deadline = .start(io, .{ .deadline = .{ .raw = .zero, .clock = .awake } });
@@ -110,8 +110,8 @@ test "what is left rounds up, so a wait never ends before its deadline" {
 }
 
 test "finite waits are clamped to each operating system API" {
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     const posix_long: Deadline = .fromMs(io, @as(u32, std.math.maxInt(i32)) + 1);
     try testing.expectEqual(std.math.maxInt(i32), posix_long.pollMs(io));
 

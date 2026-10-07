@@ -32,7 +32,7 @@ const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
-const Filter = @import("../Filter.zig");
+const CompiledFilter = @import("../CompiledFilter.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("inotify/records.zig");
 const walk = @import("../walk.zig");
@@ -90,7 +90,7 @@ const Watch = struct {
     recursive: bool,
     /// `@import("../options.zig").AddOptions.filter`, copied. An excluded directory is
     /// never registered, so the kernel is never asked for a watch on it.
-    filter: Filter,
+    filter: CompiledFilter,
 };
 
 /// One half of a rename, waiting for the other.
@@ -226,7 +226,7 @@ pub fn add(
 
     const root = try n.gpa.dupe(u8, abs_path);
     errdefer n.gpa.free(root);
-    var filter = try options.filter.dupe(n.gpa);
+    var filter = try CompiledFilter.compile(n.gpa, options.filter);
     errdefer filter.deinit();
     try n.watches.put(n.gpa, id, .{
         .root = root,
@@ -300,7 +300,7 @@ pub fn remove(n: *Inotify, io: Io, id: WatchId) void {
 /// New directories are registered before excluded ones are released.
 pub fn refilter(n: *Inotify, io: Io, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     const watch = n.watches.getPtr(id) orelse return error.UnknownWatch;
-    const replacement = try next.dupe(n.gpa);
+    const replacement = try CompiledFilter.compile(n.gpa, next);
     var previous = watch.filter;
     watch.filter = replacement;
     errdefer {
@@ -385,7 +385,7 @@ fn excluded(n: *const Inotify, id: WatchId, subject: []const u8) bool {
 }
 
 /// Whether a directory is so far outside the watch that it need not be
-/// registered at all. See `Filter.prunes`.
+/// registered at all. See `CompiledFilter.prunes`.
 fn pruned(n: *const Inotify, id: WatchId, subject: []const u8) bool {
     const watch = n.watches.get(id) orelse return false;
     return watch.filter.prunes(watch.root, subject);

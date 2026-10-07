@@ -45,7 +45,7 @@ const checkpoint_format = @import("../Checkpoint/format.zig");
 const SpinLock = @import("../SpinLock.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
-const Filter = @import("../Filter.zig");
+const CompiledFilter = @import("../CompiledFilter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("fsevents/records.zig");
@@ -222,7 +222,7 @@ const Stream = struct {
     /// FSEvents recurses in the kernel and cannot be told to leave a
     /// directory out, so here the filter drops the events rather than
     /// saving the work -- see `lookout.prunesIgnored`.
-    filter: Filter,
+    filter: CompiledFilter,
     /// Greatest record id fully reported into Batch for this stream.
     cursor: u64,
     resume_index: ?usize,
@@ -637,7 +637,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
     errdefer f.gpa.destroy(stream);
     const root = try f.gpa.dupe(u8, abs_path);
     errdefer f.gpa.free(root);
-    var filter = try options.filter.dupe(f.gpa);
+    var filter = try CompiledFilter.compile(f.gpa, options.filter);
     errdefer filter.deinit();
     stream.* = .{
         .id = id,
@@ -722,7 +722,7 @@ fn createStream(
 fn useLiveStream(f: *FsEvents, io: Io, id: WatchId) contract.AddError!void {
     const old = f.streams.get(id).?;
     if (!old.persistent) return;
-    const next = try f.startStream(io, id, old.root, old.root, .{ .recursive = old.scope == .tree, .filter = old.filter }, true);
+    const next = try f.startStream(io, id, old.root, old.root, .{ .recursive = old.scope == .tree, .filter = old.filter.spec() }, true);
     f.streams.getPtr(id).?.* = next;
     f.destroy(old);
 }
@@ -771,7 +771,7 @@ fn withoutStream(bytes: []u8, id: WatchId) usize {
 /// mounts require the host namespace.
 pub fn refilter(f: *FsEvents, io: Io, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     const stream = f.streams.get(id) orelse return error.UnknownWatch;
-    const replacement = try next.dupe(f.gpa);
+    const replacement = try CompiledFilter.compile(f.gpa, next);
     var previous = stream.filter;
     stream.filter = replacement;
     errdefer {
@@ -792,7 +792,7 @@ pub fn refilter(f: *FsEvents, io: Io, id: WatchId, next: lookout.Filter, batch: 
     }
     const NewlyReached = struct {
         stream: *const Stream,
-        old: Filter,
+        old: CompiledFilter,
 
         const Self = @This();
 
@@ -1393,8 +1393,9 @@ fn adopt(
 
         fn visit(a: *Self, entry: walk.Entry) anyerror!walk.Step {
             try a.f.budget.found(entry.dir, entry.name);
-            if (entry.kind == .directory) try a.f.budget.begin(entry.path);
             if (a.stream.filter.prunes(a.stream.root, entry.path)) return .over;
+            // Counted again from this walk only where the walk goes in.
+            if (entry.kind == .directory) try a.f.budget.begin(entry.path);
             if (a.f.known.contains(.{ .id = a.id, .path = entry.path })) return .into;
             if (!a.stream.filter.excludes(a.stream.root, entry.path)) {
                 try a.batch.push(a.f.gpa, a.io, a.id, entry.path, .created, .of(entry.kind));
@@ -1688,7 +1689,6 @@ fn seedKnown(f: *FsEvents, io: Io, stream: *const Stream) !bool {
 
         fn visit(s: *Self, entry: walk.Entry) anyerror!walk.Step {
             try s.f.budget.found(entry.dir, entry.name);
-            if (entry.kind == .directory) try s.f.budget.begin(entry.path);
             if (s.stream.filter.prunes(s.stream.root, entry.path)) {
                 trace.log("fsevents seed filtered {s}", .{entry.path});
                 return .over;
@@ -1704,7 +1704,11 @@ fn seedKnown(f: *FsEvents, io: Io, stream: *const Stream) !bool {
             }
             trace.log("fsevents seed remembered {s}", .{entry.path});
             try s.f.rememberInitial(s.io, s.stream, entry.path, entry.meta);
-            return if (s.stream.scope == .tree) .into else .over;
+            if (s.stream.scope != .tree) return .over;
+            // Only a folder the walk goes into is counted again from it: one
+            // it passes over keeps the count the watches that reach it keep.
+            if (entry.kind == .directory) try s.f.budget.begin(entry.path);
+            return .into;
         }
     };
     var seeding: Seeding = .{ .f = f, .io = io, .stream = stream };

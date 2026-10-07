@@ -7,9 +7,11 @@ pub fn build(b: *std.Build) void {
     //=====================================================================
     // The module.
     //
-    // Pure Zig, no dependencies, nothing to link: which backend is
-    // compiled in is decided by `builtin.target.os.tag` inside src/lookout.zig, so
-    // a consumer adds the import and nothing else.
+    // Pure Zig over two packages of its own, airlock for the durable
+    // baseline file and sweep for the filter patterns, both std-only:
+    // which backend is compiled in is decided by `builtin.target.os.tag`
+    // inside src/lookout.zig, so a consumer adds the import and nothing
+    // else.
     //=====================================================================
 
     // FSEvents lives in CoreServices, and the externs that reach it are
@@ -40,11 +42,19 @@ pub fn build(b: *std.Build) void {
         break :sdk .{ .frameworks = pinned.path("Frameworks"), .include = pinned.path("include"), .lib = pinned.path("lib") };
     };
 
+    const airlock = b.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock");
+    const sweep = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep");
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "airlock", .module = airlock },
+        .{ .name = "sweep", .module = sweep },
+    };
+
     const module = b.addModule("lookout", .{
         .root_source_file = b.path("src/lookout.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = darwin,
+        .imports = imports,
     });
     if (darwin) {
         if (sdk) |paths| paths.addTo(module);
@@ -79,8 +89,17 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = darwin,
             .sanitize_thread = if (thread_sanitizer) true else null,
+            .imports = imports,
         }),
     });
+    // shakedown is a lazy, test-only dependency, asked for only in
+    // lookout's own tree: a project that depends on lookout never fetches
+    // it, and no production source imports it.
+    if (b.pkg_hash.len == 0) {
+        if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |shakedown| {
+            tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
+        } else |_| {}
+    }
     if (darwin) {
         if (sdk) |paths| paths.addTo(tests.root_module);
         tests.root_module.linkFramework("CoreServices", .{});
@@ -143,13 +162,32 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "lookout", .module = module }},
         }),
     });
-    const bench_run = b.addRunArtifact(bench);
-    // A measurement is taken again on every run, never answered from the cache.
-    bench_run.has_side_effects = true;
+    // The filter on its own: the question every backend asks of every
+    // event. It is internal to lookout, so it is built here as a module of
+    // its own rather than reached through `lookout`.
+    const filter_bench = b.addTest(.{
+        .name = "lookout-filter-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/filter.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "filter", .module = b.createModule(.{
+                .root_source_file = b.path("src/CompiledFilter.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }) }},
+        }),
+    });
     const bench_step = b.step("bench", "Run lookout's speed checks (a quiet machine, a release mode)");
-    bench_step.dependOn(&bench_run.step);
-    test_step.dependOn(&bench.step);
-    check_step.dependOn(&bench.step);
+    for ([_]*std.Build.Step.Compile{ bench, filter_bench }) |artifact| {
+        const bench_run = b.addRunArtifact(artifact);
+        // A measurement is taken again on every run, never answered from the cache.
+        bench_run.has_side_effects = true;
+        bench_step.dependOn(&bench_run.step);
+        test_step.dependOn(&artifact.step);
+        check_step.dependOn(&artifact.step);
+    }
 
     //=====================================================================
     // The default step: compile everything for the selected target,
@@ -183,8 +221,13 @@ pub fn build(b: *std.Build) void {
     if (b.lazyImport(@This(), "preflight")) |preflight| {
         // What `LOOKOUT_TRACE` prints is at the info level.
         preflight.addCi(b, .{ .tests = test_step, .portable_tests = true, .test_log_level = .info });
-        // The build a consumer gets: nothing lookout fetches for itself.
-        preflight.addConsumerCheck(b, .{ .package = "lookout", .program = b.path("ci/consumer.zig") });
+        // The build a consumer gets: airlock and sweep, and nothing lookout
+        // fetches for itself.
+        preflight.addConsumerCheck(b, .{
+            .package = "lookout",
+            .program = b.path("ci/consumer.zig"),
+            .packages = &.{ b.dependency("airlock", .{}), b.dependency("sweep", .{}) },
+        });
     }
 }
 

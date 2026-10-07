@@ -83,6 +83,7 @@ test "failed overflow reporting leaves the lost watch queued for retry" {
 
 /// Which paths under a watch the caller wants. See `Watcher.AddOptions.filter`.
 pub const Filter = @import("Filter.zig");
+const CompiledFilter = @import("CompiledFilter.zig");
 
 /// Whether lookout applies its portable ASCII/Latin-1 case and composition
 /// folding, or compares paths byte for byte. See `path.zig` for the exact
@@ -344,7 +345,7 @@ pub const Watcher = struct {
         max_followed_links: usize,
         /// `AddOptions.filter`, copied: the patterns it borrowed are long
         /// gone by the time the watch is promoted.
-        filter: Filter,
+        filter: CompiledFilter,
 
         /// The ancestor watch's filter. Everything but the next step down
         /// is somebody else's business.
@@ -591,7 +592,7 @@ pub const Watcher = struct {
         if (w.claimed(target)) return error.PathAlreadyWatched;
         const p = try w.gpa.create(Pending);
         errdefer w.gpa.destroy(p);
-        var filter = try options.filter.dupe(w.gpa);
+        var filter = try CompiledFilter.compile(w.gpa, options.filter);
         errdefer filter.deinit();
 
         const id: WatchId = @fromBackingInt(@intCast(w.next_id));
@@ -833,7 +834,7 @@ pub const Watcher = struct {
             errdefer w.gpa.free(mirror);
             w.addBackend(io, p.id, p.target, p.target, .{
                 .recursive = p.recursive,
-                .filter = p.filter,
+                .filter = p.filter.spec(),
             }) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
@@ -854,7 +855,7 @@ pub const Watcher = struct {
             return true;
         }
         if (p.follow and p.recursive and target == .directory) {
-            try w.follow(io, p.id, p.target, p.filter, p.max_followed_links, true);
+            try w.follow(io, p.id, p.target, p.filter.spec(), p.max_followed_links, true);
         }
         try w.batch.pushDetail(w.gpa, io, p.id, p.target, .created, null, target);
         if (target == .directory) try w.reportMade(io, p);
@@ -968,11 +969,12 @@ pub const Watcher = struct {
         try io.checkCancel();
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
+        // A pattern refused is refused before anything changes.
+        var compiled: CompiledFilter = try .compile(w.gpa, filter);
+        defer compiled.deinit();
         for (w.pending.items) |p| {
             if (p.id != id) continue;
-            const replacement = try filter.dupe(w.gpa);
-            p.filter.deinit();
-            p.filter = replacement;
+            std.mem.swap(CompiledFilter, &p.filter, &compiled);
             return;
         }
         if (w.table.get(id).?.capabilities.backend == .poll and w.backend() != .poll) {
@@ -981,7 +983,7 @@ pub const Watcher = struct {
             inline else => |*impl| try impl.refilter(io, id, filter, &w.batch),
         }
         if (w.followingOf(id)) |links| try w.refollow(io, links, filter);
-        w.batch.refilter(w.gpa, id, w.table.get(id).?.path, filter, w.handed_out);
+        w.batch.refilter(w.gpa, id, w.table.get(id).?.path, &compiled, w.handed_out);
     }
 
     /// Waits for something to happen and returns what did.

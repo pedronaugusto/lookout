@@ -34,7 +34,7 @@ const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
-const Filter = @import("../Filter.zig");
+const CompiledFilter = @import("../CompiledFilter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("windows/records.zig");
@@ -118,7 +118,7 @@ const Watch = struct {
     /// `ReadDirectoryChangesW` recurses in the kernel and cannot be told
     /// to leave a directory out, so here the filter drops the events
     /// rather than saving the work -- see `lookout.prunesIgnored`.
-    filter: Filter,
+    filter: CompiledFilter,
     overlapped: c.Overlapped,
     /// Where the kernel writes the change records. Owned by the watch,
     /// and not released until its outstanding read has completed, which
@@ -277,7 +277,7 @@ pub fn add(
     const handle = try open(w.gpa, dir_path);
     errdefer _ = c.CloseHandle(handle);
 
-    var filter = try options.filter.dupe(w.gpa);
+    var filter = try CompiledFilter.compile(w.gpa, options.filter);
     errdefer filter.deinit();
 
     const bytes = try w.gpa.alignedAlloc(u8, .of(u32), w.buffer_len);
@@ -397,7 +397,7 @@ pub fn refilter(w: *Windows, io: Io, id: WatchId, next: lookout.Filter, batch: *
     _ = io; // Every backend takes it; this one reads nothing through it.
     _ = batch;
     const watch = w.watches.get(id) orelse return error.UnknownWatch;
-    const replacement = try next.dupe(w.gpa);
+    const replacement = try CompiledFilter.compile(w.gpa, next);
     var previous = watch.filter;
     watch.filter = replacement;
     previous.deinit();

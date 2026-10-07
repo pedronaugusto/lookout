@@ -58,31 +58,30 @@ test "a zero polling interval still sleeps between quiet scans" {
     try std.testing.expectEqual(@as(u32, 1), p.interval_ms);
 }
 
+const shakedown = @import("shakedown");
+
 test "polling racy entries compare bytes even when size and timestamps match" {
     const testing = std.testing;
     const gpa = testing.allocator;
-    const Clock = struct {
-        threadlocal var time_ns: i96 = 0;
-        threadlocal var mtime_ns: i96 = 0;
-        threadlocal var ctime_ns: i96 = 0;
+    // Files whose stat holds both timestamps fixed across positional
+    // writes, as a coarse filesystem tick does.
+    const Stamped = struct {
+        mtime_ns: i96,
+        ctime_ns: i96,
 
-        fn now(_: ?*anyopaque, _: Io.Clock) Io.Timestamp {
-            return .{ .nanoseconds = time_ns };
-        }
+        const L = shakedown.Layer(@This(), .{ .dirStatFile = stat });
 
-        fn stat(context: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
-            var result = try testing.io.vtable.dirStatFile(context, dir, path, options);
+        fn stat(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
+            const l = L.of(userdata);
+            var result = try dir.statFile(l.base, path, options);
             if (result.kind == .file) {
-                result.mtime.nanoseconds = mtime_ns;
-                result.ctime.nanoseconds = ctime_ns;
+                result.mtime.nanoseconds = l.state.mtime_ns;
+                result.ctime.nanoseconds = l.state.ctime_ns;
             }
             return result;
         }
     };
-    var vtable = testing.io.vtable.*;
-    vtable.now = Clock.now;
-    vtable.dirStatFile = Clock.stat;
-    const io: Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    const io = testing.io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "nested", .default_dir);
@@ -93,21 +92,24 @@ test "polling racy entries compare bytes even when size and timestamps match" {
     const file_path = try std.Io.Dir.path.join(gpa, &.{ root, "nested", "file" });
     defer gpa.free(file_path);
 
-    // Hold both stat timestamps fixed across positional writes. The clock
-    // is in the same two-second filesystem tick, then crosses its edge.
+    // The clock is in the same two-second filesystem tick as the stamps,
+    // then crosses its edge.
     for ([_]bool{ false, true }) |ctime_only| {
         for (0..3) |scope| {
-            Clock.time_ns = 3 * std.time.ns_per_s + 500 * std.time.ns_per_ms;
-            Clock.mtime_ns = if (ctime_only) 0 else 2 * std.time.ns_per_s;
-            Clock.ctime_ns = if (ctime_only) 2 * std.time.ns_per_s else 0;
+            var clock: shakedown.Clock = .init(io, .{ .real = .fromNanoseconds(3 * std.time.ns_per_s + 500 * std.time.ns_per_ms) });
+            var stamped: Stamped.L = .init(clock.io(), .{
+                .mtime_ns = if (ctime_only) 0 else 2 * std.time.ns_per_s,
+                .ctime_ns = if (ctime_only) 2 * std.time.ns_per_s else 0,
+            });
+            const timed = stamped.io();
             try tmp.dir.writeFile(io, .{ .sub_path = "nested/file", .data = "one" });
             var p = try Poll.init(gpa, .{});
-            defer p.deinit(io);
+            defer p.deinit(timed);
             var batch: Batch = .init(.{});
             defer batch.deinit(gpa);
             const watch_path = if (scope == 2) file_path else if (scope == 1) root else nested;
-            try p.add(io, @fromBackingInt(@intCast(0)), watch_path, .{ .recursive = scope == 1 }, &batch);
-            try p.scan(io, &batch);
+            try p.add(timed, @fromBackingInt(@intCast(0)), watch_path, .{ .recursive = scope == 1 }, &batch);
+            try p.scan(timed, &batch);
             try testing.expectEqual(@as(usize, 0), batch.events.items.len);
 
             const file = try tmp.dir.openFile(io, "nested/file", .{ .mode = .read_write });
@@ -117,14 +119,14 @@ test "polling racy entries compare bytes even when size and timestamps match" {
                 try file.writePositionalAll(io, bytes, 0);
                 // A racy baseline must still compare content on the scan
                 // where the timestamps first become strictly older.
-                if (index == 2) Clock.time_ns = 4 * std.time.ns_per_s;
-                try p.scan(io, &batch);
+                if (index == 2) clock.advance(.fromMilliseconds(500));
+                try p.scan(timed, &batch);
                 try testing.expectEqual(@as(usize, 1), batch.events.items.len);
                 try testing.expectEqual(lookout.Kind.modified, batch.events.items[0].kind);
                 try testing.expectEqualStrings(file_path, batch.events.items[0].path);
             }
             batch.reset(gpa);
-            try p.scan(io, &batch);
+            try p.scan(timed, &batch);
             try testing.expectEqual(@as(usize, 0), batch.events.items.len);
         }
     }

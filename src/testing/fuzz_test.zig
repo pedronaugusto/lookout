@@ -348,7 +348,7 @@ pub const Fake = struct {
 //=========================================================================
 
 const path_cmp = @import("../path.zig");
-const Filter = @import("../Filter.zig");
+const CompiledFilter = @import("../CompiledFilter.zig");
 const Baseline = @import("../Baseline.zig");
 const Checkpoint = @import("../Checkpoint.zig");
 const builtin = @import("builtin");
@@ -489,38 +489,80 @@ fn fuzzPaths(_: void, smith: *testing.Smith) !void {
     try checkPaths(a, b);
 }
 
-/// A pattern as the matcher reads it: the folded code points, with `**`
-/// and `*` and `?` taken out as what they are.
+/// A pattern as git reads it: the code points as the file system compares
+/// them, with `*` and `?` taken out, and `**` taken out as a globstar
+/// where it stands as a whole component and as `*` everywhere else.
 const Token = union(enum) { any_depth, any, one, literal: u21 };
+
+/// The units a pattern or a name is matched by: one per character, folded
+/// where the file system folds, and each byte no encoding produced as a
+/// unit of its own.
+fn units(gpa: std.mem.Allocator, text: []const u8) !std.ArrayList(u21) {
+    @disableInstrumentation();
+    var out: std.ArrayList(u21) = .empty;
+    errdefer out.deinit(gpa);
+    if (path_cmp.folds_case) {
+        var folder: path_cmp.Folder = .init(text);
+        while (folder.next()) |c| try out.append(gpa, c);
+        return out;
+    }
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const decoded: ?u21 = if (i + len > text.len) null else switch (len) {
+            1 => text[i],
+            2 => std.unicode.utf8Decode2(text[i..][0..2].*) catch null,
+            3 => std.unicode.utf8Decode3(text[i..][0..3].*) catch null,
+            4 => std.unicode.utf8Decode4(text[i..][0..4].*) catch null,
+            else => null,
+        };
+        if (decoded) |c| {
+            try out.append(gpa, c);
+            i += len;
+        } else {
+            try out.append(gpa, path_cmp.Folder.raw_base + text[i]);
+            i += 1;
+        }
+    }
+    return out;
+}
 
 fn tokenize(gpa: std.mem.Allocator, pattern: []const u8) !std.ArrayList(Token) {
     @disableInstrumentation();
+    var points = try units(gpa, pattern);
+    defer points.deinit(gpa);
+    const p = points.items;
     var tokens: std.ArrayList(Token) = .empty;
     errdefer tokens.deinit(gpa);
-    var folder: path_cmp.Folder = .init(pattern);
-    while (folder.next()) |c| {
-        try tokens.append(gpa, switch (c) {
-            '*' => if (folder.peek() == '*') double: {
-                _ = folder.next();
-                break :double .any_depth;
-            } else .any,
+    var i: usize = 0;
+    while (i < p.len) : (i += 1) {
+        try tokens.append(gpa, switch (p[i]) {
+            '*' => star: {
+                var end = i + 1;
+                while (end < p.len and p[end] == '*') end += 1;
+                const whole = (i == 0 or p[i - 1] == '/') and (end == p.len or p[end] == '/');
+                const run = end - i;
+                i = end - 1;
+                break :star if (run >= 2 and whole) .any_depth else .any;
+            },
             '?' => .one,
-            else => .{ .literal = c },
+            else => .{ .literal = p[i] },
         });
     }
     return tokens;
 }
 
-/// The four rules of `Filter.ignore`, matched over every pair of
-/// positions once rather than by backtracking.
+/// git's wildmatch with `WM_PATHNAME`, for patterns of `*`, `**`, `?` and
+/// literals, over every pair of positions once rather than by
+/// backtracking.
 fn referenceMatches(gpa: std.mem.Allocator, pattern: []const u8, name: []const u8) !bool {
     @disableInstrumentation();
     var tokens = try tokenize(gpa, pattern);
     defer tokens.deinit(gpa);
-    var spelled = try Spelled.of(gpa, name);
-    defer spelled.deinit(gpa);
+    var points = try units(gpa, name);
+    defer points.deinit(gpa);
     const t = tokens.items;
-    const n = spelled.points.items;
+    const n = points.items;
     // `can[i][j]`: the tokens from `i` match the name from `j`.
     const can = try gpa.alloc(bool, (t.len + 1) * (n.len + 1));
     defer gpa.free(can);
@@ -536,10 +578,17 @@ fn referenceMatches(gpa: std.mem.Allocator, pattern: []const u8, name: []const u
                 .one => j < n.len and n[j] != '/' and can[(i + 1) * w + j + 1],
                 .any => can[(i + 1) * w + j] or (j < n.len and n[j] != '/' and can[i * w + j + 1]),
                 .any_depth => any: {
-                    // Any run, separators included; and a separator just
-                    // after it may stand for no directory at all.
-                    const skip = if (i + 1 < t.len and t[i + 1] == .literal and t[i + 1].literal == '/') i + 2 else i + 1;
-                    break :any can[(i + 1) * w + j] or can[skip * w + j] or (j < n.len and can[i * w + j + 1]);
+                    // At the end: everything left. Before a separator: no
+                    // directory at all, or whole directories, each ending
+                    // at a separator.
+                    if (i + 1 == t.len) break :any true;
+                    const after = i + 2;
+                    if (can[after * w + j]) break :any true;
+                    var k = j;
+                    while (k < n.len) : (k += 1) {
+                        if (n[k] == '/' and can[after * w + k + 1]) break :any true;
+                    }
+                    break :any false;
                 },
             };
         }
@@ -547,7 +596,7 @@ fn referenceMatches(gpa: std.mem.Allocator, pattern: []const u8, name: []const u
     return can[0];
 }
 
-/// `Filter.excludes` for an ignore list of one pattern, said the long
+/// `CompiledFilter.excludes` for an ignore list of one pattern, said the long
 /// way round: the pattern names the path or a directory above it,
 /// relative to the root or absolute as the pattern is, or names the last
 /// component of one of them when it holds no separator.
@@ -591,6 +640,8 @@ test "an ignore list agrees with the reference over every short pattern and path
             len += piece.len;
         }
         const pattern = native(&native_buf, pattern_buf[0..len]);
+        var ignore: CompiledFilter = try .compile(gpa, .{ .ignore = &.{pattern} });
+        defer ignore.deinit();
         // Every path below the root of up to four characters, with no
         // empty component.
         var name: usize = 0;
@@ -609,7 +660,6 @@ test "an ignore list agrees with the reference over every short pattern and path
             }
             if (!valid or end == root.len + 1 or subject_buf[end - 1] == std.Io.Dir.path.sep) continue;
             const subject = subject_buf[0..end];
-            const ignore: Filter = .{ .ignore = &.{pattern} };
             testing.expectEqual(try referenceExcludes(gpa, root, pattern, subject), ignore.excludes(root, subject)) catch |err| {
                 std.debug.print("pattern '{s}' subject '{s}'\n", .{ pattern, subject });
                 return err;
@@ -679,8 +729,10 @@ fn fuzzFilter(_: void, smith: *testing.Smith) !void {
 
     // The matcher is the reference's answer for the path and for the
     // name alone.
-    const ignore: Filter = .{ .ignore = &.{pattern} };
-    const only: Filter = .{ .only = &.{pattern} };
+    var ignore: CompiledFilter = try .compile(gpa, .{ .ignore = &.{pattern} });
+    defer ignore.deinit();
+    var only: CompiledFilter = try .compile(gpa, .{ .only = &.{pattern} });
+    defer only.deinit();
     const bare = std.mem.findAny(u8, pattern, path_cmp.separators) == null;
     const named = pattern.len != 0 and (try referenceMatches(gpa, pattern, rel) or
         (bare and try referenceMatches(gpa, pattern, std.Io.Dir.path.basename(rel))));

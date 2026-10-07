@@ -13,11 +13,12 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/path.zig",
         "src/trace.zig",
         "src/walk.zig",
+        "src/Filter.zig",
     } },
     .{ .name = "path policy", .patterns = &.{
         "src/Budget.zig",
         "src/Deadline.zig",
-        "src/Filter.zig",
+        "src/CompiledFilter.zig",
     } },
     .{ .name = "event contracts", .patterns = &.{
         "src/types.zig",
@@ -64,8 +65,11 @@ pub const entries: []const []const u8 = &.{};
 pub const modules: []const gantry.NamedModule = &.{};
 pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{
+        "airlock",
         "builtin",
+        "shakedown",
         "std",
+        "sweep",
     } },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
 };
@@ -83,6 +87,7 @@ pub const required = [_][]const u8{
     "src/Budget.zig",
     "src/Deadline.zig",
     "src/Filter.zig",
+    "src/CompiledFilter.zig",
     "src/types.zig",
     "src/Snapshot.zig",
     "src/backend/fsevents/records.zig",
@@ -115,4 +120,8 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "kqueue backend", .tokens = &.{"kevent"}, .owners = &.{"src/backend/Kqueue.zig"} },
     .{ .name = "windows backend", .tokens = &.{ "ReadDirectoryChangesW", "CreateFileW" }, .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**" } },
     .{ .name = "windows backend", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**", "src/filesystem.zig" } },
+    // A test double is a shakedown `Clock`, `FaultIo` or `Layer`, never a
+    // copied `Io` vtable with a slot replaced: such a copy keeps its state in
+    // globals and cannot be stacked.
+    .{ .name = "test doubles on shakedown", .tokens = &.{ "vtable", "VTable" }, .owners = &.{} },
 };

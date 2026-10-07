@@ -256,10 +256,12 @@ pub const Folder = struct {
         return cp;
     }
 
-    /// A byte no valid encoding produced, kept distinct from every real
-    /// code point so that two different broken names stay different.
+    /// Where the bytes no valid encoding produced are yielded: past every
+    /// real code point, so that two different broken names stay different.
+    pub const raw_base: u21 = 0x11_0000;
+
     fn raw(byte: u8) u21 {
-        return 0x11_0000 + @as(u21, byte);
+        return raw_base + @as(u21, byte);
     }
 };
 
@@ -307,6 +309,7 @@ const latin1: [64]Latin1 = blk: {
 };
 
 const testing = std.testing;
+const shakedown = @import("shakedown");
 
 test "a path equals itself and nothing else" {
     try testing.expect(eql("/w/a.txt", "/w/a.txt"));
@@ -347,21 +350,13 @@ test "the folded hash agrees with the folded comparison" {
 
 test "the folded hash is one hash of every folded code point, however long the path" {
     if (!folds_case) return error.SkipZigTest;
-    const long = "/Users/Someone/Documents/" ++ comptime repeated("Caf\u{e9}/", 30) ++ "\xff/Ending.TXT";
+    const long = "/Users/Someone/Documents/" ++ shakedown.corpus.repeat("Caf\u{e9}/", 30) ++ "\xff/Ending.TXT";
     for ([_][]const u8{ "", "a", "/A/\u{c9}", long, long[0..63], long[0..64], long[0..65], long[0..130] }) |p| {
         var reference: std.hash.Wyhash = .init(0);
         var folder: Folder = .init(p);
         while (folder.next()) |cp| reference.update(&std.mem.toBytes(cp));
         try std.testing.expectEqual(reference.final(), hash(p));
     }
-}
-
-/// `text` written `count` times over, at compile time.
-fn repeated(comptime text: []const u8, comptime count: usize) *const [text.len * count]u8 {
-    var out: [text.len * count]u8 = undefined;
-    for (0..count) |i| @memcpy(out[i * text.len ..][0..text.len], text);
-    const final = out;
-    return &final;
 }
 
 test "what is below a root is found by comparison, not by offset" {

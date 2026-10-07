@@ -2,7 +2,7 @@
 const std = @import("std");
 const windows = std.os.windows;
 const lookout = @import("../lookout.zig");
-const ms = @import("../testing/clock.zig").ms;
+const ms = @import("../testing/timeout.zig").ms;
 const Target = lookout.Target;
 
 const access = @import("Windows.zig").test_access;

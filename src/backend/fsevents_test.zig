@@ -2,7 +2,7 @@
 const std = @import("std");
 const Io = std.Io;
 const lookout = @import("../lookout.zig");
-const ms = @import("../testing/clock.zig").ms;
+const ms = @import("../testing/timeout.zig").ms;
 const checkpoint_format = @import("../Checkpoint/format.zig");
 const Deadline = @import("../Deadline.zig");
 const path_cmp = @import("../path.zig");
@@ -17,7 +17,7 @@ const Asking = access.Asking;
 const settled = access.settled;
 const access = @import("FsEvents.zig").test_access;
 const Baseline = @import("../Baseline.zig");
-const clock = @import("../testing/clock.zig");
+const shakedown = @import("shakedown");
 const Checkpoint = @import("../Checkpoint.zig");
 const c = access.c;
 const synthesize = access.synthesize;
@@ -40,14 +40,13 @@ test "FSEvents access failures preserve known paths and report an incomplete ans
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
     inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
-        var vtable = io.vtable.*;
-        vtable.dirStatFile = struct {
-            fn stat(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
-                if (std.mem.eql(u8, std.Io.Dir.path.basename(path), "kept")) return failure;
-                return testing.io.vtable.dirStatFile(userdata, dir, path, options);
-            }
-        }.stat;
-        const failing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+        const fio = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{.{
+            .at = .{ .nth = .{ .call = .dirStatFile, .n = 1, .path = .{ .suffix = "kept" } } },
+            .fault = .{ .fail = failure },
+            .times = 0,
+        }} });
+        defer fio.deinit();
+        const failing = fio.io();
         try testing.expect(!records.pairs(
             .{ .id = id, .path = kept, .flags = flag.item_renamed, .event = 0 },
             .{ .id = id, .path = root, .flags = flag.item_renamed, .event = 0 },
@@ -408,8 +407,8 @@ test "a poll that expires before the replay begins is not the end of it" {
     const deleted = try std.Io.Dir.path.join(gpa, &.{ root, "gone.txt" });
     defer gpa.free(deleted);
 
-    var vtable: Io.VTable = undefined;
-    const frozen = clock.frozen(io, &vtable);
+    var clock: shakedown.Clock = .init(io, .{});
+    const clocked = clock.io();
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
     var watcher: lookout.Watcher = try .init(gpa, .{
@@ -417,25 +416,25 @@ test "a poll that expires before the replay begins is not the end of it" {
         .checkpoint = checkpoint,
         .latency = .fromMilliseconds(0),
     });
-    defer watcher.deinit(frozen);
-    const id = try watcher.add(frozen, root, .{ .recursive = true });
+    defer watcher.deinit(clocked);
+    const id = try watcher.add(clocked, root, .{ .recursive = true });
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
 
     stopDeliveries(f, stream);
 
     // The boundary: a wait before the stream has said anything.
-    const initial = try watcher.poll(frozen, ms(0));
+    const initial = try watcher.poll(clocked, ms(0));
     try testing.expectEqual(@as(usize, 1), initial.len);
     try testing.expectEqual(lookout.Kind.removed, initial[0].kind);
     try testing.expectEqualStrings(deleted, initial[0].path);
     // The sentinel, alone in its delivery: nothing happened to a path.
     try synthesize(gpa, stream, &.{.{ .path = root, .flags = flag.history_done }});
-    try testing.expectEqual(@as(usize, 0), (try watcher.poll(frozen, ms(0))).len);
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(clocked, ms(0))).len);
     try testing.expect(stream.replayed != null);
     // The tail, live after the sentinel.
     try synthesize(gpa, stream, &.{.{ .path = deleted, .flags = flag.item_created | flag.item_removed }});
-    const events = try watcher.poll(frozen, ms(0));
+    const events = try watcher.poll(clocked, ms(0));
     try testing.expectEqual(@as(usize, 0), events.len);
 }
 
@@ -471,16 +470,8 @@ test "a deletion numbered after the checkpoint marker is reported exactly once h
     const deleted = try std.Io.Dir.path.join(gpa, &.{ root, "gone.txt" });
     defer gpa.free(deleted);
 
-    const Late = struct {
-        var now_ms: i96 = 1_000;
-        fn now(_: ?*anyopaque, _: Io.Clock) Io.Timestamp {
-            return .{ .nanoseconds = now_ms * std.time.ns_per_ms };
-        }
-    };
-    Late.now_ms = 1_000;
-    var vtable = io.vtable.*;
-    vtable.now = Late.now;
-    const frozen: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var clock: shakedown.Clock = .init(io, .{});
+    const clocked = clock.io();
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
     var watcher: lookout.Watcher = try .init(gpa, .{
@@ -488,32 +479,32 @@ test "a deletion numbered after the checkpoint marker is reported exactly once h
         .checkpoint = checkpoint,
         .latency = .fromMilliseconds(0),
     });
-    defer watcher.deinit(frozen);
-    const id = try watcher.add(frozen, root, .{ .recursive = true });
+    defer watcher.deinit(clocked);
+    const id = try watcher.add(clocked, root, .{ .recursive = true });
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
 
     stopDeliveries(f, stream);
 
     // The boundary: a wait before the stream has said anything.
-    const initial = try watcher.poll(frozen, ms(0));
+    const initial = try watcher.poll(clocked, ms(0));
     try testing.expectEqual(@as(usize, 1), initial.len);
     try testing.expectEqual(lookout.Kind.removed, initial[0].kind);
     try testing.expectEqualStrings(deleted, initial[0].path);
     // The sentinel, alone in its delivery: nothing happened to a path.
     try synthesize(gpa, stream, &.{.{ .path = root, .flags = flag.history_done }});
-    try testing.expectEqual(@as(usize, 0), (try watcher.poll(frozen, ms(0))).len);
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(clocked, ms(0))).len);
     try testing.expect(stream.replayed != null);
     // Numbered after the checkpoint and sentinel, delivered well beyond the
     // former one-second replay window. No id-space barrier can bound it.
     const marker_at = stream.cursor + 1_000;
-    Late.now_ms += 15_000;
+    clock.advance(.fromSeconds(15));
     // The tail, live after the sentinel.
     try synthesize(gpa, stream, &.{.{ .path = deleted, .flags = flag.item_created | flag.item_removed, .event = marker_at + 1 }});
-    const events = try watcher.poll(frozen, ms(0));
+    const events = try watcher.poll(clocked, ms(0));
     try testing.expectEqual(@as(usize, 0), events.len);
     try synthesize(gpa, stream, &.{.{ .path = deleted, .flags = flag.item_removed, .event = marker_at + 2 }});
-    try testing.expectEqual(@as(usize, 0), (try watcher.poll(frozen, ms(0))).len);
+    try testing.expectEqual(@as(usize, 0), (try watcher.poll(clocked, ms(0))).len);
 }
 
 test "checkpoints preserve independent cursors and unread stream records" {

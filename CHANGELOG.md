@@ -18,7 +18,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A `Baseline` keeps its allocator and no `std.Io`: `deinit()` takes no allocator, `diff(io)` and `save(io, filename, options)` take the `io`. `save` takes the `SaveOptions` that `saveWithOptions` took, which is gone. `Baseline.Error` is `Baseline.SeedError` and `Baseline.DiffError`.
 
-- `Filter.deinit()` takes no allocator: a copy made by `Filter.dupe(gpa)` keeps it, and a filter that borrows its patterns owns nothing to release.
+- Filter patterns are git's, matched by [sweep](https://github.com/pedronaugusto/sweep): `**` crosses directories only as a whole component (`build/**`, `**/x`, `a/**/b`), and anywhere else it is `*`, so `a**/c` now names `ax/c` and no longer `ax/y/c`. `[...]` brackets are syntax, and so is a `\` escape except on Windows, where `\` is a separator. `?` is one character on Linux too, where it was one byte. Case and composition are folded as before. A pattern git refuses (an unclosed `[`, an unknown `[:class:]`, a trailing `\`) makes `Watcher.add`, `Watcher.refilter`, `Baseline.seed` and `Baseline.load` return `error.InvalidPattern`, and one past sweep's length `error.PatternTooLong`.
+
+- `Filter` is what a caller asks for and nothing more: `Filter.dupe`, `Filter.deinit`, `Filter.excludes`, `Filter.prunes` and `Filter.isEmpty` are gone, and a filter owns nothing.
 
 - FSEvents checkpoints persist the known path baseline and report paths gone on resume exactly once, even when deletion records arrive late or are numbered after the replay marker; version-1 tokens are refused.
 
@@ -36,7 +38,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `Watcher.AddOptions.follow_symlinks` makes a recursive watch follow links to directories and report changes below a link under the link's path. A link into a directory the watch already reaches is refused by device and inode, or volume and file id; `max_followed_links` bounds each watch and a link past it is reported `unwatched`. Off by default.
 
-- `Baseline.save` can fsync the file and parent directory on POSIX (`SaveOptions.durable`); Windows refuses durable replacement by name before writing.
+- `Baseline.save(io, filename, .{ .durable = true })` makes the replacement survive a power cut on Linux, macOS and Windows: the new file is synced before it replaces the old one and its directory after. A failed sync before the replacement leaves the old file; a failed directory sync after it is `error.PublishedNotDurable`, with the new file in place; a filesystem that refuses the syncs is `error.LevelUnavailable`. A save writes its temporary file under `Baseline.temp_prefix`.
 
 - `Watcher.capabilities(id)` reports the filesystem fact and backend per watch; `.auto` uses polling on network and FUSE mounts, while explicit backend choices are kept.
 
@@ -53,9 +55,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Export `path.relative` and `path.within` for callers that need the same
   platform case folding and separator handling as lookout's watches.
 
-- `zig build bench` runs lookout's own speed checks, each held to its ceiling on every backend the target has: a change while `poll` is blocked, a rename then delete, a cancellation before `poll`, a wake, and a task stopped by a flag. CI compiles them and runs none.
+- `zig build bench` runs lookout's own speed checks, each held to its ceiling on every backend the target has: a change while `poll` is blocked, a rename then delete, a cancellation before `poll`, a wake, a task stopped by a flag, and what a filter costs a path. CI compiles them and runs none.
 
 ### Changed
+
+- A path is matched against all of a watch's patterns in one pass over it, whatever their number and shape: a filter of twenty ignore patterns and three include patterns decides a path about six times faster than before, and one pattern about one and a half times.
 
 - Resuming an FSEvents checkpoint reports only what the watch would report live: a saved change outside the watch or excluded by its filter is dropped, and a saved rename with one side left out is the creation or removal of the other. Token paths must be absolute, without NUL or `.`/`..` components, or the token is `error.InvalidCheckpoint`.
 
@@ -106,6 +110,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The test modules' `error_tracing = false`: Zig 0.17's fuzz runner builds with error return traces.
 
 ### Fixed
+
+- On FSEvents, a watch taken on a folder above a recursive watch's subfolders -- one that does not recurse, or a pending watch parked there -- started each subfolder's entry count again without reading it, so the recursive watch counted those folders from nothing and was never told when one passed `Options.max_dir_entries`. A count is now started again only for a folder the walk reads.
+
+- `Baseline.save` keeps the permissions of the file it replaces: a baseline made readable by its owner alone stays so after the next save.
 
 - Glob patterns match in time proportional to the pattern and the name, however many `*` and `**` they hold. Each `*` used to retry the rest of the pattern at every position, so a file name chosen against a pattern such as `*a*a*a*a*b` could stall the watcher's thread for most of a minute.
 

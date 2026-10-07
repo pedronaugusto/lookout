@@ -9,7 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const lookout = @import("../lookout.zig");
-const ms = @import("clock.zig").ms;
+const ms = @import("timeout.zig").ms;
 const records = @import("../backend/fsevents/records.zig");
 const Kind = lookout.Kind;
 const Watcher = lookout.Watcher;

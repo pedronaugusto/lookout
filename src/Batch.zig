@@ -20,6 +20,7 @@ const Io = std.Io;
 
 const lookout = @import("types.zig");
 const path_cmp = @import("path.zig");
+const CompiledFilter = @import("CompiledFilter.zig");
 const Options = @import("options.zig").Options;
 const milliseconds = @import("options.zig").milliseconds;
 const Event = lookout.Event;
@@ -102,7 +103,7 @@ pub const Alias = struct {
     /// That watch's root, which `Kind.overflow` is reported against.
     root: []const u8,
     /// That watch's filter, asked of each path spelled under the link.
-    filter: *const lookout.Filter,
+    filter: *const CompiledFilter,
     /// Where the registration is: the directory the link leads to,
     /// canonical, as the backend reports it.
     physical: []const u8,
@@ -483,7 +484,7 @@ pub fn refilter(
     gpa: Allocator,
     id: WatchId,
     root: []const u8,
-    filter: lookout.Filter,
+    filter: *const CompiledFilter,
     handed_out: bool,
 ) void {
     var t: usize = 0;
@@ -816,12 +817,12 @@ comptime {
 }
 
 const testing = std.testing;
-const clock = @import("testing/clock.zig");
+const shakedown = @import("shakedown");
 
 test "one event per path, strongest kind wins" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
 
@@ -839,8 +840,8 @@ test "one event per path, strongest kind wins" {
 
 test "removal outranks creation and overflow outranks everything" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
 
@@ -855,8 +856,8 @@ test "removal outranks creation and overflow outranks everything" {
 
 test "a finished write outranks the writing, and a creation outranks both" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
 
@@ -875,8 +876,8 @@ test "a finished write outranks the writing, and a creation outranks both" {
 
 test "reset drops the previous window" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
 
@@ -889,8 +890,8 @@ test "reset drops the previous window" {
 
 test "a paired rename is one event carrying where it came from" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
 
@@ -903,8 +904,8 @@ test "a paired rename is one event carrying where it came from" {
 
 test "a stronger non-rename clears an earlier rename source" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
 
@@ -919,8 +920,8 @@ test "a stronger non-rename clears an earlier rename source" {
 
 test "every event carries when it was seen" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
 
@@ -935,8 +936,8 @@ test "every event carries when it was seen" {
 
 test "a settling modification is held back until it is due" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .settle = .fromMilliseconds(50) });
     defer b.deinit(gpa);
 
@@ -945,9 +946,9 @@ test "a settling modification is held back until it is due" {
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
     try testing.expect(b.nextDueMs(io).? > 0);
 
-    // Reaching back in time is the same as waiting, and a test that waits
-    // on a wall clock is a test that fails on a loaded machine.
-    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
+    // The window passes on the test's clock, not on a wall clock that a
+    // loaded machine stretches.
+    clock.advance(.fromMilliseconds(100));
     try b.promote(gpa, io);
     try testing.expectEqual(@as(usize, 1), b.events.items.len);
     try testing.expectEqual(Kind.modified, b.events.items[0].kind);
@@ -956,8 +957,8 @@ test "a settling modification is held back until it is due" {
 
 test "a name event settles the question of the contents" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .settle = .fromMilliseconds(50) });
     defer b.deinit(gpa);
 
@@ -975,8 +976,8 @@ test "loss notices bypass holding and displace held changes" {
         .{ .settle = .fromMilliseconds(50), .max_events = 1 },
     }) |options| {
         for ([_]Kind{ .overflow, .unwatched }) |kind| {
-            var vtable: Io.VTable = undefined;
-            const io = clock.frozen(testing.io, &vtable);
+            var clock: shakedown.Clock = .init(testing.io, .{});
+            const io = clock.io();
             var b = Batch.init(options);
             defer b.deinit(gpa);
             try b.push(gpa, io, id, "/watch", .modified, .file);
@@ -1005,8 +1006,8 @@ test "loss notices keep their precedence in a debounced delivery" {
         for (kinds) |last| {
             if (first != .overflow and first != .unwatched and
                 last != .overflow and last != .unwatched) continue;
-            var vtable: Io.VTable = undefined;
-            const io = clock.frozen(testing.io, &vtable);
+            var clock: shakedown.Clock = .init(testing.io, .{});
+            const io = clock.io();
             var b = Batch.init(.{ .debounce = .fromMilliseconds(50) });
             defer b.deinit(gpa);
             const now: Io.Timestamp = .now(io, .awake);
@@ -1023,8 +1024,8 @@ test "loss notices keep their precedence in a debounced delivery" {
 
 test "debouncing holds ordinary kinds and reports the one seen last" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .debounce = .fromMilliseconds(50) });
     defer b.deinit(gpa);
 
@@ -1036,7 +1037,7 @@ test "debouncing holds ordinary kinds and reports the one seen last" {
     try b.promote(gpa, io);
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
 
-    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
+    clock.advance(.fromMilliseconds(100));
     try b.promote(gpa, io);
 
     // One event for the path, and `modified` rather than the `removed`
@@ -1048,14 +1049,14 @@ test "debouncing holds ordinary kinds and reports the one seen last" {
 
 test "a debounced rename keeps where it came from" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .debounce = .fromMilliseconds(50) });
     defer b.deinit(gpa);
 
     try b.push(gpa, io, @fromBackingInt(@intCast(0)), "/tmp/new", .modified, .file);
     try b.pushRename(gpa, io, @fromBackingInt(@intCast(0)), "/tmp/new", "/tmp/old", .file);
-    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
+    clock.advance(.fromMilliseconds(100));
     try b.promote(gpa, io);
 
     try testing.expectEqual(Kind.renamed, b.events.items[0].kind);
@@ -1064,15 +1065,15 @@ test "a debounced rename keeps where it came from" {
 
 test "debouncing stamps an event with when the path first changed" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .debounce = .fromMilliseconds(50) });
     defer b.deinit(gpa);
 
     try b.push(gpa, io, @fromBackingInt(@intCast(0)), "/tmp/a", .created, .file);
     const first = b.held.values()[0].first_ns;
     try b.push(gpa, io, @fromBackingInt(@intCast(0)), "/tmp/a", .modified, .file);
-    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
+    clock.advance(.fromMilliseconds(100));
     try b.promote(gpa, io);
 
     try testing.expectEqual(first, b.events.items[0].time.nanoseconds);
@@ -1080,8 +1081,8 @@ test "debouncing stamps an event with when the path first changed" {
 
 test "a push that is held still moves the revision" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .debounce = .fromMilliseconds(50) });
     defer b.deinit(gpa);
 
@@ -1093,8 +1094,8 @@ test "a push that is held still moves the revision" {
 
 test "discarding a watch takes its events and its held paths with it" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .debounce = .fromMilliseconds(50) });
     defer b.deinit(gpa);
 
@@ -1103,7 +1104,7 @@ test "discarding a watch takes its events and its held paths with it" {
     try b.push(gpa, io, kept, "/tmp/a", .created, .file);
     try b.push(gpa, io, dropped, "/tmp/b", .created, .file);
     try b.push(gpa, io, kept, "/tmp/c", .created, .file);
-    for (b.held.values()) |*entry| entry.last_ns -= 100 * std.time.ns_per_ms;
+    clock.advance(.fromMilliseconds(100));
     try b.promote(gpa, io);
     try testing.expectEqual(@as(usize, 3), b.events.items.len);
 
@@ -1115,7 +1116,7 @@ test "discarding a watch takes its events and its held paths with it" {
     // The index has to survive the removal: a later push on a path the
     // batch still holds must merge rather than appear twice.
     try b.push(gpa, io, kept, "/tmp/c", .removed, .file);
-    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
+    clock.advance(.fromMilliseconds(100));
     try b.promote(gpa, io);
     try testing.expectEqual(@as(usize, 2), b.events.items.len);
     try testing.expectEqual(Kind.removed, b.events.items[1].kind);
@@ -1136,40 +1137,40 @@ test "a held modification that is still growing is not reported yet" {
     const target = try tmp.dir.realPathFileAlloc(io, "big.bin", gpa);
     defer gpa.free(target);
 
-    var vtable: Io.VTable = undefined;
-    const frozen = clock.frozen(io, &vtable);
+    var clock: shakedown.Clock = .init(io, .{});
+    const at = clock.io();
     var b: Batch = .init(.{ .settle = .fromMilliseconds(50) });
     defer b.deinit(gpa);
 
-    try b.push(gpa, frozen, @fromBackingInt(@intCast(0)), target, .modified, .file);
+    try b.push(gpa, at, @fromBackingInt(@intCast(0)), target, .modified, .file);
     try testing.expectEqual(@as(usize, 1), b.held.count());
 
     // The window closes, and the file is bigger than it was when it
     // opened: the writing is not over, whatever the clock says.
     tmp.dir.writeFile(io, .{ .sub_path = "big.bin", .data = "one and two" }) catch unreachable;
-    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
-    try b.promote(gpa, frozen);
+    clock.advance(.fromMilliseconds(100));
+    try b.promote(gpa, at);
     try testing.expectEqual(@as(usize, 0), b.events.items.len);
     try testing.expectEqual(@as(usize, 1), b.held.count());
 
     // The window closes again with the file the size it was: now it is.
-    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
-    try b.promote(gpa, frozen);
+    clock.advance(.fromMilliseconds(100));
+    try b.promote(gpa, at);
     try testing.expectEqual(@as(usize, 1), b.events.items.len);
     try testing.expectEqual(Kind.modified, b.events.items[0].kind);
 }
 
 test "a path that cannot be measured is still reported when it goes quiet" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b: Batch = .init(.{ .settle = .fromMilliseconds(50) });
     defer b.deinit(gpa);
 
     // Nothing is at this path, so there is no size to compare and the
     // quiet window is the whole of the answer.
     try b.push(gpa, io, @fromBackingInt(@intCast(0)), "/tmp/lookout-no-such-file", .modified, .file);
-    b.held.values()[0].last_ns -= 100 * std.time.ns_per_ms;
+    clock.advance(.fromMilliseconds(100));
     try b.promote(gpa, io);
     try testing.expectEqual(@as(usize, 1), b.events.items.len);
 }
@@ -1274,8 +1275,8 @@ test "a failed batch flush leaves trouble queued for the retry" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
     try b.trouble(gpa, @fromBackingInt(@intCast(0)), root, .directory);
@@ -1295,12 +1296,12 @@ test "a failed batch promotion leaves the rename held for the retry" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .debounce = .fromMilliseconds(1) });
     defer b.deinit(gpa);
     try b.pushRename(gpa, io, @fromBackingInt(@intCast(0)), root, "before", .directory);
-    b.held.values()[0].last_ns -= std.time.ns_per_s;
+    clock.advance(.fromSeconds(1));
     var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, b.promote(failing.allocator(), io));
     try testing.expectEqual(@as(usize, 1), b.held.count());
@@ -1318,8 +1319,8 @@ test "a failed batch replacement leaves the settling event held" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .settle = .fromMilliseconds(1) });
     defer b.deinit(gpa);
     const id: WatchId = @fromBackingInt(@intCast(0));
@@ -1334,8 +1335,8 @@ test "a failed batch replacement leaves the settling event held" {
 
 test "a paired rename ends the source path's settling hold" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .settle = .fromMilliseconds(50) });
     defer b.deinit(gpa);
     const id: WatchId = @fromBackingInt(@intCast(0));
@@ -1349,8 +1350,8 @@ test "a paired rename ends the source path's settling hold" {
 
 test "a debounced rename replaces its source within the same event ceiling" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .debounce = .fromMilliseconds(50), .max_events = 1 });
     defer b.deinit(gpa);
     const id: WatchId = @fromBackingInt(@intCast(0));
@@ -1365,8 +1366,8 @@ test "a debounced rename replaces its source within the same event ceiling" {
 
 test "a failed rename leaves its source hold available for retry" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{ .settle = .fromMilliseconds(50) });
     defer b.deinit(gpa);
     const id: WatchId = @fromBackingInt(@intCast(0));
@@ -1382,34 +1383,37 @@ test "a failed rename leaves its source hold available for retry" {
 
 test "a change below a followed link is its watch's, spelled under the link" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
     const sep = std.Io.Dir.path.sep_str;
-    const filter: lookout.Filter = .{ .ignore = &.{"*.tmp"} };
+    const logical = sep ++ "watch" ++ sep ++ "link";
+    const physical = sep ++ "elsewhere" ++ sep ++ "target";
+    var filter: CompiledFilter = try .compile(gpa, .{ .ignore = &.{"*.tmp"} });
+    defer filter.deinit();
     const alias: Alias = .{
         .owner = @fromBackingInt(@intCast(0)),
         .root = sep ++ "watch",
         .filter = &filter,
-        .physical = sep ++ "elsewhere" ++ sep ++ "target",
-        .logical = sep ++ "watch" ++ sep ++ "link",
+        .physical = physical,
+        .logical = logical,
     };
     const registration: WatchId = @fromBackingInt(@intCast(9));
     try b.aliases.put(gpa, registration, &alias);
     try b.noting.put(gpa, alias.owner, {});
 
-    try b.push(gpa, io, registration, alias.physical ++ sep ++ "a.txt", .created, .file);
-    try b.push(gpa, io, registration, alias.physical ++ sep ++ "skip.tmp", .created, .file);
-    try b.pushRename(gpa, io, registration, alias.physical ++ sep ++ "b.txt", alias.physical ++ sep ++ "skip.tmp", .file);
+    try b.push(gpa, io, registration, physical ++ sep ++ "a.txt", .created, .file);
+    try b.push(gpa, io, registration, physical ++ sep ++ "skip.tmp", .created, .file);
+    try b.pushRename(gpa, io, registration, physical ++ sep ++ "b.txt", physical ++ sep ++ "skip.tmp", .file);
     try b.push(gpa, io, registration, alias.physical, .attributes, .directory);
     try b.push(gpa, io, registration, alias.physical, .overflow, .directory);
     // Outside the target: not this registration's to report.
     try b.push(gpa, io, registration, sep ++ "elsewhere" ++ sep ++ "other", .created, .file);
 
     const expected = [_]struct { []const u8, Kind }{
-        .{ alias.logical ++ sep ++ "a.txt", .created },
-        .{ alias.logical ++ sep ++ "b.txt", .created },
+        .{ logical ++ sep ++ "a.txt", .created },
+        .{ logical ++ sep ++ "b.txt", .created },
         .{ alias.logical, .attributes },
         .{ alias.root, .overflow },
     };
@@ -1425,13 +1429,13 @@ test "a change below a followed link is its watch's, spelled under the link" {
     defer notes.deinit(gpa);
     try testing.expectEqual(@as(usize, 3), notes.items.items.len);
     try testing.expect(notes.lost);
-    try testing.expectEqualStrings(alias.logical ++ sep ++ "a.txt", notes.items.items[0].path);
+    try testing.expectEqualStrings(logical ++ sep ++ "a.txt", notes.items.items[0].path);
 }
 
 test "a lost note is said to be lost, and the change is still recorded" {
     const gpa = testing.allocator;
-    var vtable: Io.VTable = undefined;
-    const io = clock.frozen(testing.io, &vtable);
+    var clock: shakedown.Clock = .init(testing.io, .{});
+    const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
     const id: WatchId = @fromBackingInt(@intCast(0));

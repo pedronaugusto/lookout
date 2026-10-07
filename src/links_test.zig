@@ -8,7 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const lookout = @import("lookout.zig");
-const ms = @import("testing/clock.zig").ms;
+const ms = @import("testing/timeout.zig").ms;
 const Deadline = @import("Deadline.zig");
 const path_cmp = @import("path.zig");
 

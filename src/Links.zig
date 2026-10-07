@@ -21,12 +21,13 @@ const Io = std.Io;
 
 const Batch = @import("Batch.zig");
 const Filter = @import("Filter.zig");
-const filesystem = @import("filesystem.zig");
+const CompiledFilter = @import("CompiledFilter.zig");
+const airlock = @import("airlock");
 const path_cmp = @import("path.zig");
 const types = @import("types.zig");
 const walk = @import("walk.zig");
 const builtin = @import("builtin");
-const Identity = filesystem.Identity;
+const Identity = airlock.FileId;
 const WatchId = types.WatchId;
 
 /// What `Links` asks of the watcher that owns it: an id for, and a
@@ -68,7 +69,7 @@ owner: WatchId,
 root: []u8,
 /// Its filter, copied: a link it prunes is not followed, and the
 /// registrations on links' targets ask it of every path below them.
-filter: Filter,
+filter: CompiledFilter,
 /// `AddOptions.max_followed_links`.
 max: usize,
 /// What the root is.
@@ -100,7 +101,7 @@ pub const Link = struct {
     /// watch's own, asked of each path as it is spelled under the link.
     /// It answers whether a directory is worth walking into, the weaker
     /// of the two questions; what is reported is decided when the change
-    /// is spelled, by the watch's filter. See `Filter.prunes`.
+    /// is spelled, by the watch's filter. See `CompiledFilter.prunes`.
     pub fn filter(link: *Link) Filter {
         return .{ .allow = admits, .context = link };
     }
@@ -118,7 +119,7 @@ pub const Link = struct {
 /// when the root's identity cannot be read: without it no link can be
 /// shown not to lead back.
 pub fn create(gpa: Allocator, io: Io, owner: WatchId, root: []const u8, filter: Filter, max: usize) Allocator.Error!?*Links {
-    const identity = filesystem.identity(io, root) orelse return null;
+    const identity = identityOf(io, root) orelse return null;
     const l = try gpa.create(Links);
     errdefer gpa.destroy(l);
     const owned = try gpa.dupe(u8, root);
@@ -127,7 +128,7 @@ pub fn create(gpa: Allocator, io: Io, owner: WatchId, root: []const u8, filter: 
         .gpa = gpa,
         .owner = owner,
         .root = owned,
-        .filter = try filter.dupe(gpa),
+        .filter = try CompiledFilter.recompile(gpa, filter),
         .max = max,
         .identity = identity,
     };
@@ -175,7 +176,7 @@ pub fn consider(l: *const Links, io: Io, subject: []const u8) Allocator.Error!Ve
     defer l.gpa.free(real);
     const reached = Io.Dir.cwd().statFile(io, real, .{}) catch return .idle;
     if (reached.kind != .directory) return .idle;
-    const identity = filesystem.identity(io, real) orelse return .idle;
+    const identity = identityOf(io, real) orelse return .idle;
     if (l.reaches(io, real, identity)) return .reached;
     if (l.followed.items.len >= l.max) return .full;
     return .{ .follow = .{ .target = try l.gpa.dupe(u8, real), .identity = identity } };
@@ -188,7 +189,7 @@ fn reaches(l: *const Links, io: Io, target: []const u8, identity: Identity) bool
     if (l.holds(identity)) return true;
     var above = std.Io.Dir.path.dirname(target);
     while (above) |dir| : (above = std.Io.Dir.path.dirname(dir)) {
-        if (l.holds(filesystem.identity(io, dir) orelse continue)) return true;
+        if (l.holds(identityOf(io, dir) orelse continue)) return true;
     }
     if (isAbove(io, identity, l.root)) return true;
     for (l.followed.items) |link| if (isAbove(io, identity, link.target)) return true;
@@ -202,11 +203,17 @@ fn holds(l: *const Links, identity: Identity) bool {
     return false;
 }
 
+/// The identity of what `path` names, symbolic links followed: device and
+/// inode, or volume and file id. Null when it cannot be read.
+fn identityOf(io: Io, path: []const u8) ?Identity {
+    return Identity.ofPath(io, Io.Dir.cwd(), path, .{}) catch null;
+}
+
 /// Whether the directory that is `identity` is a proper ancestor of `inner`.
 fn isAbove(io: Io, identity: Identity, inner: []const u8) bool {
     var above = std.Io.Dir.path.dirname(inner);
     while (above) |dir| : (above = std.Io.Dir.path.dirname(dir)) {
-        const there = filesystem.identity(io, dir) orelse continue;
+        const there = identityOf(io, dir) orelse continue;
         if (there.eql(identity)) return true;
     }
     return false;
@@ -381,7 +388,7 @@ fn stands(l: *const Links, io: Io, link: *const Link) bool {
     if (l.filter.prunes(l.root, link.path)) return false;
     const named = Io.Dir.cwd().statFile(io, link.path, .{ .follow_symlinks = false }) catch return false;
     if (named.kind != .sym_link) return false;
-    const now = filesystem.identity(io, link.path) orelse return false;
+    const now = identityOf(io, link.path) orelse return false;
     return now.eql(link.identity);
 }
 
@@ -482,7 +489,7 @@ fn noted(l: *Links, io: Io, host: Host, batch: *Batch, item: Batch.Note) Allocat
 /// Replaces the filter the links are judged by. The registrations keep
 /// asking it; the caller refilters them and then refreshes.
 pub fn refilter(l: *Links, next: Filter) Allocator.Error!void {
-    const replacement = try next.dupe(l.gpa);
+    const replacement = try CompiledFilter.recompile(l.gpa, next);
     l.filter.deinit();
     l.filter = replacement;
 }
@@ -553,4 +560,28 @@ test "a link is followed only into a directory the watch does not reach" {
     const out = try std.Io.Dir.path.join(gpa, &.{ root, "out" });
     defer gpa.free(out);
     try testing.expectEqual(Verdict.full, try l.consider(io, out));
+}
+
+test "one directory has one identity by every name, and another has its own" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "one/inner");
+    try tmp.dir.createDirPath(io, "two");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const one = try std.Io.Dir.path.join(gpa, &.{ root, "one" });
+    defer gpa.free(one);
+    const again = try std.Io.Dir.path.join(gpa, &.{ root, "one", "inner", ".." });
+    defer gpa.free(again);
+    const two = try std.Io.Dir.path.join(gpa, &.{ root, "two" });
+    defer gpa.free(two);
+    const missing = try std.Io.Dir.path.join(gpa, &.{ root, "missing" });
+    defer gpa.free(missing);
+
+    const first = identityOf(io, one).?;
+    try std.testing.expect(first.eql(identityOf(io, again).?));
+    try std.testing.expect(!first.eql(identityOf(io, two).?));
+    try std.testing.expect(identityOf(io, missing) == null);
 }

@@ -17,6 +17,7 @@ const Io = std.Io;
 const lookout = @import("types.zig");
 const Batch = @import("Batch.zig");
 const Filter = @import("Filter.zig");
+const CompiledFilter = @import("CompiledFilter.zig");
 const Snapshot = @import("Snapshot.zig");
 const path_cmp = @import("path.zig");
 const AddOptions = @import("options.zig").AddOptions;
@@ -94,7 +95,7 @@ pub const Watch = struct {
     recursive: bool,
     /// `@import("options.zig").AddOptions.filter`, copied: the patterns are borrowed
     /// only for the duration of the `add` that supplied them.
-    filter: Filter,
+    filter: CompiledFilter,
 };
 
 /// One registered path.
@@ -127,7 +128,7 @@ pub const Node = struct {
 
 /// Errors adding a watch can return.
 pub const AddError = Allocator.Error || Io.Dir.OpenError || Io.Dir.StatFileError ||
-    Io.Dir.RealPathFileAllocError || Snapshot.RefreshError;
+    Io.Dir.RealPathFileAllocError || Snapshot.RefreshError || CompiledFilter.Error;
 
 /// Errors rescanning a watch can return.
 pub const ScanError = Allocator.Error || Snapshot.RefreshError;
@@ -182,7 +183,7 @@ pub fn addWatch(
 
     const root = try t.gpa.dupe(u8, abs_path);
     errdefer t.gpa.free(root);
-    var filter = try options.filter.dupe(t.gpa);
+    var filter = try CompiledFilter.compile(t.gpa, options.filter);
     errdefer filter.deinit();
     try t.watches.put(t.gpa, id, .{
         .root = root,
@@ -489,7 +490,7 @@ pub fn removeWatch(t: *Tree, io: Io, id: WatchId) void {
 /// excluded descendants are released.
 pub fn refilter(t: *Tree, io: Io, id: WatchId, next: Filter, added: *std.ArrayList(NodeId), batch: *Batch) Tree.AddError!void {
     const watch = t.watches.getPtr(id) orelse return;
-    const replacement = try next.dupe(t.gpa);
+    const replacement = try CompiledFilter.compile(t.gpa, next);
     var previous = watch.filter;
     watch.filter = replacement;
     errdefer {
@@ -594,7 +595,7 @@ fn excluded(t: *const Tree, id: WatchId, subject: []const u8) bool {
 }
 
 /// Whether a directory is so far outside the watch that it need not be
-/// registered at all. See `Filter.prunes`.
+/// registered at all. See `CompiledFilter.prunes`.
 fn pruned(t: *const Tree, id: WatchId, subject: []const u8) bool {
     const watch = t.watches.get(id) orelse return false;
     return watch.filter.prunes(watch.root, subject);
@@ -799,6 +800,8 @@ pub fn rescanFile(t: *Tree, io: Io, id: NodeId, batch: *Batch) Tree.ScanError!vo
     node.meta = next;
 }
 
+const shakedown = @import("shakedown");
+
 test "tree access failures keep registrations and report no removals" {
     const testing = std.testing;
     const gpa = testing.allocator;
@@ -823,18 +826,12 @@ test "tree access failures keep registrations and report no removals" {
         try tree.addWatch(io, @fromBackingInt(@intCast(1)), file, .{}, &added, &batch);
         const file_id = added.items[1];
 
-        var vtable = io.vtable.*;
-        vtable.dirRead = struct {
-            fn read(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
-                return failure;
-            }
-        }.read;
-        vtable.dirStatFile = struct {
-            fn stat(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
-                return failure;
-            }
-        }.stat;
-        const failing: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+        const fio = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{
+            .{ .at = .{ .nth = .{ .call = .dirRead, .n = 1 } }, .fault = .{ .fail = failure }, .times = 0 },
+            .{ .at = .{ .nth = .{ .call = .dirStatFile, .n = 1 } }, .fault = .{ .fail = failure }, .times = 0 },
+        } });
+        defer fio.deinit();
+        const failing = fio.io();
         try testing.expectError(failure, tree.rescanDirectory(failing, directory_id, &batch, &added));
         try testing.expectError(failure, tree.rescanFile(failing, file_id, &batch));
         try testing.expectEqual(@as(usize, 2), tree.nodes.count());

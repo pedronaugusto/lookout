@@ -3,7 +3,8 @@
 
 const std = @import("std");
 const lookout = @import("../lookout.zig");
-const ms = @import("clock.zig").ms;
+const ms = @import("timeout.zig").ms;
+const shakedown = @import("shakedown");
 const Watcher = lookout.Watcher;
 
 /// Every backend this target was built with.
@@ -18,57 +19,6 @@ const backends: []const lookout.Backend = all: {
     }
     const final = list[0..len].*;
     break :all &final;
-};
-
-/// An allocator that counts what is outstanding, so that "what a watched
-/// directory costs" is a number and not an impression.
-const Counting = struct {
-    child: std.mem.Allocator,
-    live: usize = 0,
-    peak: usize = 0,
-
-    fn allocator(c: *Counting) std.mem.Allocator {
-        return .{ .ptr = c, .vtable = &.{
-            .alloc = alloc,
-            .resize = resize,
-            .remap = remap,
-            .free = free,
-        } };
-    }
-
-    fn take(c: *Counting, n: usize) void {
-        c.live += n;
-        if (c.live > c.peak) c.peak = c.live;
-    }
-
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
-        const c: *Counting = @ptrCast(@alignCast(ctx));
-        const out = c.child.rawAlloc(len, alignment, ra) orelse return null;
-        c.take(len);
-        return out;
-    }
-
-    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
-        const c: *Counting = @ptrCast(@alignCast(ctx));
-        if (!c.child.rawResize(memory, alignment, new_len, ra)) return false;
-        c.live -= memory.len;
-        c.take(new_len);
-        return true;
-    }
-
-    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
-        const c: *Counting = @ptrCast(@alignCast(ctx));
-        const out = c.child.rawRemap(memory, alignment, new_len, ra) orelse return null;
-        c.live -= memory.len;
-        c.take(new_len);
-        return out;
-    }
-
-    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
-        const c: *Counting = @ptrCast(@alignCast(ctx));
-        c.child.rawFree(memory, alignment, ra);
-        c.live -= memory.len;
-    }
 };
 
 test "poll reports each change from another thread" {
@@ -234,7 +184,9 @@ test "a watched directory costs what it is budgeted" {
             }
         }
 
-        var counting: Counting = .{ .child = std.testing.allocator };
+        // Counts what is outstanding, so that "what a watched directory
+        // costs" is a number and not an impression.
+        var counting: shakedown.alloc.Counting = .init(std.testing.allocator);
         {
             var watcher: Watcher = try .init(counting.allocator(), .{
                 .backend = backend,
@@ -247,7 +199,7 @@ test "a watched directory costs what it is budgeted" {
             defer watcher.deinit(io);
             _ = try watcher.add(io, root, .{ .recursive = true });
 
-            const per_directory = counting.live / dirs;
+            const per_directory = counting.live_bytes / dirs;
             if (per_directory > directoryBudget(backend)) {
                 std.debug.print("{s}: {d} B per directory, budget {d} B\n", .{
                     @tagName(backend), per_directory, directoryBudget(backend),
@@ -256,6 +208,6 @@ test "a watched directory costs what it is budgeted" {
             try std.testing.expect(per_directory <= directoryBudget(backend));
         }
         // And all of it goes back, which is the other half of a budget.
-        try std.testing.expectEqual(@as(usize, 0), counting.live);
+        try std.testing.expectEqual(@as(usize, 0), counting.live_bytes);
     }
 }

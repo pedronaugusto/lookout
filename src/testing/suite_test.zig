@@ -12,7 +12,8 @@ const builtin = @import("builtin");
 const lookout = @import("../lookout.zig");
 const trace = @import("../trace.zig");
 const Deadline = @import("../Deadline.zig");
-const ms = @import("clock.zig").ms;
+const ms = @import("timeout.zig").ms;
+const shakedown = @import("shakedown");
 const records = @import("../backend/fsevents/records.zig");
 
 const Kind = lookout.Kind;
@@ -499,20 +500,16 @@ test "inotify does not pair a move across separate watches" {
 }
 
 test "settling holds a modification back until the writing stops" {
-    // Only the clock is replaced. File I/O keeps its original userdata;
-    // poll(0) scans synchronously, so this test never sleeps or races a
-    // kernel notification. The test thread owns and advances the time.
-    const Clock = struct {
-        threadlocal var milliseconds: i96 = 0;
-
-        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-            return .{ .nanoseconds = milliseconds * std.time.ns_per_ms };
+    // Only the clock is replaced. poll(0) scans synchronously, so this
+    // test never sleeps or races a kernel notification. The test thread
+    // owns and moves the time, in milliseconds from 1,000.
+    var clock: shakedown.Clock = .init(std.testing.io, .{});
+    const io = clock.io();
+    const at = struct {
+        fn at(c: *shakedown.Clock, milliseconds: i64) void {
+            c.advanceTo(.fromNanoseconds(milliseconds * std.time.ns_per_ms));
         }
-    };
-    Clock.milliseconds = 1_000;
-    var vtable = std.testing.io.vtable.*;
-    vtable.now = Clock.now;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    }.at;
     var f = try Fixture.initIo(io, .{
         .backend = .poll,
         .settle = .fromMilliseconds(400),
@@ -529,30 +526,30 @@ test "settling holds a modification back until the writing stops" {
     // Keep writing past the first write's deadline. Different lengths
     // make every write observable without relying on filesystem timestamps.
     const chunks = [_][]const u8{ "two.", "three..", "four....", "five....." };
-    const first_write = Clock.milliseconds;
+    const first_write: i64 = 1_000;
     for (chunks, 0..) |chunk, i| {
-        Clock.milliseconds = first_write + @as(i96, @intCast(i)) * 200;
+        at(&clock, first_write + @as(i64, @intCast(i)) * 200);
         try f.write("a.txt", chunk);
         try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
-        Clock.milliseconds += 199;
+        clock.advance(.fromMilliseconds(199));
         try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
     }
 
-    const last_write = first_write + (chunks.len - 1) * 200;
-    Clock.milliseconds = last_write + 399;
+    const last_write = first_write + @as(i64, chunks.len - 1) * 200;
+    at(&clock, last_write + 399);
     try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
-    Clock.milliseconds = last_write + 400;
+    at(&clock, last_write + 400);
     const events = try f.watcher.poll(f.io, ms(0));
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqual(id, events[0].id);
     try std.testing.expectEqual(Kind.modified, events[0].kind);
     try std.testing.expectEqual(lookout.Target.file, events[0].target);
     try std.testing.expectEqualStrings(wanted, events[0].path);
-    try std.testing.expectEqual(first_write * std.time.ns_per_ms, events[0].time.nanoseconds);
+    try std.testing.expectEqual(@as(i96, first_write) * std.time.ns_per_ms, events[0].time.nanoseconds);
 
     // The deadline hands the change out once, including in later windows.
     try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
-    Clock.milliseconds += 400;
+    clock.advance(.fromMilliseconds(400));
     try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(0))).len);
 }
 
@@ -2252,6 +2249,99 @@ test "a folder a pending watch alone held is counted true for the watch taken th
     }
 }
 
+test "a watch that does not walk into a folder leaves the folder's count to the watches that do" {
+    // A recursive watch counts every folder below its root. A second
+    // watch on a folder above one of those -- one that does not recurse,
+    // or a pending watch parked there for a name in it -- walks that
+    // folder's entries and not the folders among them. FSEvents started a
+    // fresh count of each such folder anyway, found nothing in it, and so
+    // the recursive watch counted the folder from nothing and was never
+    // told it was past its budget.
+    for (backends) |backend| {
+        for ([_]bool{ false, true }) |parked| {
+            var f = try Fixture.initOptions(.{
+                .backend = backend,
+                .poll_interval = .fromMilliseconds(20),
+                .max_dir_entries = 4,
+            });
+            defer f.deinit();
+            const gpa = std.testing.allocator;
+            try f.tmp.dir.createDirPath(std.testing.io, "mid/sub");
+            for ([_][]const u8{ "mid/sub/a", "mid/sub/b", "mid/sub/c" }) |name| try f.write(name, "x");
+            const mid = try f.path("mid");
+            defer gpa.free(mid);
+            const sub = try f.path("mid/sub");
+            defer gpa.free(sub);
+            const later = try f.path("mid/later/x");
+            defer gpa.free(later);
+
+            const tree = try f.watcher.add(f.io, f.root, .{ .recursive = true });
+            try f.settle();
+            _ = if (parked)
+                try f.watcher.add(f.io, later, .{ .pending = true })
+            else
+                try f.watcher.add(f.io, mid, .{});
+            try f.settle();
+
+            // Five entries in a folder of four.
+            try f.write("mid/sub/d", "x");
+            try f.write("mid/sub/e", "x");
+            var ledger: Ledger = .{};
+            defer ledger.deinit();
+            var waited: u32 = 0;
+            while (waited < timeout_ms and ledger.count(tree, .overflow, f.root) + ledger.count(tree, .overflow, sub) == 0) : (waited += 200) {
+                try ledger.note(try f.watcher.poll(f.io, ms(200)));
+            }
+            std.testing.expect(ledger.count(tree, .overflow, f.root) + ledger.count(tree, .overflow, sub) > 0) catch |err| {
+                std.debug.print("{s}, parked {}: no overflow\n", .{ @tagName(backend), parked });
+                return err;
+            };
+        }
+    }
+}
+
+test "a count a parked watch held past the folder's own watch is not taken up stale" {
+    // While a folder's own watch is there, a pending watch parked in it
+    // reaches it too, and on FSEvents and Windows that keeps the folder's
+    // count when the folder's watch goes. The parked watch hears only its
+    // own name, so the count stops moving; the next watch taken on the
+    // folder counts it again rather than take it as it is.
+    for (backends) |backend| {
+        var f = try Fixture.initOptions(.{
+            .backend = backend,
+            .poll_interval = .fromMilliseconds(20),
+            .max_dir_entries = 3,
+        });
+        defer f.deinit();
+        const gpa = std.testing.allocator;
+        const later = try f.path("later/x");
+        defer gpa.free(later);
+
+        const first = try f.watcher.add(f.io, f.root, .{});
+        _ = try f.watcher.add(f.io, later, .{ .pending = true });
+        try f.settle();
+        f.watcher.remove(f.io, first);
+        // Three entries while only the parked watch is there: at the budget.
+        for ([_][]const u8{ "f0", "f1", "f2" }) |name| try f.write(name, "x");
+        try f.settle();
+
+        const again = try f.watcher.add(f.io, f.root, .{});
+        try f.settle();
+        // The fourth is past it.
+        try f.write("f3", "x");
+        var ledger: Ledger = .{};
+        defer ledger.deinit();
+        var waited: u32 = 0;
+        while (waited < timeout_ms and ledger.count(again, .overflow, f.root) == 0) : (waited += 200) {
+            try ledger.note(try f.watcher.poll(f.io, ms(200)));
+        }
+        std.testing.expect(ledger.count(again, .overflow, f.root) > 0) catch |err| {
+            std.debug.print("{s}: no overflow\n", .{@tagName(backend)});
+            return err;
+        };
+    }
+}
+
 test "a folder several watches share is counted once against its budget" {
     // One folder reached by three watches: its parent's, recursive; its
     // own; and a pending one parked in it. Windows and FSEvents hand each
@@ -2799,32 +2889,22 @@ fn addOnce(self: anytype) Watcher.AddError!lookout.WatchId {
 }
 
 test "a cancellation requested before poll gathers no work" {
-    const Probe = struct {
-        var checks: usize = 0;
-        var clock_reads: usize = 0;
-        fn checkCancel(_: ?*anyopaque) std.Io.Cancelable!void {
-            checks += 1;
-            return error.Canceled;
-        }
-        fn now(context: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
-            clock_reads += 1;
-            return std.testing.io.vtable.now(context, clock);
-        }
-    };
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
         _ = try f.watcher.add(f.io, f.root, .{});
-        var vtable = std.testing.io.vtable.*;
-        vtable.checkCancel = Probe.checkCancel;
-        vtable.now = Probe.now;
-        Probe.checks = 0;
-        Probe.clock_reads = 0;
-        const probe: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        // A cancel lands at every cancelation point, and every call is
+        // counted.
+        const fio = try shakedown.FaultIo.init(std.testing.allocator, std.testing.io, .{ .plan = &.{.{
+            .at = .{ .nth = .{ .call = .checkCancel, .n = 1 } },
+            .fault = .cancel,
+            .times = 0,
+        }} });
+        defer fio.deinit();
         const revision = f.watcher.batch.revision;
-        try std.testing.expectError(error.Canceled, f.watcher.poll(probe, ms(0)));
-        try std.testing.expectEqual(@as(usize, 1), Probe.checks);
-        try std.testing.expectEqual(@as(usize, 0), Probe.clock_reads);
+        try std.testing.expectError(error.Canceled, f.watcher.poll(fio.io(), ms(0)));
+        try std.testing.expectEqual(@as(u64, 1), fio.count(.checkCancel));
+        try std.testing.expectEqual(@as(u64, 0), fio.count(.now));
         try std.testing.expectEqual(revision, f.watcher.batch.revision);
     }
 }

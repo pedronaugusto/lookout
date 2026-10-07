@@ -38,10 +38,12 @@ for (try watcher.poll(io, one_second)) |event| {
 
 ## Design
 
-The watcher module uses Zig's standard library. A watcher keeps the allocator it is
-made with for watches, paths and event storage, and keeps no `std.Io`: `add`,
-`remove`, `refilter`, `poll` and `deinit` each take the `io` they go through. A
-returned event slice and its paths belong to the watcher until the next poll or
+The watcher module uses Zig's standard library and two packages of the same family,
+[airlock](https://github.com/pedronaugusto/airlock) for the baseline file and
+[sweep](https://github.com/pedronaugusto/sweep) for filter patterns. A watcher keeps
+the allocator it is made with for watches, paths and event storage, and keeps no
+`std.Io`: `add`, `remove`, `refilter`, `poll` and `deinit` each take the `io` they go
+through. A returned event slice and its paths belong to the watcher until the next poll or
 `deinit`. Baselines keep their allocator the same way and take `io` per call;
 baselines and checkpoints retain their storage and must be released. A checkpoint
 can outlive its watcher; the watcher allocator must remain valid until every shared
@@ -49,7 +51,12 @@ checkpoint is released.
 
 `add` accepts file or directory watches, optional recursion and filters. Pending watches
 wait at an existing ancestor for a missing path to appear. Filters select paths by
-pattern or predicate, and `refilter` changes the selection. Excluded directories are
+pattern or predicate, and `refilter` changes the selection. Patterns are git's, as
+in a `.gitignore` line: `*`, `?` and brackets within a component, `**` as a whole
+component across components, `\` escapes (a separator on Windows), and a pattern
+with no separator matching a name at any depth. A pattern git refuses is
+`InvalidPattern`. Each path is matched against all of a watch's patterns in one
+pass over it, compared as the file system compares names. Excluded directories are
 pruned where the backend supports it; other backends discard their events.
 
 Every change within a watch's scope and filters made after `add` returns is reported, subject to coalescing.
@@ -79,13 +86,16 @@ after an overflow. A baseline does not follow symbolic links, so for a watch wit
 Keep the file outside the watched tree. Corrupt files return `InvalidBaseline`,
 old versions `UnsupportedBaselineVersion`, and mismatched platform, root, scope,
 budget or patterns `ForeignBaseline`. Predicate filters return
-`UnsupportedBaselineFilter`: executable predicates cannot be stored. Replacement
-does not fsync by default; it promises atomic visibility. For filesystem durability,
-use `save(io, filename, .{ .durable = true })`: POSIX syncs the temporary
-file before replacement and the parent directory afterwards. A directory-sync
-failure returns its error after the new file has become visible. Windows returns
-`UnsupportedBaselineDurability` before writing because the I/O API cannot promise
-a durable directory replacement there. Neither in-memory nor persisted baselines
+`UnsupportedBaselineFilter`: executable predicates cannot be stored. `save` writes
+through [airlock](https://github.com/pedronaugusto/airlock): a temporary file next to
+the destination, renamed over it, so readers see the old file or the new one. It does
+not sync by default. `save(io, filename, .{ .durable = true })` also makes the new file
+survive a power cut on every platform: the temporary file is synced before the rename
+and the directory after it, one barrier and one flush on macOS and two flushes on Linux
+and Windows. A failed sync before the rename leaves the old file; a failed directory
+sync after it is `PublishedNotDurable`, with the new file in place; a filesystem that
+refuses the syncs is `LevelUnavailable`. A crash during a save can leave a temporary
+file named after `Baseline.temp_prefix`, which `airlock.pruneTemps` removes. Neither in-memory nor persisted baselines
 recover transient changes absent from both snapshots.
 Each change carries its `target`, file or directory, from the listing that saw it, so a
 removed directory is known for one without a `stat`.
@@ -124,7 +134,7 @@ coverage but cannot produce a checkpoint. Other backends return null.
 - It does not guarantee delivery of every intermediate write or rename.
 - It does not turn overflow recovery into a complete history of transient changes.
 - It does not follow symbolic links during recursive tree walks unless `follow_symlinks` asks for it, and never into a directory the watch already reaches: loops and overlapping paths would produce duplicate reports.
-- It does not read gitignore syntax: use a predicate with the repository matcher, which owns anchoring, negation and directory rules.
+- It does not read ignore files: a pattern is one line of gitignore syntax, and negation (`!`), directory-only rules (a trailing `/`), files and their precedence are a predicate's, backed by the repository's own matcher.
 - It does not recover transient history on backends without a persistent log.
 - It does not supply an application event loop or rebuild policy.
 
@@ -163,8 +173,14 @@ native build too.
 
 - [Zig](https://ziglang.org) 0.17.0 and its standard library. On Apple targets the
   module links libc and CoreServices; nothing else is linked anywhere.
+- [airlock](https://github.com/pedronaugusto/airlock) writes the baseline file
+  atomically and, on request, durably.
+- [sweep](https://github.com/pedronaugusto/sweep) compiles and matches filter
+  patterns.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
+- [shakedown](https://github.com/pedronaugusto/shakedown) is the clock, fault
+  injection and counting allocator the tests run on, fetched only for them.
 - A pinned macOS SDK package, fetched only to link a named Apple target without
   an SDK of its own.
 
@@ -176,7 +192,7 @@ overflow, cancellation, settling, checkpoints and resource cleanup. `zig build
 examples` runs the examples separately. `zig build bench` runs lookout's own speed
 checks; run it on a quiet machine, with `-Doptimize=ReleaseFast`. CI also runs
 `zig build lint`, which includes `zig build check-consumer`: a project that depends
-on lookout by path, built with no packages fetched.
+on lookout by path, built with only airlock and sweep fetched.
 
 [CI](.github/workflows/ci.yml) has three tiers. The fast tier runs the source
 checks and the Linux Debug suite with the examples, compiles the benchmarks, and

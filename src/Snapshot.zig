@@ -265,24 +265,13 @@ pub fn freeChanges(gpa: Allocator, changes: *std.ArrayList(Change)) void {
     changes.clearRetainingCapacity();
 }
 
+const shakedown = @import("shakedown");
+
 test "racy content checks stop reading at the cap and after timestamps age" {
     const testing = std.testing;
-    const source = testing.io;
-    const Probe = struct {
-        threadlocal var reads: usize = 0;
-        threadlocal var denied: bool = false;
-
-        fn read(context: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-            reads += 1;
-            if (denied) return error.AccessDenied;
-            return testing.io.vtable.fileReadPositional(context, file, data, offset);
-        }
-    };
-    Probe.reads = 0;
-    Probe.denied = false;
-    var vtable = source.vtable.*;
-    vtable.fileReadPositional = Probe.read;
-    const io: Io = .{ .userdata = source.userdata, .vtable = &vtable };
+    const fio = try shakedown.FaultIo.init(testing.allocator, testing.io, .{});
+    defer fio.deinit();
+    const io = fio.io();
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "file", .{ .read = true });
@@ -295,16 +284,16 @@ test "racy content checks stop reading at the cap and after timestamps age" {
     const before = capture(io, tmp.dir, "file", stat, taken_ns, true, false);
     try testing.expect(before.racy);
     try testing.expect(before.content_hash != null);
-    try testing.expect(Probe.reads > 0);
+    try testing.expect(fio.count(.fileReadPositional) > 0);
 
     // Even an entry aging on this scan needs its final content comparison.
     const aged = capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s, true, before.racy);
     try testing.expect(!aged.racy);
     try testing.expect(!before.contentChanged(aged));
-    Probe.reads = 0;
+    const reads = fio.count(.fileReadPositional);
     const quiet = capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s, true, aged.racy);
     try testing.expect(!quiet.racy);
-    try testing.expectEqual(@as(usize, 0), Probe.reads);
+    try testing.expectEqual(reads, fio.count(.fileReadPositional));
 
     try file.setLength(io, content_hash_cap + 1);
     stat.size = content_hash_cap + 1;
@@ -312,10 +301,10 @@ test "racy content checks stop reading at the cap and after timestamps age" {
     try testing.expect(large.racy);
     try testing.expect(large.content_hash == null);
     try testing.expect(large.contentChanged(large));
-    try testing.expectEqual(@as(usize, 0), Probe.reads);
+    try testing.expectEqual(reads, fio.count(.fileReadPositional));
 
     stat.size = content_hash_cap;
-    Probe.denied = true;
+    try fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .fileReadPositional, .n = 1 } }, .fault = .{ .fail = error.AccessDenied }, .times = 0 }});
     const unreadable = capture(io, tmp.dir, "file", stat, taken_ns, true, false);
     try testing.expect(unreadable.racy);
     try testing.expect(unreadable.content_hash == null);
