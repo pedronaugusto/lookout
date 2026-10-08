@@ -17,7 +17,14 @@ and Linux queries ext4/f2fs directory naming flags. Unsupported filesystems
 and failed probes remain unknown. Root and supported directory policies are
 separate; polling retains directory facts, native Windows/inotify queries
 entry parents, and queued refiltering and followed-link filtering use parent
-policy as well. Explicit policy overrides remain in force for those paths.
+policy as well. Explicit policy overrides remain in force for those paths. No caller Io
+context is retained in link/alias state: live and deferred events receive the
+current operation's Io. A pure traversal callback without directory facts
+prunes only when both possible case policies refuse; explicit policy or case
+preference prunes directly. This can admit extra directories for traversal,
+while actual delivered matching uses the entry parent's policy. The Windows
+FaultIo regression denies the current directory probe and checks exact unknown
+fallback, rather than accidentally reusing add-time Io.
 
 Kernel spelling is identity: roots resolve links and obtain kernel spelling;
 path keys, events and baseline names compare exact canonical bytes. The
@@ -50,7 +57,7 @@ shows `[é]` excluding plain e. Original `f03-before.txt`, `f07-before.txt`,
 seven-run `filter-before.tsv`, and the original reports are preserved.
 
 Focused after logs are `f03-after.txt`, `f07-after.txt`, `unknown-after.txt`,
-`filter-allocation-after.txt`, and `wake-after.txt`. They exercise mixed
+`filter-allocation-after.txt`, and `wake-after.txt`, `links-after.txt`, and the final cross-compile records. They exercise mixed
 root/directory policies, distinct canonical keys, caller overrides without
 fabricated capability, native case-distinct files where supported, Unicode
 root aliases, native composed filtering, raw pattern retention, multi-scalar

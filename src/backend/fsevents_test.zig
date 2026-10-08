@@ -555,7 +555,7 @@ test "a checkpoint refuses a different volume or FSEvents log before restoring c
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     try testing.expectEqual(watcher.impl.fsevents.streams.get(id).?.volume.device, c.FSEventStreamGetDeviceBeingWatched(watcher.impl.fsevents.streams.get(id).?.ref));
-    try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
+    try watcher.batch.deferChange(gpa, io, id, root, .modified, null, .directory);
     var saved = (try watcher.checkpoint(gpa)).?;
     defer saved.deinit();
     for ([_]bool{ true, false }) |volume| {
@@ -586,7 +586,7 @@ test "a checkpoint is unavailable without an unchanged persistent log" {
     const stream = watcher.impl.fsevents.streams.get(id).?;
     const original = stream.volume.identity;
     defer stream.volume.identity = original;
-    try watcher.batch.deferChange(gpa, id, root, .modified, null, .directory);
+    try watcher.batch.deferChange(gpa, io, id, root, .modified, null, .directory);
     stream.volume.identity = null;
     try testing.expectEqual(@as(?Checkpoint, null), try watcher.checkpoint(gpa));
     stream.volume.identity = original;
@@ -902,7 +902,7 @@ fn tokenWith(gpa: std.mem.Allocator, io: Io, root: []const u8, filter: lookout.F
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{ .recursive = true, .filter = filter });
     stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(id).?);
-    for (changes) |change| try watcher.batch.deferChange(gpa, id, change.path, change.kind, change.from, change.target);
+    for (changes) |change| try watcher.batch.deferChange(gpa, io, id, change.path, change.kind, change.from, change.target);
     var checkpoint = (try watcher.checkpoint(gpa)).?;
     defer checkpoint.deinit();
     return checkpoint.token(gpa);

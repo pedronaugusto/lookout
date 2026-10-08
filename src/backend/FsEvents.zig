@@ -540,7 +540,7 @@ pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested
     };
     if (cross_device) {
         if (stream.resume_index != null) return error.InvalidCheckpoint;
-        try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
+        try batch.deferChange(f.gpa, io, id, stream.root, .overflow, null, stream.rootTarget());
         try f.useLiveStream(io, id);
         stream = f.streams.get(id).?;
     }
@@ -560,12 +560,12 @@ pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested
             if (!stream.keeps(subject)) continue;
             if (f.known.contains(.{ .id = id, .path = subject })) continue;
             const there = pathExists(io, subject) orelse {
-                try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
+                try batch.deferChange(f.gpa, io, id, stream.root, .overflow, null, stream.rootTarget());
                 continue;
             };
-            if (!there) try batch.deferChange(f.gpa, id, subject, .removed, null, .unknown);
+            if (!there) try batch.deferChange(f.gpa, io, id, subject, .removed, null, .unknown);
         }
-        for (saved.changes) |change| try restoreChange(f.gpa, batch, stream, change);
+        for (saved.changes) |change| try restoreChange(f.gpa, io, batch, stream, change);
         if (saved.half) |half| if (stream.keeps(half.path)) {
             try f.resolveHeld(io, batch);
             const owned = try f.gpa.dupe(u8, half.path);
@@ -582,16 +582,16 @@ pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested
 /// is left out, and a rename with one side left out is the creation or
 /// removal of the other, as in live pairing. A token is a file anyone may
 /// have edited, and its patterns may not be the ones this watch has.
-fn restoreChange(gpa: Allocator, batch: *Batch, stream: *const Stream, change: checkpoint_format.Change) Allocator.Error!void {
+fn restoreChange(gpa: Allocator, io: Io, batch: *Batch, stream: *const Stream, change: checkpoint_format.Change) Allocator.Error!void {
     const keeps = stream.keeps(change.path);
     if (change.from) |from| {
         const keeps_from = stream.keeps(from);
-        if (keeps and keeps_from) return batch.deferChange(gpa, stream.id, change.path, .renamed, from, change.target);
-        if (keeps) return batch.deferChange(gpa, stream.id, change.path, .created, null, change.target);
-        if (keeps_from) return batch.deferChange(gpa, stream.id, from, .removed, null, change.target);
+        if (keeps and keeps_from) return batch.deferChange(gpa, io, stream.id, change.path, .renamed, from, change.target);
+        if (keeps) return batch.deferChange(gpa, io, stream.id, change.path, .created, null, change.target);
+        if (keeps_from) return batch.deferChange(gpa, io, stream.id, from, .removed, null, change.target);
         return;
     }
-    if (keeps) try batch.deferChange(gpa, stream.id, change.path, change.kind, null, change.target);
+    if (keeps) try batch.deferChange(gpa, io, stream.id, change.path, change.kind, null, change.target);
 }
 
 /// Whether two pattern lists are the same patterns in the same order.
@@ -811,7 +811,7 @@ pub fn refilter(f: *FsEvents, io: Io, id: WatchId, next: lookout.Filter, batch: 
     };
     f.budget.reread(NewlyReached, NewlyReached.includes, io, .{ .stream = stream, .old = previous });
     if (cross_device) {
-        try batch.deferChange(f.gpa, id, stream.root, .overflow, null, stream.rootTarget());
+        try batch.deferChange(f.gpa, io, id, stream.root, .overflow, null, stream.rootTarget());
         try f.useLiveStream(io, id);
     }
     previous.deinit();

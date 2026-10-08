@@ -267,7 +267,7 @@ pub fn add(
                 // a hole in the watch, and saying so is the difference
                 // between a quiet subtree and a silent one.
                 else => {
-                    try r.batch.trouble(r.n.gpa, r.id, entry.path, .directory);
+                    try r.batch.trouble(r.n.gpa, r.io, r.id, entry.path, .directory);
                     return .over;
                 },
             };
@@ -337,7 +337,7 @@ pub fn refilter(n: *Inotify, io: Io, id: WatchId, next: lookout.Filter, batch: *
                     r.n.register(r.id, try r.n.gpa.dupe(u8, entry.path)) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => {
-                            try r.batch.trouble(r.n.gpa, r.id, entry.path, .directory);
+                            try r.batch.trouble(r.n.gpa, r.io, r.id, entry.path, .directory);
                             return .over;
                         },
                     };
@@ -802,7 +802,7 @@ fn adopt(n: *Inotify, io: Io, id: WatchId, root: []const u8, batch: *Batch) cont
     n.register(id, try n.gpa.dupe(u8, root)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
-            try batch.trouble(n.gpa, id, root, .directory);
+            try batch.trouble(n.gpa, io, id, root, .directory);
             return;
         },
     };
@@ -825,7 +825,7 @@ fn adopt(n: *Inotify, io: Io, id: WatchId, root: []const u8, batch: *Batch) cont
             a.n.register(a.id, try a.n.gpa.dupe(u8, entry.path)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
-                    try a.batch.trouble(a.n.gpa, a.id, entry.path, .directory);
+                    try a.batch.trouble(a.n.gpa, a.io, a.id, entry.path, .directory);
                     return .over;
                 },
             };

@@ -270,7 +270,7 @@ fn descend(t: *Tree, io: Io, parent_id: NodeId, added: *std.ArrayList(NodeId), b
             // is the difference between a quiet subtree and a silent one.
             error.FileNotFound, error.AccessDenied, error.NotDir => {
                 if (err != error.FileNotFound) {
-                    try batch.trouble(t.gpa, watch, child_path, .directory);
+                    try batch.trouble(t.gpa, io, watch, child_path, .directory);
                 }
                 t.gpa.free(child_path);
                 continue;
@@ -765,7 +765,7 @@ fn adopt(
                 // gone.
                 else => {
                     if (err != error.FileNotFound) {
-                        try batch.trouble(t.gpa, watch, owned, .directory);
+                        try batch.trouble(t.gpa, io, watch, owned, .directory);
                     }
                     t.gpa.free(owned);
                     continue;

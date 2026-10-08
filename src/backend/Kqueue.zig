@@ -330,7 +330,7 @@ fn register(k: *Kqueue, io: Io, ids: []const Tree.NodeId, batch: *Batch) contrac
                     // near its descriptor limit takes.
                     if (std.mem.eql(u8, node.path, k.tree.watchRoot(node.watch)))
                         return translateOpen(err);
-                    try batch.trouble(k.gpa, node.watch, node.path, .file);
+                    try batch.trouble(k.gpa, io, node.watch, node.path, .file);
                     k.tree.removeSubtree(io, node.watch, node.path);
                     continue;
                 };
@@ -357,7 +357,7 @@ fn register(k: *Kqueue, io: Io, ids: []const Tree.NodeId, batch: *Batch) contrac
             switch (posix.errno(rc)) {
                 .NOMEM => {
                     if (root) return error.WatchLimitReached;
-                    try batch.trouble(k.gpa, node.watch, node.path, .directory);
+                    try batch.trouble(k.gpa, io, node.watch, node.path, .directory);
                     k.tree.removeSubtree(io, node.watch, node.path);
                     continue;
                 },

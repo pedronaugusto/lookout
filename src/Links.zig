@@ -64,7 +64,6 @@ pub const Host = struct {
 const Links = @This();
 
 gpa: Allocator,
-io: Io,
 identity_override: ?names.Policy,
 /// The watch the links are in.
 owner: WatchId,
@@ -114,7 +113,16 @@ pub const Link = struct {
         var buffer: [4096]u8 = undefined;
         // Too long to spell here: let it through, the report decides.
         const spelled = link.alias.spell(&buffer, subject) orelse return true;
-        return !link.links.prunes(link.links.io, spelled);
+        const l = link.links;
+        if (l.identity_override != null or l.filter.case != null) return !l.filter.prunes(l.root, spelled);
+        // This pure callback has no directory facts. Admit a directory
+        // possible under either case policy; reporting applies its actual
+        // parent policy using the current operation's Io.
+        var sensitive = l.filter.policy;
+        sensitive.case_sensitive = true;
+        var folded = sensitive;
+        folded.case_sensitive = false;
+        return !(l.filter.prunesPolicy(sensitive, l.root, spelled) and l.filter.prunesPolicy(folded, l.root, spelled));
     }
 };
 
@@ -135,7 +143,6 @@ pub fn create(gpa: Allocator, io: Io, owner: WatchId, root: []const u8, filter: 
     errdefer gpa.free(owned);
     l.* = .{
         .gpa = gpa,
-        .io = io,
         .identity_override = identity_override,
         .owner = owner,
         .root = owned,
@@ -260,11 +267,12 @@ fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8
     const Finding = struct {
         l: *const Links,
         found: *std.ArrayList([]u8),
+        io: Io,
 
         const Self = @This();
 
         fn visit(f: Self, entry: walk.Entry) anyerror!walk.Step {
-            if (f.l.prunes(f.l.io, entry.path)) return .over;
+            if (f.l.prunes(f.io, entry.path)) return .over;
             switch (entry.kind) {
                 .directory => return .into,
                 .sym_link => {
@@ -277,7 +285,7 @@ fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8
             }
         }
     };
-    walk.tree(Finding, Finding.visit, l.gpa, io, dir, Finding{ .l = l, .found = found }) catch |err| switch (err) {
+    walk.tree(Finding, Finding.visit, l.gpa, io, dir, Finding{ .l = l, .found = found, .io = io }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // gone again, or not ours to read: nothing to follow there
         else => {},
@@ -302,7 +310,7 @@ pub fn follow(l: *Links, io: Io, host: Host, batch: *Batch, subject: []const u8)
             return null;
         },
         .full => {
-            try batch.trouble(l.gpa, l.owner, subject, .directory);
+            try batch.trouble(l.gpa, io, l.owner, subject, .directory);
             return null;
         },
         .follow => |found| {
@@ -310,7 +318,7 @@ pub fn follow(l: *Links, io: Io, host: Host, batch: *Batch, subject: []const u8)
             host.register(io, link) catch |err| {
                 l.forget(link);
                 if (err == error.OutOfMemory) return error.OutOfMemory;
-                try batch.trouble(l.gpa, l.owner, subject, .directory);
+                try batch.trouble(l.gpa, io, l.owner, subject, .directory);
                 return null;
             };
             return link;
@@ -333,7 +341,7 @@ fn adopt(l: *Links, subject: []const u8, target: []u8, identity: Identity, id: W
         .path = owned,
         .target = target,
         .identity = identity,
-        .alias = .{ .gpa = l.gpa, .io = l.io, .identity_override = l.identity_override, .owner = l.owner, .root = l.root, .filter = &l.filter, .physical = target, .logical = owned },
+        .alias = .{ .identity_override = l.identity_override, .owner = l.owner, .root = l.root, .filter = &l.filter, .physical = target, .logical = owned },
     };
     l.followed.appendAssumeCapacity(link);
     return link;

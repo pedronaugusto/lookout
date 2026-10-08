@@ -14,6 +14,7 @@
 //! every mode: `overflow` < `unwatched`. See `promote`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -101,8 +102,6 @@ const Deferred = struct {
 pub const Alias = struct {
     /// The watch the link is in, which its changes are reported as.
     owner: WatchId,
-    gpa: Allocator,
-    io: Io,
     identity_override: ?identity.Policy = null,
     /// That watch's root, which `Kind.overflow` is reported against.
     root: []const u8,
@@ -139,10 +138,10 @@ pub const Alias = struct {
         return spelled;
     }
 
-    fn keeps(alias: *const Alias, subject: []const u8) bool {
+    fn keeps(alias: *const Alias, gpa: Allocator, io: Io, subject: []const u8) bool {
         if (alias.filter.isEmpty()) return true;
         const parent = std.Io.Dir.path.dirname(subject) orelse alias.root;
-        const policy = identity.read(alias.gpa, alias.io, parent).policy(alias.identity_override);
+        const policy = alias.identity_override orelse identity.read(gpa, io, parent).policy(null);
         return !alias.filter.excludesPolicy(policy, alias.root, subject);
     }
 };
@@ -330,9 +329,9 @@ fn pushAliased(b: *Batch, gpa: Allocator, io: Io, alias: *const Alias, subject: 
     defer gpa.free(here);
     const there = if (from) |source| try alias.spellAlloc(gpa, source) else null;
     defer if (there) |spelled| gpa.free(spelled);
-    const keeps = alias.keeps(here);
+    const keeps = alias.keeps(gpa, io, here);
     if (kind == .renamed and there != null) {
-        const keeps_from = alias.keeps(there.?);
+        const keeps_from = alias.keeps(gpa, io, there.?);
         if (keeps and keeps_from) return b.pushDetail(gpa, io, alias.owner, here, .renamed, there, target);
         if (keeps) return b.pushDetail(gpa, io, alias.owner, here, .created, null, target);
         if (keeps_from) return b.pushDetail(gpa, io, alias.owner, there.?, .removed, null, target);
@@ -590,25 +589,26 @@ fn rebuildIndex(b: *Batch) void {
 pub fn trouble(
     b: *Batch,
     gpa: Allocator,
+    io: Io,
     id: WatchId,
     subject: []const u8,
     target: Target,
 ) Allocator.Error!void {
-    try b.deferChange(gpa, id, subject, .unwatched, null, target);
+    try b.deferChange(gpa, io, id, subject, .unwatched, null, target);
 }
 
 /// Queues a change produced while add runs. It cannot join a slice the
 /// previous poll already handed out; flush transfers it after poll resets.
-pub fn deferChange(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) Allocator.Error!void {
+pub fn deferChange(b: *Batch, gpa: Allocator, io: Io, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) Allocator.Error!void {
     assert(from == null or kind == .renamed);
     if (b.aliases.get(id)) |alias| {
-        if (kind == .overflow) return b.deferChange(gpa, alias.owner, alias.root, .overflow, null, .directory);
+        if (kind == .overflow) return b.deferChange(gpa, io, alias.owner, alias.root, .overflow, null, .directory);
         const here = try alias.spellAlloc(gpa, subject) orelse return;
         defer gpa.free(here);
         const there = if (from) |source| try alias.spellAlloc(gpa, source) else null;
         defer if (there) |spelled| gpa.free(spelled);
-        if (!alias.keeps(here)) return;
-        return b.deferChange(gpa, alias.owner, here, kind, there, target);
+        if (!alias.keeps(gpa, io, here)) return;
+        return b.deferChange(gpa, io, alias.owner, here, kind, there, target);
     }
     const owned = try gpa.dupe(u8, subject);
     errdefer gpa.free(owned);
@@ -1285,7 +1285,7 @@ test "a failed batch flush leaves trouble queued for the retry" {
     const io = clock.io();
     var b = Batch.init(.{});
     defer b.deinit(gpa);
-    try b.trouble(gpa, @fromBackingInt(@intCast(0)), root, .directory);
+    try b.trouble(gpa, io, @fromBackingInt(@intCast(0)), root, .directory);
     var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, b.flush(failing.allocator(), io));
     try testing.expectEqual(@as(usize, 1), b.deferred.items.len);
@@ -1362,7 +1362,7 @@ test "a debounced rename replaces its source within the same event ceiling" {
     defer b.deinit(gpa);
     const id: WatchId = @fromBackingInt(@intCast(0));
     try b.push(gpa, io, id, "/watch/old", .modified, .file);
-    try b.deferChange(gpa, id, "/watch/new", .renamed, "/watch/old", .file);
+    try b.deferChange(gpa, io, id, "/watch/new", .renamed, "/watch/old", .file);
     try b.flush(gpa, io);
     try testing.expectEqual(@as(usize, 0), b.dropped.count());
     try testing.expectEqual(@as(usize, 1), b.held.count());
@@ -1399,8 +1399,6 @@ test "a change below a followed link is its watch's, spelled under the link" {
     var filter: CompiledFilter = try .compile(gpa, .{ .ignore = &.{"*.tmp"} });
     defer filter.deinit();
     const alias: Alias = .{
-        .gpa = gpa,
-        .io = io,
         .owner = @fromBackingInt(@intCast(0)),
         .root = sep ++ "watch",
         .filter = &filter,
@@ -1489,8 +1487,6 @@ test "normalized followed alias keeps explicit policy separate from unknown fact
     var filter: CompiledFilter = try .compilePolicy(gpa, .{ .ignore = &.{ "FOO", "[é]" } }, .{ .case_sensitive = false, .normalization = .nfc });
     defer filter.deinit();
     const alias: Alias = .{
-        .gpa = gpa,
-        .io = io,
         .owner = @fromBackingInt(0),
         .root = sep ++ "watch",
         .filter = &filter,
@@ -1501,9 +1497,40 @@ test "normalized followed alias keeps explicit policy separate from unknown fact
     const registration: WatchId = @fromBackingInt(9);
     try b.aliases.put(gpa, registration, &alias);
     try b.push(gpa, io, registration, sep ++ "elsewhere" ++ sep ++ "foo", .created, .file);
-    try b.deferChange(gpa, registration, sep ++ "elsewhere" ++ sep ++ "e\u{301}", .created, null, .file);
+    try b.deferChange(gpa, io, registration, sep ++ "elsewhere" ++ sep ++ "e\u{301}", .created, null, .file);
     try b.push(gpa, io, registration, sep ++ "elsewhere" ++ sep ++ "e", .created, .file);
     try b.flush(gpa, io);
     try testing.expectEqual(@as(usize, 1), b.events.items.len);
     try testing.expectEqualStrings(sep ++ "watch" ++ sep ++ "link" ++ sep ++ "e", b.events.items[0].path);
+}
+
+test "unknown directory capability uses the current Io for deferred aliases" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const facts = identity.read(gpa, io, root);
+    if (facts.case_sensitive == null or facts.case_sensitive.?) return error.SkipZigTest;
+    const subject = try std.Io.Dir.path.join(gpa, &.{ root, "foo" });
+    defer gpa.free(subject);
+    var filter: CompiledFilter = try .compilePolicy(gpa, .{ .ignore = &.{"FOO"} }, facts.policy(null));
+    defer filter.deinit();
+    var b = Batch.init(.{});
+    defer b.deinit(gpa);
+    const alias: Alias = .{ .owner = @fromBackingInt(0), .root = root, .filter = &filter, .physical = root, .logical = root };
+    const registration: WatchId = @fromBackingInt(9);
+    try b.aliases.put(gpa, registration, &alias);
+    try b.deferChange(gpa, io, registration, subject, .created, null, .file);
+    try testing.expectEqual(@as(usize, 0), b.deferred.items.len);
+    const fio = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{
+        .{ .at = .{ .nth = .{ .call = .dirOpenDir, .n = 1 } }, .fault = .{ .fail = error.AccessDenied }, .times = 0 },
+    } });
+    defer fio.deinit();
+    try b.deferChange(gpa, fio.io(), registration, subject, .created, null, .file);
+    try b.flush(gpa, io);
+    try testing.expectEqual(@as(usize, 1), b.events.items.len);
+    try testing.expectEqualStrings(subject, b.events.items[0].path);
 }

@@ -3380,7 +3380,7 @@ test "checkpoints keep settling and rename changes beside handed deliveries" {
         const handed = try f.path("handed.txt");
         defer gpa.free(handed);
 
-        try f.watcher.batch.deferChange(gpa, id, handed, .overflow, null, .file);
+        try f.watcher.batch.deferChange(gpa, f.io, id, handed, .overflow, null, .file);
         const delivered = try f.watcher.poll(f.io, ms(0));
         try std.testing.expectEqual(@as(usize, 1), delivered.len);
         // The next changes are unhanded even though a prior delivery
@@ -3477,7 +3477,7 @@ test "checkpoint allocation failures leave the delivery and snapshot owned" {
     var f = try Fixture.init(.fsevents);
     defer f.deinit();
     const id = try f.watcher.add(f.io, f.root, .{});
-    try f.watcher.batch.deferChange(gpa, id, f.root, .renamed, f.root, .directory);
+    try f.watcher.batch.deferChange(gpa, f.io, id, f.root, .renamed, f.root, .directory);
     var failures: usize = 0;
     while (true) : (failures += 1) {
         var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = failures });
@@ -3530,7 +3530,7 @@ test "checkpoint restoration rolls back a failed add and preserves prior slices"
     defer gpa.free(moved_to);
     const moved_from = try f.path("later/old");
     defer gpa.free(moved_from);
-    try f.watcher.batch.deferChange(gpa, id, moved_to, .renamed, moved_from, .file);
+    try f.watcher.batch.deferChange(gpa, f.io, id, moved_to, .renamed, moved_from, .file);
     var saved = (try f.watcher.checkpoint(gpa)).?;
     defer saved.deinit();
     var failures: usize = 0;
@@ -3541,7 +3541,7 @@ test "checkpoint restoration rolls back a failed add and preserves prior slices"
             var resumed = try Watcher.init(failing.allocator(), .{ .backend = .fsevents, .checkpoint = saved, .latency = .fromMilliseconds(0) });
             defer resumed.deinit(io);
             const prior_id = try resumed.add(io, f.root, .{});
-            try resumed.batch.deferChange(failing.allocator(), prior_id, f.root, .overflow, null, .directory);
+            try resumed.batch.deferChange(failing.allocator(), f.io, prior_id, f.root, .overflow, null, .directory);
             const prior = try resumed.poll(io, ms(0));
             try std.testing.expectEqual(@as(usize, 1), prior.len);
             const borrowed = prior.ptr;
