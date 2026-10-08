@@ -1,0 +1,510 @@
+gate / Linux Debug	UNKNOWN STEP	﻿2026-10-08T19:33:13.7569125Z Current runner version: '2.337.0'
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7594928Z ##[group]Runner Image Provisioner
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7595805Z Hosted Compute Agent
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7596474Z Version: 20261002.596
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7597705Z Commit: c3d12f3313a95f25162a1503be624f3b0617f8c0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7598464Z Build Date: 2026-10-02T22:28:27Z
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7599266Z Worker ID: {886e4f3d-2109-4b0e-a98d-546794ec1563}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7599980Z Region: westus
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7600509Z Cloud: Azure
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7601142Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7602744Z ##[group]Operating System
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7603504Z Ubuntu
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7604034Z 24.04.5
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7604521Z LTS
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7605083Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7605631Z ##[group]Runner Image
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7606281Z Image: ubuntu-24.04
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7607193Z Version: 20261004.327.1
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7608550Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261004.327/images/ubuntu/Ubuntu2404-Readme.md
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7610165Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261004.327
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7611205Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7612413Z ##[group]GITHUB_TOKEN Permissions
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7614384Z Actions: read
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7615059Z Contents: read
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7615646Z Metadata: read
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7616269Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7618559Z Secret source: Actions
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7619585Z Cache mode: write
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7620394Z Prepare workflow directory
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.7965348Z Prepare all required actions
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:13.8017355Z Getting action download info
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.1691099Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.2812859Z Download action repository 'actions/upload-artifact@v4' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5594107Z Uses: pedronaugusto/preflight/.github/workflows/zig.yml@b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5598684Z ##[group] Inputs
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5599272Z   tier: fast
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5600091Z   adopt: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5600588Z   working-directory: .
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5601172Z   preflight-ref: b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5601812Z   attest: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5603101Z   fast-matrix: {"include":[{"os":"ubuntu-latest","name":"Linux Debug","step":"preflight-fast","args":"-Doptimize=debug","shard":"","setup":true,"job_timeout":20,"cache_key":"fast-linux-debug-0","artifact":""}]}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5606499Z   merge-matrix: {"include":[{"os":"ubuntu-latest","name":"Linux Debug","step":"preflight-fast","args":"-Doptimize=debug -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"fast-linux-debug-0","artifact":""},{"os":"macos-latest","name":"test (macos-latest, Debug)","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"ebda036faf315e75","artifact":""}]}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5610707Z   merge-compile-matrix: {"include":[{"os":"ubuntu-latest","name":"compile for test (windows-latest, Debug)","step":"ci-build","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"}]}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5613975Z   merge-run-matrix: {"include":[{"os":"windows-latest","name":"test (windows-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"}]}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5624938Z   release-matrix: {"include":[{"os":"ubuntu-latest","name":"test (ubuntu-latest, Debug)","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"64526a725a6be397","artifact":""},{"os":"ubuntu-latest","name":"test (ubuntu-latest, ReleaseSafe)","step":"ci","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"929001d8bf20c626","artifact":""},{"os":"ubuntu-latest","name":"test (ubuntu-latest, ReleaseFast)","step":"ci","args":"-Doptimize=fast -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"ff4d0a7dbdf6570c","artifact":""},{"os":"macos-latest","name":"test (macos-latest, Debug)","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"ebda036faf315e75","artifact":""},{"os":"macos-latest","name":"test (macos-latest, ReleaseSafe)","step":"ci","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"b231e36a5f15deb2","artifact":""},{"os":"ubuntu-latest","name":"source checks and documented snippets","step":"lint","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"f8fb09ced14d6cbf","artifact":""},{"os":"ubuntu-latest","name":"compile (ReleaseSmall)","step":"install","args":"-Doptimize=small","shard":"","setup":false,"job_timeout":20,"cache_key":"12fec5ad133102ff","artifact":""},{"os":"ubuntu-latest","name":"cross (all configured targets)","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"31829ac6da603806","artifact":""},{"os":"ubuntu-latest","name":"ThreadSanitizer (Linux)","step":"test","args":"-Dthread-sanitizer -Doptimize=debug -Dci-lint=false","shard":"","setup":true,"job_timeout":20,"cache_key":"00e5a9bfc5503969","artifact":""}]}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5638238Z   release-compile-matrix: {"include":[{"os":"ubuntu-latest","name":"compile for test (windows-latest, Debug)","step":"ci-build","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"},{"os":"ubuntu-latest","name":"compile for test (windows-latest, ReleaseSafe)","step":"ci-build","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-79f6a6b2846d7f58","artifact":"preflight-79f6a6b2846d7f58"}]}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5644295Z   release-run-matrix: {"include":[{"os":"windows-latest","name":"test (windows-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"},{"os":"windows-latest","name":"test (windows-latest, ReleaseSafe)","step":"ci-run","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"79f6a6b2846d7f58","artifact":"preflight-79f6a6b2846d7f58"}]}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5647400Z   compile-once: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5648442Z   test-job-timeout: 20
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5648977Z   windows-git-latest: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5649522Z   windows-job-timeout: 20
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5650016Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.5650648Z Complete job name: gate / Linux Debug
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6455388Z ##[group]Run actions/checkout@v4
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6456273Z with:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6456961Z   fetch-depth: 0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6457437Z   repository: pedronaugusto/lookout
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6461048Z   token: ***
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6461486Z   ssh-strict: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6461983Z   ssh-user: git
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6462431Z   persist-credentials: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6462909Z   clean: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6463351Z   sparse-checkout-cone-mode: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6463879Z   fetch-tags: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6464325Z   show-progress: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6464767Z   lfs: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6465180Z   submodules: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6465632Z   set-safe-directory: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6466146Z   allow-unsafe-pr-checkout: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.6467168Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7473981Z Syncing repository: pedronaugusto/lookout
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7476569Z ##[group]Getting Git version info
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7478022Z Working directory is '/home/runner/work/lookout/lookout'
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7479616Z [command]/usr/bin/git version
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7555382Z git version 2.55.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7577749Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7603634Z Temporarily overriding HOME='/home/runner/work/_temp/172fea99-f5ed-423b-b8d6-9689a0cf9093' before making global git config changes
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7615213Z Adding repository directory to the temporary git global config as a safe directory
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7617252Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/lookout/lookout
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7661750Z Deleting the contents of '/home/runner/work/lookout/lookout'
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7666345Z ##[group]Initializing the repository
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7670547Z [command]/usr/bin/git init /home/runner/work/lookout/lookout
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7793274Z hint: Using 'master' as the name for the initial branch. This default branch name
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7795008Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7796542Z hint: to use in all of your new repositories, which will suppress this warning,
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7798013Z hint: call:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7798872Z hint:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7799667Z hint: 	git config --global init.defaultBranch <name>
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7800648Z hint:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7801579Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7803169Z hint: 'development'. The just-created branch can be renamed via this command:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7804390Z hint:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7805035Z hint: 	git branch -m <name>
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7805778Z hint:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7806975Z hint: Disable this message with "git config set advice.defaultBranchName false"
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7808664Z Initialized empty Git repository in /home/runner/work/lookout/lookout/.git/
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7811357Z [command]/usr/bin/git remote add origin https://github.com/pedronaugusto/lookout
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7863852Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7865064Z ##[group]Disabling automatic garbage collection
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7867628Z [command]/usr/bin/git config --local gc.auto 0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7900299Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7901392Z ##[group]Setting up auth
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7906499Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.7940015Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.8344161Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.8388391Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.8642590Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.8685096Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.8944969Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.8985582Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.8986488Z ##[group]Fetching the repository
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:14.8996203Z [command]/usr/bin/git -c protocol.version=2 fetch --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7329233Z From https://github.com/pedronaugusto/lookout
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7331229Z  * [new branch]      adopt           -> origin/adopt
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7332388Z  * [new branch]      arch            -> origin/arch
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7333847Z  * [new branch]      ci-cache        -> origin/ci-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7334999Z  * [new branch]      cleanup         -> origin/cleanup
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7336158Z  * [new branch]      debt-2          -> origin/debt-2
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7337832Z  * [new branch]      follow-symlinks -> origin/follow-symlinks
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7339065Z  * [new branch]      gate            -> origin/gate
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7340257Z  * [new branch]      layout          -> origin/layout
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7341476Z  * [new branch]      main            -> origin/main
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7342965Z  * [new branch]      preflight       -> origin/preflight
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7344489Z  * [new branch]      race            -> origin/race
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7345879Z  * [new branch]      race-tree       -> origin/race-tree
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7347631Z  * [new branch]      review          -> origin/review
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7349054Z  * [new branch]      roots           -> origin/roots
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7350390Z  * [new branch]      zig-0.17        -> origin/zig-0.17
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7351655Z  * [new tag]         v0.1.1          -> v0.1.1
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7353140Z  * [new tag]         v0.2.0          -> v0.2.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7354790Z  * [new tag]         v0.3.0          -> v0.3.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7357865Z [command]/usr/bin/git branch --list --remote origin/roots
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7376167Z   origin/roots
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7388356Z [command]/usr/bin/git rev-parse refs/remotes/origin/roots
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7415107Z fcb593428fa6380faac6291f8d36b8641aaeb11b
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7423075Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7426958Z ##[group]Determining the checkout info
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7430658Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7432704Z [command]/usr/bin/git sparse-checkout disable
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7491789Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7527387Z ##[group]Checking out the ref
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7530615Z [command]/usr/bin/git checkout --progress --force -B roots refs/remotes/origin/roots
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7687862Z Switched to a new branch 'roots'
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7693440Z branch 'roots' set up to track 'origin/roots'.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7703289Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7783905Z [command]/usr/bin/git log -1 --format=%H
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.7812538Z fcb593428fa6380faac6291f8d36b8641aaeb11b
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8331743Z ##[group]Run actions/checkout@v4
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8332930Z with:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8333870Z   repository: pedronaugusto/preflight
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8335178Z   ref: b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8336458Z   path: .preflight
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8346076Z   token: ***
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8347133Z   ssh-strict: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8348069Z   ssh-user: git
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8349020Z   persist-credentials: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8350071Z   clean: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8351026Z   sparse-checkout-cone-mode: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8352172Z   fetch-depth: 1
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8353133Z   fetch-tags: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8354102Z   show-progress: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8355072Z   lfs: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8355954Z   submodules: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8357051Z   set-safe-directory: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8358171Z   allow-unsafe-pr-checkout: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.8359307Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9263631Z Syncing repository: pedronaugusto/preflight
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9267361Z ##[group]Getting Git version info
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9269639Z Working directory is '/home/runner/work/lookout/lookout/.preflight'
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9280682Z [command]/usr/bin/git version
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9326135Z git version 2.55.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9352777Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9367869Z Temporarily overriding HOME='/home/runner/work/_temp/d23f7a9f-2bf3-4d1d-b889-bac8da3eed45' before making global git config changes
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9371471Z Adding repository directory to the temporary git global config as a safe directory
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9375772Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/lookout/lookout/.preflight
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9413106Z ##[group]Initializing the repository
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9418213Z [command]/usr/bin/git init /home/runner/work/lookout/lookout/.preflight
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9466407Z hint: Using 'master' as the name for the initial branch. This default branch name
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9486959Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9490628Z hint: to use in all of your new repositories, which will suppress this warning,
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9492457Z hint: call:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9493400Z hint:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9494555Z hint: 	git config --global init.defaultBranch <name>
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9495989Z hint:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9498138Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9501007Z hint: 'development'. The just-created branch can be renamed via this command:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9502799Z hint:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9503800Z hint: 	git branch -m <name>
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9504907Z hint:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9506409Z hint: Disable this message with "git config set advice.defaultBranchName false"
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9520843Z Initialized empty Git repository in /home/runner/work/lookout/lookout/.preflight/.git/
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9527756Z [command]/usr/bin/git remote add origin https://github.com/pedronaugusto/preflight
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9543899Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9547743Z ##[group]Disabling automatic garbage collection
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9550884Z [command]/usr/bin/git config --local gc.auto 0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9587088Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9590153Z ##[group]Setting up auth
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9593207Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9653201Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9903235Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:15.9943232Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.0202763Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.0246137Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.0497858Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.0541651Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.0543709Z ##[group]Fetching the repository
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.0552078Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5239381Z From https://github.com/pedronaugusto/preflight
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5240275Z  * branch            b28046cc22055fcd32640117fc0e6965283a8ae5 -> FETCH_HEAD
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5243946Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5244812Z ##[group]Determining the checkout info
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5247157Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5253215Z [command]/usr/bin/git sparse-checkout disable
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5315549Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5488739Z ##[group]Checking out the ref
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5489742Z [command]/usr/bin/git checkout --progress --force b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5605023Z Note: switching to 'b28046cc22055fcd32640117fc0e6965283a8ae5'.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5606028Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5607244Z You are in 'detached HEAD' state. You can look around, make experimental
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5608683Z changes and commit them, and you can discard any commits you make in this
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5610429Z state without impacting any branches by switching back to a branch.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5611047Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5611477Z If you want to create a new branch to retain commits you create, you may
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5612246Z do so (now or later) by using -c with the switch command. Example:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5612710Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5612984Z   git switch -c <new-branch-name>
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5613351Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5613624Z Or undo this operation with:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5613974Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5614227Z   git switch -
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5614678Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5615110Z Turn off this advice by setting config variable advice.detachedHead to false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5615622Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5616042Z HEAD is now at b28046c Restore supported legacy lint behavior and defer F04 to glint
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5618011Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5657841Z [command]/usr/bin/git log -1 --format=%H
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5686002Z b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5981850Z Prepare all required actions
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.5982532Z Getting action download info
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:16.7500082Z Download action repository 'mlugg/setup-zig@v2' (SHA:d1434d08867e3ee9daa34448df10607b98908d29)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.3231047Z Download action repository 'actions/cache@v4' (SHA:0057852bfaa89a56745cba8c7296529d2fc39830)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4512238Z ##[group]Run ./.preflight/.github/actions/setup
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4512581Z with:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4512800Z   windows-git-latest: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4513058Z   working-directory: .
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4513337Z   build-args: -Doptimize=debug
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4513601Z   build-key: fast-linux-debug-0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4513848Z   zig-version: 0.17.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4514079Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4573383Z ##[start-action display=Upgrade Git for Windows;id=__self.__run]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4592738Z ##[end-action id=__self.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4594993Z ##[start-action display=Run mlugg/setup-zig@v2;id=__self.__mlugg_setup-zig]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4651321Z ##[group]Run mlugg/setup-zig@v2
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4651745Z with:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4652034Z   version: 0.17.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4652416Z   use-cache: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4652735Z   cache-size-limit: 2048
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.4653072Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.7130622Z Using tool-cache: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.7138513Z Fetching zig-x86_64-linux-0.17.0.tar.xz
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:18.9985457Z Cache hit for: setup-zig-tarball-zig-x86_64-linux-0.17.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:20.3073362Z Received 0 of 57335739 (0.0%), 0.0 MBs/sec
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:21.0098101Z Received 57335739 of 57335739 (100.0%), 32.1 MBs/sec
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:21.0102500Z Cache Size: ~55 MB (57335739 B)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:21.0142925Z [command]/usr/bin/tar -xf /home/runner/work/_temp/bc2ff2ad-7dd2-42b4-b71a-54880e007880/cache.tzst -P -C /home/runner/work/lookout/lookout --use-compress-program unzstd
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:21.0998072Z Cache restored successfully
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:21.1074539Z Fetch took 2394 ms
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:21.1091995Z Extracting tarball zig-x86_64-linux-0.17.0.tar.xz
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:21.1173306Z [command]/usr/bin/tar xJ --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/27f268db-bf87-4934-89c2-6a46f353981a -f /home/runner/work/_temp/zig-x86_64-linux-0.17.0.tar.xz
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.0686562Z Extract took 3961 ms
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.0711280Z [command]/home/runner/work/_temp/27f268db-bf87-4934-89c2-6a46f353981a/zig-x86_64-linux-0.17.0/zig version
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.0776954Z 0.17.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.0791009Z Resolved Zig version 0.17.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.0935993Z ##[end-action id=__self.__mlugg_setup-zig;outcome=success;conclusion=success;duration_ms=6633]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.0939268Z ##[start-action display=Cache fetched Zig packages;id=__self.packages]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2007802Z ##[group]Run actions/cache@v4
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2008247Z with:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2008536Z   path: /home/runner/work/lookout/lookout/.zig-cache/p
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2009174Z   key: zig-packages-configured-Linux-0.17.0-64b8f376434f83ccbdc318412801b648dc235a0745ee4549fef1acae97152560
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2009816Z   restore-keys: zig-packages-configured-Linux-0.17.0-
+gate / Linux Debug	UNKNOWN STEP	
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2010168Z   enableCrossOsArchive: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2010440Z   fail-on-cache-miss: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2010683Z   lookup-only: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2010912Z   save-always: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2011118Z env:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2011418Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2011875Z   ZIG_LOCAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.2012232Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.3121283Z (node:2461) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.3122561Z (Use `node --trace-deprecation ...` to show where the warning was created)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.5721607Z Cache not found for input keys: zig-packages-configured-Linux-0.17.0-64b8f376434f83ccbdc318412801b648dc235a0745ee4549fef1acae97152560, zig-packages-configured-Linux-0.17.0-
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.5787966Z ##[end-action id=__self.packages;outcome=success;conclusion=success;duration_ms=484]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.5794260Z ##[start-action display=Cache compiled builds;id=__self.builds]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7612931Z ##[group]Run actions/cache@v4
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7613190Z with:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7613899Z   path: ./.zig-cache
+gate / Linux Debug	UNKNOWN STEP	.preflight/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	/home/runner/work/lookout/lookout/.zig-cache/o
+gate / Linux Debug	UNKNOWN STEP	/home/runner/work/lookout/lookout/.zig-cache/h
+gate / Linux Debug	UNKNOWN STEP	/home/runner/work/lookout/lookout/.zig-cache/z
+gate / Linux Debug	UNKNOWN STEP	
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7615002Z   key: zig-build-Linux-X64-0.17.0-fast-linux-debug-0-babf5ae76a88ee5dbfba2a554b43889a97310245d9f1271438b1616baf0c37a1
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7615794Z   restore-keys: zig-build-Linux-X64-0.17.0-fast-linux-debug-0-
+gate / Linux Debug	UNKNOWN STEP	zig-build-Linux-X64-0.17.0-
+gate / Linux Debug	UNKNOWN STEP	
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7616304Z   enableCrossOsArchive: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7616578Z   fail-on-cache-miss: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7617110Z   lookup-only: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7617333Z   save-always: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7617549Z env:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7617842Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7618298Z   ZIG_LOCAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.7618657Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.8712931Z (node:2485) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:25.8714185Z (Use `node --trace-deprecation ...` to show where the warning was created)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.1580636Z Cache not found for input keys: zig-build-Linux-X64-0.17.0-fast-linux-debug-0-babf5ae76a88ee5dbfba2a554b43889a97310245d9f1271438b1616baf0c37a1, zig-build-Linux-X64-0.17.0-fast-linux-debug-0-, zig-build-Linux-X64-0.17.0-
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.1643750Z ##[end-action id=__self.builds;outcome=success;conclusion=success;duration_ms=584]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.1646536Z ##[start-action display=Cache external tools;id=__self.__actions_cache]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2651778Z ##[group]Run actions/cache@v4
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2652038Z with:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2652278Z   path: /home/runner/work/_temp/preflight-tools
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2652616Z   key: preflight-tools-Linux-X64-0.17.0-
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2652931Z   enableCrossOsArchive: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2653198Z   fail-on-cache-miss: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2653445Z   lookup-only: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2653668Z   save-always: false
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2653886Z env:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2654187Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2654671Z   ZIG_LOCAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.2655045Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.3840701Z (node:2509) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.3842204Z (Use `node --trace-deprecation ...` to show where the warning was created)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6408599Z Cache not found for input keys: preflight-tools-Linux-X64-0.17.0-
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6467306Z ##[end-action id=__self.__actions_cache;outcome=success;conclusion=success;duration_ms=481]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6472169Z ##[start-action display=Fetch what the job's build asks for, with retries;id=__self.__run_2]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6506269Z ##[group]Run zig build --build-file .preflight/build.zig -Drepo-root="/home/runner/work/lookout/lookout/." fetch
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6507744Z ^[[36;1mzig build --build-file .preflight/build.zig -Drepo-root="/home/runner/work/lookout/lookout/." fetch^[[0m
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6874567Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6875127Z env:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6875595Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6876341Z   ZIG_LOCAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6877380Z   BUILD_ARGS: -Doptimize=debug
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:33:26.6877782Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:35:05.8930423Z info: fetching lazy dependency gantry-0.1.0-1iNrkYwDDACsflv8JL7EcKNxh68qFeRvfnj44o2gpGWP
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:26.5035657Z info: fetching lazy dependency shakedown-0.1.0-BR8U441oDgBA_guQJ481zswN7jK3G8X4nKygC9-IuaxT
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:26.5038695Z info: fetching lazy dependency shakedown-0.1.0-BR8U4177DQAXS79Rcl1reGMylJ-qq3g0WNSWNyjjfw19
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:26.5041469Z info: fetching lazy dependency preflight-0.1.0-LX1ZwjmEBwCer1MlXnpPw9a_ko-7gFW-k0n7uD_6jv-P
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:28.9428010Z info: fetching lazy dependency ziglint-0.5.3-t0bwL9gkBgDJkTIUhKe70dqGDYevrZK1XGTdjnHfwURT
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8988197Z   install (default)            Copy build artifacts to prefix path
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8989179Z   uninstall                    Remove build artifacts from prefix path
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8990002Z   test                         Run the lookout tests
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8990811Z   check                        Compile the lookout tests without running them
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8991461Z   examples                     Build and run the examples
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8991968Z   lint                         Check format, structure, Zig policy, docs and test imports
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8992731Z   bench                        Build the benchmarks in ReleaseFast under zig-out/bench and run the timed ones, one after another
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8993423Z   ci                           Run source checks, then the tests
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8994021Z   ci-check                     Compile root, test, benchmark and helper objects without linking or executing
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8994747Z   ci-link                      Link tests, benchmarks and helpers on a runner with its native SDK
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8995380Z   ci-build                     Compile test executables for execution on another runner
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8995944Z   ci-run                       Run the previously compiled test executables
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8996485Z   plan                         Plan matrices or regenerate the pinned caller workflow
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8997578Z   cache                        Prune compiled products while preserving packages and tools
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8998478Z   docs                         Render a configured documentation region
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.8999678Z   deprecations                 List what this Zig release deprecated, rewritten; -- --write applies it
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9000216Z   check-imports                Check declared source structure
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9000732Z   check-consumer               Build a project that depends on lookout, with only the packages it needs
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9484135Z   install (default)            Copy build artifacts to prefix path
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9484975Z   uninstall                    Remove build artifacts from prefix path
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9485641Z   test                         Run the lookout tests
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9486953Z   check                        Compile the lookout tests without running them
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9487697Z   examples                     Build and run the examples
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9488450Z   lint                         Check format, structure, Zig policy, docs and test imports
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9489593Z   bench                        Build the benchmarks in ReleaseFast under zig-out/bench and run the timed ones, one after another
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9490596Z   ci                           Run source checks, then the tests
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9491369Z   ci-check                     Compile root, test, benchmark and helper objects without linking or executing
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9491967Z   ci-link                      Link tests, benchmarks and helpers on a runner with its native SDK
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9492486Z   ci-build                     Compile test executables for execution on another runner
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9492963Z   ci-run                       Run the previously compiled test executables
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9493616Z   plan                         Plan matrices or regenerate the pinned caller workflow
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9494105Z   cache                        Prune compiled products while preserving packages and tools
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9494550Z   docs                         Render a configured documentation region
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9495065Z   deprecations                 List what this Zig release deprecated, rewritten; -- --write applies it
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9495984Z   check-imports                Check declared source structure
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9497056Z   check-consumer               Build a project that depends on lookout, with only the packages it needs
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9508082Z ##[end-action id=__self.__run_2;outcome=success;conclusion=success;duration_ms=184303]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9511569Z ##[start-action display=Record cache hits;id=__self.__run_3]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9530150Z ##[group]Run zig build --build-file .preflight/build.zig -Drepo-root="/home/runner/work/lookout/lookout" setup -- --report
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9531064Z ^[[36;1mzig build --build-file .preflight/build.zig -Drepo-root="/home/runner/work/lookout/lookout" setup -- --report^[[0m
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9594697Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9595042Z env:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9595337Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9595791Z   ZIG_LOCAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9596152Z   PREFLIGHT_PACKAGE_HIT: 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9610186Z   PREFLIGHT_BUILD_HIT: 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:30.9610626Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5084179Z ##[end-action id=__self.__run_3;outcome=success;conclusion=success;duration_ms=1557]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5124817Z ##[group]Run zig build --build-file .preflight/build.zig -Drepo-root="/home/runner/work/lookout/lookout/." prepare
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5125651Z ^[[36;1mzig build --build-file .preflight/build.zig -Drepo-root="/home/runner/work/lookout/lookout/." prepare^[[0m
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5189239Z shell: /usr/bin/bash -e {0}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5189503Z env:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5189804Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5190273Z   ZIG_LOCAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5190638Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5879485Z ##[group]Run zig build --build-file .preflight/build.zig -Drepo-root="/home/runner/work/lookout/lookout/." run
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5880295Z ^[[36;1mzig build --build-file .preflight/build.zig -Drepo-root="/home/runner/work/lookout/lookout/." run^[[0m
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5942999Z shell: /usr/bin/bash -e {0}
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5943265Z env:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5943563Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5944030Z   ZIG_LOCAL_CACHE_DIR: /home/runner/work/lookout/lookout/.zig-cache
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5944397Z   STEP: preflight-fast
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5944657Z   BUILD_ARGS: -Doptimize=debug
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5945093Z   PREFLIGHT_SHARD: 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5945319Z   PREFLIGHT_PREPARED: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5945561Z   PREFLIGHT_SETUP: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5945809Z   PREFLIGHT_LEDGER_BASE: origin/main
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5946076Z   FAST_COMPILE: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:36:32.5946291Z ##[endgroup]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:37:52.5009754Z preflight: assertion density: 60 assertions in 652 functions
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:37:52.5011483Z preflight: source quality
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:37:52.8651811Z preflight: ziglint
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:37:53.8895944Z preflight: namespace layout
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:37:53.8896473Z preflight: cast reasons
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:37:53.8899567Z preflight: function length
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:37:53.8941603Z preflight: documentation
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:37:53.8942699Z preflight: test imports
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:37:54.9452614Z preflight: package paths
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4954091Z created /home/runner/work/lookout/lookout/zig-out/lookout-example/notes.txt
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4955310Z modified /home/runner/work/lookout/lookout/zig-out/lookout-example/notes.txt
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4958849Z renamed /home/runner/work/lookout/lookout/zig-out/lookout-example/renamed.txt (from /home/runner/work/lookout/lookout/zig-out/lookout-example/notes.txt)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4960035Z created /home/runner/work/lookout/lookout/zig-out/lookout-example/sub
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4960805Z created /home/runner/work/lookout/lookout/zig-out/lookout-example/sub/inside.txt
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4961595Z removed /home/runner/work/lookout/lookout/zig-out/lookout-example/renamed.txt
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4962406Z filtered: created /home/runner/work/lookout/lookout/zig-out/lookout-example/kept.txt
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4963262Z pending: created /home/runner/work/lookout/lookout/zig-out/lookout-example/later/inside
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4964205Z baseline: created /home/runner/work/lookout/lookout/zig-out/lookout-example/written-while-away.txt
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4964902Z backend: inotify
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.4965206Z prunes ignored: true
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:39:36.5010580Z inotify keeps no log to resume from, so there is no checkpoint to take
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7002166Z ci
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7002597Z +- test
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7002975Z    +- run test lookout-tests 293 pass, 18 skip, 1 fail (312 total)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7004133Z error: 'testing.suite_test.test.a pending path that leads to one already watched is not watched twice' failed:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7005273Z        preflight: test seed 178556195 (reproduce with PREFLIGHT_TEST_SEED=178556195)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7006327Z        inotify: no unwatched for watch 1 at /home/runner/work/lookout/lookout/.zig-cache/tmp/xGVX-iJfo8CVw-rF/link/inside within 5000 ms
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7007616Z        testing.suite_test.test.a pending path that leads to one already watched is not watched twice: EventNotObserved; seed 178556195
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7008430Z        /home/runner/work/lookout/lookout/src/testing/suite_test.zig:1962:9: 0x1a74b88 in await (tests.zig)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7008955Z                return error.EventNotObserved;
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7009253Z                ^
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7009901Z        /home/runner/work/lookout/lookout/src/testing/suite_test.zig:2159:9: 0x1a82a90 in test.a pending path that leads to one already watched is not watched twice (tests.zig)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7011080Z                try ledger.await(&f, &.{.{ .id = waiting, .sub_path = "link/inside", .kind = .unwatched }});
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7011526Z                ^
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7012098Z failed command: ./.zig-cache/o/4e289b2429e4f9c58240cd8f9b142ed9/lookout-tests --cache-dir=./.zig-cache --seed=0xaa48d23 --listen=-
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7012624Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7012877Z Build Summary: 24/27 steps succeeded (1 failed); 293/312 tests passed (18 skipped, 1 failed)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7013326Z ci transitive failure
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7013559Z +- test transitive failure
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7013885Z    +- run test lookout-tests 293 pass, 18 skip, 1 fail (312 total)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7014153Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7021682Z error: CommandFailed
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7024350Z run
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7024731Z +- run exe preflight failure
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7025216Z error: process exited with code 1
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7026140Z failed command: cd /home/runner/work/lookout/lookout/. && ./.zig-cache/o/09d7e993cb556b8fad3166235fc71386/preflight run
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7027195Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7027419Z Build Summary: 1/3 steps succeeded (1 failed)
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7027944Z run transitive failure
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7028344Z +- run exe preflight failure
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7028601Z 
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7045847Z ##[error]Process completed with exit code 1.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7284264Z Post job cleanup.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7289346Z ##[start-action display=Cache external tools;id=__d9bbe617-257f-49a8-85f6-18932be61fd4.__actions_cache]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7291398Z ##[end-action id=__d9bbe617-257f-49a8-85f6-18932be61fd4.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7293385Z ##[start-action display=Cache compiled builds;id=__d9bbe617-257f-49a8-85f6-18932be61fd4.builds]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7295288Z ##[end-action id=__d9bbe617-257f-49a8-85f6-18932be61fd4.builds;outcome=skipped;conclusion=skipped;duration_ms=0]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7297447Z ##[start-action display=Cache fetched Zig packages;id=__d9bbe617-257f-49a8-85f6-18932be61fd4.packages]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7299432Z ##[end-action id=__d9bbe617-257f-49a8-85f6-18932be61fd4.packages;outcome=skipped;conclusion=skipped;duration_ms=0]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7301356Z ##[start-action display=Run mlugg/setup-zig@v2;id=__d9bbe617-257f-49a8-85f6-18932be61fd4.__mlugg_setup-zig]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.7331566Z Post job cleanup.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.9881779Z ##[end-action id=__d9bbe617-257f-49a8-85f6-18932be61fd4.__mlugg_setup-zig;outcome=success;conclusion=success;duration_ms=257]
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:17.9966018Z Post job cleanup.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1015368Z [command]/usr/bin/git version
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1107609Z git version 2.55.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1157376Z Temporarily overriding HOME='/home/runner/work/_temp/141fb7e6-6916-4ae5-bf68-f1179fe62f22' before making global git config changes
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1170592Z Adding repository directory to the temporary git global config as a safe directory
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1171898Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/lookout/lookout/.preflight
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1267651Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1347998Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1653547Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1689774Z http.https://github.com/.extraheader
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1704293Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.1759548Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.2032567Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.2072437Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.2504304Z Post job cleanup.
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3404446Z [command]/usr/bin/git version
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3450113Z git version 2.55.0
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3492053Z Temporarily overriding HOME='/home/runner/work/_temp/6e03e908-342c-4579-a99e-fc39fb5c5ee4' before making global git config changes
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3493454Z Adding repository directory to the temporary git global config as a safe directory
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3498837Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/lookout/lookout
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3546094Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3599861Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3862096Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3888926Z http.https://github.com/.extraheader
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3902052Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.3941262Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.4220485Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.4261192Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.4667353Z Cleaning up orphan processes
+gate / Linux Debug	UNKNOWN STEP	2026-10-08T19:41:18.5003461Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@v4, actions/checkout@v4, mlugg/setup-zig@v2. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

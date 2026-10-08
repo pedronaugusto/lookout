@@ -65,6 +65,13 @@ and all seven paired native ReleaseFast runs succeeded. No causal fix or
 performance claim is attributed to that isolated observation; CI's required
 native gates remain the landing requirement.
 
+The first complete fast run (`37832497597`) found one stale assertion:
+a pending symbolic-link refusal expected the caller alias as its event path.
+The updated regression expects the resolved canonical path, independently
+asserts the original request, and retains registration-count/no-duplicate
+checks. `ci-fast-37832497597-failed.txt` preserves that log. The pending
+promotion walk also selects each entry parent's policy.
+
 ## Interleaved ReleaseFast measurements
 
 Quiet Apple M3 host, Zig 0.17.0, seven interleaved rounds, reversing acquisition
@@ -91,14 +98,22 @@ and its query scratch buffer are removed. NFC and folded matching cost more
 than exact matching; both remain faster than the historical implementation
 on this corpus. The benchmark is evidence, not a timing correctness gate.
 
-`native-ab.jsonl` preserves seven paired runs of the existing ReleaseFast
-native driver; `native-ab-summary.txt` includes every backend and row.
-FSEvents blocked change was 11→11 ms, kqueue 0→0 ms, polling 54→58 ms;
-wake was 100→100, 100→103 and 112→117 ms respectively. Polling's round-best
-medians were 55→59 and 116→122 ms. These small regressions/noise are reported,
-not presented as improvements; every run stayed within the existing ceilings.
-Event timings include deliberate waits and scheduling, not filter-query cost.
-This macOS host does not establish Linux/Windows native probe performance.
+`native-ab.jsonl` and its summary preserve the first seven paired native
+runs. A later Debug smoke returned UnexpectedEvents during idle wake;
+the driver reused a fixture name across rows and had not drained setup
+notifications before idle timing. The driver now gives each fixture a unique
+name and settles setup before cancel/wake/stop timing. No production wake
+fix is claimed. `native-isolated-ab.jsonl` preserves seven final paired
+runs using this identical corrected driver against baseline and candidate
+production, both with the same green sweep/airlock dependencies.
+
+Final best blocked-change times (FSEvents/kqueue/polling) were 12→12, 0→0
+and 60→59 ms; wake was 106→102, 102→102 and 109→108 ms. Full summaries
+are in `native-isolated-ab-summary.txt`. Regressions in round-best medians
+are also reported: polling blocked-change 64→66 ms, kqueue cancellation
+55→60 ms, and kqueue wake 105→110 ms. Every run stayed within the existing
+ceilings; timing includes deliberate waits and scheduling, not only query
+cost. This macOS host does not establish Linux/Windows native probe costs.
 
 ## Published dependency evidence and landing
 

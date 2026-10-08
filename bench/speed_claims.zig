@@ -168,6 +168,7 @@ const Claims = struct {
         var f = try Fixture.init(c, .{ .backend = backend, .poll_interval = .fromMilliseconds(20) });
         defer f.deinit();
         _ = try f.watcher.add(io, f.root, .{});
+        try f.settle();
 
         const Task = struct {
             io: Io,
@@ -213,6 +214,7 @@ const Claims = struct {
         var f = try Fixture.init(c, .{ .backend = backend, .poll_interval = .fromMilliseconds(20) });
         defer f.deinit();
         _ = try f.watcher.add(io, f.root, .{});
+        try f.settle();
 
         const Waker = struct {
             io: Io,
@@ -232,7 +234,11 @@ const Claims = struct {
         const started: Io.Timestamp = .now(io, .awake);
         const events = try f.watcher.poll(io, .none);
         const elapsed = started.durationTo(.now(io, .awake)).toMilliseconds();
-        if (events.len != 0) return error.UnexpectedEvents;
+        if (events.len != 0) {
+            for (events) |event| try c.out.print("wake {s}: unexpected {s} {s}\n", .{ @tagName(backend), @tagName(event.kind), event.path });
+            try c.out.flush();
+            return error.UnexpectedEvents;
+        }
         try c.metric("wake", backend, elapsed);
         return c.judged("wake", backend, timeout_ms, elapsed < timeout_ms);
     }
@@ -244,6 +250,7 @@ const Claims = struct {
         var f = try Fixture.init(c, .{ .backend = backend, .poll_interval = .fromMilliseconds(20) });
         defer f.deinit();
         _ = try f.watcher.add(io, f.root, .{});
+        try f.settle();
 
         const Task = struct {
             io: Io,
@@ -300,24 +307,27 @@ const Fixture = struct {
     dir: Io.Dir,
     root: [:0]u8,
     watcher: Watcher,
-
-    const name = "fixture";
+    name: []u8,
 
     fn init(c: *Claims, options: Watcher.Options) !Fixture {
         const cwd = Io.Dir.cwd();
-        cwd.deleteTree(c.io, name) catch {};
+        // A delayed native record from a previous fixture must not name
+        // the tree whose idle wake is being measured now.
+        const name = try std.fmt.allocPrint(c.gpa, "fixture-{d}", .{Io.Clock.awake.now(c.io).nanoseconds});
+        errdefer c.gpa.free(name);
         var dir = try cwd.createDirPathOpen(c.io, name, .{ .open_options = .{ .iterate = true } });
         errdefer dir.close(c.io);
         const root = try dir.realPathFileAlloc(c.io, ".", c.gpa);
         errdefer c.gpa.free(root);
-        return .{ .io = c.io, .gpa = c.gpa, .dir = dir, .root = root, .watcher = try Watcher.init(c.gpa, options) };
+        return .{ .io = c.io, .gpa = c.gpa, .dir = dir, .root = root, .watcher = try Watcher.init(c.gpa, options), .name = name };
     }
 
     fn deinit(f: *Fixture) void {
         f.watcher.deinit(f.io);
         f.gpa.free(f.root);
         f.dir.close(f.io);
-        Io.Dir.cwd().deleteTree(f.io, name) catch {};
+        Io.Dir.cwd().deleteTree(f.io, f.name) catch {};
+        f.gpa.free(f.name);
     }
 
     fn write(f: *Fixture, sub_path: []const u8, data: []const u8) !void {

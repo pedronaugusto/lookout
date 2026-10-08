@@ -924,8 +924,10 @@ pub const Watcher = struct {
             const Self = @This();
 
             fn visit(m: Self, entry: walk.Entry) anyerror!walk.Step {
-                if (m.p.filter.prunes(m.p.target, entry.path)) return .over;
-                if (!m.p.filter.excludes(m.p.target, entry.path)) {
+                const parent = Io.Dir.path.dirname(entry.path) orelse m.p.target;
+                const policy = if (m.p.filter.isEmpty()) m.p.filter.policy else identity.read(m.w.gpa, m.io, parent).policy(m.p.identity_override);
+                if (m.p.filter.prunesPolicy(policy, m.p.target, entry.path)) return .over;
+                if (!m.p.filter.excludesPolicy(policy, m.p.target, entry.path)) {
                     try m.w.batch.pushDetail(m.w.gpa, m.io, m.p.id, entry.path, .created, null, Target.of(entry.kind));
                 }
                 return if (entry.kind == .directory and m.p.recursive) .into else .over;

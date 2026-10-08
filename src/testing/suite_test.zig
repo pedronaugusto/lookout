@@ -2156,7 +2156,8 @@ test "a pending path that leads to one already watched is not watched twice" {
 
         var ledger: Ledger = .{};
         defer ledger.deinit();
-        try ledger.await(&f, &.{.{ .id = waiting, .sub_path = "link/inside", .kind = .unwatched }});
+        try ledger.await(&f, &.{.{ .id = waiting, .sub_path = "real/inside", .kind = .unwatched }});
+        try std.testing.expectEqual(@as(usize, 0), ledger.count(waiting, .created, real));
         try std.testing.expectEqual(@as(usize, 0), ledger.count(waiting, .created, through));
         try std.testing.expectEqual(registrations, f.watcher.stats().registrations);
         try std.testing.expectEqual(@as(usize, 2), f.watcher.stats().watches);
@@ -2172,7 +2173,15 @@ test "a pending path that leads to one already watched is not watched twice" {
         // The id stays valid until it is removed.
         const infos = try f.watcher.watches(gpa);
         defer gpa.free(infos);
-        for (infos) |info| if (info.id == waiting) try std.testing.expect(!info.waiting);
+        var found = false;
+        for (infos) |info| {
+            if (info.id != waiting) continue;
+            found = true;
+            try std.testing.expect(!info.waiting);
+            try std.testing.expectEqualStrings(real, info.path);
+            try std.testing.expectEqualStrings(through, info.requested);
+        }
+        try std.testing.expect(found);
         f.watcher.remove(io, waiting);
         try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().watches);
     }
