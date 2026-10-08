@@ -610,3 +610,11 @@ test "a path longer than any the system gives is let through, not matched unfold
     try testing.expect(f.excludes(root, long[0..max_subject]));
     try testing.expect(!f.excludes(root, long));
 }
+
+// F07: a class member must never turn into two independent members.
+test "normalization preserves an accented class member" {
+    var f = try expectCompiled(.{ .ignore = &.{"[é]"} });
+    defer f.deinit();
+    try testing.expect(!f.excludes(sep("/w"), sep("/w/e")));
+    try testing.expect(!f.excludes(sep("/w"), sep("/w/\u{301}")));
+}

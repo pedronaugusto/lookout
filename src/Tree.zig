@@ -1145,3 +1145,11 @@ test "a name that comes back as another kind replaces its node" {
     defer gpa.free(name);
     try testing.expectEqual(Node.Role.directory, tree.nodes.get(tree.index.get(.{ .watch = @fromBackingInt(@intCast(0)), .path = name }).?).?.role);
 }
+
+// F03: two kernel names on a known case-sensitive root are distinct.
+test "filesystem identity preserves case-distinct kernel names" {
+    const context: KeyContext = .{};
+    const a: Key = .{ .watch = @fromBackingInt(@intCast(1)), .path = "/w/A" };
+    const b: Key = .{ .watch = @fromBackingInt(@intCast(1)), .path = "/w/a" };
+    try std.testing.expect(!context.eql(a, b, 0));
+}

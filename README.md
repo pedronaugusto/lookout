@@ -4,6 +4,9 @@ lookout watches files and directory trees in Zig. One `Watcher` coalesces change
 native notification backends or polling, with explicit overflow events and backend
 capability queries.
 
+Filesystem case/normalization per root and syntax-aware normalized filtering
+are work in progress; see [the implementation evidence](docs/roots-evidence.md).
+
 ## Install
 
 Requires Zig 0.17.0. Fetch with `zig fetch --save
