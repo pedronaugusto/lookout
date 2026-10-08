@@ -487,13 +487,14 @@ fn fuzzPaths(_: void, smith: *testing.Smith) !void {
     try checkPaths(a, b);
 }
 
-/// A pattern as git reads it: the code points as the file system compares
-/// them, with `*` and `?` taken out, and `**` taken out as a globstar
+/// A pattern as git reads it: exact scalars and explicit separators,
+/// with `*` and `?` taken out, and `**` taken out as a globstar
 /// where it stands as a whole component and as `*` everywhere else.
 const Token = union(enum) { any_depth, any, one, literal: u21 };
 
-/// Exact UTF-8 scalars, with invalid bytes distinct from valid scalars.
-fn units(gpa: std.mem.Allocator, text: []const u8) !std.ArrayList(u21) {
+/// Exact UTF-8 scalars with both separator spellings represented by `/`.
+/// Invalid bytes remain distinct from valid scalars.
+fn units(gpa: std.mem.Allocator, text: []const u8, alternate_separator: ?u8) !std.ArrayList(u21) {
     @disableInstrumentation();
     var out: std.ArrayList(u21) = .empty;
     errdefer out.deinit(gpa);
@@ -508,7 +509,7 @@ fn units(gpa: std.mem.Allocator, text: []const u8) !std.ArrayList(u21) {
             else => null,
         };
         if (decoded) |c| {
-            try out.append(gpa, c);
+            try out.append(gpa, if (alternate_separator != null and c == alternate_separator.?) '/' else c);
             i += len;
         } else {
             try out.append(gpa, @as(u21, 0x110000) + text[i]);
@@ -518,9 +519,9 @@ fn units(gpa: std.mem.Allocator, text: []const u8) !std.ArrayList(u21) {
     return out;
 }
 
-fn tokenize(gpa: std.mem.Allocator, pattern: []const u8) !std.ArrayList(Token) {
+fn tokenize(gpa: std.mem.Allocator, pattern: []const u8, alternate_separator: ?u8) !std.ArrayList(Token) {
     @disableInstrumentation();
-    var points = try units(gpa, pattern);
+    var points = try units(gpa, pattern, alternate_separator);
     defer points.deinit(gpa);
     const p = points.items;
     var tokens: std.ArrayList(Token) = .empty;
@@ -547,10 +548,14 @@ fn tokenize(gpa: std.mem.Allocator, pattern: []const u8) !std.ArrayList(Token) {
 /// literals, over every pair of positions once rather than by
 /// backtracking.
 fn referenceMatches(gpa: std.mem.Allocator, pattern: []const u8, name: []const u8) !bool {
+    return referenceMatchesSeparators(gpa, pattern, name, if (builtin.target.os.tag == .windows) '\\' else null);
+}
+
+fn referenceMatchesSeparators(gpa: std.mem.Allocator, pattern: []const u8, name: []const u8, alternate_separator: ?u8) !bool {
     @disableInstrumentation();
-    var tokens = try tokenize(gpa, pattern);
+    var tokens = try tokenize(gpa, pattern, alternate_separator);
     defer tokens.deinit(gpa);
-    var points = try units(gpa, name);
+    var points = try units(gpa, name, alternate_separator);
     defer points.deinit(gpa);
     const t = tokens.items;
     const n = points.items;
@@ -585,6 +590,17 @@ fn referenceMatches(gpa: std.mem.Allocator, pattern: []const u8, name: []const u
         }
     }
     return can[0];
+}
+
+test "the filter reference respects both separator spellings" {
+    const gpa = testing.allocator;
+    try testing.expect(!try referenceMatchesSeparators(gpa, "a*a", "a\\a", '\\'));
+    try testing.expect(try referenceMatchesSeparators(gpa, "a*a", "a\\a", null));
+    try testing.expect(!try referenceMatchesSeparators(gpa, "a?b", "a\\b", '\\'));
+    try testing.expect(try referenceMatchesSeparators(gpa, "a\\*\\b", "a/x/b", '\\'));
+    try testing.expect(try referenceMatchesSeparators(gpa, "a\\**\\b", "a/b", '\\'));
+    try testing.expect(try referenceMatchesSeparators(gpa, "a/**/b", "a\\x/y\\b", '\\'));
+    try testing.expect(!try referenceMatchesSeparators(gpa, "a/*/b", "a\\x/y\\b", '\\'));
 }
 
 /// `CompiledFilter.excludes` for an ignore list of one pattern, said the long
