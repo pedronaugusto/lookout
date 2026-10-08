@@ -22,7 +22,7 @@
             .hash = "airlock-0.1.0-rfvu6CZTBQB7slH2y-nDXvVwoLp-sbWLW_E1X9J3DwhQ",
         },
         .sweep = .{
-            .url = "git+https://github.com/pedronaugusto/sweep#0b6c39b63a32135d1735b6d1ed8ed82e5fb26793",
+            .url = "git+https://github.com/pedronaugusto/sweep#fd0a9af1da2218d9ed6fc069d818046553f0ed09",
             .hash = "sweep-0.1.0-6Erwaaw5OwBJqKlJUwn1uRwGg5O7npXywhcNWQmYVCaB",
         },
         .preflight = .{

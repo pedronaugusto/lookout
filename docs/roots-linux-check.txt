@@ -1,5 +1,0 @@
-Build Summary: 3/3 steps succeeded
-check success
-+- compile test lookout-tests debug x86_64-linux-gnu success 12s MaxRSS:273M
-   +- options cached
-

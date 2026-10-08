@@ -5,7 +5,7 @@ native notification backends or polling, with explicit overflow events and backe
 capability queries.
 
 Work in progress toward the public cut. Filesystem policy is measured per root
-and directory where supported; sweep parses and composes normalized filters; see [the implementation evidence](docs/roots-evidence.md).
+and directory where supported; sweep parses and composes normalized filters.
 
 ## Install
 

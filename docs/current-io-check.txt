@@ -1,5 +1,0 @@
-Build Summary: 3/3 steps succeeded
-check success
-+- compile test lookout-tests debug native success 6s MaxRSS:888M
-   +- options cached
-
