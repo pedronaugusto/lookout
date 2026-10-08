@@ -3,6 +3,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Snapshot = @import("../Snapshot.zig");
+const identity = @import("../identity.zig");
+const sweep = @import("sweep");
 const path = @import("../path.zig");
 
 pub const State = struct {
@@ -13,19 +15,24 @@ pub const State = struct {
     ignore: []const []const u8,
     only: []const []const u8,
     dirs: []const Directory,
+    case: ?sweep.Case = null,
+    normalization: ?identity.Policy.Normalization = null,
+    policy: identity.Policy = .{},
+    identity_override: ?identity.Policy = null,
 };
 pub const Directory = struct {
     path: []const u8,
     truncated: bool,
     check_contents: bool,
     entries: []const Entry,
+    policy: identity.Policy = .{},
 };
 pub const Entry = struct { name: []const u8, meta: Snapshot.Meta };
 pub const ParseError = error{ OutOfMemory, InvalidBaseline, UnsupportedBaselineVersion, ForeignBaseline };
 const magic = "LOOKBASE";
 /// The layout `encode` writes and `parse` reads: the magic, the version,
 /// then the checksum of the JSON after them.
-const version: u32 = 1;
+const version: u32 = 2;
 const version_at = magic.len;
 const digest_at = version_at + @sizeOf(u32);
 const Sha256 = std.crypto.hash.sha2.Sha256;

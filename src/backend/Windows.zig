@@ -34,6 +34,7 @@ const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
+const identity = @import("../identity.zig");
 const CompiledFilter = @import("../CompiledFilter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
@@ -119,6 +120,7 @@ const Watch = struct {
     /// to leave a directory out, so here the filter drops the events
     /// rather than saving the work -- see `lookout.prunesIgnored`.
     filter: CompiledFilter,
+    identity_override: ?identity.Policy = null,
     overlapped: c.Overlapped,
     /// Where the kernel writes the change records. Owned by the watch,
     /// and not released until its outstanding read has completed, which
@@ -277,7 +279,7 @@ pub fn add(
     const handle = try open(w.gpa, dir_path);
     errdefer _ = c.CloseHandle(handle);
 
-    var filter = try CompiledFilter.compile(w.gpa, options.filter);
+    var filter = try CompiledFilter.compilePolicy(w.gpa, options.filter, identity.read(w.gpa, io, abs_path).policy(options.identity));
     errdefer filter.deinit();
 
     const bytes = try w.gpa.alignedAlloc(u8, .of(u32), w.buffer_len);
@@ -286,6 +288,7 @@ pub fn add(
     watch.* = .{
         .id = id,
         .root = root,
+        .identity_override = options.identity,
         .root_inode = stat.inode,
         .handle = handle,
         .only = only,
@@ -397,7 +400,7 @@ pub fn refilter(w: *Windows, io: Io, id: WatchId, next: lookout.Filter, batch: *
     _ = io; // Every backend takes it; this one reads nothing through it.
     _ = batch;
     const watch = w.watches.get(id) orelse return error.UnknownWatch;
-    const replacement = try CompiledFilter.compile(w.gpa, next);
+    const replacement = try CompiledFilter.compilePolicy(w.gpa, next, watch.filter.policy);
     var previous = watch.filter;
     watch.filter = replacement;
     previous.deinit();
@@ -446,7 +449,7 @@ pub fn wait(w: *Windows, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollE
 fn flushRenames(w: *Windows, io: Io, batch: *Batch) contract.PollError!void {
     for (w.watches.values()) |watch| {
         const old = watch.pending_rename orelse continue;
-        if (wants(watch, old))
+        if (w.wants(io, watch, old))
             try batch.push(w.gpa, io, watch.id, old, .removed, watch.goneTarget());
         watch.pending_rename = null;
         w.gpa.free(old);
@@ -767,10 +770,10 @@ fn report(w: *Windows, io: Io, watch: *Watch, transferred: u32, batch: *Batch) c
             c.file_action_renamed_old_name, c.file_action_renamed_new_name => {
                 try w.reportRename(io, watch, record.action, path, batch);
             },
-            c.file_action_removed => if (wants(watch, path)) {
+            c.file_action_removed => if (w.wants(io, watch, path)) {
                 try w.reportRemoval(io, watch, it, dir, path, batch);
             },
-            else => if (wants(watch, path)) {
+            else => if (w.wants(io, watch, path)) {
                 try w.reportOne(io, watch, record.action, path, batch);
             },
         }
@@ -840,11 +843,11 @@ fn actionName(action: u32) []const u8 {
 /// Whether an event for `subject` is reported against `watch`: it is the
 /// watched file, for a watch on one, and it is not excluded by the
 /// filter.
-fn wants(watch: *const Watch, subject: []const u8) bool {
-    return if (watch.only == null)
-        !watch.filter.excludes(watch.root, subject)
-    else
-        path_cmp.eql(subject, watch.root);
+fn wants(w: *const Windows, io: Io, watch: *const Watch, subject: []const u8) bool {
+    if (watch.only != null) return path_cmp.eql(subject, watch.root);
+    const parent = std.Io.Dir.path.dirname(subject) orelse watch.root;
+    const policy = identity.read(w.gpa, io, parent).policy(watch.identity_override);
+    return !watch.filter.excludesPolicy(policy, watch.root, subject);
 }
 
 /// Holds an old name, or joins a new name to the old one held.
@@ -856,7 +859,7 @@ fn wants(watch: *const Watch, subject: []const u8) bool {
 /// one wanted is `removed` there, as a rename out would be; neither is
 /// nothing.
 fn reportRename(w: *Windows, io: Io, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) contract.PollError!void {
-    const wanted = wants(watch, subject);
+    const wanted = w.wants(io, watch, subject);
     if (action == c.file_action_renamed_old_name) {
         // Copied before the one it replaces is freed, so a copy that
         // fails leaves the watch holding what it held.
@@ -872,7 +875,7 @@ fn reportRename(w: *Windows, io: Io, watch: *Watch, action: u32, subject: []cons
         watch.pending_rename = null;
         if (from) |old| w.gpa.free(old);
     };
-    const keeps_from = if (from) |old| wants(watch, old) else false;
+    const keeps_from = if (from) |old| w.wants(io, watch, old) else false;
     // The new name is where the entry is now, so it can be asked what the
     // entry is, whichever name is reported.
     const target = targetOf(io, subject);
@@ -953,6 +956,8 @@ fn recount(w: *Windows, io: Io, watch: *Watch, subject: []const u8, move: Budget
     const change: Change = .{
         .dir = std.Io.Dir.path.dirname(subject) orelse return,
         .subject = subject,
+        .backend = w,
+        .io = io,
     };
     if (Budget.counter(*Watch, Change, Change.reaches, w.watches.values(), change) != watch) return;
     if (!try w.budget.note(io, change.dir, std.Io.Dir.path.basename(subject), move)) return;
@@ -967,12 +972,14 @@ const Change = struct {
     /// The directory the entry is in.
     dir: []const u8,
     subject: []const u8,
+    backend: *const Windows,
+    io: Io,
 
     /// Whether `watch` read a copy of this change and keeps it, as one
     /// of the entries of a directory it reports. See `Watch.reach`.
     fn reaches(change: Change, watch: *Watch) bool {
         const reach = watch.reach() orelse return false;
-        return reach.covers(change.dir) and wants(watch, change.subject);
+        return reach.covers(change.dir) and change.backend.wants(change.io, watch, change.subject);
     }
 };
 

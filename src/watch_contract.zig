@@ -59,9 +59,11 @@ pub const UnexpectedError = error{Unexpected};
 pub const WatchInfo = struct {
     /// The id `add` returned.
     id: WatchId,
-    /// The path the caller asked for. Owned by the watcher and valid
+    /// Canonical kernel root. Owned by the watcher and valid
     /// until the next `add`, `remove` or `deinit`.
     path: []const u8,
+    /// Original caller spelling, retained independently of the kernel root.
+    requested: []const u8 = "",
     /// `AddOptions.recursive`.
     recursive: bool,
     /// Whether the path is still not there, so the watch is parked

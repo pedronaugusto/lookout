@@ -7,6 +7,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/SpinLock.zig",
         "src/Waker.zig",
         "src/filesystem.zig",
+        "src/identity.zig",
         "src/backend/inotify/records.zig",
         "src/backend/windows/records.zig",
         "src/buffer.zig",
@@ -79,6 +80,7 @@ pub const required = [_][]const u8{
     "src/SpinLock.zig",
     "src/Waker.zig",
     "src/filesystem.zig",
+    "src/identity.zig",
     "src/backend/inotify/records.zig",
     "src/backend/windows/records.zig",
     "src/buffer.zig",
@@ -120,7 +122,7 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "fsevents backend", .tokens = &.{ "FSEventStreamCreate", "FSEventStreamStart" }, .owners = &.{ "src/backend/FsEvents.zig", "src/backend/fsevents/**" } },
     .{ .name = "kqueue backend", .tokens = &.{"kevent"}, .owners = &.{"src/backend/Kqueue.zig"} },
     .{ .name = "windows backend", .tokens = &.{ "ReadDirectoryChangesW", "CreateFileW" }, .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**" } },
-    .{ .name = "windows backend", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**", "src/filesystem.zig" } },
+    .{ .name = "windows backend", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**", "src/filesystem.zig", "src/identity.zig" } },
     // A test double is a shakedown `Clock`, `FaultIo` or `Layer`, never a
     // copied `Io` vtable with a slot replaced: such a copy keeps its state in
     // globals and cannot be stacked.

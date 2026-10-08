@@ -51,10 +51,8 @@ const Context = struct {
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var smoke = false;
-    var folded = false;
-    var nfc = false;
     for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--smoke")) smoke = true else if (std.mem.eql(u8, arg, "--folded")) folded = true else if (std.mem.eql(u8, arg, "--nfc")) nfc = true else return error.UnknownArgument;
+        if (std.mem.eql(u8, arg, "--smoke")) smoke = true else return error.UnknownArgument;
     }
     var stdout_buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
@@ -69,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "ignore_20_only_3", .ignore = &ignore, .only = &only },
     };
     for (cases) |case| {
-        var c: Context = .{ .filter = try .compilePolicy(init.gpa, .{ .ignore = case.ignore, .only = case.only }, .{ .case_sensitive = !folded, .normalization = if (nfc) .nfc else .exact }), .subjects = subjects };
+        var c: Context = .{ .filter = try .compile(init.gpa, .{ .ignore = case.ignore, .only = case.only }), .subjects = subjects };
         defer c.filter.deinit();
         try shakedown.bench.run(init.gpa, init.io, &stdout.interface, &c, &.{.{ .name = case.name, .unit = "two-questions", .initial = 20_000, .run = Context.run }}, .{ .commit = "filesystem-policy" }, .{ .smoke = smoke });
     }

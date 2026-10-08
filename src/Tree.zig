@@ -17,6 +17,7 @@ const Io = std.Io;
 const lookout = @import("types.zig");
 const Batch = @import("Batch.zig");
 const Filter = @import("Filter.zig");
+const identity = @import("identity.zig");
 const CompiledFilter = @import("CompiledFilter.zig");
 const Snapshot = @import("Snapshot.zig");
 const path_cmp = @import("path.zig");
@@ -96,6 +97,7 @@ pub const Watch = struct {
     /// `@import("options.zig").AddOptions.filter`, copied: the patterns are borrowed
     /// only for the duration of the `add` that supplied them.
     filter: CompiledFilter,
+    identity_override: ?identity.Policy = null,
 };
 
 /// One registered path.
@@ -121,6 +123,8 @@ pub const Node = struct {
     /// The nodes listed in this one, so that dropping a directory costs
     /// what is below it and not a pass over every node.
     children: std.array_hash_map.Auto(NodeId, void) = .empty,
+    names: identity.Capabilities = .{},
+    policy: identity.Policy = .{},
 
     /// What a node stands for.
     pub const Role = enum { file, directory };
@@ -183,13 +187,14 @@ pub fn addWatch(
 
     const root = try t.gpa.dupe(u8, abs_path);
     errdefer t.gpa.free(root);
-    var filter = try CompiledFilter.compile(t.gpa, options.filter);
+    var filter = try CompiledFilter.compilePolicy(t.gpa, options.filter, identity.read(t.gpa, io, abs_path).policy(options.identity));
     errdefer filter.deinit();
     try t.watches.put(t.gpa, id, .{
         .root = root,
         .target = .of(stat.kind),
         .recursive = recursive,
         .filter = filter,
+        .identity_override = options.identity,
     });
     errdefer _ = t.watches.swapRemove(id);
 
@@ -279,11 +284,14 @@ fn createDirectory(t: *Tree, io: Io, watch: WatchId, parent: ?NodeId, path: []u8
     var dir = try Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
     errdefer dir.close(io);
 
+    const names = identity.read(t.gpa, io, path);
     const id: NodeId = @fromBackingInt(@intCast(t.next_node));
     try t.insert(io, id, .{
         .watch = watch,
         .path = path,
         .role = .directory,
+        .names = names,
+        .policy = names.policy(t.watches.get(watch).?.identity_override),
         .dir = dir,
         .snapshot = .{ .entries = .empty, .truncated = false, .check_contents = t.check_contents },
         .meta = undefined,
@@ -490,7 +498,7 @@ pub fn removeWatch(t: *Tree, io: Io, id: WatchId) void {
 /// excluded descendants are released.
 pub fn refilter(t: *Tree, io: Io, id: WatchId, next: Filter, added: *std.ArrayList(NodeId), batch: *Batch) Tree.AddError!void {
     const watch = t.watches.getPtr(id) orelse return;
-    const replacement = try CompiledFilter.compile(t.gpa, next);
+    const replacement = try CompiledFilter.compilePolicy(t.gpa, next, watch.filter.policy);
     var previous = watch.filter;
     watch.filter = replacement;
     errdefer {
@@ -587,18 +595,32 @@ fn isRecursive(t: *Tree, id: WatchId) bool {
     return (t.watches.get(id) orelse return false).recursive;
 }
 
+/// Longest registered parent determines the name policy; canonical paths
+/// remain exact keys even when descendant directories differ in sensitivity.
+fn parentPolicy(t: *const Tree, id: WatchId, subject: []const u8) identity.Policy {
+    const watch = t.watches.get(id) orelse return .{};
+    // Directory descriptors are registered at mount boundaries. The exact
+    // parent is normally present; a root/file watch uses its own policy.
+    const dir = std.Io.Dir.path.dirname(subject) orelse return watch.filter.policy;
+    if (t.index.get(.{ .watch = id, .path = dir })) |node_id| {
+        const node = t.nodes.get(node_id).?;
+        if (node.role == .directory) return node.policy;
+    }
+    return watch.filter.policy;
+}
+
 /// Whether `subject` is outside what the watch `id` is about, so no
 /// event for it is reported. See `@import("options.zig").AddOptions.filter`.
 fn excluded(t: *const Tree, id: WatchId, subject: []const u8) bool {
     const watch = t.watches.get(id) orelse return false;
-    return watch.filter.excludes(watch.root, subject);
+    return watch.filter.excludesPolicy(t.parentPolicy(id, subject), watch.root, subject);
 }
 
 /// Whether a directory is so far outside the watch that it need not be
 /// registered at all. See `CompiledFilter.prunes`.
 fn pruned(t: *const Tree, id: WatchId, subject: []const u8) bool {
     const watch = t.watches.get(id) orelse return false;
-    return watch.filter.prunes(watch.root, subject);
+    return watch.filter.prunesPolicy(t.parentPolicy(id, subject), watch.root, subject);
 }
 
 /// Re-lists the directory node `id`, pushes what changed into `batch`, and
@@ -620,6 +642,11 @@ pub fn rescanDirectory(
     if (node.role != .directory) return;
     const watch = node.watch;
     const recursive = t.isRecursive(watch);
+    const registration = t.watches.get(watch).?;
+    if (!registration.filter.isEmpty()) {
+        node.names = identity.read(t.gpa, io, node.path);
+        node.policy = node.names.policy(registration.identity_override);
+    }
 
     Snapshot.freeChanges(t.gpa, &t.changes);
     defer Snapshot.freeChanges(t.gpa, &t.changes);
@@ -1152,4 +1179,56 @@ test "filesystem identity preserves case-distinct kernel names" {
     const a: Key = .{ .watch = @fromBackingInt(@intCast(1)), .path = "/w/A" };
     const b: Key = .{ .watch = @fromBackingInt(@intCast(1)), .path = "/w/a" };
     try std.testing.expect(!context.eql(a, b, 0));
+}
+
+test "filesystem identity keys preserve mixed directory policies and spellings" {
+    var tree = init(std.testing.allocator, 4096, false);
+    defer tree.deinit(std.testing.io);
+    const watch: WatchId = @fromBackingInt(@intCast(1));
+    const filter = try CompiledFilter.compilePolicy(std.testing.allocator, .{}, .{ .case_sensitive = false });
+    try tree.watches.put(tree.gpa, watch, .{ .root = try tree.gpa.dupe(u8, "/w"), .target = .directory, .recursive = true, .filter = filter });
+    const cases = [_]struct { []const u8, bool }{ .{ "/w/A", true }, .{ "/w/a", false } };
+    for (cases, 0..) |c, i| {
+        const id: NodeId = @fromBackingInt(@intCast(i));
+        const spelling = try tree.gpa.dupe(u8, c[0]);
+        try tree.nodes.put(tree.gpa, id, .{ .watch = watch, .path = spelling, .role = .file, .dir = undefined, .snapshot = undefined, .meta = undefined, .parent = null, .policy = .{ .case_sensitive = c[1] } });
+        try tree.index.put(tree.gpa, .{ .watch = watch, .path = spelling }, id);
+    }
+    try std.testing.expectEqual(@as(usize, 2), tree.index.count());
+    try std.testing.expect(!path_cmp.eql(tree.nodes.values()[0].path, tree.nodes.values()[1].path));
+}
+
+test "filesystem identity chooses each parent directory policy across mixed roots" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "one/sub");
+    try tmp.dir.createDirPath(io, "two/sub");
+    var t = init(gpa, 4096, false);
+    defer t.deinit(io);
+    var added: std.ArrayList(NodeId) = .empty;
+    defer added.deinit(gpa);
+    var batch: Batch = .init(.{});
+    defer batch.deinit(gpa);
+    for ([_][]const u8{ "one", "two" }, 0..) |name, i| {
+        const root = try tmp.dir.realPathFileAlloc(io, name, gpa);
+        defer gpa.free(root);
+        const id: WatchId = @fromBackingInt(@intCast(i));
+        try t.addWatch(io, id, root, .{ .recursive = true, .filter = .{ .ignore = &.{"FOO"} } }, &added, &batch);
+        const sub = try std.Io.Dir.path.join(gpa, &.{ root, "sub" });
+        defer gpa.free(sub);
+        // Native directory flags are independent facts. Simulate their two
+        // possible values on actual directory nodes, without changing names.
+        const root_node = t.index.get(.{ .watch = id, .path = root }).?;
+        const sub_node = t.index.get(.{ .watch = id, .path = sub }).?;
+        t.nodes.getPtr(root_node).?.policy = .{ .case_sensitive = i != 0 };
+        t.nodes.getPtr(sub_node).?.policy = .{ .case_sensitive = i == 0 };
+        const direct = try std.Io.Dir.path.join(gpa, &.{ root, "foo" });
+        defer gpa.free(direct);
+        const nested = try std.Io.Dir.path.join(gpa, &.{ sub, "foo" });
+        defer gpa.free(nested);
+        try std.testing.expectEqual(i == 0, t.excluded(id, direct));
+        try std.testing.expectEqual(i != 0, t.excluded(id, nested));
+    }
 }

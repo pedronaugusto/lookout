@@ -1,4 +1,5 @@
 //! Watch configuration above checkpoint storage and event contracts.
+const identity = @import("identity.zig");
 const Filter = @import("Filter.zig");
 const Checkpoint = @import("Checkpoint.zig");
 const types = @import("types.zig");
@@ -149,6 +150,8 @@ pub const Options = struct {
 
 /// How one watch behaves, fixed for its lifetime.
 pub const AddOptions = struct {
+    /// Explicit name policy, independent of the reported filesystem facts.
+    identity: ?identity.Policy = null,
     /// Also watch every directory below this one, and every directory
     /// created below it afterwards.
     ///

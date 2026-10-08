@@ -10,6 +10,7 @@ const builtin = @import("builtin");
 
 const lookout = @import("../lookout.zig");
 const ms = @import("timeout.zig").ms;
+const identity = @import("../identity.zig");
 const records = @import("../backend/fsevents/records.zig");
 const Kind = lookout.Kind;
 const Watcher = lookout.Watcher;
@@ -167,7 +168,6 @@ test "a watch spelled in another case than the disk still reports" {
     // On a volume that folds case the operating system then names the
     // same path differently, and a byte-exact comparison drops every
     // event.
-    if (!lookout.folds_case) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -184,6 +184,8 @@ test "a watch spelled in another case than the disk still reports" {
         });
         defer watcher.deinit(io);
 
+        const facts = identity.read(gpa, io, root);
+        if (facts.case_sensitive orelse true) continue;
         // Asked for in upper case; created in lower case.
         const asked = try std.Io.Dir.path.join(gpa, &.{ root, "TARGET" });
         defer gpa.free(asked);
@@ -191,13 +193,12 @@ test "a watch spelled in another case than the disk still reports" {
 
         try tmp.dir.createDirPath(io, "target");
 
-        // The path the caller asked about appeared, under the spelling
-        // the caller used.
+        // Promotion adopts the actual kernel spelling and keeps the request.
         var promoted = false;
         var waited: u32 = 0;
         while (waited < timeout_ms and !promoted) : (waited += 200) {
             for (try watcher.poll(io, ms(200))) |event| {
-                if (event.kind == .created and std.mem.eql(u8, event.path, asked)) promoted = true;
+                if (event.kind == .created and std.mem.endsWith(u8, event.path, "target")) promoted = true;
             }
         }
         if (!promoted) std.debug.print("{s}: {s} never appeared\n", .{ @tagName(backend), asked });
@@ -218,9 +219,7 @@ test "a watch spelled in another case than the disk still reports" {
     }
 }
 
-test "an ignore pattern in another case than the disk still excludes" {
-    if (!lookout.folds_case) return error.SkipZigTest;
-
+test "explicit case insensitive filtering excludes across filesystem policies" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
@@ -239,7 +238,7 @@ test "an ignore pattern in another case than the disk still excludes" {
         defer watcher.deinit(io);
         _ = try watcher.add(io, root, .{
             .recursive = true,
-            .filter = .{ .ignore = &.{"SKIP"} },
+            .filter = .{ .ignore = &.{"SKIP"}, .case = .unicode },
         });
         while ((try watcher.poll(io, ms(200))).len != 0) {}
 
@@ -947,4 +946,81 @@ test "recovery remains visible while a watch is waiting for its path" {
     try testing.expectEqual(id, events[0].id);
     try testing.expectEqual(Kind.overflow, events[0].kind);
     try testing.expectEqualStrings(waiting, events[0].path);
+}
+
+test "filesystem identity reports two native case-distinct entries on sensitive roots" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for (backends) |backend| {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+        if (!(identity.read(gpa, io, root).case_sensitive orelse false)) continue;
+        var watcher = try Watcher.init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(1), .latency = .fromMilliseconds(0) });
+        defer watcher.deinit(io);
+        const id = try watcher.add(io, root, .{});
+        try tmp.dir.writeFile(io, .{ .sub_path = "Case", .data = "one" });
+        try tmp.dir.writeFile(io, .{ .sub_path = "case", .data = "two" });
+        var upper = false;
+        var lower = false;
+        var waited: u32 = 0;
+        while (waited < timeout_ms and !(upper and lower)) : (waited += 100) {
+            for (try watcher.poll(io, ms(100))) |event| {
+                if (event.id != id or event.kind != .created) continue;
+                upper = upper or std.mem.endsWith(u8, event.path, "Case");
+                lower = lower or std.mem.endsWith(u8, event.path, "case");
+            }
+        }
+        try std.testing.expect(upper and lower);
+    }
+}
+
+test "normalized filtering composes native names and keeps plain e and kernel spelling" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for (backends) |backend| {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(root);
+        var watcher = try Watcher.init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(1), .latency = .fromMilliseconds(0) });
+        defer watcher.deinit(io);
+        const id = try watcher.add(io, root, .{ .filter = .{ .ignore = &.{"[é]"}, .case = .sensitive, .normalization = .nfc } });
+        try tmp.dir.writeFile(io, .{ .sub_path = "é", .data = "one" });
+        try tmp.dir.writeFile(io, .{ .sub_path = "e\u{301}", .data = "two" });
+        try tmp.dir.writeFile(io, .{ .sub_path = "e", .data = "plain" });
+        var plain = false;
+        var waited: u32 = 0;
+        while (waited < 1_000 or !plain) : (waited += 100) {
+            if (waited >= timeout_ms) break;
+            for (try watcher.poll(io, ms(100))) |event| {
+                if (event.id != id) continue;
+                try std.testing.expect(!std.mem.endsWith(u8, event.path, "é"));
+                try std.testing.expect(!std.mem.endsWith(u8, event.path, "e\u{301}"));
+                if (std.mem.endsWith(u8, event.path, std.Io.Dir.path.sep_str ++ "e")) plain = true;
+            }
+        }
+        try std.testing.expect(plain);
+    }
+}
+
+test "filesystem identity canonicalizes existing Unicode root aliases before claiming them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "café");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const stored = try std.Io.Dir.path.join(gpa, &.{ root, "café" });
+    defer gpa.free(stored);
+    const alias = try std.Io.Dir.path.join(gpa, &.{ root, "cafe\u{301}" });
+    defer gpa.free(alias);
+    // Establish equivalence from the filesystem itself, with no OS guess.
+    _ = std.Io.Dir.cwd().statFile(io, alias, .{}) catch return error.SkipZigTest;
+    var watcher = try Watcher.init(gpa, .{ .backend = .poll });
+    defer watcher.deinit(io);
+    _ = try watcher.add(io, stored, .{});
+    try std.testing.expectError(error.PathAlreadyWatched, watcher.add(io, alias, .{}));
 }

@@ -1,0 +1,40 @@
+first run: created /Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since/seen.txt
+checkpoint: {"version":3,"backend":"fsevents","watches":[{"root":"/Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since","cursor":3158912982,"itest
++- run test lookout-tests w
+preflight: test seed 2244024548 (reproduce with PREFLIGHT_TEST_SEED=2244024548)
+failed command: ./.zig-cache/o/ff8ac5729d1cb139d4751d57c5594793/lookout-tests --cache-dir=./.zig-cache --seed=0x85c118e4 --listen=-
+
+Build Summary: 26/26 steps succeeded; 9/9 tests passed
+test success
++- run test lookout-tests 9 pass (9 total) 3s MaxRSS:14M
+|  +- compile test lookout-tests debug native success 4s MaxRSS:504M
+|  |  +- options cached
+|  +- lint success
+|     +- run exe preflight-checks success 3s
+|        +- compile exe preflight-checks safe aarch64-macos-none cached 115ms MaxRSS:31M
+|        +- compile exe ziglint safe aarch64-macos-none cached 125ms MaxRSS:31M
+|        |  +- options cached
+|        +- run exe preflight-structure success 71ms
+|           +- compile exe preflight-structure debug aarch64-macos-none cached 124ms MaxRSS:31M
+|           +- zig fmt --check success
++- examples success
+|  +- run exe usage success 893ms
+|  |  +- compile exe usage debug native cached 131ms MaxRSS:31M
+|  |  +- install success
+|  |  |  +- install lookout cached
+|  |  |  |  +- compile lib lookout debug native cached 129ms MaxRSS:31M
+|  |  |  +- compile test lookout-tests debug native (+1 more reused dependencies)
+|  |  +- lint (+1 more reused dependencies)
+|  +- run exe since success 186ms
+|     +- compile exe since debug native cached 131ms MaxRSS:31M
+|     +- install (+2 more reused dependencies)
+|     +- lint (+1 more reused dependencies)
++- run exe lookout-bench success 3s
+|  +- compile exe lookout-bench debug native cached 139ms MaxRSS:31M
+|  +- WriteFile success
+|  +- lint (+1 more reused dependencies)
++- run exe lookout-filter-bench success 72ms
+   +- compile exe lookout-filter-bench debug native cached 132ms MaxRSS:31M
+   +- WriteFile success
+   +- lint (+1 more reused dependencies)
+

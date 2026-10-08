@@ -26,6 +26,7 @@ const Filter = @import("Filter.zig");
 const CompiledFilter = @import("CompiledFilter.zig");
 const Snapshot = @import("Snapshot.zig");
 const builtin = @import("builtin");
+const identity = @import("identity.zig");
 const path_cmp = @import("path.zig");
 const format = @import("Baseline/format.zig");
 const Kind = lookout.Kind;
@@ -43,6 +44,7 @@ recursive: bool,
 max_dir_entries: usize,
 /// Mirrors `Options.filter`, copied.
 filter: CompiledFilter,
+identity_override: ?identity.Policy = null,
 /// One remembered listing per directory, keyed by absolute path. Keys
 /// owned here.
 dirs: std.array_hash_map.String(Remembered),
@@ -55,6 +57,7 @@ scratch: std.ArrayList(Snapshot.Change),
 /// One directory's remembered listing.
 const Remembered = struct {
     snapshot: Snapshot,
+    policy: identity.Policy = .{},
 };
 
 /// What a baseline covers, which should be what the watch covers: a
@@ -71,6 +74,8 @@ pub const Options = struct {
     /// What to leave out, on the same terms as `@import("options.zig").AddOptions.filter`.
     /// The patterns are copied by `seed`.
     filter: Filter = .none,
+    /// Caller policy independent of the directory capability query.
+    identity: ?identity.Policy = null,
 };
 
 /// One difference between the remembered tree and the tree now, spelled
@@ -112,7 +117,7 @@ pub const DiffError = Allocator.Error || Io.Dir.OpenError ||
 ///
 /// `gpa` is kept until `deinit`; `io` is used here and not kept.
 pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Baseline.SeedError!Baseline {
-    const real = try Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
+    const real = try identity.canonical(gpa, io, path);
     defer gpa.free(real);
 
     // Everything is owned by `b` from here, so there is one thing to
@@ -123,12 +128,13 @@ pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Baseline
         .recursive = options.recursive,
         .max_dir_entries = options.max_dir_entries,
         .filter = .none,
+        .identity_override = options.identity,
         .dirs = .empty,
         .changes = .empty,
         .scratch = .empty,
     };
     errdefer b.deinit();
-    b.filter = try .compile(gpa, options.filter);
+    b.filter = try .compilePolicy(gpa, options.filter, identity.read(gpa, io, real).policy(options.identity));
     try b.scan(gpa, io, false);
     return b;
 }
@@ -198,9 +204,9 @@ pub fn save(b: *const Baseline, io: Io, filename: []const u8, options: SaveOptio
     for (b.dirs.keys(), b.dirs.values(), dirs) |path, remembered, *dir| {
         const entries = try a.alloc(format.Entry, remembered.snapshot.entries.count());
         for (remembered.snapshot.entries.keys(), remembered.snapshot.entries.values(), entries) |name, meta, *entry| entry.* = .{ .name = name, .meta = meta };
-        dir.* = .{ .path = path, .truncated = remembered.snapshot.truncated, .check_contents = remembered.snapshot.check_contents, .entries = entries };
+        dir.* = .{ .path = path, .truncated = remembered.snapshot.truncated, .check_contents = remembered.snapshot.check_contents, .entries = entries, .policy = remembered.policy };
     }
-    const bytes = try format.encode(a, .{ .platform = format.platform, .root = b.root, .recursive = b.recursive, .max_dir_entries = b.max_dir_entries, .ignore = b.filter.ignore, .only = b.filter.only, .dirs = dirs });
+    const bytes = try format.encode(a, .{ .platform = format.platform, .root = b.root, .recursive = b.recursive, .max_dir_entries = b.max_dir_entries, .ignore = b.filter.ignore, .only = b.filter.only, .case = b.filter.case, .normalization = b.filter.normalization, .policy = b.filter.policy, .identity_override = b.identity_override, .dirs = dirs });
     _ = try airlock.writeFileOrRefuse(io, Io.Dir.cwd(), filename, bytes, .{
         .create = .{ .temp = .{ .random = temp_prefix } },
         .commit = .{ .level = if (options.durable) .data else .none },
@@ -222,17 +228,17 @@ pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, opti
     var parsed = try format.parse(gpa, bytes);
     defer parsed.deinit();
     const state = parsed.value;
-    const real = Io.Dir.cwd().realPathFileAlloc(io, root, gpa) catch |err| switch (err) {
-        error.FileNotFound => if (std.Io.Dir.path.isAbsolute(root)) try gpa.dupeSentinel(u8, root, 0) else return err,
+    const real = identity.canonical(gpa, io, root) catch |err| switch (err) {
+        error.FileNotFound => if (std.Io.Dir.path.isAbsolute(root)) try gpa.dupe(u8, root) else return err,
         else => return err,
     };
     defer gpa.free(real);
     if (!path_cmp.eql(real, state.root) or options.recursive != state.recursive or
         options.max_dir_entries != state.max_dir_entries or !samePatterns(options.filter.ignore, state.ignore) or
-        !samePatterns(options.filter.only, state.only)) return error.ForeignBaseline;
-    var b: Baseline = .{ .gpa = gpa, .root = try gpa.dupe(u8, state.root), .recursive = state.recursive, .max_dir_entries = state.max_dir_entries, .filter = .none, .dirs = .empty, .changes = .empty, .scratch = .empty };
+        !samePatterns(options.filter.only, state.only) or options.filter.case != state.case or options.filter.normalization != state.normalization or !std.meta.eql(options.identity, state.identity_override) or !std.meta.eql(identity.read(gpa, io, real).policy(options.identity), state.policy)) return error.ForeignBaseline;
+    var b: Baseline = .{ .gpa = gpa, .root = try gpa.dupe(u8, state.root), .recursive = state.recursive, .max_dir_entries = state.max_dir_entries, .filter = .none, .identity_override = options.identity, .dirs = .empty, .changes = .empty, .scratch = .empty };
     errdefer b.deinit();
-    b.filter = try .compile(gpa, options.filter);
+    b.filter = try .compilePolicy(gpa, options.filter, identity.read(gpa, io, real).policy(options.identity));
     for (state.dirs) |dir| {
         const owned = try gpa.dupe(u8, dir.path);
         errdefer gpa.free(owned);
@@ -243,7 +249,7 @@ pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, opti
             errdefer gpa.free(name);
             try snapshot.entries.put(gpa, name, entry.meta);
         }
-        try b.dirs.put(gpa, owned, .{ .snapshot = snapshot });
+        try b.dirs.put(gpa, owned, .{ .snapshot = snapshot, .policy = dir.policy });
     }
     return b;
 }
@@ -323,6 +329,8 @@ const Scan = struct {
             defer dir.close(io);
 
             const index = try s.remember(gpa, path);
+            const policy = identity.read(gpa, io, path).policy(b.identity_override);
+            s.dirs.values()[index].policy = policy;
             Snapshot.freeChanges(gpa, &s.scratch);
             const before = if (b.dirs.getPtr(path)) |remembered| &remembered.snapshot else &Snapshot.empty;
             s.dirs.values()[index].snapshot = try before.read(gpa, io, dir, b.max_dir_entries);
@@ -340,7 +348,7 @@ const Scan = struct {
                 if (meta.file_kind != .directory) continue;
                 const child = try std.Io.Dir.path.join(gpa, &.{ path, name });
                 errdefer gpa.free(child);
-                if (b.filter.prunes(b.root, child)) {
+                if (b.filter.prunesPolicy(policy, b.root, child)) {
                     gpa.free(child);
                     continue;
                 }
@@ -367,7 +375,7 @@ const Scan = struct {
 
             const child = try std.Io.Dir.path.join(gpa, &.{ path, change.name });
             defer gpa.free(child);
-            if (b.filter.excludes(b.root, child)) continue;
+            if (b.filter.excludesPolicy(s.dirs.values()[index].policy, b.root, child)) continue;
             try s.record(gpa, child, change.kind, .of(change.file_kind));
         }
     }
@@ -382,7 +390,7 @@ const Scan = struct {
             for (remembered.snapshot.entries.keys(), remembered.snapshot.entries.values()) |name, meta| {
                 const child = try std.Io.Dir.path.join(gpa, &.{ path, name });
                 defer gpa.free(child);
-                if (b.filter.excludes(b.root, child)) continue;
+                if (b.filter.excludesPolicy(remembered.policy, b.root, child)) continue;
                 try s.record(gpa, child, .removed, .of(meta.file_kind));
             }
         }
@@ -965,13 +973,12 @@ test "a durable save syncs the file before the replacement and its directory aft
 
     // The temp's sync is whichever call the platform makes for it, the
     // first of these on a path with the temp's prefix.
-    const temp: shakedown.Match = .{ .prefix = temp_prefix };
     const file_sync = [_]seam.Plan.Entry{
-        .{ .at = .{ .nth = .{ .call = .sync_data, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
-        .{ .at = .{ .nth = .{ .call = .sync_full, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
-        .{ .at = .{ .nth = .{ .call = .sync_barrier, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
-        .{ .at = .{ .nth = .{ .call = .sync_plain, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
-        .{ .at = .{ .nth = .{ .call = .sync_writeout, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_data, .n = 1, .path = .{ .prefix = temp_prefix } } }, .fault = .{ .code = seam.io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_full, .n = 1, .path = .{ .prefix = temp_prefix } } }, .fault = .{ .code = seam.io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_barrier, .n = 1, .path = .{ .prefix = temp_prefix } } }, .fault = .{ .code = seam.io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_plain, .n = 1, .path = .{ .prefix = temp_prefix } } }, .fault = .{ .code = seam.io_error } },
+        .{ .at = .{ .nth = .{ .call = .sync_writeout, .n = 1, .path = .{ .prefix = temp_prefix } } }, .fault = .{ .code = seam.io_error } },
     };
 
     // A failed sync of the new contents leaves the old file, and no temp.
@@ -1042,4 +1049,35 @@ test "a save keeps the permissions of the baseline it replaces" {
         const stat = try tmp.dir.statFile(io, "saved", .{});
         try testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
     }
+}
+
+test "baseline storage retains explicit name policy and normalized filter preferences" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "tree");
+    const root = try tmp.dir.realPathFileAlloc(io, "tree", gpa);
+    defer gpa.free(root);
+    const parent = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(parent);
+    const file = try std.Io.Dir.path.join(gpa, &.{ parent, "saved" });
+    defer gpa.free(file);
+    const options: Options = .{ .filter = .{ .ignore = &.{"[é]"}, .case = .sensitive, .normalization = .nfc }, .identity = .{ .case_sensitive = false } };
+    var before = try seed(gpa, io, root, options);
+    defer before.deinit();
+    try before.save(io, file, .{});
+    var after = try load(gpa, io, file, root, options);
+    defer after.deinit();
+    var changed = options;
+    changed.filter.normalization = .exact;
+    try testing.expectError(error.ForeignBaseline, load(gpa, io, file, root, changed));
+    changed = options;
+    changed.identity = null;
+    try testing.expectError(error.ForeignBaseline, load(gpa, io, file, root, changed));
+    try tmp.dir.writeFile(io, .{ .sub_path = "tree/e\u{301}", .data = "accent" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tree/e", .data = "plain" });
+    const changes = try after.diff(io);
+    try testing.expectEqual(@as(usize, 1), changes.len);
+    try testing.expect(std.mem.endsWith(u8, changes[0].path, std.Io.Dir.path.sep_str ++ "e"));
 }

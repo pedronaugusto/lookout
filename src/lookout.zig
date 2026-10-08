@@ -37,9 +37,11 @@ const options_mod = @import("options.zig");
 
 /// The filesystem fact measured at each watch registration.
 pub const Filesystem = fs_type.Kind;
+/// Explicit filesystem matching policy, separate from probed facts.
+pub const NamePolicy = @import("identity.zig").Policy;
+const identity = @import("identity.zig");
 
-/// Paths compared as a watch compares them: the same case folding and
-/// separators (`folds_case`).
+/// Helpers for canonical kernel paths. Resolve caller spellings before use.
 pub const path = struct {
     /// The part of `p` below `base`, as a slice of `p`: empty when they
     /// name the same place, null when `p` is outside `base`.
@@ -53,7 +55,7 @@ test "public path helpers use watch path comparisons" {
     try testing.expectEqualStrings("file", path.relative("/watch", "/watch/file").?);
     try testing.expect(path.within("/watch", "/watch"));
     try testing.expect(!path.within("/watch", "/watcher/file"));
-    if (folds_case) try testing.expectEqualStrings("file", path.relative("/WATCH", "/watch/file").?);
+    try testing.expect(path.relative("/WATCH", "/watch/file") == null);
 }
 
 test "failed overflow reporting leaves the lost watch queued for retry" {
@@ -84,11 +86,6 @@ test "failed overflow reporting leaves the lost watch queued for retry" {
 /// Which paths under a watch the caller wants. See `Watcher.AddOptions.filter`.
 pub const Filter = @import("Filter.zig");
 const CompiledFilter = @import("CompiledFilter.zig");
-
-/// Whether lookout applies its portable ASCII/Latin-1 case and composition
-/// folding, or compares paths byte for byte. See `path.zig` for the exact
-/// supported range and its limitation outside Latin-1.
-pub const folds_case = @import("path.zig").folds_case;
 
 /// What a tree looked like, and what has changed in it since. This is
 /// what `Kind.overflow` asks a caller to work out, made answerable:
@@ -297,6 +294,8 @@ pub const Watcher = struct {
         /// nowhere yet, and an ancestor is never taken by a wait in it --
         /// see `claimed`.
         registered: ?[]u8,
+        requested: ?[]u8 = null,
+        identity_override: ?NamePolicy = null,
         /// The type of the caller's root, retained for root-level events
         /// after the path can no longer be stat-ed.
         target: Target,
@@ -309,12 +308,21 @@ pub const Watcher = struct {
     };
 
     /// Facts for one watch; use the backend with the global capability queries.
-    pub const Capabilities = struct { backend: Backend, filesystem: Filesystem };
+    pub const Capabilities = struct { backend: Backend, filesystem: Filesystem, names: identity.Capabilities = .{}, policy: NamePolicy = .{} };
 
     /// Returns facts measured on registration, including for an explicitly
     /// selected backend. Pending watches report their current ancestor facts.
     pub fn capabilities(w: *const Watcher, id: WatchId) ?Capabilities {
         return (w.table.get(id) orelse return null).capabilities;
+    }
+
+    /// Fresh facts for a canonical directory under this watch. Caller policy
+    /// stays separate and never changes the reported capability.
+    pub fn directoryCapabilities(w: *const Watcher, io: Io, id: WatchId, directory: []const u8) ?Capabilities {
+        const held = w.table.get(id) orelse return null;
+        if (!path_cmp.within(held.path, directory)) return null;
+        const names = identity.read(w.gpa, io, directory);
+        return .{ .backend = held.capabilities.backend, .filesystem = fs_type.read(w.gpa, io, directory), .names = names, .policy = names.policy(held.identity_override) };
     }
 
     /// One watch, as `watches` reports it.
@@ -343,6 +351,7 @@ pub const Watcher = struct {
         /// at the promotion.
         follow: bool,
         max_followed_links: usize,
+        identity_override: ?NamePolicy = null,
         /// `AddOptions.filter`, copied: the patterns it borrowed are long
         /// gone by the time the watch is promoted.
         filter: CompiledFilter,
@@ -472,12 +481,21 @@ pub const Watcher = struct {
     /// failure to take one.
     pub fn add(w: *Watcher, io: Io, requested: []const u8, options: AddOptions) AddError!WatchId {
         try io.checkCancel();
+        const spelling = try w.gpa.dupe(u8, requested);
+        errdefer w.gpa.free(spelling);
+        const id = try w.addResolved(io, requested, options);
+        w.table.getPtr(id).?.requested = spelling;
+        w.table.getPtr(id).?.identity_override = options.identity;
+        return id;
+    }
+    fn addResolved(w: *Watcher, io: Io, requested: []const u8, options: AddOptions) AddError!WatchId {
+        try io.checkCancel();
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
 
         // The backend copies what it keeps, so this resolution is scratch
         // and a failed `add` leaves nothing behind.
-        const abs = Io.Dir.cwd().realPathFileAlloc(io, requested, w.gpa) catch |err| switch (err) {
+        const abs = identity.canonical(w.gpa, io, requested) catch |err| switch (err) {
             error.FileNotFound => if (options.pending)
                 return w.addPending(io, requested, options)
             else
@@ -503,6 +521,7 @@ pub const Watcher = struct {
             .registered = mirror,
             .target = .of(stat.kind),
             .recursive = options.recursive,
+            .identity_override = options.identity,
         });
         errdefer _ = w.table.swapRemove(id);
         try w.addBackend(io, id, abs, abs, options);
@@ -524,8 +543,9 @@ pub const Watcher = struct {
     /// always the caller's root, owned by Watcher.
     fn addBackend(w: *Watcher, io: Io, id: WatchId, physical: []const u8, requested: []const u8, options: AddOptions) AddError!void {
         const filesystem = fs_type.read(w.gpa, io, physical);
+        const names = identity.read(w.gpa, io, physical);
         const use_poll = w.options.backend == .auto and (filesystem == .network or filesystem == .fuse) and w.backend() != .poll;
-        if (w.table.getPtr(id)) |held| held.capabilities = .{ .backend = if (use_poll) .poll else w.backend(), .filesystem = filesystem };
+        if (w.table.getPtr(id)) |held| held.capabilities = .{ .backend = if (use_poll) .poll else w.backend(), .filesystem = filesystem, .names = names, .policy = names.policy(options.identity) };
         if (use_poll) return w.polling.add(io, id, physical, options, &w.batch);
         if (comptime @hasField(Impl, "fsevents")) {
             if (w.impl == .fsevents) return w.impl.fsevents.addFor(io, id, physical, requested, options, &w.batch);
@@ -564,6 +584,7 @@ pub const Watcher = struct {
 
     fn release(w: *Watcher, held: *Held) void {
         w.gpa.free(held.path);
+        if (held.requested) |requested| w.gpa.free(requested);
         if (held.registered) |registered| w.gpa.free(registered);
         held.* = undefined;
     }
@@ -592,7 +613,7 @@ pub const Watcher = struct {
         if (w.claimed(target)) return error.PathAlreadyWatched;
         const p = try w.gpa.create(Pending);
         errdefer w.gpa.destroy(p);
-        var filter = try CompiledFilter.compile(w.gpa, options.filter);
+        var filter = try CompiledFilter.compilePolicy(w.gpa, options.filter, options.identity orelse .{});
         errdefer filter.deinit();
 
         const id: WatchId = @fromBackingInt(@intCast(w.next_id));
@@ -603,6 +624,7 @@ pub const Watcher = struct {
             .registered = null,
             .target = .unknown,
             .recursive = options.recursive,
+            .identity_override = options.identity,
         });
         errdefer _ = w.table.swapRemove(id);
         p.* = .{
@@ -613,6 +635,7 @@ pub const Watcher = struct {
             .recursive = options.recursive,
             .follow = options.follow_symlinks,
             .max_followed_links = options.max_followed_links,
+            .identity_override = options.identity,
             .filter = filter,
         };
         try w.pending.append(w.gpa, p);
@@ -638,7 +661,7 @@ pub const Watcher = struct {
         errdefer w.gpa.free(lexical);
 
         const present = existingPrefix(io, lexical) orelse return lexical;
-        const real = Io.Dir.cwd().realPathFileAlloc(io, present, w.gpa) catch return lexical;
+        const real = identity.canonical(w.gpa, io, present) catch return lexical;
         defer w.gpa.free(real);
 
         var rest = lexical[present.len..];
@@ -815,6 +838,27 @@ pub const Watcher = struct {
     fn promotePending(w: *Watcher, io: Io, p: *Pending) PollError!bool {
         w.removeBackend(io, p.id);
         w.unregister(p.id);
+        // Once present, ask the kernel for spelling instead of folding an
+        // uncreated caller name into an identity key.
+        const canonical = identity.canonical(w.gpa, io, p.target) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                _ = try w.reanchorPending(io, p);
+                return false;
+            },
+        };
+        if (!std.mem.eql(u8, canonical, p.target)) {
+            errdefer w.gpa.free(canonical);
+            const held_path = try w.gpa.dupe(u8, canonical);
+            w.gpa.free(p.target);
+            p.target = canonical;
+            p.next = p.target;
+            p.anchor = null;
+            const held = w.table.getPtr(p.id).?;
+            w.gpa.free(held.path);
+            held.path = held_path;
+        } else w.gpa.free(canonical);
+        p.filter.policy = identity.read(w.gpa, io, p.target).policy(p.identity_override);
         if (try w.takenElsewhere(io, p)) {
             try w.batch.pushDetail(w.gpa, io, p.id, p.target, .unwatched, null, .unknown);
             w.destroyPending(p);
@@ -835,6 +879,7 @@ pub const Watcher = struct {
             w.addBackend(io, p.id, p.target, p.target, .{
                 .recursive = p.recursive,
                 .filter = p.filter.spec(),
+                .identity = p.identity_override,
             }) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
@@ -896,7 +941,7 @@ pub const Watcher = struct {
     /// Whether the path a pending watch waited for, now that it is there,
     /// resolves to a path another watch has.
     fn takenElsewhere(w: *Watcher, io: Io, p: *const Pending) Allocator.Error!bool {
-        const real = Io.Dir.cwd().realPathFileAlloc(io, p.target, w.gpa) catch |err| switch (err) {
+        const real = identity.canonical(w.gpa, io, p.target) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // Gone again, or not ours to resolve: the registration that
             // follows finds out which.
@@ -970,20 +1015,36 @@ pub const Watcher = struct {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         // A pattern refused is refused before anything changes.
-        var compiled: CompiledFilter = try .compile(w.gpa, filter);
-        defer compiled.deinit();
         for (w.pending.items) |p| {
             if (p.id != id) continue;
+            var compiled: CompiledFilter = try .compilePolicy(w.gpa, filter, p.filter.policy);
+            defer compiled.deinit();
             std.mem.swap(CompiledFilter, &p.filter, &compiled);
             return;
         }
+        var compiled: CompiledFilter = try .compilePolicy(w.gpa, filter, w.table.get(id).?.capabilities.policy);
+        defer compiled.deinit();
         if (w.table.get(id).?.capabilities.backend == .poll and w.backend() != .poll) {
             try w.polling.refilter(io, id, filter, &w.batch);
         } else switch (w.impl) {
             inline else => |*impl| try impl.refilter(io, id, filter, &w.batch),
         }
         if (w.followingOf(id)) |links| try w.refollow(io, links, filter);
-        w.batch.refilter(w.gpa, id, w.table.get(id).?.path, &compiled, w.handed_out);
+        const Query = struct {
+            watcher: *Watcher,
+            io: Io,
+            filter: *const CompiledFilter,
+            override: ?NamePolicy,
+            pub const Self = @This();
+            pub fn excludes(q: Self, root: []const u8, subject: []const u8) bool {
+                if (q.filter.isEmpty()) return false;
+                const parent = Io.Dir.path.dirname(subject) orelse root;
+                const policy = identity.read(q.watcher.gpa, q.io, parent).policy(q.override);
+                return q.filter.excludesPolicy(policy, root, subject);
+            }
+        };
+        const held = w.table.get(id).?;
+        w.batch.refilter(w.gpa, id, held.path, Query{ .watcher = w, .io = io, .filter = &compiled, .override = held.identity_override }, w.handed_out);
     }
 
     /// Waits for something to happen and returns what did.
@@ -1249,7 +1310,7 @@ pub const Watcher = struct {
     /// handed out, and stops following otherwise.
     fn follow(w: *Watcher, io: Io, id: WatchId, root: []const u8, filter: Filter, max: usize, keep: bool) Allocator.Error!void {
         w.stopFollowing(io, id);
-        const links = try Links.create(w.gpa, io, id, root, filter, max) orelse return;
+        const links = try Links.create(w.gpa, io, id, root, filter, w.table.get(id).?.capabilities.policy, w.table.get(id).?.identity_override, max) orelse return;
         {
             errdefer links.destroy(io, w.linkHost());
             try w.following.ensureUnusedCapacity(w.gpa, 1);
@@ -1368,6 +1429,7 @@ pub const Watcher = struct {
             slot.* = .{
                 .id = id,
                 .path = held.path,
+                .requested = held.requested orelse held.path,
                 .recursive = held.recursive,
                 .waiting = w.waiting(id),
             };
@@ -1713,4 +1775,57 @@ test "pending watches recheck filesystem facts when they move to their root" {
     try testing.expectEqual(Backend.poll, w.capabilities(id).?.backend);
     w.remove(io, id);
     try testing.expectEqual(@as(usize, 0), w.polling.registrationCount());
+}
+
+test "filesystem identity keeps requested roots and explicit policy separate from facts" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "Stored");
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    const asked = try std.Io.Dir.path.join(gpa, &.{ base, ".", "Stored" });
+    defer gpa.free(asked);
+    const kernel = try identity.canonical(gpa, io, asked);
+    defer gpa.free(kernel);
+    var w = try Watcher.init(gpa, .{ .backend = .poll });
+    defer w.deinit(io);
+    const policy: NamePolicy = .{ .case_sensitive = false, .normalization = .nfc };
+    const id = try w.add(io, asked, .{ .recursive = true, .identity = policy });
+    const info = try w.watches(gpa);
+    defer gpa.free(info);
+    try testing.expectEqualStrings(asked, info[0].requested);
+    try testing.expectEqualStrings(kernel, info[0].path);
+    try testing.expectEqual(policy, w.capabilities(id).?.policy);
+    try testing.expectEqual(identity.read(gpa, io, kernel), w.capabilities(id).?.names);
+    const missing = try std.Io.Dir.path.join(gpa, &.{ kernel, "missing" });
+    defer gpa.free(missing);
+    const unknown = w.directoryCapabilities(io, id, missing).?;
+    try testing.expectEqual(@as(?bool, null), unknown.names.case_sensitive);
+    try testing.expectEqual(policy, unknown.policy);
+    try testing.expect(w.directoryCapabilities(io, id, base) == null);
+    try testing.expectError(error.PathAlreadyWatched, w.add(io, kernel, .{}));
+}
+
+test "normalized pending refilter retains explicit policy before promotion" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const missing = try Io.Dir.path.join(testing.allocator, &.{ root, "later" });
+    defer testing.allocator.free(missing);
+    var watcher = try Watcher.init(testing.allocator, .{ .backend = .poll });
+    defer watcher.deinit(io);
+    const id = try watcher.add(io, missing, .{ .pending = true, .identity = .{ .normalization = .nfc } });
+    try testing.expectError(error.InvalidPattern, watcher.refilter(io, id, .{ .ignore = &.{"[x\u{301}]"} }));
+    try watcher.refilter(io, id, .{ .ignore = &.{"[é]"} });
+    const pending = watcher.pending.items[0];
+    try testing.expectEqual(NamePolicy.Normalization.nfc, pending.filter.policy.normalization);
+    const composed = try Io.Dir.path.join(testing.allocator, &.{ missing, "e\u{301}" });
+    defer testing.allocator.free(composed);
+    try testing.expect(pending.filter.excludes(missing, composed));
 }

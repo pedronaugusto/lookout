@@ -376,9 +376,7 @@ fn generatePath(smith: *testing.Smith, buf: []u8) []u8 {
     return buf[0..end];
 }
 
-/// The code points `path_cmp.Folder` yields for `p`, and for each the offset
-/// it starts at when that is a place the spelling can be cut -- null in
-/// the middle of a decomposed letter -- with one more entry for the end.
+/// Canonical path bytes and their original offsets, including the end.
 const Spelled = struct {
     points: std.ArrayList(u21) = .empty,
     cuts: std.ArrayList(?usize) = .empty,
@@ -386,11 +384,11 @@ const Spelled = struct {
     fn of(gpa: std.mem.Allocator, p: []const u8) !Spelled {
         @disableInstrumentation();
         var s: Spelled = .{};
-        var folder: path_cmp.Folder = .init(p);
-        while (true) {
-            try s.cuts.append(gpa, if (folder.settled()) folder.at else null);
-            try s.points.append(gpa, folder.next() orelse break);
+        for (p, 0..) |byte, i| {
+            try s.cuts.append(gpa, i);
+            try s.points.append(gpa, byte);
         }
+        try s.cuts.append(gpa, p.len);
         return s;
     }
 
@@ -439,7 +437,7 @@ fn checkPaths(a: []const u8, b: []const u8) !void {
     try testing.expectEqual(same, path_cmp.eql(b, a));
     try testing.expect(path_cmp.eql(a, a));
     if (same) try testing.expectEqual(path_cmp.hash(a), path_cmp.hash(b));
-    if (!path_cmp.folds_case) try testing.expectEqual(std.mem.eql(u8, a, b), same);
+    try testing.expectEqual(std.mem.eql(u8, a, b), same);
 
     for ([_][2][]const u8{ .{ a, b }, .{ b, a }, .{ a, a } }) |pair| {
         const root = pair[0];
@@ -460,7 +458,7 @@ fn checkPaths(a: []const u8, b: []const u8) !void {
     }
 }
 
-test "paths compare, hash and cut the way their folded spelling says" {
+test "canonical paths compare, hash and cut their original bytes" {
     try testing.fuzz({}, fuzzPaths, .{});
 }
 
@@ -494,18 +492,11 @@ fn fuzzPaths(_: void, smith: *testing.Smith) !void {
 /// where it stands as a whole component and as `*` everywhere else.
 const Token = union(enum) { any_depth, any, one, literal: u21 };
 
-/// The units a pattern or a name is matched by: one per character, folded
-/// where the file system folds, and each byte no encoding produced as a
-/// unit of its own.
+/// Exact UTF-8 scalars, with invalid bytes distinct from valid scalars.
 fn units(gpa: std.mem.Allocator, text: []const u8) !std.ArrayList(u21) {
     @disableInstrumentation();
     var out: std.ArrayList(u21) = .empty;
     errdefer out.deinit(gpa);
-    if (path_cmp.folds_case) {
-        var folder: path_cmp.Folder = .init(text);
-        while (folder.next()) |c| try out.append(gpa, c);
-        return out;
-    }
     var i: usize = 0;
     while (i < text.len) {
         const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
@@ -520,7 +511,7 @@ fn units(gpa: std.mem.Allocator, text: []const u8) !std.ArrayList(u21) {
             try out.append(gpa, c);
             i += len;
         } else {
-            try out.append(gpa, path_cmp.Folder.raw_base + text[i]);
+            try out.append(gpa, @as(u21, 0x110000) + text[i]);
             i += 1;
         }
     }
@@ -968,7 +959,7 @@ fn fuzzCheckpoint(_: void, smith: *testing.Smith) !void {
     const gpa = testing.allocator;
     const absolute = if (builtin.target.os.tag == .windows) "\"C:\\\\w\"" else "\"/w\"";
     const pieces = [_][]const u8{
-        "{\"version\":2,\"backend\":\"fsevents\",\"watches\":[",                                                             "]}",
+        "{\"version\":3,\"backend\":\"fsevents\",\"watches\":[",                                                             "]}",
         "{\"root\":" ++ absolute ++ ",\"cursor\":1,\"recursive\":true,\"baseline\":[],\"identity\":{\"volume\":[",           "],\"log\":[",
         "]}",                                                                                                                "}",
         "48,",                                                                                                               "48",

@@ -1,0 +1,40 @@
+first run: created /Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since/seen.txt
+checkpoint: {"version":3,"backend":"fsevents","watches":[{"root":"/Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since","cursor":3158903612,"itest
++- run test lookout-tests w
+preflight: test seed 1847644587 (reproduce with PREFLIGHT_TEST_SEED=1847644587)
+failed command: ./.zig-cache/o/ea0a523218c8e2fef695ebd0f5e23f88/lookout-tests --cache-dir=./.zig-cache --seed=0x6e20d1ab --listen=-
+
+Build Summary: 26/26 steps succeeded; 11/11 tests passed
+test success
++- run test lookout-tests 11 pass (11 total) 303ms MaxRSS:9M
+|  +- compile test lookout-tests debug native success 2s MaxRSS:463M
+|  |  +- options cached
+|  +- lint success
+|     +- run exe preflight-checks success 12s
+|        +- compile exe preflight-checks safe aarch64-macos-none cached 64ms MaxRSS:31M
+|        +- compile exe ziglint safe aarch64-macos-none cached 60ms MaxRSS:31M
+|        |  +- options cached
+|        +- run exe preflight-structure success 95ms
+|           +- compile exe preflight-structure debug aarch64-macos-none cached 57ms MaxRSS:31M
+|           +- zig fmt --check success
++- examples success
+|  +- run exe usage success 1s
+|  |  +- compile exe usage debug native success 2s MaxRSS:415M
+|  |  +- install success
+|  |  |  +- install lookout success
+|  |  |  |  +- compile lib lookout debug native success 2s MaxRSS:96M
+|  |  |  +- compile test lookout-tests debug native (+1 more reused dependencies)
+|  |  +- lint (+1 more reused dependencies)
+|  +- run exe since success 581ms
+|     +- compile exe since debug native success 2s MaxRSS:443M
+|     +- install (+2 more reused dependencies)
+|     +- lint (+1 more reused dependencies)
++- run exe lookout-bench success 4s
+|  +- compile exe lookout-bench debug native success 2s MaxRSS:430M
+|  +- WriteFile success
+|  +- lint (+1 more reused dependencies)
++- run exe lookout-filter-bench success 74ms
+   +- compile exe lookout-filter-bench debug native cached 102ms MaxRSS:31M
+   +- WriteFile success
+   +- lint (+1 more reused dependencies)
+

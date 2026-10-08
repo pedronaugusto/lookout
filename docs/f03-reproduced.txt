@@ -1,0 +1,17 @@
+test
++- run test lookout-tests 4 pass, 1 fail (5 total)
+error: 'Tree.test.filesystem identity preserves case-distinct kernel names' failed:
+       preflight: test seed 674232610 (reproduce with PREFLIGHT_TEST_SEED=674232610)
+       Tree.test.filesystem identity preserves case-distinct kernel names: TestUnexpectedResult; seed 674232610
+       /Users/gusto/.local/zig/0.17.0/lib/std/testing.zig:584:14: 0x104bb5cbf in expect (lookout-tests)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /Users/gusto/work/tycho/.wt/lookout-roots-resume/src/Tree.zig:1154:5: 0x104bb5d5b in test.filesystem identity preserves case-distinct kernel names (lookout-tests)
+           try std.testing.expect(!context.eql(a, b, 0));
+           ^
+failed command: ./.zig-cache/o/a9c906238eb915e287924b2ac96743c9/lookout-tests --cache-dir=./.zig-cache --seed=0x282ff922 --listen=-
+
+Build Summary: 16/18 steps succeeded (1 failed); 4/5 tests passed (1 failed)
+test transitive failure
++- run test lookout-tests 4 pass, 1 fail (5 total)
+

@@ -45,6 +45,7 @@ const checkpoint_format = @import("../Checkpoint/format.zig");
 const SpinLock = @import("../SpinLock.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
+const name_policy = @import("../identity.zig");
 const CompiledFilter = @import("../CompiledFilter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
@@ -223,6 +224,7 @@ const Stream = struct {
     /// directory out, so here the filter drops the events rather than
     /// saving the work -- see `lookout.prunesIgnored`.
     filter: CompiledFilter,
+    identity_override: ?name_policy.Policy = null,
     /// Greatest record id fully reported into Batch for this stream.
     cursor: u64,
     resume_index: ?usize,
@@ -445,6 +447,10 @@ pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_
             .baseline = paths,
             .ignore = stream.filter.ignore,
             .only = stream.filter.only,
+            .case = stream.filter.case,
+            .normalization = stream.filter.normalization,
+            .policy = stream.filter.policy,
+            .identity_override = stream.identity_override,
         });
     }
     return .{ .state = try checkpoint_format.copy(gpa, .{ .version = checkpoint_format.version, .backend = .fsevents, .watches = watches.items }) };
@@ -615,6 +621,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
 
     var volume = try Volume.read(f.gpa, stream_path);
     errdefer volume.deinit(f.gpa);
+    const policy = name_policy.read(f.gpa, io, abs_path).policy(options.identity);
     const resumed = if (force_live) null else f.resumeIndex(requested);
     if (resumed) |index| {
         const saved = f.restarting.?.state.value.watches[index];
@@ -622,7 +629,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
         // own; the caller's scope and patterns apply once it is promoted.
         if (path_cmp.eql(abs_path, requested)) {
             if (saved.recursive != options.recursive) return error.InvalidCheckpoint;
-            if (!samePatterns(saved.ignore, options.filter.ignore) or !samePatterns(saved.only, options.filter.only)) return error.InvalidCheckpoint;
+            if (!samePatterns(saved.ignore, options.filter.ignore) or !samePatterns(saved.only, options.filter.only) or saved.case != options.filter.case or saved.normalization != options.filter.normalization or !std.meta.eql(saved.policy, policy) or !std.meta.eql(saved.identity_override, options.identity)) return error.InvalidCheckpoint;
         }
         const identity = volume.identity orelse return error.InvalidCheckpoint;
         if (!Volume.matches(identity, f.restarting.?.state.value.watches[index].identity)) return error.InvalidCheckpoint;
@@ -637,7 +644,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
     errdefer f.gpa.destroy(stream);
     const root = try f.gpa.dupe(u8, abs_path);
     errdefer f.gpa.free(root);
-    var filter = try CompiledFilter.compile(f.gpa, options.filter);
+    var filter = try CompiledFilter.compilePolicy(f.gpa, options.filter, policy);
     errdefer filter.deinit();
     stream.* = .{
         .id = id,
@@ -648,6 +655,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
         .root = root,
         .scope = scope,
         .filter = filter,
+        .identity_override = options.identity,
         .cursor = since,
         .resume_index = resumed,
         .resumed = resumed != null,
@@ -722,7 +730,7 @@ fn createStream(
 fn useLiveStream(f: *FsEvents, io: Io, id: WatchId) contract.AddError!void {
     const old = f.streams.get(id).?;
     if (!old.persistent) return;
-    const next = try f.startStream(io, id, old.root, old.root, .{ .recursive = old.scope == .tree, .filter = old.filter.spec() }, true);
+    const next = try f.startStream(io, id, old.root, old.root, .{ .recursive = old.scope == .tree, .filter = old.filter.spec(), .identity = old.identity_override }, true);
     f.streams.getPtr(id).?.* = next;
     f.destroy(old);
 }
@@ -771,7 +779,7 @@ fn withoutStream(bytes: []u8, id: WatchId) usize {
 /// mounts require the host namespace.
 pub fn refilter(f: *FsEvents, io: Io, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     const stream = f.streams.get(id) orelse return error.UnknownWatch;
-    const replacement = try CompiledFilter.compile(f.gpa, next);
+    const replacement = try CompiledFilter.compilePolicy(f.gpa, next, stream.filter.policy);
     var previous = stream.filter;
     stream.filter = replacement;
     errdefer {

@@ -21,6 +21,7 @@ const Io = std.Io;
 const lookout = @import("types.zig");
 const path_cmp = @import("path.zig");
 const CompiledFilter = @import("CompiledFilter.zig");
+const identity = @import("identity.zig");
 const Options = @import("options.zig").Options;
 const milliseconds = @import("options.zig").milliseconds;
 const Event = lookout.Event;
@@ -100,6 +101,9 @@ const Deferred = struct {
 pub const Alias = struct {
     /// The watch the link is in, which its changes are reported as.
     owner: WatchId,
+    gpa: Allocator,
+    io: Io,
+    identity_override: ?identity.Policy = null,
     /// That watch's root, which `Kind.overflow` is reported against.
     root: []const u8,
     /// That watch's filter, asked of each path spelled under the link.
@@ -136,7 +140,10 @@ pub const Alias = struct {
     }
 
     fn keeps(alias: *const Alias, subject: []const u8) bool {
-        return !alias.filter.excludes(alias.root, subject);
+        if (alias.filter.isEmpty()) return true;
+        const parent = std.Io.Dir.path.dirname(subject) orelse alias.root;
+        const policy = identity.read(alias.gpa, alias.io, parent).policy(alias.identity_override);
+        return !alias.filter.excludesPolicy(policy, alias.root, subject);
     }
 };
 
@@ -484,7 +491,7 @@ pub fn refilter(
     gpa: Allocator,
     id: WatchId,
     root: []const u8,
-    filter: *const CompiledFilter,
+    filter: anytype,
     handed_out: bool,
 ) void {
     var t: usize = 0;
@@ -1256,7 +1263,7 @@ test "an event says whether the path was a file or a directory" {
     try testing.expectEqual(lookout.Target.file, b.events.items[1].target);
 }
 
-test "two spellings of one path are one event" {
+test "distinct canonical case spellings are distinct events" {
     const gpa = testing.allocator;
     const io = testing.io;
     var b: Batch = .init(.{});
@@ -1265,8 +1272,7 @@ test "two spellings of one path are one event" {
     try b.push(gpa, io, @fromBackingInt(@intCast(0)), "/tmp/Notes.txt", .modified, .file);
     try b.push(gpa, io, @fromBackingInt(@intCast(0)), "/tmp/notes.txt", .removed, .file);
 
-    const merged: usize = if (path_cmp.folds_case) 1 else 2;
-    try testing.expectEqual(merged, b.events.items.len);
+    try testing.expectEqual(@as(usize, 2), b.events.items.len);
 }
 
 test "a failed batch flush leaves trouble queued for the retry" {
@@ -1393,6 +1399,8 @@ test "a change below a followed link is its watch's, spelled under the link" {
     var filter: CompiledFilter = try .compile(gpa, .{ .ignore = &.{"*.tmp"} });
     defer filter.deinit();
     const alias: Alias = .{
+        .gpa = gpa,
+        .io = io,
         .owner = @fromBackingInt(@intCast(0)),
         .root = sep ++ "watch",
         .filter = &filter,
@@ -1448,4 +1456,54 @@ test "a lost note is said to be lost, and the change is still recorded" {
     defer notes.deinit(gpa);
     try testing.expect(notes.lost);
     try testing.expectEqual(@as(usize, 0), notes.items.items.len);
+}
+
+test "filesystem identity refilters held events with each parent policy" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var b = Batch.init(.{});
+    defer b.deinit(gpa);
+    const id: WatchId = @fromBackingInt(0);
+    try b.push(gpa, io, id, "/w/sensitive/Foo", .created, .file);
+    try b.push(gpa, io, id, "/w/folded/Foo", .created, .file);
+    var filter: CompiledFilter = try .compile(gpa, .{ .ignore = &.{"foo"} });
+    defer filter.deinit();
+    const Query = struct {
+        filter: *const CompiledFilter,
+        pub const Self = @This();
+        pub fn excludes(q: Self, root: []const u8, subject: []const u8) bool {
+            return q.filter.excludesPolicy(.{ .case_sensitive = !std.mem.startsWith(u8, subject, "/w/folded/") }, root, subject);
+        }
+    };
+    b.refilter(gpa, id, "/w", Query{ .filter = &filter }, false);
+    try testing.expectEqual(@as(usize, 1), b.events.items.len);
+    try testing.expectEqualStrings("/w/sensitive/Foo", b.events.items[0].path);
+}
+
+test "normalized followed alias keeps explicit policy separate from unknown facts" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var b = Batch.init(.{});
+    defer b.deinit(gpa);
+    const sep = std.Io.Dir.path.sep_str;
+    var filter: CompiledFilter = try .compilePolicy(gpa, .{ .ignore = &.{ "FOO", "[é]" } }, .{ .case_sensitive = false, .normalization = .nfc });
+    defer filter.deinit();
+    const alias: Alias = .{
+        .gpa = gpa,
+        .io = io,
+        .owner = @fromBackingInt(0),
+        .root = sep ++ "watch",
+        .filter = &filter,
+        .physical = sep ++ "elsewhere",
+        .logical = sep ++ "watch" ++ sep ++ "link",
+        .identity_override = .{ .case_sensitive = false, .normalization = .nfc },
+    };
+    const registration: WatchId = @fromBackingInt(9);
+    try b.aliases.put(gpa, registration, &alias);
+    try b.push(gpa, io, registration, sep ++ "elsewhere" ++ sep ++ "foo", .created, .file);
+    try b.deferChange(gpa, registration, sep ++ "elsewhere" ++ sep ++ "e\u{301}", .created, null, .file);
+    try b.push(gpa, io, registration, sep ++ "elsewhere" ++ sep ++ "e", .created, .file);
+    try b.flush(gpa, io);
+    try testing.expectEqual(@as(usize, 1), b.events.items.len);
+    try testing.expectEqualStrings(sep ++ "watch" ++ sep ++ "link" ++ sep ++ "e", b.events.items[0].path);
 }

@@ -1,0 +1,23 @@
+first run: created /Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since/seen.txt
+checkpoint: {"version":3,"backend":"fsevents","watches":[{"root":"/Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since","curBuild Summary: 18/18 steps succeeded; 5/5 tests passed
+test success
++- run test lookout-tests 5 pass (5 total) 265ms MaxRSS:9M
+|  +- compile test lookout-tests debug native success 1s MaxRSS:312M
+|     +- options cached
++- examples success
+|  +- run exe usage success 1s
+|  |  +- compile exe usage debug native success 3s MaxRSS:417M
+|  |  +- install success
+|  |     +- install lookout success
+|  |     |  +- compile lib lookout debug native success 187ms MaxRSS:94M
+|  |     +- compile test lookout-tests debug native (+1 more reused dependencies)
+|  +- run exe since success 574ms
+|     +- compile exe since debug native success 5s MaxRSS:439M
+|     +- install (+2 more reused dependencies)
++- run exe lookout-bench success 3s
+|  +- compile exe lookout-bench debug native success 5s MaxRSS:430M
+|  +- WriteFile success
++- run exe lookout-filter-bench success 368ms
+   +- compile exe lookout-filter-bench debug native success 1s MaxRSS:331M
+   +- WriteFile success
+

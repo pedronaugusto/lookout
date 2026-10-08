@@ -2,9 +2,8 @@
 //! sweep sets that answer for any path in one pass over it, whatever the
 //! number of patterns.
 //!
-//! The patterns and every path asked about are folded first the way the
-//! file system compares names (`path.Folder`), so a pattern is matched as
-//! `path.eql` compares. A query moves the sets' caches: one thread asks at
+//! Sweep parses original patterns and applies scalar normalization itself.
+//! A query moves the sets' caches: one thread asks at
 //! a time, which is the watcher's own.
 
 const std = @import("std");
@@ -14,6 +13,7 @@ const sweep = @import("sweep");
 
 const Filter = @import("Filter.zig");
 const path = @import("path.zig");
+const identity = @import("identity.zig");
 
 const CompiledFilter = @This();
 
@@ -27,7 +27,11 @@ allow: ?*const fn (context: ?*anyopaque, path: []const u8) bool = null,
 /// `Filter.context`.
 context: ?*anyopaque = null,
 /// Private: the compiled patterns, or null when there are none.
-matcher: ?*Matcher = null,
+matcher: [2]?*Matcher = @splat(null),
+/// Measured directory policy; caller preferences are retained separately.
+policy: identity.Policy = .{},
+case: ?sweep.Case = null,
+normalization: ?identity.Policy.Normalization = null,
 /// Private: the allocator the copies are owned in, or null for `none`.
 gpa: ?Allocator = null,
 
@@ -43,19 +47,30 @@ pub const Error = errors: {
 
 /// Copies and compiles `filter`; `deinit` releases it.
 pub fn compile(gpa: Allocator, filter: Filter) Error!CompiledFilter {
+    return compilePolicy(gpa, filter, .{});
+}
+/// Compile the original patterns with the measured or explicit name policy.
+pub fn compilePolicy(gpa: Allocator, filter: Filter, policy: identity.Policy) Error!CompiledFilter {
     const ignore = try dupeList(gpa, filter.ignore);
     errdefer freeList(gpa, ignore);
     const only = try dupeList(gpa, filter.only);
     errdefer freeList(gpa, only);
-    const matcher = try Matcher.create(gpa, ignore, only);
-    return .{ .ignore = ignore, .only = only, .allow = filter.allow, .context = filter.context, .matcher = matcher, .gpa = gpa };
+    var matchers: [2]?*Matcher = @splat(null);
+    errdefer for (matchers) |m| if (m) |made| made.destroy(gpa);
+    for (&matchers, 0..) |*slot, i| {
+        var opts = pattern_options;
+        opts.case = filter.case orelse if (i & 1 != 0) .unicode else .sensitive;
+        opts.normalization = if ((filter.normalization orelse policy.normalization) == .nfc) .nfc else .exact;
+        slot.* = try Matcher.create(gpa, ignore, only, opts);
+    }
+    return .{ .ignore = ignore, .only = only, .allow = filter.allow, .context = filter.context, .matcher = matchers, .gpa = gpa, .case = filter.case, .normalization = filter.normalization, .policy = policy };
 }
 
 /// `compile`, for a filter whose patterns have compiled once already: a
 /// second copy for another registration of the same watch. Only memory
 /// can fail.
-pub fn recompile(gpa: Allocator, filter: Filter) Allocator.Error!CompiledFilter {
-    return compile(gpa, filter) catch |err| switch (err) {
+pub fn recompile(gpa: Allocator, filter: Filter, policy: identity.Policy) Allocator.Error!CompiledFilter {
+    return compilePolicy(gpa, filter, policy) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         // unreachable: the caller compiled these exact patterns before
         error.InvalidPattern, error.PatternTooLong => unreachable,
@@ -64,13 +79,13 @@ pub fn recompile(gpa: Allocator, filter: Filter) Allocator.Error!CompiledFilter 
 
 /// The filter this was compiled from, borrowing this copy's patterns.
 pub fn spec(c: *const CompiledFilter) Filter {
-    return .{ .ignore = c.ignore, .only = c.only, .allow = c.allow, .context = c.context };
+    return .{ .ignore = c.ignore, .only = c.only, .allow = c.allow, .context = c.context, .case = c.case, .normalization = c.normalization };
 }
 
 /// Releases a compiled filter. `none` owns nothing.
 pub fn deinit(c: *CompiledFilter) void {
     const gpa = c.gpa orelse return;
-    if (c.matcher) |m| m.destroy(gpa);
+    for (c.matcher) |m| if (m) |made| made.destroy(gpa);
     freeList(gpa, c.ignore);
     freeList(gpa, c.only);
     c.* = undefined;
@@ -90,7 +105,7 @@ pub fn isEmpty(c: *const CompiledFilter) bool {
 /// so of the path or of any ancestor below the root, or when `only` has
 /// patterns and none of them matches the path.
 pub fn excludes(c: *const CompiledFilter, root: []const u8, subject: []const u8) bool {
-    return c.outside(root, subject, .report);
+    return c.outside(c.policy, root, subject, .report);
 }
 
 /// Whether a directory is so far outside the watch that lookout need not
@@ -103,7 +118,7 @@ pub fn excludes(c: *const CompiledFilter, root: []const u8, subject: []const u8)
 /// backends that recurse themselves ask before registering a directory,
 /// and `excludes` is the one every backend asks before reporting a path.
 pub fn prunes(c: *const CompiledFilter, root: []const u8, subject: []const u8) bool {
-    return c.outside(root, subject, .walk);
+    return c.outside(c.policy, root, subject, .walk);
 }
 
 /// Which of the two questions is being asked. They differ only for
@@ -111,14 +126,22 @@ pub fn prunes(c: *const CompiledFilter, root: []const u8, subject: []const u8) b
 /// reported.
 const Purpose = enum { report, walk };
 
-fn outside(c: *const CompiledFilter, root: []const u8, subject: []const u8, purpose: Purpose) bool {
+/// Query with the policy measured on the entry's parent directory.
+pub fn excludesPolicy(c: *const CompiledFilter, policy: identity.Policy, root: []const u8, subject: []const u8) bool {
+    return c.outside(policy, root, subject, .report);
+}
+pub fn prunesPolicy(c: *const CompiledFilter, policy: identity.Policy, root: []const u8, subject: []const u8) bool {
+    return c.outside(policy, root, subject, .walk);
+}
+fn outside(c: *const CompiledFilter, policy: identity.Policy, root: []const u8, subject: []const u8, purpose: Purpose) bool {
     if (c.isEmpty()) return false;
     const rest = path.relative(root, subject) orelse return false;
     if (rest.len == 0) return false;
     // `rest` is a suffix of `subject`, which is what lets one ancestor be
     // spelled both ways without joining anything.
     const base = subject.len - rest.len;
-    if (c.matcher) |m| if (m.outside(subject, base, purpose)) return true;
+    const which: usize = @intFromBool(!policy.case_sensitive);
+    if (c.matcher[which]) |m| if (m.outside(subject, base, purpose)) return true;
     const allow = c.allow orelse return false;
     var end: usize = 0;
     while (end < rest.len) {
@@ -150,31 +173,17 @@ fn freeList(gpa: Allocator, list: []const []const u8) void {
 
 /// How every pattern is read: git's syntax over UTF-8 scalars, a pattern
 /// with no separator at any depth. On Windows `\` is a separator, which
-/// folding turns into `/`, and so no escape.
+/// sweep reads both separator spellings directly, and there is no escape.
 const pattern_options: sweep.Options = .{
-    .syntax = .{ .unit = .utf8, .escape = builtin.target.os.tag != .windows },
+    .syntax = .{ .unit = .utf8, .escape = builtin.target.os.tag != .windows, .alternate_separator = if (builtin.target.os.tag == .windows) '\\' else null },
     .anywhere = true,
 };
-
-/// The longest path a query folds. A path the operating system gives is
-/// never longer; a longer one is let through unmatched, and the event
-/// reported.
-const max_subject = std.Io.Dir.max_path_bytes;
-
-/// What folding can make of `n` bytes: a Latin-1 letter, two bytes, comes
-/// out as its base letter and a combining accent, three.
-fn foldedCapacity(n: usize) usize {
-    return n + n / 2 + 1;
-}
 
 /// The patterns, compiled: one set per list and per anchoring, each with
 /// the cache a query runs on.
 const Matcher = struct {
     /// Indexed by `Which`; null for a list with no such patterns.
     parts: [4]?Part,
-    /// Where a path is folded, on a target that folds; empty elsewhere.
-    scratch: []u8,
-
     const Which = enum(u2) { ignore, ignore_absolute, only, only_absolute };
 
     const Part = struct {
@@ -187,20 +196,17 @@ const Matcher = struct {
     const cache_options: sweep.Set.Cache.Options = .{ .capacity = 1 << 16 };
 
     /// Null when no list holds a pattern.
-    fn create(gpa: Allocator, ignore: []const []const u8, only: []const []const u8) Error!?*Matcher {
+    fn create(gpa: Allocator, ignore: []const []const u8, only: []const []const u8, options: sweep.Options) Error!?*Matcher {
         var builders: [4]?sweep.Set.Builder = @splat(null);
         defer for (&builders) |*b| if (b.*) |*builder| builder.deinit();
-        var fold_buffer: std.ArrayList(u8) = .empty;
-        defer fold_buffer.deinit(gpa);
+
         for ([_][]const []const u8{ ignore, only }, [_]Which{ .ignore, .only }) |list, relative| {
             for (list) |pattern| {
                 if (pattern.len == 0) continue;
                 const which: Which = if (std.Io.Dir.path.isAbsolute(pattern)) @fromBackingInt(@backingInt(relative) + 1) else relative;
                 const slot = &builders[@backingInt(which)];
                 if (slot.* == null) slot.* = .init(gpa);
-                try fold_buffer.resize(gpa, foldedCapacity(pattern.len));
-                const folded = fold(fold_buffer.items, pattern);
-                _ = slot.*.?.add(folded, .{ .options = pattern_options }) catch |err| switch (err) {
+                _ = slot.*.?.add(pattern, .{ .options = options }) catch |err| switch (err) {
                     // unreachable: every entry is read with one separator
                     error.SeparatorMismatch => unreachable,
                     else => |e| return e,
@@ -213,9 +219,10 @@ const Matcher = struct {
 
         const m = try gpa.create(Matcher);
         errdefer gpa.destroy(m);
-        m.* = .{ .parts = @splat(null), .scratch = &.{} };
-        errdefer m.release(gpa);
-        if (path.folds_case) m.scratch = try gpa.alloc(u8, foldedCapacity(max_subject));
+        m.* = .{
+            .parts = @splat(null),
+        };
+        errdefer m.release();
         for (&builders, &m.parts) |*b, *part| {
             const builder = if (b.*) |*builder| builder else continue;
             // Built aside: a `try` inside the literal would mark the slot
@@ -234,18 +241,16 @@ const Matcher = struct {
     }
 
     fn destroy(m: *Matcher, gpa: Allocator) void {
-        m.release(gpa);
+        m.release();
         gpa.destroy(m);
     }
 
-    fn release(m: *Matcher, gpa: Allocator) void {
+    fn release(m: *Matcher) void {
         for (&m.parts) |*p| if (p.*) |*part| {
             part.cache.deinit();
             part.set.deinit();
             p.* = null;
         };
-        if (m.scratch.len != 0) gpa.free(m.scratch);
-        m.scratch = &.{};
     }
 
     fn find(m: *Matcher, which: Which) ?*Part {
@@ -256,16 +261,8 @@ const Matcher = struct {
     /// Whether the patterns put `subject` outside the watch; `subject[base..]`
     /// is the part below the root.
     fn outside(m: *Matcher, subject: []const u8, base: usize, purpose: Purpose) bool {
-        // The absolute spelling, folded, and where its part below the root
-        // starts: one fold serves both, since a fold goes character by
-        // character and `base` is at the start of one.
-        var absolute: []const u8 = subject;
-        var start: usize = base;
-        if (path.folds_case) {
-            if (subject.len > max_subject) return false;
-            start = fold(m.scratch, subject[0..base]).len;
-            absolute = m.scratch[0 .. start + fold(m.scratch[start..], subject[base..]).len];
-        }
+        const absolute = subject;
+        const start = base;
         const relative = absolute[start..];
 
         if (m.find(.ignore)) |p| {
@@ -294,28 +291,6 @@ const Matcher = struct {
     }
 };
 
-/// Writes `text` into `out` as `path.Folder` reads it, each code point in
-/// UTF-8 and each byte no encoding produced as itself, and returns the
-/// written part. On a target that does not fold, a copy.
-fn fold(out: []u8, text: []const u8) []const u8 {
-    if (!path.folds_case) {
-        @memcpy(out[0..text.len], text);
-        return out[0..text.len];
-    }
-    var folder: path.Folder = .init(text);
-    var n: usize = 0;
-    while (folder.next()) |cp| {
-        if (cp >= path.Folder.raw_base) {
-            out[n] = @intCast(cp - path.Folder.raw_base);
-            n += 1;
-        } else {
-            // unreachable: Folder yields only scalars it decoded or folded
-            n += std.unicode.utf8Encode(cp, out[n..]) catch unreachable;
-        }
-    }
-    return out[0..n];
-}
-
 const testing = std.testing;
 const shakedown = @import("shakedown");
 
@@ -337,7 +312,7 @@ test "an empty filter excludes nothing" {
     var f = try expectCompiled(.none);
     defer f.deinit();
     try testing.expect(f.isEmpty());
-    try testing.expect(f.matcher == null);
+    for (f.matcher) |m| try testing.expect(m == null);
     try testing.expect(!f.excludes(sep("/w"), sep("/w/a/b.txt")));
 }
 
@@ -403,9 +378,8 @@ test "a question mark is exactly one character, and a bracket one of a set" {
 test "a question mark is one character, not one byte" {
     var f = try expectCompiled(.{ .ignore = &.{"caf?"} });
     defer f.deinit();
-    // On a target that folds, the accent of a Latin-1 letter is a
-    // character of its own, as `path.eql` reads it.
-    try testing.expectEqual(!path.folds_case, f.excludes(sep("/w"), sep("/w/caf\u{e9}")));
+    // Exact UTF-8 mode keeps the precomposed scalar intact.
+    try testing.expectEqual(true, f.excludes(sep("/w"), sep("/w/caf\u{e9}")));
     try testing.expect(f.excludes(sep("/w"), sep("/w/caf\u{3b1}")));
 }
 
@@ -534,7 +508,7 @@ test "the predicate is asked about every ancestor" {
     var calls: usize = 0;
     var f = try expectCompiled(.{ .allow = rule.allow, .context = &calls });
     defer f.deinit();
-    try testing.expect(f.matcher == null);
+    for (f.matcher) |m| try testing.expect(m == null);
 
     try testing.expect(f.excludes(sep("/w"), sep("/w/private")));
     // Excluding the directory excludes the tree under it, which the
@@ -547,17 +521,17 @@ test "the predicate is asked about every ancestor" {
 test "a pattern is matched the way the file system compares names" {
     var f = try expectCompiled(.{ .ignore = &.{"*.TMP"} });
     defer f.deinit();
-    try testing.expectEqual(path.folds_case, f.excludes(sep("/w"), sep("/w/notes.tmp")));
+    try testing.expectEqual(false, f.excludes(sep("/w"), sep("/w/notes.tmp")));
 
     var g = try expectCompiled(.{ .ignore = &.{"Node_Modules"} });
     defer g.deinit();
-    try testing.expectEqual(path.folds_case, g.excludes(sep("/w"), sep("/w/node_modules/a.js")));
+    try testing.expectEqual(false, g.excludes(sep("/w"), sep("/w/node_modules/a.js")));
 
     // A Latin-1 letter written composed in the pattern and decomposed in
     // the name, as a volume that stores it decomposed spells it.
     var h = try expectCompiled(.{ .ignore = &.{"caf\u{e9}"} });
     defer h.deinit();
-    try testing.expectEqual(path.folds_case, h.excludes(sep("/w"), sep("/w/cafe\u{301}/a")));
+    try testing.expectEqual(false, h.excludes(sep("/w"), sep("/w/cafe\u{301}/a")));
     // A name that is not UTF-8 is matched byte for byte.
     var raw = try expectCompiled(.{ .ignore = &.{"\xff*"} });
     defer raw.deinit();
@@ -588,27 +562,16 @@ test "a copy owns its patterns" {
     }
 }
 
-test "a compile that runs out of memory leaves nothing behind" {
-    var fail_index: usize = 0;
-    while (true) : (fail_index += 1) {
-        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
-        const filter: Filter = .{ .ignore = &.{ "*.tmp", sep("/w/abs"), "a*b*c" }, .only = &.{ sep("src/**/*.zig"), sep("/w/x/**") } };
-        if (compile(failing.allocator(), filter)) |compiled| {
-            var c = compiled;
-            c.deinit();
-            break;
-        } else |err| try testing.expectEqual(error.OutOfMemory, err);
-    }
-}
-
-test "a path longer than any the system gives is let through, not matched unfolded" {
-    if (!path.folds_case) return error.SkipZigTest;
-    var f = try expectCompiled(.{ .ignore = &.{"*"} });
-    defer f.deinit();
-    const root = comptime sep("/w");
-    const long = root ++ std.Io.Dir.path.sep_str ++ shakedown.corpus.repeat("a", max_subject);
-    try testing.expect(f.excludes(root, long[0..max_subject]));
-    try testing.expect(!f.excludes(root, long));
+test "a composed filter releases all allocations when compilation fails" {
+    const Exercise = struct {
+        fn run(backing: Allocator) !void {
+            var no_resize: shakedown.alloc.NoResize = .init(backing);
+            var c = try compilePolicy(no_resize.allocator(), .{ .ignore = &.{ "[é]", sep("/w/abs"), "a*b*c" }, .only = &.{ sep("src/**/*.zig"), sep("/w/x/**") } }, .{ .normalization = .nfc });
+            defer c.deinit();
+            try testing.expect(c.excludes(sep("/w"), sep("/w/e\u{301}")));
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Exercise.run, .{});
 }
 
 // F07: a class member must never turn into two independent members.
@@ -617,4 +580,26 @@ test "normalization preserves an accented class member" {
     defer f.deinit();
     try testing.expect(!f.excludes(sep("/w"), sep("/w/e")));
     try testing.expect(!f.excludes(sep("/w"), sep("/w/\u{301}")));
+}
+
+test "normalized root policies preserve grammar classes and raw patterns" {
+    const gpa = testing.allocator;
+    var composed = try compilePolicy(gpa, .{ .ignore = &.{"[é]"} }, .{ .normalization = .nfc });
+    defer composed.deinit();
+    try testing.expectEqualStrings("[é]", composed.ignore[0]);
+    try testing.expect(composed.excludes(sep("/w"), sep("/w/e\u{301}")));
+    try testing.expect(!composed.excludes(sep("/w"), sep("/w/e")));
+    var exact = try compilePolicy(gpa, .{ .ignore = &.{"[é]"} }, .{});
+    defer exact.deinit();
+    try testing.expect(!exact.excludes(sep("/w"), sep("/w/e\u{301}")));
+    var sensitive = try compilePolicy(gpa, .{ .ignore = &.{"[É]"} }, .{ .case_sensitive = true, .normalization = .nfc });
+    defer sensitive.deinit();
+    try testing.expect(!sensitive.excludes(sep("/w"), sep("/w/e\u{301}")));
+    try testing.expect(sensitive.excludesPolicy(.{ .case_sensitive = false, .normalization = .nfc }, sep("/w"), sep("/w/e\u{301}")));
+    var override = try compilePolicy(gpa, .{ .ignore = &.{"[É]"}, .case = .sensitive, .normalization = .nfc }, .{ .case_sensitive = false });
+    defer override.deinit();
+    try testing.expect(!override.excludes(sep("/w"), sep("/w/e\u{301}")));
+    try testing.expectError(error.InvalidPattern, compilePolicy(gpa, .{ .ignore = &.{"[q\u{301}]"} }, .{ .normalization = .nfc }));
+    var multi = try compilePolicy(gpa, .{ .ignore = &.{"[q\u{301}]"} }, .{});
+    defer multi.deinit();
 }

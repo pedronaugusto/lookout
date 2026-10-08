@@ -32,6 +32,7 @@ const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
+const identity = @import("../identity.zig");
 const CompiledFilter = @import("../CompiledFilter.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("inotify/records.zig");
@@ -91,6 +92,7 @@ const Watch = struct {
     /// `@import("../options.zig").AddOptions.filter`, copied. An excluded directory is
     /// never registered, so the kernel is never asked for a watch on it.
     filter: CompiledFilter,
+    identity_override: ?identity.Policy = null,
 };
 
 /// One half of a rename, waiting for the other.
@@ -226,13 +228,14 @@ pub fn add(
 
     const root = try n.gpa.dupe(u8, abs_path);
     errdefer n.gpa.free(root);
-    var filter = try CompiledFilter.compile(n.gpa, options.filter);
+    var filter = try CompiledFilter.compilePolicy(n.gpa, options.filter, identity.read(n.gpa, io, abs_path).policy(options.identity));
     errdefer filter.deinit();
     try n.watches.put(n.gpa, id, .{
         .root = root,
         .target = .of(stat.kind),
         .recursive = options.recursive,
         .filter = filter,
+        .identity_override = options.identity,
     });
     errdefer _ = n.watches.swapRemove(id);
     // A watch the kernel only half accepted is worse than none: it would
@@ -246,6 +249,7 @@ pub fn add(
     // One kernel watch per directory: inotify does not recurse.
     const Registering = struct {
         n: *Inotify,
+        io: Io,
         id: WatchId,
         batch: *Batch,
 
@@ -255,7 +259,7 @@ pub fn add(
             if (entry.kind != .directory) return .over;
             // An excluded directory costs no kernel watch and is not
             // descended into, so its whole tree costs nothing.
-            if (r.n.pruned(r.id, entry.path)) return .over;
+            if (r.n.pruned(r.io, r.id, entry.path)) return .over;
             r.n.register(r.id, try r.n.gpa.dupe(u8, entry.path)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 // A subdirectory that vanished, or that is not ours to
@@ -270,7 +274,7 @@ pub fn add(
             return .into;
         }
     };
-    var registering: Registering = .{ .n = n, .id = id, .batch = batch };
+    var registering: Registering = .{ .n = n, .io = io, .id = id, .batch = batch };
     walk.tree(*Registering, Registering.visit, n.gpa, io, abs_path, &registering) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
@@ -300,7 +304,7 @@ pub fn remove(n: *Inotify, io: Io, id: WatchId) void {
 /// New directories are registered before excluded ones are released.
 pub fn refilter(n: *Inotify, io: Io, id: WatchId, next: lookout.Filter, batch: *Batch) contract.RefilterError!void {
     const watch = n.watches.getPtr(id) orelse return error.UnknownWatch;
-    const replacement = try CompiledFilter.compile(n.gpa, next);
+    const replacement = try CompiledFilter.compilePolicy(n.gpa, next, watch.filter.policy);
     var previous = watch.filter;
     watch.filter = replacement;
     errdefer {
@@ -328,7 +332,7 @@ pub fn refilter(n: *Inotify, io: Io, id: WatchId, next: lookout.Filter, batch: *
             const Self = @This();
 
             fn visit(r: *Self, entry: walk.Entry) anyerror!walk.Step {
-                if (entry.kind != .directory or r.n.pruned(r.id, entry.path)) return .over;
+                if (entry.kind != .directory or r.n.pruned(r.io, r.id, entry.path)) return .over;
                 if (!r.n.ownsPath(r.id, entry.path)) {
                     r.n.register(r.id, try r.n.gpa.dupe(u8, entry.path)) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
@@ -351,7 +355,7 @@ pub fn refilter(n: *Inotify, io: Io, id: WatchId, next: lookout.Filter, batch: *
     var i: usize = 0;
     while (i < n.wds.count()) {
         const registration = &n.wds.values()[i];
-        if (!path_cmp.eql(registration.path, watch.root) and n.pruned(id, registration.path)) {
+        if (!path_cmp.eql(registration.path, watch.root) and n.pruned(io, id, registration.path)) {
             if (!n.removeOwner(i, id)) i += 1;
         } else i += 1;
     }
@@ -379,16 +383,20 @@ fn stillCounted(n: *const Inotify, dir: []const u8) bool {
 
 /// Whether `subject` is outside what the watch `id` is about, so no
 /// event for it is reported. See `@import("../options.zig").AddOptions.filter`.
-fn excluded(n: *const Inotify, id: WatchId, subject: []const u8) bool {
+fn excluded(n: *const Inotify, io: Io, id: WatchId, subject: []const u8) bool {
     const watch = n.watches.get(id) orelse return false;
-    return watch.filter.excludes(watch.root, subject);
+    if (watch.filter.isEmpty()) return false;
+    const parent = std.Io.Dir.path.dirname(subject) orelse watch.root;
+    return watch.filter.excludesPolicy(identity.read(n.gpa, io, parent).policy(watch.identity_override), watch.root, subject);
 }
 
 /// Whether a directory is so far outside the watch that it need not be
 /// registered at all. See `CompiledFilter.prunes`.
-fn pruned(n: *const Inotify, id: WatchId, subject: []const u8) bool {
+fn pruned(n: *const Inotify, io: Io, id: WatchId, subject: []const u8) bool {
     const watch = n.watches.get(id) orelse return false;
-    return watch.filter.prunes(watch.root, subject);
+    if (watch.filter.isEmpty()) return false;
+    const parent = std.Io.Dir.path.dirname(subject) orelse watch.root;
+    return watch.filter.prunesPolicy(identity.read(n.gpa, io, parent).policy(watch.identity_override), watch.root, subject);
 }
 
 /// Waits on the inotify descriptor until it reports something `batch` did
@@ -598,7 +606,7 @@ fn handle(n: *Inotify, io: Io, event: records.Record, batch: *Batch) contract.Po
         if (move != .unchanged and n.budget.count(base) != null) _ = try n.budget.note(io, base, name, move);
     }
     for (owners) |watch| {
-        var change = (try n.decode(event, watch, base)) orelse continue;
+        var change = (try n.decode(io, event, watch, base)) orelse continue;
         defer {
             n.gpa.free(change.path);
             n.gpa.free(change.dir);
@@ -612,7 +620,7 @@ fn handle(n: *Inotify, io: Io, event: records.Record, batch: *Batch) contract.Po
 /// Reads the flags, and answers everything that is over before an entry
 /// is named: the queue overflowing, a watch going away, and the watched
 /// path itself being deleted or moved.
-fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u8) contract.PollError!?Change {
+fn decode(n: *Inotify, io: Io, event: records.Record, watch: WatchId, watched: []const u8) contract.PollError!?Change {
     const base = try n.gpa.dupe(u8, watched);
     errdefer n.gpa.free(base);
 
@@ -624,7 +632,7 @@ fn decode(n: *Inotify, event: records.Record, watch: WatchId, watched: []const u
 
     // Excluded before anything is reported, registered or counted: the
     // path is not part of this watch at all.
-    if (n.excluded(watch, full) and n.pruned(watch, full)) {
+    if (n.excluded(io, watch, full) and n.pruned(io, watch, full)) {
         n.gpa.free(full);
         n.gpa.free(base);
         return null;
@@ -672,8 +680,8 @@ fn pair(n: *Inotify, io: Io, change: *const Change, batch: *Batch) contract.Poll
     if (change.moved_to) {
         const key: PendingKey = .{ .watch = change.watch, .cookie = change.cookie };
         const half = n.pending_renames.get(key) orelse return false;
-        const keeps_to = !n.excluded(change.watch, change.path);
-        const keeps_from = !n.excluded(change.watch, half.path);
+        const keeps_to = !n.excluded(io, change.watch, change.path);
+        const keeps_from = !n.excluded(io, change.watch, half.path);
         if (keeps_to and keeps_from) {
             try batch.pushRename(n.gpa, io, change.watch, change.path, half.path, change.target());
         } else if (keeps_to) {
@@ -698,7 +706,7 @@ fn pair(n: *Inotify, io: Io, change: *const Change, batch: *Batch) contract.Poll
 /// Reports what happened to the entry, for everything a pairing did not
 /// already answer.
 fn emit(n: *Inotify, io: Io, change: Change, paired: bool, batch: *Batch) contract.PollError!void {
-    if (n.excluded(change.watch, change.path)) return;
+    if (n.excluded(io, change.watch, change.path)) return;
     const target = change.target();
     if (change.appeared and !paired) {
         try batch.push(n.gpa, io, change.watch, change.path, .created, target);
@@ -769,7 +777,7 @@ fn flushRenames(n: *Inotify, io: Io, batch: *Batch) contract.PollError!void {
     while (n.pending_renames.count() != 0) {
         const key = n.pending_renames.keys()[0];
         const half = n.pending_renames.values()[0];
-        if (!n.excluded(key.watch, half.path)) try batch.push(
+        if (!n.excluded(io, key.watch, half.path)) try batch.push(
             n.gpa,
             io,
             key.watch,
@@ -809,8 +817,8 @@ fn adopt(n: *Inotify, io: Io, id: WatchId, root: []const u8, batch: *Batch) cont
         const Self = @This();
 
         fn visit(a: *Self, entry: walk.Entry) anyerror!walk.Step {
-            if (a.n.pruned(a.id, entry.path)) return .over;
-            if (!a.n.excluded(a.id, entry.path)) {
+            if (a.n.pruned(a.io, a.id, entry.path)) return .over;
+            if (!a.n.excluded(a.io, a.id, entry.path)) {
                 try a.batch.push(a.n.gpa, a.io, a.id, entry.path, .created, .of(entry.kind));
             }
             if (entry.kind != .directory) return .over;

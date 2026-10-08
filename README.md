@@ -4,8 +4,8 @@ lookout watches files and directory trees in Zig. One `Watcher` coalesces change
 native notification backends or polling, with explicit overflow events and backend
 capability queries.
 
-Filesystem case/normalization per root and syntax-aware normalized filtering
-are work in progress; see [the implementation evidence](docs/roots-evidence.md).
+Work in progress toward the public cut. Filesystem policy is measured per root
+and directory where supported; sweep parses and composes normalized filters; see [the implementation evidence](docs/roots-evidence.md).
 
 ## Install
 
@@ -115,13 +115,32 @@ to a self-contained baseline. Paths removed since a retained revision are reclai
 when that revision is released. On resume a path in that
 baseline that is gone is reported as a deletion once, independent of event ids
 and replay arrival time. The replay has no time window or id-space barrier;
-version-1 checkpoint tokens are refused. Resume with matching canonical roots, scopes and filters: a
+Version-1/2 checkpoint tokens are refused. Resume with matching canonical roots, scopes and filters: a
 token records its ignore and include patterns and is refused under others, while a predicate
 filter cannot be recorded and is the caller's to keep the same. Saved changes a resumed watch
 would not report live are dropped. A changed
 volume or log yields `InvalidCheckpoint`; watches spanning mounted volumes keep live
 coverage but cannot produce a checkpoint. Other backends return null.
 [examples/since.zig](examples/since.zig) exercises checkpoint tokens and resuming.
+
+Filesystem name capabilities and caller policy are separate: `Watcher.capabilities(id)`
+reports `names` (nullable facts) and `policy` (effective matching policy).
+`directoryCapabilities(io, id, directory)` probes a canonical directory below a watch.
+Unknown capability selects exact spelling and sensitive matching; `AddOptions.identity`
+can override the policy without changing the reported facts. Darwin measures volume
+case sensitivity, Windows measures directory case flags, and Linux measures supported
+filesystem/directory flags. Normalization remains unknown where no supported query
+establishes it; lookout makes no platform guess about Unicode equivalence.
+
+`Filter.case` and `Filter.normalization` are independent matching preferences.
+Set normalization to `.nfc` for canonical equivalence: `[é]` matches `é` and `e` plus
+combining acute, and never plain `e`; `?` consumes one composed scalar. Sweep owns
+composition, classes, ranges, escapes and folding; lookout passes original glob text.
+A class member that remains several scalars under NFC is `InvalidPattern`.
+Kernel event names and canonical roots are retained unchanged; `WatchInfo.requested`
+retains the original caller root independently. Public `path` helpers take canonical
+kernel paths and compare exact bytes. Baseline format 2 and checkpoint format 3
+retain matching preferences and refuse older formats.
 
 ## API
 

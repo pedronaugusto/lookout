@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- Remove the OS-global `folds_case` and Latin-1 normalization engine. Canonical kernel paths are exact identity keys, and public path helpers require canonical spellings. `WatchInfo.requested` retains the caller root. Name capabilities are nullable per-root/per-directory facts; unknown means exact matching, with explicit `AddOptions.identity` and independent `Filter.case`/`Filter.normalization` overrides.
+
+- NFC matching is owned by sweep and operates on composed scalars after parsing syntax. Multi-scalar NFC class members return `InvalidPattern`; raw glob text is retained. Baseline format 2 and checkpoint format 3 persist matching policy and preferences, and refuse older formats.
+
 - Requires Zig 0.17.0; Zig 0.16 no longer builds lookout. On the BSDs and Apple targets the mount query is declared in Zig instead of imported from C headers, and a named Apple target links against `-Dmacos-sdk=<path>` or the pinned framework SDK: the build no longer asks the host for its SDK at configure time, and `--sysroot` is no longer read.
 
 - A `Watcher` keeps no `std.Io`. `Watcher.init(gpa, options)` takes none; `add`, `remove`, `refilter`, `poll` and `deinit` take the `io` they go through, as `std.Io.File.close(io)` does.
@@ -18,7 +22,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A `Baseline` keeps its allocator and no `std.Io`: `deinit()` takes no allocator, `diff(io)` and `save(io, filename, options)` take the `io`. `save` takes the `SaveOptions` that `saveWithOptions` took, which is gone. `Baseline.Error` is `Baseline.SeedError` and `Baseline.DiffError`.
 
-- Filter patterns are git's, matched by [sweep](https://github.com/pedronaugusto/sweep): `**` crosses directories only as a whole component (`build/**`, `**/x`, `a/**/b`), and anywhere else it is `*`, so `a**/c` now names `ax/c` and no longer `ax/y/c`. `[...]` brackets are syntax, and so is a `\` escape except on Windows, where `\` is a separator. `?` is one character on Linux too, where it was one byte. Case and composition are folded as before. A pattern git refuses (an unclosed `[`, an unknown `[:class:]`, a trailing `\`) makes `Watcher.add`, `Watcher.refilter`, `Baseline.seed` and `Baseline.load` return `error.InvalidPattern`, and one past sweep's length `error.PatternTooLong`.
+- Filter patterns are git's, matched by [sweep](https://github.com/pedronaugusto/sweep): `**` crosses directories only as a whole component (`build/**`, `**/x`, `a/**/b`), and anywhere else it is `*`, so `a**/c` now names `ax/c` and no longer `ax/y/c`. `[...]` brackets are syntax, and so is a `\` escape except on Windows, where `\` is a separator. `?` is one character on Linux too, where it was one byte. Case follows measured directory policy; canonical composition is an explicit NFC preference where capability is unknown. A pattern git refuses (an unclosed `[`, an unknown `[:class:]`, a trailing `\`) makes `Watcher.add`, `Watcher.refilter`, `Baseline.seed` and `Baseline.load` return `error.InvalidPattern`, and one past sweep's length `error.PatternTooLong`.
 
 - `Filter` is what a caller asks for and nothing more: `Filter.dupe`, `Filter.deinit`, `Filter.excludes`, `Filter.prunes` and `Filter.isEmpty` are gone, and a filter owns nothing.
 

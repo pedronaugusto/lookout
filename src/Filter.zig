@@ -22,11 +22,17 @@
 //! kept new name, `removed` at the kept old one. See
 //! `lookout.pairsRenames`.
 //!
-//! On Apple and Windows targets, comparisons fold ASCII and Latin-1 case
-//! and composition, so `*.TMP` excludes `notes.tmp`. Other Unicode
-//! scripts are compared as written. See `path.folds_case`.
+//! Name matching follows the measured directory policy unless the caller
+//! sets `case` or `normalization`. Sweep owns the glob grammar and Unicode.
 
+const sweep = @import("sweep");
+const identity = @import("identity.zig");
 const Filter = @This();
+
+/// Explicit filter preference; null follows the directory policy.
+case: ?sweep.Case = null,
+/// Explicit scalar normalization preference, separate from identity.
+normalization: ?identity.Policy.Normalization = null,
 
 /// Patterns naming what this watch is not about, matched against each
 /// path below the watch root.

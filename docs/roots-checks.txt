@@ -1,0 +1,41 @@
+preflight: assertion density: 60 assertions in 648 functions
+preflight: source quality
+preflight: ziglint
+preflight: namespace layout
+preflight: cast reasons
+preflight: function length
+preflight: documentation
+preflight: test imports
+preflight: package paths
+check
++- compile test lookout-tests debug native 2 errors
+src/Baseline.zig:978:60: error: expected type 'match.Match', found 'match.Match'
+        .{ .at = .{ .nth = .{ .call = .sync_data, .n = 1, .path = temp } }, .fault = .{ .code = seam.io_error } },
+                                                          ~^~~~~~~~~~~
+zig-pkg/shakedown-0.1.0-BR8U441oDgBA_guQJ481zswN7jK3G8X4nKygC9-IuaxT/src/match.zig:6:19: note: union declared here
+pub const Match = union(enum) {
+                  ^~~~~
+zig-pkg/shakedown-0.1.0-BR8U4177DQAXS79Rcl1reGMylJ-qq3g0WNSWNyjjfw19/src/match.zig:6:19: note: union declared here
+referenced by:
+    Baseline: src/lookout.zig:94:30
+    test.what an overflow lost can be read back from a baseline: src/testing/suite_test.zig:1383:26
+    1 reference(s) hidden; use '-freference-trace=3' to see all references
+src/testing/fuzz_test.zig:514:33: error: type 'u8' cannot represent integer value '1114112'
+            try out.append(gpa, 0x110000 + text[i]);
+                                ^~~~~~~~
+error: 2 compilation errors
+failed command: /Users/gusto/.local/zig/0.17.0/zig test -Odebug --dep airlock --dep sweep --dep shakedown --dep airlock.testing --dep preflight_timings --dep preflight_order --dep preflight_runner_options --dep preflight_default_test_runner -Mroot=src/tests.zig -Odebug --dep seam -Mairlock=zig-pkg/airlock-0.1.0-rfvu6CZTBQB7slH2y-nDXvVwoLp-sbWLW_E1X9J3DwhQ/src/airlock.zig -Odebug -Msweep=zig-pkg/sweep-0.1.0-6ErwaRz9OgCj0kKEjszwD06sKTUKt85YMfvhmI9rVlj4/src/sweep.zig -Odebug -Mshakedown=zig-pkg/shakedown-0.1.0-BR8U441oDgBA_guQJ481zswN7jK3G8X4nKygC9-IuaxT/src/shakedown.zig -Odebug --dep seam --dep shakedown=shakedown0 -Mairlock.testing=zig-pkg/airlock-0.1.0-rfvu6CZTBQB7slH2y-nDXvVwoLp-sbWLW_E1X9J3DwhQ/src/testing.zig -Mpreflight_timings=zig-pkg/preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r/src/timings.zig -Mpreflight_order=zig-pkg/preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r/src/order.zig -Mpreflight_runner_options=.zig-cache/o/5c91b85b341fd587fc6de1cbb1b22fb0/options.zig -Mpreflight_default_test_runner=/Users/gusto/.local/zig/0.17.0/lib/compiler/test_runner.zig -Odebug -Mseam=zig-pkg/airlock-0.1.0-rfvu6CZTBQB7slH2y-nDXvVwoLp-sbWLW_E1X9J3DwhQ/src/seam.zig -Odebug -Mshakedown0=zig-pkg/shakedown-0.1.0-BR8U4177DQAXS79Rcl1reGMylJ-qq3g0WNSWNyjjfw19/src/shakedown.zig -framework CoreServices -lc --test-runner zig-pkg/preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r/src/runner.zig --cache-dir .zig-cache --global-cache-dir /Users/gusto/.cache/zig --build-root . --name lookout-tests --zig-lib-dir /Users/gusto/.local/zig/0.17.0/lib/ --listen=-
+
+Build Summary: 9/11 steps succeeded (1 failed)
+check transitive failure
++- compile test lookout-tests debug native 2 errors
+   +- options cached
+lint success
++- run exe preflight-checks success 53s
+   +- compile exe preflight-checks safe aarch64-macos-none cached 53ms MaxRSS:31M
+   +- compile exe ziglint safe aarch64-macos-none cached 52ms MaxRSS:31M
+   |  +- options cached
+   +- run exe preflight-structure success 56ms
+      +- compile exe preflight-structure debug aarch64-macos-none cached 53ms MaxRSS:31M
+      +- zig fmt --check success
+

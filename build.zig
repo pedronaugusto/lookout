@@ -246,7 +246,13 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
         .optimize = optimize,
         .imports = imports,
     });
-    return b.allocator.dupe(std.Build.Module.Import, &.{
+    if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |shakedown| {
+        return b.allocator.dupe(std.Build.Module.Import, &.{
+            .{ .name = "lookout", .module = lookout },
+            .{ .name = "filter", .module = filter },
+            .{ .name = "shakedown", .module = shakedown.module("shakedown") },
+        }) catch @panic("OOM");
+    } else |_| return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "lookout", .module = lookout },
         .{ .name = "filter", .module = filter },
     }) catch @panic("OOM");

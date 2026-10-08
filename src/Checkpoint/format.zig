@@ -1,10 +1,12 @@
 //! The private, versioned checkpoint wire format.
 
+const name_policy = @import("../identity.zig");
+const sweep = @import("sweep");
 const lookout = @import("../types.zig");
 
 /// The format a watcher writes and the only one `parse` reads, versioned
 /// independently of the package.
-pub const version = 2;
+pub const version = 3;
 
 /// The serialized format is versioned independently of the package.
 pub const State = struct {
@@ -29,6 +31,10 @@ pub const Watch = struct {
     /// though they covered paths they never did, so it is refused.
     ignore: []const []const u8 = &.{},
     only: []const []const u8 = &.{},
+    case: ?sweep.Case = null,
+    normalization: ?name_policy.Policy.Normalization = null,
+    policy: name_policy.Policy = .{},
+    identity_override: ?name_policy.Policy = null,
 };
 
 /// Stable volume identity and the identity of its current FSEvents log.

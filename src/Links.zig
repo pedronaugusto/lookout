@@ -23,6 +23,7 @@ const Batch = @import("Batch.zig");
 const Filter = @import("Filter.zig");
 const CompiledFilter = @import("CompiledFilter.zig");
 const airlock = @import("airlock");
+const names = @import("identity.zig");
 const path_cmp = @import("path.zig");
 const types = @import("types.zig");
 const walk = @import("walk.zig");
@@ -63,6 +64,8 @@ pub const Host = struct {
 const Links = @This();
 
 gpa: Allocator,
+io: Io,
+identity_override: ?names.Policy,
 /// The watch the links are in.
 owner: WatchId,
 /// Its root, canonical. Owned.
@@ -111,14 +114,20 @@ pub const Link = struct {
         var buffer: [4096]u8 = undefined;
         // Too long to spell here: let it through, the report decides.
         const spelled = link.alias.spell(&buffer, subject) orelse return true;
-        return !link.links.filter.prunes(link.links.root, spelled);
+        return !link.links.prunes(link.links.io, spelled);
     }
 };
+
+fn prunes(l: *const Links, io: Io, subject: []const u8) bool {
+    if (l.filter.isEmpty()) return false;
+    const parent = std.Io.Dir.path.dirname(subject) orelse l.root;
+    return l.filter.prunesPolicy(names.read(l.gpa, io, parent).policy(l.identity_override), l.root, subject);
+}
 
 /// The links of the watch `owner`, of which none are followed yet. Null
 /// when the root's identity cannot be read: without it no link can be
 /// shown not to lead back.
-pub fn create(gpa: Allocator, io: Io, owner: WatchId, root: []const u8, filter: Filter, max: usize) Allocator.Error!?*Links {
+pub fn create(gpa: Allocator, io: Io, owner: WatchId, root: []const u8, filter: Filter, policy: names.Policy, identity_override: ?names.Policy, max: usize) Allocator.Error!?*Links {
     const identity = identityOf(io, root) orelse return null;
     const l = try gpa.create(Links);
     errdefer gpa.destroy(l);
@@ -126,9 +135,11 @@ pub fn create(gpa: Allocator, io: Io, owner: WatchId, root: []const u8, filter: 
     errdefer gpa.free(owned);
     l.* = .{
         .gpa = gpa,
+        .io = io,
+        .identity_override = identity_override,
         .owner = owner,
         .root = owned,
-        .filter = try CompiledFilter.recompile(gpa, filter),
+        .filter = try CompiledFilter.recompile(gpa, filter, policy),
         .max = max,
         .identity = identity,
     };
@@ -168,7 +179,7 @@ pub fn consider(l: *const Links, io: Io, subject: []const u8) Allocator.Error!Ve
     const named = Io.Dir.cwd().statFile(io, subject, .{ .follow_symlinks = false }) catch return .none;
     if (named.kind != .sym_link) return .none;
     if (l.find(subject)) |link| return .{ .followed = link };
-    const real = Io.Dir.cwd().realPathFileAlloc(io, subject, l.gpa) catch |err| switch (err) {
+    const real = names.canonical(l.gpa, io, subject) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // Leads nowhere, or nowhere this process may look.
         else => return .idle,
@@ -253,7 +264,7 @@ fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8
         const Self = @This();
 
         fn visit(f: Self, entry: walk.Entry) anyerror!walk.Step {
-            if (f.l.filter.prunes(f.l.root, entry.path)) return .over;
+            if (f.l.prunes(f.l.io, entry.path)) return .over;
             switch (entry.kind) {
                 .directory => return .into,
                 .sym_link => {
@@ -282,7 +293,7 @@ fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8
 /// leads to no directory, or to one the watch reaches another way, is
 /// remembered as idle.
 pub fn follow(l: *Links, io: Io, host: Host, batch: *Batch, subject: []const u8) Allocator.Error!?*Link {
-    if (l.filter.prunes(l.root, subject)) return null;
+    if (l.prunes(io, subject)) return null;
     switch (try l.consider(io, subject)) {
         .none => return null,
         .followed => |link| return link,
@@ -322,7 +333,7 @@ fn adopt(l: *Links, subject: []const u8, target: []u8, identity: Identity, id: W
         .path = owned,
         .target = target,
         .identity = identity,
-        .alias = .{ .owner = l.owner, .root = l.root, .filter = &l.filter, .physical = target, .logical = owned },
+        .alias = .{ .gpa = l.gpa, .io = l.io, .identity_override = l.identity_override, .owner = l.owner, .root = l.root, .filter = &l.filter, .physical = target, .logical = owned },
     };
     l.followed.appendAssumeCapacity(link);
     return link;
@@ -385,7 +396,7 @@ fn wake(l: *Links, subject: []const u8, below: bool) void {
 /// Whether a followed link still leads where it was followed to, and is
 /// still something the watch is about.
 fn stands(l: *const Links, io: Io, link: *const Link) bool {
-    if (l.filter.prunes(l.root, link.path)) return false;
+    if (l.prunes(io, link.path)) return false;
     const named = Io.Dir.cwd().statFile(io, link.path, .{ .follow_symlinks = false }) catch return false;
     if (named.kind != .sym_link) return false;
     const now = identityOf(io, link.path) orelse return false;
@@ -489,7 +500,7 @@ fn noted(l: *Links, io: Io, host: Host, batch: *Batch, item: Batch.Note) Allocat
 /// Replaces the filter the links are judged by. The registrations keep
 /// asking it; the caller refilters them and then refreshes.
 pub fn refilter(l: *Links, next: Filter) Allocator.Error!void {
-    const replacement = try CompiledFilter.recompile(l.gpa, next);
+    const replacement = try CompiledFilter.recompile(l.gpa, next, l.filter.policy);
     l.filter.deinit();
     l.filter = replacement;
 }
@@ -542,7 +553,7 @@ test "a link is followed only into a directory the watch does not reach" {
     };
     var nothing: u8 = 0;
     const idle: Host = .{ .context = &nothing, .issue_fn = Idle.issue, .register_fn = Idle.register, .unregister_fn = Idle.unregister };
-    const l = (try create(gpa, io, @fromBackingInt(@intCast(0)), root, .none, 64)) orelse return error.SkipZigTest;
+    const l = (try create(gpa, io, @fromBackingInt(@intCast(0)), root, .none, .{}, null, 64)) orelse return error.SkipZigTest;
     defer l.destroy(io, idle);
     for (cases) |case| {
         const subject = try std.Io.Dir.path.join(gpa, &.{ root, case.link });

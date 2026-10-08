@@ -34,7 +34,7 @@ test "checkpoint tokens own their paths and refuse unknown formats" {
     const testing = std.testing;
     const gpa = testing.allocator;
     const root = if (builtin.target.os.tag == .windows) "C:\\watch" else "/watch";
-    var original: Checkpoint = .{ .state = try format.copy(gpa, .{ .version = 2, .backend = .fsevents, .watches = &.{.{
+    var original: Checkpoint = .{ .state = try format.copy(gpa, .{ .version = 3, .backend = .fsevents, .watches = &.{.{
         .root = root,
         .baseline = .{ .flat = &.{root} },
         .recursive = true,
@@ -49,7 +49,7 @@ test "checkpoint tokens own their paths and refuse unknown formats" {
     defer parsed.deinit();
     try testing.expectEqual(@as(u64, 1234), parsed.state.value.watches[0].cursor);
     try testing.expectEqualStrings(root, parsed.state.value.watches[0].changes[0].path);
-    for ([_][]const u8{ "", "1.fsevents.1234", "{}", "{\"version\":1,\"backend\":\"fsevents\",\"watches\":[]}", "{\"version\":1,\"backend\":\"poll\",\"watches\":[]}" }) |bad| {
+    for ([_][]const u8{ "", "1.fsevents.1234", "{}", "{\"version\":1,\"backend\":\"fsevents\",\"watches\":[]}", "{\"version\":1,\"backend\":\"poll\",\"watches\":[]}", "{\"version\":2,\"backend\":\"fsevents\",\"watches\":[]}" }) |bad| {
         try testing.expectError(error.InvalidCheckpoint, parse(gpa, bad));
     }
 }
@@ -57,7 +57,7 @@ test "checkpoint tokens own their paths and refuse unknown formats" {
 // A host cursor alone cannot identify the volume or its current log.
 test "checkpoint tokens require volume and log identity" {
     const root = if (builtin.target.os.tag == .windows) "C:\\watch" else "/watch";
-    const text = try std.testing.allocator.print("{{\"version\":2,\"backend\":\"fsevents\",\"watches\":[{{\"root\":{f},\"baseline\":[],\"recursive\":true,\"cursor\":1234}}]}}", .{std.json.fmt(root, .{})});
+    const text = try std.testing.allocator.print("{{\"version\":3,\"backend\":\"fsevents\",\"watches\":[{{\"root\":{f},\"baseline\":[],\"recursive\":true,\"cursor\":1234}}]}}", .{std.json.fmt(root, .{})});
     defer std.testing.allocator.free(text);
     if (parse(std.testing.allocator, text)) |value| {
         var accepted = value;
@@ -72,10 +72,10 @@ test "checkpoint paths cannot omit their baseline or escape the root" {
     const escaped = try std.Io.Dir.path.join(gpa, &.{ root, "..", "outside" });
     defer gpa.free(escaped);
     const identity: format.Identity = .{ .volume = @splat('1'), .log = @splat('2') };
-    const text = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 2, .backend = .fsevents, .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true, .baseline = .{ .flat = &.{escaped} } }} }, .{});
+    const text = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 3, .backend = .fsevents, .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true, .baseline = .{ .flat = &.{escaped} } }} }, .{});
     defer gpa.free(text);
     try std.testing.expectError(error.InvalidCheckpoint, parse(gpa, text));
-    const missing = try std.json.Stringify.valueAlloc(gpa, .{ .version = 2, .backend = "fsevents", .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true }} }, .{});
+    const missing = try std.json.Stringify.valueAlloc(gpa, .{ .version = 3, .backend = "fsevents", .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true }} }, .{});
     defer gpa.free(missing);
     try std.testing.expectError(error.InvalidCheckpoint, parse(gpa, missing));
 }
@@ -85,11 +85,11 @@ test "a checkpoint token naming one root twice is refused" {
     const root = if (builtin.target.os.tag == .windows) "C:\\watch" else "/watch";
     const identity: format.Identity = .{ .volume = @splat('1'), .log = @splat('2') };
     const watch: format.Watch = .{ .root = root, .cursor = 1, .identity = identity, .recursive = true, .baseline = .{ .flat = &.{root} } };
-    const once = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 2, .backend = .fsevents, .watches = &.{watch} }, .{});
+    const once = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 3, .backend = .fsevents, .watches = &.{watch} }, .{});
     defer gpa.free(once);
     var parsed = try parse(gpa, once);
     parsed.deinit();
-    const twice = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 2, .backend = .fsevents, .watches = &.{ watch, watch } }, .{});
+    const twice = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 3, .backend = .fsevents, .watches = &.{ watch, watch } }, .{});
     defer gpa.free(twice);
     try std.testing.expectError(error.InvalidCheckpoint, parse(gpa, twice));
 }
