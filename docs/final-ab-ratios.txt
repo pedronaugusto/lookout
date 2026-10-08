@@ -1,0 +1,42 @@
+ignore_1 exact: median after/before 0.3822; spread [0.3716, 0.3940]
+ignore_1 folded: median after/before 0.9291; spread [0.9272, 0.9579]
+ignore_1 nfc: median after/before 0.9354; spread [0.9302, 0.9662]
+ignore_20 exact: median after/before 0.5021; spread [0.4949, 0.5131]
+ignore_20 folded: median after/before 0.5767; spread [0.5712, 0.5968]
+ignore_20 nfc: median after/before 0.5798; spread [0.5680, 0.5956]
+only_3 exact: median after/before 0.2705; spread [0.2674, 0.2760]
+only_3 folded: median after/before 0.7155; spread [0.7088, 0.8863]
+only_3 nfc: median after/before 0.7723; spread [0.7592, 0.7741]
+ignore_20_only_3 exact: median after/before 0.5296; spread [0.5186, 0.5477]
+ignore_20_only_3 folded: median after/before 0.7095; spread [0.6955, 0.8719]
+ignore_20_only_3 nfc: median after/before 0.7177; spread [0.7102, 0.7410]
+blocked_change_fsevents: median after/before 0.8333; spread [0.4348, 3.4667]
+blocked_change_fsevents: target 500 ms; observed after range [10, 118] ms; misses 0/7
+blocked_change_kqueue: median after/before 0.7500; spread [0.0000, 14.0000]
+blocked_change_kqueue: target 500 ms; observed after range [0, 18] ms; misses 0/7
+blocked_change_poll: median after/before 1.0169; spread [0.9194, 1.7031]
+blocked_change_poll: target 700 ms; observed after range [56, 109] ms; misses 0/7
+rename_then_delete_fsevents: median after/before 0.9841; spread [0.9254, 2.3333]
+rename_then_delete_fsevents: target 2500 ms; observed after range [59, 133] ms; misses 0/7
+rename_then_delete_kqueue: median after/before 0.9804; spread [0.9804, 1.0000]
+rename_then_delete_kqueue: target 2500 ms; observed after range [50, 52] ms; misses 0/7
+rename_then_delete_poll: median after/before 0.9808; spread [0.9310, 1.0392]
+rename_then_delete_poll: target 2500 ms; observed after range [50, 54] ms; misses 0/7
+cancel_before_poll_fsevents: median after/before 1.0000; spread [0.9091, 1.1800]
+cancel_before_poll_fsevents: target 2500 ms; observed after range [50, 59] ms; misses 0/7
+cancel_before_poll_kqueue: median after/before 1.0000; spread [0.9091, 1.1176]
+cancel_before_poll_kqueue: target 2500 ms; observed after range [50, 57] ms; misses 0/7
+cancel_before_poll_poll: median after/before 1.0000; spread [0.9273, 4.1500]
+cancel_before_poll_poll: target 2500 ms; observed after range [51, 249] ms; misses 0/7
+wake_fsevents: median after/before 1.0092; spread [0.9524, 1.0700]
+wake_fsevents: target 5000 ms; observed after range [100, 110] ms; misses 0/7
+wake_kqueue: median after/before 1.0000; spread [0.9630, 1.0294]
+wake_kqueue: target 5000 ms; observed after range [100, 110] ms; misses 0/7
+wake_poll: median after/before 1.0259; spread [0.9217, 1.0973]
+wake_poll: target 5000 ms; observed after range [106, 125] ms; misses 0/7
+stop_by_flag_fsevents: timer-floor baseline; paired delta median 0 ms; spread [-2, 129] ms
+stop_by_flag_fsevents: target 5000 ms; observed after range [0, 129] ms; misses 0/7
+stop_by_flag_kqueue: timer-floor baseline; paired delta median 0 ms; spread [0, 0] ms
+stop_by_flag_kqueue: target 5000 ms; observed after range [0, 0] ms; misses 0/7
+stop_by_flag_poll: timer-floor baseline; paired delta median 0 ms; spread [-16, 7] ms
+stop_by_flag_poll: target 5000 ms; observed after range [0, 26] ms; misses 0/7

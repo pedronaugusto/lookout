@@ -138,10 +138,10 @@ pub const Alias = struct {
         return spelled;
     }
 
-    fn keeps(alias: *const Alias, gpa: Allocator, io: Io, subject: []const u8) bool {
+    fn keeps(alias: *const Alias, io: Io, subject: []const u8) bool {
         if (alias.filter.isEmpty()) return true;
         const parent = std.Io.Dir.path.dirname(subject) orelse alias.root;
-        const policy = alias.identity_override orelse identity.read(gpa, io, parent).policy(null);
+        const policy = alias.identity_override orelse identity.read(io, parent).policy(null);
         return !alias.filter.excludesPolicy(policy, alias.root, subject);
     }
 };
@@ -329,9 +329,9 @@ fn pushAliased(b: *Batch, gpa: Allocator, io: Io, alias: *const Alias, subject: 
     defer gpa.free(here);
     const there = if (from) |source| try alias.spellAlloc(gpa, source) else null;
     defer if (there) |spelled| gpa.free(spelled);
-    const keeps = alias.keeps(gpa, io, here);
+    const keeps = alias.keeps(io, here);
     if (kind == .renamed and there != null) {
-        const keeps_from = alias.keeps(gpa, io, there.?);
+        const keeps_from = alias.keeps(io, there.?);
         if (keeps and keeps_from) return b.pushDetail(gpa, io, alias.owner, here, .renamed, there, target);
         if (keeps) return b.pushDetail(gpa, io, alias.owner, here, .created, null, target);
         if (keeps_from) return b.pushDetail(gpa, io, alias.owner, there.?, .removed, null, target);
@@ -607,7 +607,7 @@ pub fn deferChange(b: *Batch, gpa: Allocator, io: Io, id: WatchId, subject: []co
         defer gpa.free(here);
         const there = if (from) |source| try alias.spellAlloc(gpa, source) else null;
         defer if (there) |spelled| gpa.free(spelled);
-        if (!alias.keeps(gpa, io, here)) return;
+        if (!alias.keeps(io, here)) return;
         return b.deferChange(gpa, io, alias.owner, here, kind, there, target);
     }
     const owned = try gpa.dupe(u8, subject);
@@ -1512,7 +1512,7 @@ test "unknown directory capability uses the current Io for deferred aliases" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const facts = identity.read(gpa, io, root);
+    const facts = identity.read(io, root);
     if (facts.case_sensitive == null or facts.case_sensitive.?) return error.SkipZigTest;
     const subject = try std.Io.Dir.path.join(gpa, &.{ root, "foo" });
     defer gpa.free(subject);

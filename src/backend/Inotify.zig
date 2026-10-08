@@ -228,7 +228,7 @@ pub fn add(
 
     const root = try n.gpa.dupe(u8, abs_path);
     errdefer n.gpa.free(root);
-    var filter = try CompiledFilter.compilePolicy(n.gpa, options.filter, identity.read(n.gpa, io, abs_path).policy(options.identity));
+    var filter = try CompiledFilter.compilePolicy(n.gpa, options.filter, identity.read(io, abs_path).policy(options.identity));
     errdefer filter.deinit();
     try n.watches.put(n.gpa, id, .{
         .root = root,
@@ -387,7 +387,7 @@ fn excluded(n: *const Inotify, io: Io, id: WatchId, subject: []const u8) bool {
     const watch = n.watches.get(id) orelse return false;
     if (watch.filter.isEmpty()) return false;
     const parent = std.Io.Dir.path.dirname(subject) orelse watch.root;
-    return watch.filter.excludesPolicy(identity.read(n.gpa, io, parent).policy(watch.identity_override), watch.root, subject);
+    return watch.filter.excludesPolicy(identity.read(io, parent).policy(watch.identity_override), watch.root, subject);
 }
 
 /// Whether a directory is so far outside the watch that it need not be
@@ -396,7 +396,7 @@ fn pruned(n: *const Inotify, io: Io, id: WatchId, subject: []const u8) bool {
     const watch = n.watches.get(id) orelse return false;
     if (watch.filter.isEmpty()) return false;
     const parent = std.Io.Dir.path.dirname(subject) orelse watch.root;
-    return watch.filter.prunesPolicy(identity.read(n.gpa, io, parent).policy(watch.identity_override), watch.root, subject);
+    return watch.filter.prunesPolicy(identity.read(io, parent).policy(watch.identity_override), watch.root, subject);
 }
 
 /// Waits on the inotify descriptor until it reports something `batch` did

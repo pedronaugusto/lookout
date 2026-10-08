@@ -1,0 +1,12 @@
+first run: created /Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since/seen.txt
+checkpoint: {"version":3,"backend":"fsevents","watches":[{"root":"/Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since","cursor":3163642554,"itest
++- run test lookout-tests w
+preflight: test seed 3178641617 (reproduce with PREFLIGHT_TEST_SEED=3178641617)
+failed command: ./.zig-cache/o/c1c00944ea927a05875406374a5b5213/lookout-tests --cache-dir=./.zig-cache --seed=0xbd7638d1 --listen=-
+
+e/zig-out/lookout-since/seen.txt"],"changes":[],"half":null,"ignore":[],"only":[],"case":null,"normalization":null,"policy":{"case_sensitive":false,"normalization":"exact"},"identity_override":null}]}
+since: removed /Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since/seen.txt
+sume/zig-out/lookout-example/later/inside
+baseline: created /Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-example/written-while-away.txt
+backend: fsevents
+prunes ignored: false

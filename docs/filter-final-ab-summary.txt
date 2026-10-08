@@ -1,0 +1,16 @@
+ignore_1 before: best 398.512 ns/question; median of round best 403.101; rounds 7
+ignore_20 before: best 490.440 ns/question; median of round best 492.323; rounds 7
+only_3 before: best 339.721 ns/question; median of round best 342.852; rounds 7
+ignore_20_only_3 before: best 524.122 ns/question; median of round best 526.961; rounds 7
+ignore_1 exact: best 152.795 ns/question; median of round best 154.322; rounds 7
+ignore_20 exact: best 243.994 ns/question; median of round best 246.242; rounds 7
+only_3 exact: best 90.902 ns/question; median of round best 92.383; rounds 7
+ignore_20_only_3 exact: best 275.989 ns/question; median of round best 279.939; rounds 7
+ignore_1 folded: best 371.453 ns/question; median of round best 376.253; rounds 7
+ignore_20 folded: best 280.335 ns/question; median of round best 283.931; rounds 7
+only_3 folded: best 243.210 ns/question; median of round best 244.970; rounds 7
+ignore_20_only_3 folded: best 371.843 ns/question; median of round best 375.788; rounds 7
+ignore_1 nfc: best 372.211 ns/question; median of round best 381.964; rounds 7
+ignore_20 nfc: best 279.628 ns/question; median of round best 286.049; rounds 7
+only_3 nfc: best 258.086 ns/question; median of round best 263.523; rounds 7
+ignore_20_only_3 nfc: best 374.066 ns/question; median of round best 383.378; rounds 7

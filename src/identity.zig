@@ -17,10 +17,10 @@ pub const Capabilities = struct {
     }
 };
 
-pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Capabilities {
+pub fn read(io: std.Io, path: []const u8) Capabilities {
     if (builtin.target.os.tag.isDarwin()) {
-        const name = gpa.dupeSentinel(u8, path, 0) catch return .{};
-        defer gpa.free(name);
+        var name_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
+        const name = nativeName(path, &name_buffer) orelse return .{};
         const Attr = extern struct { count: u16 = 5, reserved: u16 = 0, common: u32 = 0, volume: u32 = 0x80020000, directory: u32 = 0, file: u32 = 0, fork: u32 = 0 };
         var attrs: Attr = .{};
         const Result = extern struct { len: u32, capabilities: [4]u32, valid: [4]u32 };
@@ -38,8 +38,8 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Capabilities {
         return .{ .case_sensitive = flags & 1 != 0 };
     }
     if (builtin.target.os.tag == .linux) {
-        const name = gpa.dupeSentinel(u8, path, 0) catch return .{};
-        defer gpa.free(name);
+        var name_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
+        const name = nativeName(path, &name_buffer) orelse return .{};
         var storage: [256]usize = undefined;
         const rc = std.os.linux.syscall2(.statfs, @intFromPtr(name.ptr), @intFromPtr(&storage)); // safe: the syscall borrows the terminated name and aligned writable statfs buffer
         if (std.os.linux.errno(rc) != .SUCCESS) return .{};
@@ -59,6 +59,13 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Capabilities {
     }
     return .{};
 }
+fn nativeName(path: []const u8, buffer: *[std.Io.Dir.max_path_bytes + 1]u8) ?[:0]const u8 {
+    if (path.len >= buffer.len) return null;
+    @memcpy(buffer[0..path.len], path);
+    buffer[path.len] = 0;
+    return buffer[0..path.len :0];
+}
+
 extern "c" fn getattrlist([*:0]const u8, *const anyopaque, *anyopaque, usize, c_ulong) c_int;
 extern "kernel32" fn GetFileInformationByHandleEx(std.os.windows.HANDLE, c_int, *anyopaque, u32) callconv(.winapi) std.os.windows.BOOL;
 

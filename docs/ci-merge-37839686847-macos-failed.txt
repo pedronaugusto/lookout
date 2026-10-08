@@ -1,0 +1,521 @@
+gate / test (macos-latest, Debug)	UNKNOWN STEP	﻿2026-10-08T20:30:21.1110880Z Current runner version: '2.337.0'
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1134440Z ##[group]Runner Image Provisioner
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1135130Z Hosted Compute Agent
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1135580Z Version: 20260828.587
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1136080Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1136670Z Build Date: 2026-08-28T16:44:25Z
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1137220Z Worker ID: {4300f5f4-629d-4c10-b410-c373de5f1e04}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1137750Z Azure Region: westus
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1138180Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1139330Z ##[group]Operating System
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1139820Z macOS
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1140190Z 26.6.2
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1140520Z 25G83
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1140860Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1141240Z ##[group]Runner Image
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1141650Z Image: macos-26-arm64
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1142060Z Version: 20260907.0351.1
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1143100Z Included Software: https://github.com/actions/runner-images/blob/macos-26-arm64/20260907.0351/images/macos/macos-26-arm64-Readme.md
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1144360Z Image Release: https://github.com/actions/runner-images/releases/tag/macos-26-arm64%2F20260907.0351
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1145130Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1146050Z ##[group]GITHUB_TOKEN Permissions
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1147370Z Actions: read
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1147740Z Contents: read
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1148100Z Metadata: read
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1148460Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1149980Z Secret source: Actions
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1150560Z Cache mode: write
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1151030Z Prepare workflow directory
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1509870Z Prepare all required actions
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.1562550Z Getting action download info
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.5545790Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:21.8856750Z Download action repository 'actions/upload-artifact@v4' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1072520Z Uses: pedronaugusto/preflight/.github/workflows/zig.yml@b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1075530Z ##[group] Inputs
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1075920Z   tier: merge
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1076440Z   adopt: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1076790Z   working-directory: .
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1077210Z   preflight-ref: b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1077660Z   attest: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1078570Z   fast-matrix: {"include":[{"os":"ubuntu-latest","name":"Linux Debug","step":"preflight-fast","args":"-Doptimize=debug","shard":"","setup":true,"job_timeout":20,"cache_key":"fast-linux-debug-0","artifact":""}]}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1080960Z   merge-matrix: {"include":[{"os":"ubuntu-latest","name":"Linux Debug","step":"preflight-fast","args":"-Doptimize=debug -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"fast-linux-debug-0","artifact":""},{"os":"macos-latest","name":"test (macos-latest, Debug)","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"ebda036faf315e75","artifact":""}]}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1084260Z   merge-compile-matrix: {"include":[{"os":"ubuntu-latest","name":"compile for test (windows-latest, Debug)","step":"ci-build","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"}]}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1086570Z   merge-run-matrix: {"include":[{"os":"windows-latest","name":"test (windows-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"}]}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1095400Z   release-matrix: {"include":[{"os":"ubuntu-latest","name":"test (ubuntu-latest, Debug)","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"64526a725a6be397","artifact":""},{"os":"ubuntu-latest","name":"test (ubuntu-latest, ReleaseSafe)","step":"ci","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"929001d8bf20c626","artifact":""},{"os":"ubuntu-latest","name":"test (ubuntu-latest, ReleaseFast)","step":"ci","args":"-Doptimize=fast -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"ff4d0a7dbdf6570c","artifact":""},{"os":"macos-latest","name":"test (macos-latest, Debug)","step":"ci","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"ebda036faf315e75","artifact":""},{"os":"macos-latest","name":"test (macos-latest, ReleaseSafe)","step":"ci","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"b231e36a5f15deb2","artifact":""},{"os":"ubuntu-latest","name":"source checks and documented snippets","step":"lint","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"f8fb09ced14d6cbf","artifact":""},{"os":"ubuntu-latest","name":"compile (ReleaseSmall)","step":"install","args":"-Doptimize=small","shard":"","setup":false,"job_timeout":20,"cache_key":"12fec5ad133102ff","artifact":""},{"os":"ubuntu-latest","name":"cross (all configured targets)","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"31829ac6da603806","artifact":""},{"os":"ubuntu-latest","name":"ThreadSanitizer (Linux)","step":"test","args":"-Dthread-sanitizer -Doptimize=debug -Dci-lint=false","shard":"","setup":true,"job_timeout":20,"cache_key":"00e5a9bfc5503969","artifact":""}]}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1105650Z   release-compile-matrix: {"include":[{"os":"ubuntu-latest","name":"compile for test (windows-latest, Debug)","step":"ci-build","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"},{"os":"ubuntu-latest","name":"compile for test (windows-latest, ReleaseSafe)","step":"ci-build","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true -Dtarget=x86_64-windows-gnu","shard":"","setup":false,"job_timeout":20,"cache_key":"compile-79f6a6b2846d7f58","artifact":"preflight-79f6a6b2846d7f58"}]}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1109940Z   release-run-matrix: {"include":[{"os":"windows-latest","name":"test (windows-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"03c230abe180e8e9","artifact":"preflight-03c230abe180e8e9"},{"os":"windows-latest","name":"test (windows-latest, ReleaseSafe)","step":"ci-run","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"79f6a6b2846d7f58","artifact":"preflight-79f6a6b2846d7f58"}]}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1112090Z   compile-once: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1113670Z   test-job-timeout: 20
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1114040Z   windows-git-latest: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1114450Z   windows-job-timeout: 20
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1114860Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1115240Z Complete job name: gate / test (macos-latest, Debug)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1752950Z ##[group]Run actions/checkout@v4
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1754080Z with:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1754420Z   fetch-depth: 0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1754770Z   repository: pedronaugusto/lookout
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1757490Z   token: ***
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1757820Z   ssh-strict: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1758140Z   ssh-user: git
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1758480Z   persist-credentials: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1758930Z   clean: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1759300Z   sparse-checkout-cone-mode: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1759670Z   fetch-tags: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1760510Z   show-progress: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1760850Z   lfs: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1761350Z   submodules: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1761880Z   set-safe-directory: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1762330Z   allow-unsafe-pr-checkout: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.1763050Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.6293420Z Syncing repository: pedronaugusto/lookout
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.6297660Z ##[group]Getting Git version info
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.6298780Z Working directory is '/Users/runner/work/lookout/lookout'
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.6299700Z [command]/opt/homebrew/bin/git version
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.6924200Z git version 2.55.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.6945350Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.6952980Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/d1ddc1f5-ab65-45b7-9896-26493cf7c127/.gitconfig'
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.6965410Z Temporarily overriding HOME='/Users/runner/work/_temp/d1ddc1f5-ab65-45b7-9896-26493cf7c127' before making global git config changes
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.6968540Z Adding repository directory to the temporary git global config as a safe directory
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.6970880Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/lookout/lookout
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7125630Z Deleting the contents of '/Users/runner/work/lookout/lookout'
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7130810Z ##[group]Initializing the repository
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7135250Z [command]/opt/homebrew/bin/git init /Users/runner/work/lookout/lookout
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7756220Z hint: Using 'master' as the name for the initial branch. This default branch name
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7776230Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7782820Z hint: to use in all of your new repositories, which will suppress this warning,
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7784130Z hint: call:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7786070Z hint:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7788210Z hint: 	git config --global init.defaultBranch <name>
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7790420Z hint:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7802970Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7805440Z hint: 'development'. The just-created branch can be renamed via this command:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7807980Z hint:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7822060Z hint: 	git branch -m <name>
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7823580Z hint:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7829750Z hint: Disable this message with "git config set advice.defaultBranchName false"
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7832980Z Initialized empty Git repository in /Users/runner/work/lookout/lookout/.git/
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7842090Z [command]/opt/homebrew/bin/git remote add origin https://github.com/pedronaugusto/lookout
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7983790Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7984670Z ##[group]Disabling automatic garbage collection
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.7985250Z [command]/opt/homebrew/bin/git config --local gc.auto 0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.8339260Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.8436440Z ##[group]Setting up auth
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.8438330Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.8444070Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.9586270Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:22.9732900Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:23.0653950Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:23.0722880Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:23.2447720Z [command]/opt/homebrew/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:23.2451050Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:23.2452130Z ##[group]Fetching the repository
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:23.2464290Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1693590Z From https://github.com/pedronaugusto/lookout
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1696610Z  * [new branch]      adopt           -> origin/adopt
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1700030Z  * [new branch]      arch            -> origin/arch
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1701390Z  * [new branch]      ci-cache        -> origin/ci-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1702440Z  * [new branch]      cleanup         -> origin/cleanup
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1705810Z  * [new branch]      debt-2          -> origin/debt-2
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1707090Z  * [new branch]      follow-symlinks -> origin/follow-symlinks
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1708260Z  * [new branch]      gate            -> origin/gate
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1709340Z  * [new branch]      layout          -> origin/layout
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1710460Z  * [new branch]      main            -> origin/main
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1711590Z  * [new branch]      preflight       -> origin/preflight
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1712590Z  * [new branch]      race            -> origin/race
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1713660Z  * [new branch]      race-tree       -> origin/race-tree
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1714770Z  * [new branch]      review          -> origin/review
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1715900Z  * [new branch]      roots           -> origin/roots
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1717360Z  * [new branch]      zig-0.17        -> origin/zig-0.17
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1718370Z  * [new tag]         v0.1.1          -> v0.1.1
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1719200Z  * [new tag]         v0.2.0          -> v0.2.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1720390Z  * [new tag]         v0.3.0          -> v0.3.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1723180Z [command]/opt/homebrew/bin/git branch --list --remote origin/roots
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1843810Z   origin/roots
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1854610Z [command]/opt/homebrew/bin/git rev-parse refs/remotes/origin/roots
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1992080Z 84849437e2589d69146018d151ef39338ce8a693
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.1999760Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.2003280Z ##[group]Determining the checkout info
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.2007010Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.2009410Z [command]/opt/homebrew/bin/git sparse-checkout disable
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.2134470Z [command]/opt/homebrew/bin/git config --local --unset-all extensions.worktreeConfig
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.2229390Z ##[group]Checking out the ref
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.2234740Z [command]/opt/homebrew/bin/git checkout --progress --force -B roots refs/remotes/origin/roots
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.5193510Z Switched to a new branch 'roots'
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.5203320Z branch 'roots' set up to track 'origin/roots'.
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.5212120Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.5392960Z [command]/opt/homebrew/bin/git log -1 --format=%H
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.5500780Z 84849437e2589d69146018d151ef39338ce8a693
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6055940Z ##[group]Run actions/checkout@v4
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6056840Z with:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6057520Z   repository: pedronaugusto/preflight
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6058380Z   ref: b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6059240Z   path: .preflight
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6065790Z   token: ***
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6066470Z   ssh-strict: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6067090Z   ssh-user: git
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6067790Z   persist-credentials: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6068590Z   clean: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6069220Z   sparse-checkout-cone-mode: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6069960Z   fetch-depth: 1
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6070650Z   fetch-tags: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6071310Z   show-progress: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6071940Z   lfs: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6072520Z   submodules: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6073150Z   set-safe-directory: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6073860Z   allow-unsafe-pr-checkout: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.6074660Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7406320Z Syncing repository: pedronaugusto/preflight
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7408470Z ##[group]Getting Git version info
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7411330Z Working directory is '/Users/runner/work/lookout/lookout/.preflight'
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7474920Z [command]/opt/homebrew/bin/git version
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7608820Z git version 2.55.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7625200Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7632730Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/6bc9001e-aa3e-4713-b48e-1f15f0b0b14a/.gitconfig'
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7640130Z Temporarily overriding HOME='/Users/runner/work/_temp/6bc9001e-aa3e-4713-b48e-1f15f0b0b14a' before making global git config changes
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7641990Z Adding repository directory to the temporary git global config as a safe directory
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7649940Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/lookout/lookout/.preflight
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7799940Z ##[group]Initializing the repository
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.7804250Z [command]/opt/homebrew/bin/git init /Users/runner/work/lookout/lookout/.preflight
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8023610Z hint: Using 'master' as the name for the initial branch. This default branch name
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8025470Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8029610Z hint: to use in all of your new repositories, which will suppress this warning,
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8032260Z hint: call:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8033640Z hint:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8035310Z hint: 	git config --global init.defaultBranch <name>
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8037300Z hint:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8039230Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8041760Z hint: 'development'. The just-created branch can be renamed via this command:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8042930Z hint:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8043670Z hint: 	git branch -m <name>
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8045760Z hint:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8047110Z hint: Disable this message with "git config set advice.defaultBranchName false"
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8050020Z Initialized empty Git repository in /Users/runner/work/lookout/lookout/.preflight/.git/
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8056270Z [command]/opt/homebrew/bin/git remote add origin https://github.com/pedronaugusto/preflight
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8143370Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8144520Z ##[group]Disabling automatic garbage collection
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8151300Z [command]/opt/homebrew/bin/git config --local gc.auto 0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8252190Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8253650Z ##[group]Setting up auth
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8256190Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.8332340Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.9451530Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:24.9542240Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.0836550Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.0914330Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.2192530Z [command]/opt/homebrew/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.2282650Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.2283260Z ##[group]Fetching the repository
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.2289060Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.7485400Z From https://github.com/pedronaugusto/preflight
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.7509240Z  * branch            b28046cc22055fcd32640117fc0e6965283a8ae5 -> FETCH_HEAD
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.7526150Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.7526640Z ##[group]Determining the checkout info
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.7527110Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.7527540Z [command]/opt/homebrew/bin/git sparse-checkout disable
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.7608870Z [command]/opt/homebrew/bin/git config --local --unset-all extensions.worktreeConfig
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.7725440Z ##[group]Checking out the ref
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.7726130Z [command]/opt/homebrew/bin/git checkout --progress --force b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.8026090Z HEAD is now at b28046c Restore supported legacy lint behavior and defer F04 to glint
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.8039710Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.8177890Z [command]/opt/homebrew/bin/git log -1 --format=%H
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.8314300Z b28046cc22055fcd32640117fc0e6965283a8ae5
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.8706110Z Prepare all required actions
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:25.8706690Z Getting action download info
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:26.0099180Z Download action repository 'mlugg/setup-zig@v2' (SHA:d1434d08867e3ee9daa34448df10607b98908d29)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:28.8994410Z Download action repository 'actions/cache@v4' (SHA:0057852bfaa89a56745cba8c7296529d2fc39830)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0380040Z ##[group]Run ./.preflight/.github/actions/setup
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0380330Z with:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0380490Z   windows-git-latest: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0380710Z   working-directory: .
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0381060Z   build-args: -Doptimize=debug -Dci-lint=false -Dci-timings=true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0381370Z   build-key: ebda036faf315e75
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0381570Z   zig-version: 0.17.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0381740Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0455320Z ##[start-action display=Upgrade Git for Windows;id=__self.__run]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0472740Z ##[end-action id=__self.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0474800Z ##[start-action display=Run mlugg/setup-zig@v2;id=__self.__mlugg_setup-zig]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0515560Z ##[group]Run mlugg/setup-zig@v2
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0515830Z with:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0516020Z   version: 0.17.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0516160Z   use-cache: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0516320Z   cache-size-limit: 2048
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.0516580Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.3292300Z Using tool-cache: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.3294750Z Fetching zig-aarch64-macos-0.17.0.tar.xz
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:29.6618240Z Cache miss. Fetching Zig 0.17.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:30.2343410Z Available mirrors: https://pkg.hexops.org/zig, https://zigmirror.hryx.net/zig, https://zig.linus.dev/zig, https://zig.squirl.dev, https://zig.mirror.mschae23.de/zig, https://ziglang.freetls.fastly.net, https://zig.tilok.dev, https://zig-mirror.tsimnet.eu/zig, https://zig.karearl.com/zig, https://pkg.earth/zig, https://fs.liujiacai.net/zigbuilds, https://zigmirror.com, https://zig.chainsafe.dev, https://zig.savalione.com, https://zig.bcr.ist, https://zig.vortan.dev/zig, https://pkg.alexrp.com/zig
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:30.2345500Z Attempting mirror: https://zig.vortan.dev/zig
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:32.2484990Z [command]/opt/homebrew/bin/gtar --posix -cf cache.tzst --exclude cache.tzst -P -C /Users/runner/work/lookout/lookout --files-from manifest.txt --delay-directory-restore --use-compress-program zstdmt
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:33.6355430Z Sent 20381696 of 53988424 (37.8%), 19.4 MBs/sec
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:34.6373920Z Sent 53988424 of 53988424 (100.0%), 25.7 MBs/sec
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:35.0085130Z Fetch took 5679 ms
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:35.0086480Z Extracting tarball zig-aarch64-macos-0.17.0.tar.xz
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:35.0245980Z [command]/usr/bin/tar xJ -C /Users/runner/work/_temp/ce251588-b6a0-450d-9160-3d157a8b9a91 -f /Users/runner/work/_temp/zig-aarch64-macos-0.17.0.tar.xz
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:42.6874600Z Extract took 7678 ms
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:42.6971340Z [command]/Users/runner/work/_temp/ce251588-b6a0-450d-9160-3d157a8b9a91/zig-aarch64-macos-0.17.0/zig version
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.1326740Z 0.17.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.1350860Z Resolved Zig version 0.17.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.1847860Z ##[end-action id=__self.__mlugg_setup-zig;outcome=success;conclusion=success;duration_ms=14136]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.1866160Z ##[start-action display=Cache fetched Zig packages;id=__self.packages]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8257300Z ##[group]Run actions/cache@v4
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8266300Z with:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8267140Z   path: /Users/runner/work/lookout/lookout/.zig-cache/p
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8294140Z   key: zig-packages-configured-macOS-0.17.0-64b8f376434f83ccbdc318412801b648dc235a0745ee4549fef1acae97152560
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8294960Z   restore-keys: zig-packages-configured-macOS-0.17.0-
+gate / test (macos-latest, Debug)	UNKNOWN STEP	
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8295400Z   enableCrossOsArchive: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8295660Z   fail-on-cache-miss: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8296070Z   lookup-only: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8296400Z   save-always: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8296840Z env:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8298800Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8299290Z   ZIG_LOCAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:43.8299630Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.1329350Z (node:1552) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.1334010Z (Use `node --trace-deprecation ...` to show where the warning was created)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.4089270Z Cache not found for input keys: zig-packages-configured-macOS-0.17.0-64b8f376434f83ccbdc318412801b648dc235a0745ee4549fef1acae97152560, zig-packages-configured-macOS-0.17.0-
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.4150030Z ##[end-action id=__self.packages;outcome=success;conclusion=success;duration_ms=1228]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.4166590Z ##[start-action display=Cache compiled builds;id=__self.builds]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7436670Z ##[group]Run actions/cache@v4
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7437130Z with:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7437940Z   path: ./.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	.preflight/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	/Users/runner/work/lookout/lookout/.zig-cache/o
+gate / test (macos-latest, Debug)	UNKNOWN STEP	/Users/runner/work/lookout/lookout/.zig-cache/h
+gate / test (macos-latest, Debug)	UNKNOWN STEP	/Users/runner/work/lookout/lookout/.zig-cache/z
+gate / test (macos-latest, Debug)	UNKNOWN STEP	
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7438970Z   key: zig-build-macOS-ARM64-0.17.0-ebda036faf315e75-0a8fd500dcf96cf5cfe6a4a130663e666950d86fad03c27dc501eeac409e242b
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7439680Z   restore-keys: zig-build-macOS-ARM64-0.17.0-ebda036faf315e75-
+gate / test (macos-latest, Debug)	UNKNOWN STEP	zig-build-macOS-ARM64-0.17.0-
+gate / test (macos-latest, Debug)	UNKNOWN STEP	
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7440120Z   enableCrossOsArchive: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7440360Z   fail-on-cache-miss: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7440600Z   lookup-only: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7440930Z   save-always: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7441150Z env:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7441610Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7442110Z   ZIG_LOCAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.7442470Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.8612600Z (node:1619) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:44.8614530Z (Use `node --trace-deprecation ...` to show where the warning was created)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.1149790Z Cache not found for input keys: zig-build-macOS-ARM64-0.17.0-ebda036faf315e75-0a8fd500dcf96cf5cfe6a4a130663e666950d86fad03c27dc501eeac409e242b, zig-build-macOS-ARM64-0.17.0-ebda036faf315e75-, zig-build-macOS-ARM64-0.17.0-
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.1186000Z ##[end-action id=__self.builds;outcome=success;conclusion=success;duration_ms=701]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.1188500Z ##[start-action display=Cache external tools;id=__self.__actions_cache]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2305990Z ##[group]Run actions/cache@v4
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2306270Z with:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2306480Z   path: /Users/runner/work/_temp/preflight-tools
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2306750Z   key: preflight-tools-macOS-ARM64-0.17.0-
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2306980Z   enableCrossOsArchive: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2307250Z   fail-on-cache-miss: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2307460Z   lookup-only: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2307660Z   save-always: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2307830Z env:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2308060Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2308410Z   ZIG_LOCAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.2308690Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.3484140Z (node:1623) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.3485950Z (Use `node --trace-deprecation ...` to show where the warning was created)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.5908150Z Cache not found for input keys: preflight-tools-macOS-ARM64-0.17.0-
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.5935900Z ##[end-action id=__self.__actions_cache;outcome=success;conclusion=success;duration_ms=474]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.5939160Z ##[start-action display=Fetch what the job's build asks for, with retries;id=__self.__run_2]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.5977830Z ##[group]Run zig build --build-file .preflight/build.zig -Drepo-root="/Users/runner/work/lookout/lookout/." fetch
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.5978600Z ^[[36;1mzig build --build-file .preflight/build.zig -Drepo-root="/Users/runner/work/lookout/lookout/." fetch^[[0m
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.6048240Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.6048580Z env:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.6048830Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.6049220Z   ZIG_LOCAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.6049600Z   BUILD_ARGS: -Doptimize=debug -Dci-lint=false -Dci-timings=true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:30:45.6049890Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:32:27.4126310Z info: fetching lazy dependency gantry-0.1.0-1iNrkYwDDACsflv8JL7EcKNxh68qFeRvfnj44o2gpGWP
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:33:47.6186730Z info: fetching lazy dependency shakedown-0.1.0-BR8U441oDgBA_guQJ481zswN7jK3G8X4nKygC9-IuaxT
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:33:47.6190300Z info: fetching lazy dependency shakedown-0.1.0-BR8U4177DQAXS79Rcl1reGMylJ-qq3g0WNSWNyjjfw19
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:33:47.6191610Z info: fetching lazy dependency preflight-0.1.0-LX1ZwjmEBwCer1MlXnpPw9a_ko-7gFW-k0n7uD_6jv-P
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:33:55.5532130Z info: fetching lazy dependency ziglint-0.5.3-t0bwL9gkBgDJkTIUhKe70dqGDYevrZK1XGTdjnHfwURT
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8877250Z   install (default)            Copy build artifacts to prefix path
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8878870Z   uninstall                    Remove build artifacts from prefix path
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8881790Z   test                         Run the lookout tests
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8882430Z   check                        Compile the lookout tests without running them
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8883040Z   examples                     Build and run the examples
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8883490Z   lint                         Check format, structure, Zig policy, docs and test imports
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8884320Z   bench                        Build the benchmarks in ReleaseFast under zig-out/bench and run the timed ones, one after another
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8885050Z   ci                           Run source checks, then the tests
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8885730Z   ci-check                     Compile root, test, benchmark and helper objects without linking or executing
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8886560Z   ci-link                      Link tests, benchmarks and helpers on a runner with its native SDK
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8887070Z   ci-build                     Compile test executables for execution on another runner
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8887680Z   ci-run                       Run the previously compiled test executables
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8888160Z   plan                         Plan matrices or regenerate the pinned caller workflow
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8888650Z   cache                        Prune compiled products while preserving packages and tools
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8889210Z   docs                         Render a configured documentation region
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8890520Z   deprecations                 List what this Zig release deprecated, rewritten; -- --write applies it
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8891100Z   check-imports                Check declared source structure
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:00.8891730Z   check-consumer               Build a project that depends on lookout, with only the packages it needs
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1177780Z   install (default)            Copy build artifacts to prefix path
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1279020Z   uninstall                    Remove build artifacts from prefix path
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1381030Z   test                         Run the lookout tests
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1382230Z   check                        Compile the lookout tests without running them
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1382860Z   examples                     Build and run the examples
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1384720Z   lint                         Check format, structure, Zig policy, docs and test imports
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1386960Z   bench                        Build the benchmarks in ReleaseFast under zig-out/bench and run the timed ones, one after another
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1387710Z   ci                           Run source checks, then the tests
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1389580Z   ci-check                     Compile root, test, benchmark and helper objects without linking or executing
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1390410Z   ci-link                      Link tests, benchmarks and helpers on a runner with its native SDK
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1390990Z   ci-build                     Compile test executables for execution on another runner
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1391470Z   ci-run                       Run the previously compiled test executables
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1392450Z   plan                         Plan matrices or regenerate the pinned caller workflow
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1393080Z   cache                        Prune compiled products while preserving packages and tools
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1393560Z   docs                         Render a configured documentation region
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1394190Z   deprecations                 List what this Zig release deprecated, rewritten; -- --write applies it
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1394660Z   check-imports                Check declared source structure
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1395240Z   check-consumer               Build a project that depends on lookout, with only the packages it needs
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1425860Z ##[end-action id=__self.__run_2;outcome=success;conclusion=success;duration_ms=195548]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1436260Z ##[start-action display=Record cache hits;id=__self.__run_3]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1500980Z ##[group]Run zig build --build-file .preflight/build.zig -Drepo-root="/Users/runner/work/lookout/lookout" setup -- --report
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1501930Z ^[[36;1mzig build --build-file .preflight/build.zig -Drepo-root="/Users/runner/work/lookout/lookout" setup -- --report^[[0m
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1810740Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1811160Z env:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1811440Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1811960Z   ZIG_LOCAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1812720Z   PREFLIGHT_PACKAGE_HIT: 
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1813120Z   PREFLIGHT_BUILD_HIT: 
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:01.1813500Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:10.7624690Z ##[end-action id=__self.__run_3;outcome=success;conclusion=success;duration_ms=9618]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:10.7705990Z ##[group]Run zig build --build-file .preflight/build.zig -Drepo-root="/Users/runner/work/lookout/lookout/." prepare
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:10.7707210Z ^[[36;1mzig build --build-file .preflight/build.zig -Drepo-root="/Users/runner/work/lookout/lookout/." prepare^[[0m
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:10.7769150Z shell: /bin/bash -e {0}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:10.7769660Z env:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:10.7770250Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:10.7770690Z   ZIG_LOCAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:10.7771780Z   SDKROOT: /Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:10.7772360Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1553480Z ##[group]Run zig build --build-file .preflight/build.zig -Drepo-root="/Users/runner/work/lookout/lookout/." run
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1554170Z ^[[36;1mzig build --build-file .preflight/build.zig -Drepo-root="/Users/runner/work/lookout/lookout/." run^[[0m
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1584070Z shell: /bin/bash -e {0}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1584380Z env:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1584670Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1585500Z   ZIG_LOCAL_CACHE_DIR: /Users/runner/work/lookout/lookout/.zig-cache
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1586120Z   SDKROOT: /Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1586570Z   STEP: ci
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1586910Z   BUILD_ARGS: -Doptimize=debug -Dci-lint=false -Dci-timings=true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1587290Z   PREFLIGHT_SHARD: 
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1587500Z   PREFLIGHT_PREPARED: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1587780Z   PREFLIGHT_SETUP: true
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1588220Z   PREFLIGHT_ADOPT: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1588550Z   PREFLIGHT_LEDGER_BASE: origin/main
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1588970Z   FAST_COMPILE: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:11.1602920Z ##[endgroup]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.4680710Z created /Users/runner/work/lookout/lookout/zig-out/lookout-example/notes.txt
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.4788070Z modified /Users/runner/work/lookout/lookout/zig-out/lookout-example/notes.txt
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.4901480Z renamed /Users/runner/work/lookout/lookout/zig-out/lookout-example/renamed.txt (from /Users/runner/work/lookout/lookout/zig-out/lookout-example/notes.txt)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.5650680Z created /Users/runner/work/lookout/lookout/zig-out/lookout-example/sub
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.5775070Z created /Users/runner/work/lookout/lookout/zig-out/lookout-example/sub/inside.txt
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.5881670Z removed /Users/runner/work/lookout/lookout/zig-out/lookout-example/renamed.txt
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.5996160Z filtered: created /Users/runner/work/lookout/lookout/zig-out/lookout-example/kept.txt
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.6098920Z pending: created /Users/runner/work/lookout/lookout/zig-out/lookout-example/later/inside
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.6211070Z baseline: created /Users/runner/work/lookout/lookout/zig-out/lookout-example/written-while-away.txt
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.6393810Z backend: fsevents
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:28.6496830Z prunes ignored: false
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:34.3835140Z first run: created /Users/runner/work/lookout/lookout/zig-out/lookout-since/seen.txt
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:34.3839020Z checkpoint: {"version":3,"backend":"fsevents","watches":[{"root":"/Users/runner/work/lookout/lookout/zig-out/lookout-since","cursor":26807841,"identity":{"volume":"e52219f8ee7e45a891a27ff3360ed05f","log":"3bdc1dc40237456286efc9b870303abb"},"recursive":true,"baseline":["/Users/runner/work/lookout/lookout/zig-out/lookout-since","/Users/runner/work/lookout/lookout/zig-out/lookout-since/seen.txt"],"changes":[],"half":null,"ignore":[],"only":[],"case":null,"normalization":null,"policy":{"case_sensitive":false,"normalization":"exact"},"identity_override":null}]}
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:34:34.3841250Z since: removed /Users/runner/work/lookout/lookout/zig-out/lookout-since/seen.txt
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6228020Z ci
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6228500Z +- test
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6228890Z    +- run test lookout-tests 335 pass, 11 skip, 2 fail (348 total)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6229440Z error: 'Baseline.test.a saved baseline reports changes since last run and replaces its file' failed:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6230450Z        preflight: test seed 1030482569 (reproduce with PREFLIGHT_TEST_SEED=1030482569)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6231110Z        Baseline.test.a saved baseline reports changes since last run and replaces its file: ForeignBaseline; seed 1030482569
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6231800Z        /Users/runner/work/lookout/lookout/src/Baseline.zig:238:295: 0x1028b0be3 in load (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6345310Z                !samePatterns(options.filter.only, state.only) or options.filter.case != state.case or options.filter.normalization != state.normalization or !std.meta.eql(options.identity, state.identity_override) or !std.meta.eql(identity.read(gpa, io, real).policy(options.identity), state.policy)) return error.ForeignBaseline;
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6350500Z                                                                                                                                                                                                                                                                                                              ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6542880Z        /Users/runner/work/lookout/lookout/src/Baseline.zig:888:19: 0x102989403 in test.a saved baseline reports changes since last run and replaces its file (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6543630Z            var missing = try load(gpa, io, file, root, options);
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6544060Z                          ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6544650Z error: 'testing.suite_test.test.checkpoint restoration rolls back a failed add and preserves prior slices' failed:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6545310Z        expected error.OutOfMemory, found error.InvalidCheckpoint
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6546270Z        testing.suite_test.test.checkpoint restoration rolls back a failed add and preserves prior slices: TestExpectedEqual; seed 1030482569
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6547480Z        /Users/runner/work/lookout/lookout/src/backend/FsEvents.zig:632:310: 0x1027e8c6f in startStream (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6549890Z                    if (!samePatterns(saved.ignore, options.filter.ignore) or !samePatterns(saved.only, options.filter.only) or saved.case != options.filter.case or saved.normalization != options.filter.normalization or !std.meta.eql(saved.policy, policy) or !std.meta.eql(saved.identity_override, options.identity)) return error.InvalidCheckpoint;
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6552140Z                                                                                                                                                                                                                                                                                                                             ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6553170Z        /Users/runner/work/lookout/lookout/src/backend/FsEvents.zig:530:18: 0x1027bba4b in addFor (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6553880Z            var stream = try f.startStream(io, id, abs_path, requested, options, false);
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6554490Z                         ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6555250Z        /Users/runner/work/lookout/lookout/src/lookout.zig:551:38: 0x1027ba02f in addBackend (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6556350Z                    if (w.impl == .fsevents) return w.impl.fsevents.addFor(io, id, physical, requested, options, &w.batch);
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6557100Z                                             ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6557860Z        /Users/runner/work/lookout/lookout/src/lookout.zig:527:9: 0x102807053 in register (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6558810Z                try w.addBackend(io, id, abs, abs, options);
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6559330Z                ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6559810Z        /Users/runner/work/lookout/lookout/src/lookout.zig:506:9: 0x102806943 in addResolved (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6560420Z                return w.register(io, abs, options);
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6560800Z                ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6561360Z        /Users/runner/work/lookout/lookout/src/lookout.zig:486:20: 0x1027aa333 in add (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6562030Z                const id = try w.addResolved(io, requested, options);
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6562780Z                           ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6563990Z        /Users/runner/work/_temp/ce251588-b6a0-450d-9160-3d157a8b9a91/zig-aarch64-macos-0.17.0/lib/std/testing.zig:93:17: 0x10283750b in expectEqualInner__func_4501 (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6565380Z                        return error.TestExpectedEqual;
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6565750Z                        ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6568150Z        /Users/runner/work/_temp/ce251588-b6a0-450d-9160-3d157a8b9a91/zig-aarch64-macos-0.17.0/lib/std/testing.zig:57:5: 0x1029bf4bf in expectEqual (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6570900Z            return expectEqualInner(T, expected, actual);
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6571780Z            ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6573570Z        /Users/runner/work/lookout/lookout/src/testing/suite_test.zig:3566:17: 0x1029bf603 in test.checkpoint restoration rolls back a failed add and preserves prior slices (lookout-tests)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6575650Z                        try std.testing.expectEqual(error.OutOfMemory, err);
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6576050Z                        ^
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6578230Z failed command: ./.zig-cache/o/8580230bee28fd3ae6963cb166991081/lookout-tests --cache-dir=./.zig-cache --seed=0x3d6bea89 --listen=-
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6578780Z 
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6579070Z Build Summary: 16/19 steps succeeded (1 failed); 335/348 tests passed (11 skipped, 2 failed)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6579650Z ci transitive failure
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6580240Z +- test transitive failure
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6580590Z    +- run test lookout-tests 335 pass, 11 skip, 2 fail (348 total)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6580910Z 
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6581070Z error: CommandFailed
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6581360Z run
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6581610Z +- run exe preflight failure
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6582010Z error: process exited with code 1
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6582810Z failed command: cd /Users/runner/work/lookout/lookout/. && ./.zig-cache/o/0a7b696a4a5be80e48a36ecaa426fd0f/preflight run
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6583370Z 
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6583610Z Build Summary: 1/3 steps succeeded (1 failed)
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6584050Z run transitive failure
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6584370Z +- run exe preflight failure
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6584580Z 
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.6629050Z ##[error]Process completed with exit code 1.
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.7172890Z Post job cleanup.
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.7186270Z ##[start-action display=Cache external tools;id=__ee271b98-f808-4c47-acfa-9b5f353783fd.__actions_cache]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.7191410Z ##[end-action id=__ee271b98-f808-4c47-acfa-9b5f353783fd.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.7197080Z ##[start-action display=Cache compiled builds;id=__ee271b98-f808-4c47-acfa-9b5f353783fd.builds]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.7199700Z ##[end-action id=__ee271b98-f808-4c47-acfa-9b5f353783fd.builds;outcome=skipped;conclusion=skipped;duration_ms=0]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.7207820Z ##[start-action display=Cache fetched Zig packages;id=__ee271b98-f808-4c47-acfa-9b5f353783fd.packages]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.7214750Z ##[end-action id=__ee271b98-f808-4c47-acfa-9b5f353783fd.packages;outcome=skipped;conclusion=skipped;duration_ms=0]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.7216940Z ##[start-action display=Run mlugg/setup-zig@v2;id=__ee271b98-f808-4c47-acfa-9b5f353783fd.__mlugg_setup-zig]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:08.7288090Z Post job cleanup.
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:09.6532470Z ##[end-action id=__ee271b98-f808-4c47-acfa-9b5f353783fd.__mlugg_setup-zig;outcome=success;conclusion=success;duration_ms=931]
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:09.6664530Z Post job cleanup.
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:09.8240590Z [command]/opt/homebrew/bin/git version
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:09.8621220Z git version 2.55.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:09.8643080Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/ce3462b1-f0fe-42f0-9f3a-bccf29201043/.gitconfig'
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:09.8654230Z Temporarily overriding HOME='/Users/runner/work/_temp/ce3462b1-f0fe-42f0-9f3a-bccf29201043' before making global git config changes
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:09.8655900Z Adding repository directory to the temporary git global config as a safe directory
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:09.8658050Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/lookout/lookout/.preflight
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:09.8821320Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:09.8923820Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.0823760Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.0903250Z http.https://github.com/.extraheader
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.0915980Z [command]/opt/homebrew/bin/git config --local --unset-all http.https://github.com/.extraheader
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.1016210Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.2588900Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.2721340Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.4378550Z Post job cleanup.
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.5940230Z [command]/opt/homebrew/bin/git version
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.6037470Z git version 2.55.0
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.6058870Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/7260f341-5944-4616-b1ff-2c3abf4f6f40/.gitconfig'
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.6067500Z Temporarily overriding HOME='/Users/runner/work/_temp/7260f341-5944-4616-b1ff-2c3abf4f6f40' before making global git config changes
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.6069280Z Adding repository directory to the temporary git global config as a safe directory
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.6072350Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/lookout/lookout
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.6170010Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.6256930Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.7605540Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.7682150Z http.https://github.com/.extraheader
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.7689370Z [command]/opt/homebrew/bin/git config --local --unset-all http.https://github.com/.extraheader
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.7777590Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.9410010Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:10.9487100Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:11.0993430Z Cleaning up orphan processes
+gate / test (macos-latest, Debug)	UNKNOWN STEP	2026-10-08T20:38:12.9471000Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@v4, actions/checkout@v4, mlugg/setup-zig@v2. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

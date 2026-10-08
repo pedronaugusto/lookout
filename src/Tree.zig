@@ -187,7 +187,7 @@ pub fn addWatch(
 
     const root = try t.gpa.dupe(u8, abs_path);
     errdefer t.gpa.free(root);
-    var filter = try CompiledFilter.compilePolicy(t.gpa, options.filter, identity.read(t.gpa, io, abs_path).policy(options.identity));
+    var filter = try CompiledFilter.compilePolicy(t.gpa, options.filter, identity.read(io, abs_path).policy(options.identity));
     errdefer filter.deinit();
     try t.watches.put(t.gpa, id, .{
         .root = root,
@@ -284,7 +284,7 @@ fn createDirectory(t: *Tree, io: Io, watch: WatchId, parent: ?NodeId, path: []u8
     var dir = try Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
     errdefer dir.close(io);
 
-    const names = identity.read(t.gpa, io, path);
+    const names = identity.read(io, path);
     const id: NodeId = @fromBackingInt(@intCast(t.next_node));
     try t.insert(io, id, .{
         .watch = watch,
@@ -644,7 +644,7 @@ pub fn rescanDirectory(
     const recursive = t.isRecursive(watch);
     const registration = t.watches.get(watch).?;
     if (!registration.filter.isEmpty()) {
-        node.names = identity.read(t.gpa, io, node.path);
+        node.names = identity.read(io, node.path);
         node.policy = node.names.policy(registration.identity_override);
     }
 
@@ -1126,7 +1126,9 @@ test "removing a directory drops its subtree and only it, and says which nodes w
     for (tree.takeDropped().?) |dropped| try testing.expect(!tree.nodes.contains(dropped));
     for (tree.nodes.values()) |node| try testing.expect(!path_cmp.within(gone, node.path));
     for ([_][]const u8{ "gone-sibling", "gone-sibling/d", "kept/c", "e" }) |name| {
-        const path = try std.Io.Dir.path.join(gpa, &.{ root, name });
+        const requested = try std.Io.Dir.path.join(gpa, &.{ root, name });
+        defer gpa.free(requested);
+        const path = try identity.canonical(gpa, io, requested);
         defer gpa.free(path);
         try testing.expect(tree.hasNode(id, path));
     }

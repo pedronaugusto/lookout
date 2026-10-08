@@ -129,7 +129,7 @@ pub const Link = struct {
 fn prunes(l: *const Links, io: Io, subject: []const u8) bool {
     if (l.filter.isEmpty()) return false;
     const parent = std.Io.Dir.path.dirname(subject) orelse l.root;
-    return l.filter.prunesPolicy(names.read(l.gpa, io, parent).policy(l.identity_override), l.root, subject);
+    return l.filter.prunesPolicy(names.read(io, parent).policy(l.identity_override), l.root, subject);
 }
 
 /// The links of the watch `owner`, of which none are followed yet. Null

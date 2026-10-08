@@ -184,7 +184,7 @@ test "a watch spelled in another case than the disk still reports" {
         });
         defer watcher.deinit(io);
 
-        const facts = identity.read(gpa, io, root);
+        const facts = identity.read(io, root);
         if (facts.case_sensitive orelse true) continue;
         // Asked for in upper case; created in lower case.
         const asked = try std.Io.Dir.path.join(gpa, &.{ root, "TARGET" });
@@ -956,7 +956,7 @@ test "filesystem identity reports two native case-distinct entries on sensitive 
         defer tmp.cleanup();
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
-        if (!(identity.read(gpa, io, root).case_sensitive orelse false)) continue;
+        if (!(identity.read(io, root).case_sensitive orelse false)) continue;
         var watcher = try Watcher.init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(1), .latency = .fromMilliseconds(0) });
         defer watcher.deinit(io);
         const id = try watcher.add(io, root, .{});

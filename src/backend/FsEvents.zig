@@ -621,7 +621,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
 
     var volume = try Volume.read(f.gpa, stream_path);
     errdefer volume.deinit(f.gpa);
-    const policy = name_policy.read(f.gpa, io, abs_path).policy(options.identity);
+    const policy = name_policy.read(io, abs_path).policy(options.identity);
     const resumed = if (force_live) null else f.resumeIndex(requested);
     if (resumed) |index| {
         const saved = f.restarting.?.state.value.watches[index];
@@ -629,7 +629,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
         // own; the caller's scope and patterns apply once it is promoted.
         if (path_cmp.eql(abs_path, requested)) {
             if (saved.recursive != options.recursive) return error.InvalidCheckpoint;
-            if (!samePatterns(saved.ignore, options.filter.ignore) or !samePatterns(saved.only, options.filter.only) or saved.case != options.filter.case or saved.normalization != options.filter.normalization or !std.meta.eql(saved.policy, policy) or !std.meta.eql(saved.identity_override, options.identity)) return error.InvalidCheckpoint;
+            if (!samePatterns(saved.ignore, options.filter.ignore) or !samePatterns(saved.only, options.filter.only) or saved.case != options.filter.case or saved.normalization != options.filter.normalization or !std.meta.eql(saved.identity_override, options.identity)) return error.InvalidCheckpoint;
         }
         const identity = volume.identity orelse return error.InvalidCheckpoint;
         if (!Volume.matches(identity, f.restarting.?.state.value.watches[index].identity)) return error.InvalidCheckpoint;

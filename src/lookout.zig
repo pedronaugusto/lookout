@@ -321,7 +321,7 @@ pub const Watcher = struct {
     pub fn directoryCapabilities(w: *const Watcher, io: Io, id: WatchId, directory: []const u8) ?Capabilities {
         const held = w.table.get(id) orelse return null;
         if (!path_cmp.within(held.path, directory)) return null;
-        const names = identity.read(w.gpa, io, directory);
+        const names = identity.read(io, directory);
         return .{ .backend = held.capabilities.backend, .filesystem = fs_type.read(w.gpa, io, directory), .names = names, .policy = names.policy(held.identity_override) };
     }
 
@@ -543,7 +543,7 @@ pub const Watcher = struct {
     /// always the caller's root, owned by Watcher.
     fn addBackend(w: *Watcher, io: Io, id: WatchId, physical: []const u8, requested: []const u8, options: AddOptions) AddError!void {
         const filesystem = fs_type.read(w.gpa, io, physical);
-        const names = identity.read(w.gpa, io, physical);
+        const names = identity.read(io, physical);
         const use_poll = w.options.backend == .auto and (filesystem == .network or filesystem == .fuse) and w.backend() != .poll;
         if (w.table.getPtr(id)) |held| held.capabilities = .{ .backend = if (use_poll) .poll else w.backend(), .filesystem = filesystem, .names = names, .policy = names.policy(options.identity) };
         if (use_poll) return w.polling.add(io, id, physical, options, &w.batch);
@@ -858,7 +858,7 @@ pub const Watcher = struct {
             w.gpa.free(held.path);
             held.path = held_path;
         } else w.gpa.free(canonical);
-        p.filter.policy = identity.read(w.gpa, io, p.target).policy(p.identity_override);
+        p.filter.policy = identity.read(io, p.target).policy(p.identity_override);
         if (try w.takenElsewhere(io, p)) {
             try w.batch.pushDetail(w.gpa, io, p.id, p.target, .unwatched, null, .unknown);
             w.destroyPending(p);
@@ -925,7 +925,7 @@ pub const Watcher = struct {
 
             fn visit(m: Self, entry: walk.Entry) anyerror!walk.Step {
                 const parent = Io.Dir.path.dirname(entry.path) orelse m.p.target;
-                const policy = if (m.p.filter.isEmpty()) m.p.filter.policy else identity.read(m.w.gpa, m.io, parent).policy(m.p.identity_override);
+                const policy = if (m.p.filter.isEmpty()) m.p.filter.policy else identity.read(m.io, parent).policy(m.p.identity_override);
                 if (m.p.filter.prunesPolicy(policy, m.p.target, entry.path)) return .over;
                 if (!m.p.filter.excludesPolicy(policy, m.p.target, entry.path)) {
                     try m.w.batch.pushDetail(m.w.gpa, m.io, m.p.id, entry.path, .created, null, Target.of(entry.kind));
@@ -1041,7 +1041,7 @@ pub const Watcher = struct {
             pub fn excludes(q: Self, root: []const u8, subject: []const u8) bool {
                 if (q.filter.isEmpty()) return false;
                 const parent = Io.Dir.path.dirname(subject) orelse root;
-                const policy = identity.read(q.watcher.gpa, q.io, parent).policy(q.override);
+                const policy = identity.read(q.io, parent).policy(q.override);
                 return q.filter.excludesPolicy(policy, root, subject);
             }
         };
@@ -1801,7 +1801,7 @@ test "filesystem identity keeps requested roots and explicit policy separate fro
     try testing.expectEqualStrings(asked, info[0].requested);
     try testing.expectEqualStrings(kernel, info[0].path);
     try testing.expectEqual(policy, w.capabilities(id).?.policy);
-    try testing.expectEqual(identity.read(gpa, io, kernel), w.capabilities(id).?.names);
+    try testing.expectEqual(identity.read(io, kernel), w.capabilities(id).?.names);
     const missing = try std.Io.Dir.path.join(gpa, &.{ kernel, "missing" });
     defer gpa.free(missing);
     const unknown = w.directoryCapabilities(io, id, missing).?;

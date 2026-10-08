@@ -1,0 +1,35 @@
+first run: created /Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since/seen.txt
+checkpoint: {"version":3,"backend":"fsevents","watches":[{"root":"/Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since","cursor":3162910853,"identity":{"volume":"ebb36280c94242569c7603b9da36c1e2","log":"f1c1b6e58dd44de884ac410793edb8d8"},"recursive":true,"baseline":["/Users/gusto/work/tycho/.wt/lookout-roots-resume/zig-out/lookout-since","/Users/gusto/work/tycho/.wt/lookout-roots-resumBuild Summary: 26/26 steps succeeded; 5/5 tests passed
+test success
++- run test lookout-tests 5 pass (5 total) 1s MaxRSS:9M
+|  +- compile test lookout-tests debug native success 3s MaxRSS:416M
+|  |  +- options cached
+|  +- lint success
+|     +- run exe preflight-checks success 6s
+|        +- compile exe preflight-checks safe aarch64-macos-none cached 59ms MaxRSS:31M
+|        +- compile exe ziglint safe aarch64-macos-none cached 58ms MaxRSS:31M
+|        |  +- options cached
+|        +- run exe preflight-structure success 98ms
+|           +- compile exe preflight-structure debug aarch64-macos-none cached 75ms MaxRSS:31M
+|           +- zig fmt --check success
++- examples success
+|  +- run exe usage success 1s
+|  |  +- compile exe usage debug native success 3s MaxRSS:418M
+|  |  +- install success
+|  |  |  +- install lookout success
+|  |  |  |  +- compile lib lookout debug native success 193ms MaxRSS:95M
+|  |  |  +- compile test lookout-tests debug native (+1 more reused dependencies)
+|  |  +- lint (+1 more reused dependencies)
+|  +- run exe since success 523ms
+|     +- compile exe since debug native success 3s MaxRSS:440M
+|     +- install (+2 more reused dependencies)
+|     +- lint (+1 more reused dependencies)
++- run exe lookout-bench success 6s
+|  +- compile exe lookout-bench debug native success 3s MaxRSS:429M
+|  +- WriteFile success
+|  +- lint (+1 more reused dependencies)
++- run exe lookout-filter-bench success 984ms
+   +- compile exe lookout-filter-bench debug native cached 144ms MaxRSS:31M
+   +- WriteFile success
+   +- lint (+1 more reused dependencies)
+

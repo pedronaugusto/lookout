@@ -134,7 +134,7 @@ pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Baseline
         .scratch = .empty,
     };
     errdefer b.deinit();
-    b.filter = try .compilePolicy(gpa, options.filter, identity.read(gpa, io, real).policy(options.identity));
+    b.filter = try .compilePolicy(gpa, options.filter, identity.read(io, real).policy(options.identity));
     try b.scan(gpa, io, false);
     return b;
 }
@@ -235,10 +235,10 @@ pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, opti
     defer gpa.free(real);
     if (!path_cmp.eql(real, state.root) or options.recursive != state.recursive or
         options.max_dir_entries != state.max_dir_entries or !samePatterns(options.filter.ignore, state.ignore) or
-        !samePatterns(options.filter.only, state.only) or options.filter.case != state.case or options.filter.normalization != state.normalization or !std.meta.eql(options.identity, state.identity_override) or !std.meta.eql(identity.read(gpa, io, real).policy(options.identity), state.policy)) return error.ForeignBaseline;
+        !samePatterns(options.filter.only, state.only) or options.filter.case != state.case or options.filter.normalization != state.normalization or !std.meta.eql(options.identity, state.identity_override)) return error.ForeignBaseline;
     var b: Baseline = .{ .gpa = gpa, .root = try gpa.dupe(u8, state.root), .recursive = state.recursive, .max_dir_entries = state.max_dir_entries, .filter = .none, .identity_override = options.identity, .dirs = .empty, .changes = .empty, .scratch = .empty };
     errdefer b.deinit();
-    b.filter = try .compilePolicy(gpa, options.filter, identity.read(gpa, io, real).policy(options.identity));
+    b.filter = try .compilePolicy(gpa, options.filter, identity.read(io, real).policy(options.identity));
     for (state.dirs) |dir| {
         const owned = try gpa.dupe(u8, dir.path);
         errdefer gpa.free(owned);
@@ -329,7 +329,7 @@ const Scan = struct {
             defer dir.close(io);
 
             const index = try s.remember(gpa, path);
-            const policy = identity.read(gpa, io, path).policy(b.identity_override);
+            const policy = identity.read(io, path).policy(b.identity_override);
             s.dirs.values()[index].policy = policy;
             Snapshot.freeChanges(gpa, &s.scratch);
             const before = if (b.dirs.getPtr(path)) |remembered| &remembered.snapshot else &Snapshot.empty;
