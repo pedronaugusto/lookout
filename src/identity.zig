@@ -34,7 +34,8 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Capabilities {
         defer directory.close(io);
         var flags: u32 = undefined;
         if (GetFileInformationByHandleEx(directory.handle, 23, &flags, @sizeOf(u32)) == .FALSE) return .{};
-        return .{ .case_sensitive = flags & 1 != 0, .normalization = .exact };
+        // The directory case flag establishes no normalization capability.
+        return .{ .case_sensitive = flags & 1 != 0 };
     }
     if (builtin.target.os.tag == .linux) {
         const name = gpa.dupeSentinel(u8, path, 0) catch return .{};

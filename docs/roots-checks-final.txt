@@ -9,14 +9,14 @@ preflight: test imports
 preflight: package paths
 Build Summary: 11/11 steps succeeded
 check success
-+- compile test lookout-tests debug native success 7s MaxRSS:867M
++- compile test lookout-tests debug native success 6s MaxRSS:870M
    +- options cached
 lint success
 +- run exe preflight-checks success 2s
-   +- compile exe preflight-checks safe aarch64-macos-none cached 59ms MaxRSS:31M
-   +- compile exe ziglint safe aarch64-macos-none cached 57ms MaxRSS:31M
+   +- compile exe preflight-checks safe aarch64-macos-none cached 50ms MaxRSS:31M
+   +- compile exe ziglint safe aarch64-macos-none cached 49ms MaxRSS:31M
    |  +- options cached
-   +- run exe preflight-structure success 64ms
-      +- compile exe preflight-structure debug aarch64-macos-none cached 59ms MaxRSS:31M
+   +- run exe preflight-structure success 60ms
+      +- compile exe preflight-structure debug aarch64-macos-none cached 50ms MaxRSS:31M
       +- zig fmt --check success
 
