@@ -33,6 +33,10 @@ pub const AddError = error{
     WatchLimitReached,
     /// This watcher already watches that path. See `add`.
     PathAlreadyWatched,
+    /// This watcher has issued every id it can: 2^32 - 1, one per watch
+    /// added, removed ones included. Ids are not reused, so the watcher
+    /// takes no more watches.
+    IdExhausted,
 } || Tree.AddError || UnexpectedError;
 
 /// Errors changing a live watch's filter.

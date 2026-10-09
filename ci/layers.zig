@@ -4,7 +4,6 @@ const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "primitives", .patterns = &.{
-        "src/SpinLock.zig",
         "src/Waker.zig",
         "src/filesystem.zig",
         "src/identity.zig",
@@ -66,6 +65,7 @@ pub const entries: []const []const u8 = &.{};
 pub const modules: []const gantry.NamedModule = &.{};
 pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{
+        "aegis",
         "airlock",
         "airlock.testing",
         "builtin",
@@ -77,7 +77,6 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
 };
 
 pub const required = [_][]const u8{
-    "src/SpinLock.zig",
     "src/Waker.zig",
     "src/filesystem.zig",
     "src/identity.zig",
@@ -125,6 +124,7 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "windows backend", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**", "src/filesystem.zig", "src/identity.zig" } },
     // A test double is a shakedown `Clock`, `FaultIo` or `Layer`, never a
     // copied `Io` vtable with a slot replaced: such a copy keeps its state in
-    // globals and cannot be stacked.
-    .{ .name = "test doubles on shakedown", .tokens = &.{ "vtable", "VTable" }, .owners = &.{} },
+    // globals and cannot be stacked. The one exception is an allocator that
+    // looks at a lock when it is called, which shakedown's do not offer.
+    .{ .name = "test doubles on shakedown", .tokens = &.{ "vtable", "VTable" }, .owners = &.{"src/testing/LockProbe.zig"} },
 };

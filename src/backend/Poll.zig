@@ -108,7 +108,7 @@ test "polling racy entries compare bytes even when size and timestamps match" {
             var batch: Batch = .init(.{});
             defer batch.deinit(gpa);
             const watch_path = if (scope == 2) file_path else if (scope == 1) root else nested;
-            try p.add(timed, @fromBackingInt(@intCast(0)), watch_path, .{ .recursive = scope == 1 }, &batch);
+            try p.add(timed, .fromRaw(0), watch_path, .{ .recursive = scope == 1 }, &batch);
             try p.scan(timed, &batch);
             try testing.expectEqual(@as(usize, 0), batch.events.items.len);
 
@@ -322,7 +322,7 @@ test "a failed polling removal allocation releases its staged path" {
     defer poll.deinit(io);
     var batch: Batch = .init(.{});
     defer batch.deinit(testing.allocator);
-    try poll.add(io, @fromBackingInt(@intCast(0)), root, .{}, &batch);
+    try poll.add(io, .fromRaw(0), root, .{}, &batch);
     try tmp.dir.deleteFile(testing.io, "gone");
 
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });

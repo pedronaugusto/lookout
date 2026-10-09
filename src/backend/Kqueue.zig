@@ -251,7 +251,8 @@ fn drain(k: *Kqueue, io: Io, batch: *Batch) contract.PollError!bool {
 
 /// Turns one kernel event into lookout events.
 fn handle(k: *Kqueue, io: Io, event: posix.Kevent, batch: *Batch) contract.PollError!void {
-    const node_id: Tree.NodeId = @fromBackingInt(@intCast(event.udata));
+    // A C/OS boundary: `udata` is the node id given at registration.
+    const node_id: Tree.NodeId = .fromRaw(event.udata);
     const node = k.tree.nodes.get(node_id) orelse return;
     const flags = event.fflags;
 
@@ -349,7 +350,8 @@ fn register(k: *Kqueue, io: Io, ids: []const Tree.NodeId, batch: *Batch) contrac
             .flags = std.c.EV.ADD | std.c.EV.CLEAR,
             .fflags = interest,
             .data = 0,
-            .udata = @backingInt(id),
+            // A C/OS boundary: the kernel hands this back with the event.
+            .udata = id.raw(),
         };
         const rc = std.c.kevent(k.kq, (&change)[0..1], 1, undefined, 0, null);
         if (rc < 0) {
@@ -456,8 +458,8 @@ test "allocation failure during delivery retains unread kqueue flags" {
         defer k.deinit(io);
         var batch = Batch.init(.{});
         defer batch.deinit(failing.allocator());
-        try k.add(io, @fromBackingInt(@intCast(0)), first, .{}, &batch);
-        try k.add(io, @fromBackingInt(@intCast(1)), last, .{}, &batch);
+        try k.add(io, .fromRaw(0), first, .{}, &batch);
+        try k.add(io, .fromRaw(1), last, .{}, &batch);
         try k.wait(io, &batch, 0);
         batch.reset(failing.allocator());
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "first", .data = "changed" });
@@ -490,7 +492,7 @@ test "a failed kqueue registration is retried before waiting again" {
     defer k.deinit(io);
     var batch = Batch.init(.{});
     defer batch.deinit(failing.allocator());
-    try k.add(io, @fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch);
+    try k.add(io, .fromRaw(0), root, .{ .recursive = true }, &batch);
     const parent = k.tree.nodes.keys()[0];
     try tmp.dir.createDirPath(testing.io, "child");
     for (0..40) |i| {

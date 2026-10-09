@@ -98,7 +98,7 @@ pub const Iterator = struct {
         it.offset += header_len + len;
         assert(it.offset <= it.bytes.len);
         return .{
-            .id = @fromBackingInt(@intCast(std.mem.readInt(u32, rest[0..4], .little))),
+            .id = .fromBytes(rest[0..4].*, .little),
             .flags = std.mem.readInt(u32, rest[4..8], .little),
             .event = std.mem.readInt(u64, rest[12..20], .little),
             .path = rest[header_len..][0..len],
@@ -146,7 +146,7 @@ pub fn encodedVolumePathLen(prefix: []const u8, relative: []const u8) usize {
 fn encodeHeader(out: []u8, id: WatchId, flags: u32, event: u64, length: usize) void {
     // `Iterator.next` reads the length back as 32 bits.
     assert(length <= std.math.maxInt(u32));
-    std.mem.writeInt(u32, out[0..4], @backingInt(id), .little);
+    out[0..4].* = id.toBytes(.little);
     std.mem.writeInt(u32, out[4..8], flags, .little);
     std.mem.writeInt(u32, out[8..12], @intCast(length), .little);
     std.mem.writeInt(u64, out[12..20], event, .little);
@@ -285,14 +285,14 @@ const Fake = struct {
 };
 
 fn made(id: u32, flags: u32, path: []const u8) Record {
-    return .{ .id = @fromBackingInt(@intCast(id)), .flags = flags, .event = 0, .path = path };
+    return .{ .id = .fromRaw(id), .flags = flags, .event = 0, .path = path };
 }
 
 test "a buffer of two records" {
     var buffer: [256]u8 = undefined;
     var len: usize = 0;
-    len += encode(buffer[len..], @fromBackingInt(@intCast(1)), flag.item_created, 9, "/a/one");
-    len += encode(buffer[len..], @fromBackingInt(@intCast(2)), flag.item_is_dir, 10, "/a/two");
+    len += encode(buffer[len..], .fromRaw(1), flag.item_created, 9, "/a/one");
+    len += encode(buffer[len..], .fromRaw(2), flag.item_is_dir, 10, "/a/two");
 
     var it = iterate(buffer[0..len]);
     const first = (try it.next()).?;
@@ -306,7 +306,7 @@ test "a buffer of two records" {
 
 test "a path that runs past the end of the buffer is a named error" {
     var buffer: [256]u8 = undefined;
-    const len = encode(&buffer, @fromBackingInt(@intCast(1)), 0, 0, "/a/one");
+    const len = encode(&buffer, .fromRaw(1), 0, 0, "/a/one");
 
     var it = iterate(buffer[0 .. len - 2]);
     try testing.expectError(error.TruncatedRecord, it.next());
@@ -335,7 +335,7 @@ test "a half waits for the delivery that brings its partner" {
 
     var old: [6]u8 = "/a/old".*;
     try testing.expectEqual(@as(?Half, null), pairing.carry(.{
-        .id = @fromBackingInt(@intCast(1)),
+        .id = .fromRaw(1),
         .path = &old,
         .flags = flag.item_renamed,
         .event = 1,
@@ -355,7 +355,7 @@ test "a half whose partner never comes is given back alone" {
     var pairing: Pairing = .{};
 
     var old: [6]u8 = "/a/old".*;
-    _ = pairing.carry(.{ .id = @fromBackingInt(@intCast(1)), .path = &old, .flags = flag.item_renamed, .event = 1 });
+    _ = pairing.carry(.{ .id = .fromRaw(1), .path = &old, .flags = flag.item_renamed, .event = 1 });
 
     const records: []const Record = &.{made(1, flag.item_modified, "/a/other")};
     var used = [_]bool{false};
@@ -366,7 +366,7 @@ test "a half whose partner never comes is given back alone" {
 
 test "volume-relative records retain their absolute namespace and event identity" {
     var bytes: [256]u8 = undefined;
-    const id: WatchId = @fromBackingInt(@intCast(7));
+    const id: WatchId = .fromRaw(7);
     for ([_]struct { prefix: []const u8, tail: []const u8, absolute: []const u8 }{
         .{ .prefix = "", .tail = "Users/watch/file", .absolute = "/Users/watch/file" },
         .{ .prefix = "/Volumes/Data", .tail = "watch/file", .absolute = "/Volumes/Data/watch/file" },
@@ -385,7 +385,7 @@ test "volume-relative records retain their absolute namespace and event identity
 
 test "volume-root records preserve the canonical root spelling" {
     var bytes: [128]u8 = undefined;
-    const id: WatchId = @fromBackingInt(@intCast(0));
+    const id: WatchId = .fromRaw(0);
     for ([_][]const u8{ "", "/Volumes/Data" }) |prefix| {
         const len = encodeVolumePath(&bytes, id, flag.item_created, 1, prefix, "");
         var it = iterate(bytes[0..len]);

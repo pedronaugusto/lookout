@@ -74,9 +74,9 @@ buffer_len: usize,
 /// outstanding, one per watch. The default is what a network share will
 /// take, which is the one size that works everywhere.
 const bounds: buffer.Bounds = .{
-    .min = 4 * 1024,
-    .max = 16 * 1024 * 1024,
-    .default = 64 * 1024,
+    .min = .fromRaw(4 * 1024),
+    .max = .fromRaw(16 * 1024 * 1024),
+    .default = .fromRaw(64 * 1024),
 };
 
 /// What a share will take when it refuses the size the caller asked for.
@@ -200,7 +200,7 @@ pub fn init(gpa: Allocator, options: Options) contract.InitError!Windows {
         .watches = .empty,
         .retiring = null,
         .budget = .init(gpa, options.max_dir_entries),
-        .buffer_len = buffer.clamp(options.buffer_bytes, bounds),
+        .buffer_len = buffer.clamp(options.buffer_bytes, bounds).raw(),
     };
 }
 
@@ -304,7 +304,7 @@ pub fn add(
     };
     if (is_dir) try w.budget.seed(io, dir_path);
 
-    if (c.CreateIoCompletionPort(handle, w.port, @backingInt(id), 0) == null)
+    if (c.CreateIoCompletionPort(handle, w.port, id.raw(), 0) == null)
         return error.WatchLimitReached;
     try w.watches.put(w.gpa, id, watch);
     errdefer _ = w.watches.swapRemove(id);
@@ -535,7 +535,9 @@ fn take(w: *Windows, io: Io, batch: *Batch, timeout: u32) contract.PollError!Tak
         return .quiet;
     }
     if (key == wake_key) return .woken;
-    const id: WatchId = @fromBackingInt(@intCast(@as(u32, @truncate(key))));
+    // A C/OS boundary: the key is the id this port was given at
+    // registration, widened by the OS.
+    const id: WatchId = .fromRaw(@truncate(key));
     const watch = w.live(id, overlapped) orelse {
         w.retire(overlapped);
         return .taken;
@@ -759,7 +761,7 @@ fn report(w: *Windows, io: Io, watch: *Watch, transferred: u32, batch: *Batch) c
         const path = try std.Io.Dir.path.join(w.gpa, &.{ dir, relative });
         defer w.gpa.free(path);
         trace.log("windows record watch={d} action={s} path={s}", .{
-            @backingInt(watch.id), actionName(record.action), path,
+            watch.id.raw(), actionName(record.action), path,
         });
 
         // The kernel walked the tree whatever the filter says; what the
@@ -1122,7 +1124,7 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     backend.budget = .init(testing.allocator, 8);
     defer backend.budget.deinit();
     var watch: Watch = undefined;
-    watch.id = @fromBackingInt(@intCast(0));
+    watch.id = .fromRaw(0);
     watch.root = root;
     watch.only = null;
     watch.filter = .none;

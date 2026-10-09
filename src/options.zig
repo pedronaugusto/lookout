@@ -1,5 +1,6 @@
 //! Watch configuration above checkpoint storage and event contracts.
 const identity = @import("identity.zig");
+const buffer = @import("buffer.zig");
 const Filter = @import("Filter.zig");
 const Checkpoint = @import("Checkpoint.zig");
 const types = @import("types.zig");
@@ -77,7 +78,8 @@ pub const Options = struct {
     report_closes: bool = false,
     /// How much change may accumulate between two polls, in bytes, on
     /// the backends that are handed a buffer and find the changes in it.
-    /// Zero, the default, is each backend's own.
+    /// Zero, the default, is each backend's own. It is an aegis byte
+    /// count, `aegis.units.Bytes(usize)`, written `.fromRaw(n)`.
     ///
     /// On `windows` this is the buffer `ReadDirectoryChangesW` writes
     /// its records into, one per watch. Its default is 64 KiB, which is
@@ -100,7 +102,7 @@ pub const Options = struct {
     ///
     /// The other three backends are told what changed by the kernel or
     /// find it by listing, and ignore this.
-    buffer_bytes: usize = 0,
+    buffer_bytes: buffer.Bytes = .fromRaw(0),
     /// Resume from an earlier Watcher.checkpoint. Borrowed only by init,
     /// which copies what it keeps. Recreate the same watched paths, scopes
     /// and filters. Watches are matched by their canonical requested roots.

@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
+const aegis = @import("aegis");
 pub const Filter = @import("Filter.zig");
 
 /// The mechanism a `Watcher` uses to learn that something changed.
@@ -209,7 +210,7 @@ pub fn tracksCheckpoint(backend: Backend) bool {
 /// id the caller already holds. A backend that keeps state past a
 /// `remove` -- a buffer the kernel may still be writing into, say --
 /// therefore cannot key that state on the id alone.
-pub const WatchId = enum(u32) { _ };
+pub const WatchId = aegis.id.Id(struct {}, u32);
 
 /// What happened to a path.
 ///

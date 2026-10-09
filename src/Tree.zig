@@ -10,6 +10,7 @@
 //! table keyed by the kernel's watch descriptors.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -62,6 +63,10 @@ dropped: std.ArrayList(NodeId) = .empty,
 dropped_lost: bool = false,
 /// The caller's watches, keyed by the id `lookout.Watcher.add` returned.
 watches: std.array_hash_map.Auto(WatchId, Watch),
+/// The next node id to issue, one per registered path and 64 bits wide: no
+/// danger there, since no tree reaches the end of it. A checked issuer would
+/// put `IdExhausted` into the error sets of every scan for a case that
+/// cannot happen.
 next_node: u64,
 /// Scratch reused by every scan so that a steady-state watcher does not
 /// allocate per event.
@@ -69,7 +74,7 @@ changes: std.ArrayList(Snapshot.Change),
 
 /// Identifies one registered path within one tree. Never reused, so a
 /// stale kernel event naming a freed node simply finds nothing.
-pub const NodeId = enum(u64) { _ };
+pub const NodeId = aegis.id.Id(struct {}, u64);
 
 pub const Key = struct {
     watch: WatchId,
@@ -78,7 +83,7 @@ pub const Key = struct {
 
 pub const KeyContext = struct {
     pub fn hash(_: KeyContext, key: Key) u32 {
-        return @truncate(path_cmp.hashOwned(@backingInt(key.watch), key.path));
+        return @truncate(path_cmp.hashOwned(key.watch.raw(), key.path));
     }
 
     pub fn eql(_: KeyContext, a: Key, b: Key, _: usize) bool {
@@ -285,7 +290,7 @@ fn createDirectory(t: *Tree, io: Io, watch: WatchId, parent: ?NodeId, path: []u8
     errdefer dir.close(io);
 
     const names = identity.read(io, path);
-    const id: NodeId = @fromBackingInt(@intCast(t.next_node));
+    const id: NodeId = .fromRaw(t.next_node);
     try t.insert(io, id, .{
         .watch = watch,
         .path = path,
@@ -359,7 +364,7 @@ fn trackEntries(t: *Tree, io: Io, dir_id: NodeId, added: *std.ArrayList(NodeId))
 }
 
 fn createFile(t: *Tree, io: Io, watch: WatchId, parent: ?NodeId, path: []u8, meta: Snapshot.Meta, added: *std.ArrayList(NodeId)) Allocator.Error!NodeId {
-    const id: NodeId = @fromBackingInt(@intCast(t.next_node));
+    const id: NodeId = .fromRaw(t.next_node);
     try t.insert(io, id, .{
         .watch = watch,
         .path = path,
@@ -848,9 +853,9 @@ test "tree access failures keep registrations and report no removals" {
         defer batch.deinit(gpa);
         var added: std.ArrayList(NodeId) = .empty;
         defer added.deinit(gpa);
-        try tree.addWatch(io, @fromBackingInt(@intCast(0)), root, .{}, &added, &batch);
+        try tree.addWatch(io, .fromRaw(0), root, .{}, &added, &batch);
         const directory_id = added.items[0];
-        try tree.addWatch(io, @fromBackingInt(@intCast(1)), file, .{}, &added, &batch);
+        try tree.addWatch(io, .fromRaw(1), file, .{}, &added, &batch);
         const file_id = added.items[1];
 
         const fio = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{
@@ -887,7 +892,7 @@ test "a failed tree registration releases every snapshot and path" {
             defer added.deinit(gpa);
             var batch: Batch = .init(.{});
             defer batch.deinit(gpa);
-            if (tree.addWatch(io, @fromBackingInt(@intCast(0)), root, .{}, &added, &batch)) |_| {
+            if (tree.addWatch(io, .fromRaw(0), root, .{}, &added, &batch)) |_| {
                 break;
             } else |err| {
                 try std.testing.expectEqual(error.OutOfMemory, err);
@@ -917,13 +922,13 @@ test "a failed tree adoption releases every unregistered path" {
             var tree: Tree = .init(gpa, 8, false);
             defer tree.deinit(io);
             defer {
-                const watch = tree.watches.fetchSwapRemove(@fromBackingInt(@intCast(0))).?.value;
+                const watch = tree.watches.fetchSwapRemove(.fromRaw(0)).?.value;
                 testing.allocator.free(watch.root);
                 tree.watches.deinit(testing.allocator);
                 tree.watches = .empty;
             }
             // Adoption needs the watch policy, but not a parent node.
-            try tree.watches.put(testing.allocator, @fromBackingInt(@intCast(0)), .{
+            try tree.watches.put(testing.allocator, .fromRaw(0), .{
                 .root = try testing.allocator.dupe(u8, root),
                 .target = .directory,
                 .recursive = true,
@@ -933,7 +938,7 @@ test "a failed tree adoption releases every unregistered path" {
             defer added.deinit(gpa);
             var batch: Batch = .init(.{});
             defer batch.deinit(gpa);
-            if (tree.adopt(io, @fromBackingInt(@intCast(0)), null, root, &batch, &added)) |_| {
+            if (tree.adopt(io, .fromRaw(0), null, root, &batch, &added)) |_| {
                 succeeded = true;
             } else |err| try testing.expectEqual(error.OutOfMemory, err);
         }
@@ -961,7 +966,7 @@ test "a failed tree scan keeps its directory baseline and retries adoption" {
             defer batch.deinit(failing.allocator());
             var added: std.ArrayList(NodeId) = .empty;
             defer added.deinit(failing.allocator());
-            try tree.addWatch(io, @fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &added, &batch);
+            try tree.addWatch(io, .fromRaw(0), root, .{ .recursive = true }, &added, &batch);
             const parent = added.items[0];
             added.clearRetainingCapacity();
             try tmp.dir.createDirPath(testing.io, "child/deeper");
@@ -1006,7 +1011,7 @@ test "a failed tree scan keeps file metadata until reporting succeeds" {
     defer batch.deinit(failing.allocator());
     var added: std.ArrayList(NodeId) = .empty;
     defer added.deinit(failing.allocator());
-    try tree.addWatch(io, @fromBackingInt(@intCast(0)), root, .{}, &added, &batch);
+    try tree.addWatch(io, .fromRaw(0), root, .{}, &added, &batch);
     const id = added.items[0];
     const before = tree.nodes.get(id).?.meta;
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "file", .data = "changed size" });
@@ -1035,7 +1040,7 @@ test "refilter registers newly admitted files without recursion" {
     defer batch.deinit(gpa);
     var added: std.ArrayList(NodeId) = .empty;
     defer added.deinit(gpa);
-    const id: WatchId = @fromBackingInt(@intCast(0));
+    const id: WatchId = .fromRaw(0);
     try tree.addWatch(io, id, root, .{ .filter = .{ .only = &.{"old"} } }, &added, &batch);
     try testing.expectEqual(@as(usize, 2), tree.nodes.count());
     added.clearRetainingCapacity();
@@ -1062,7 +1067,7 @@ test "refilter releases files that only lead to an included path" {
     defer batch.deinit(gpa);
     var added: std.ArrayList(NodeId) = .empty;
     defer added.deinit(gpa);
-    const id: WatchId = @fromBackingInt(@intCast(0));
+    const id: WatchId = .fromRaw(0);
     try tree.addWatch(io, id, root, .{}, &added, &batch);
     try testing.expectEqual(@as(usize, 2), tree.nodes.count());
     added.clearRetainingCapacity();
@@ -1110,7 +1115,7 @@ test "removing a directory drops its subtree and only it, and says which nodes w
     defer batch.deinit(gpa);
     var added: std.ArrayList(NodeId) = .empty;
     defer added.deinit(gpa);
-    const id: WatchId = @fromBackingInt(@intCast(0));
+    const id: WatchId = .fromRaw(0);
     try tree.addWatch(io, id, root, .{ .recursive = true }, &added, &batch);
     // The root, four directories and five files.
     try testing.expectEqual(@as(usize, 10), tree.nodes.count());
@@ -1158,7 +1163,7 @@ test "a name that comes back as another kind replaces its node" {
     defer batch.deinit(gpa);
     var added: std.ArrayList(NodeId) = .empty;
     defer added.deinit(gpa);
-    try tree.addWatch(io, @fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &added, &batch);
+    try tree.addWatch(io, .fromRaw(0), root, .{ .recursive = true }, &added, &batch);
     const directory = added.items[0];
     try testing.expectEqual(@as(usize, 2), tree.nodes.count());
 
@@ -1172,26 +1177,26 @@ test "a name that comes back as another kind replaces its node" {
     try testing.expectEqual(@as(usize, 3), tree.nodes.count());
     const name = try std.Io.Dir.path.join(gpa, &.{ root, "name" });
     defer gpa.free(name);
-    try testing.expectEqual(Node.Role.directory, tree.nodes.get(tree.index.get(.{ .watch = @fromBackingInt(@intCast(0)), .path = name }).?).?.role);
+    try testing.expectEqual(Node.Role.directory, tree.nodes.get(tree.index.get(.{ .watch = .fromRaw(0), .path = name }).?).?.role);
 }
 
 // F03: two kernel names on a known case-sensitive root are distinct.
 test "filesystem identity preserves case-distinct kernel names" {
     const context: KeyContext = .{};
-    const a: Key = .{ .watch = @fromBackingInt(@intCast(1)), .path = "/w/A" };
-    const b: Key = .{ .watch = @fromBackingInt(@intCast(1)), .path = "/w/a" };
+    const a: Key = .{ .watch = .fromRaw(1), .path = "/w/A" };
+    const b: Key = .{ .watch = .fromRaw(1), .path = "/w/a" };
     try std.testing.expect(!context.eql(a, b, 0));
 }
 
 test "filesystem identity keys preserve mixed directory policies and spellings" {
     var tree = init(std.testing.allocator, 4096, false);
     defer tree.deinit(std.testing.io);
-    const watch: WatchId = @fromBackingInt(@intCast(1));
+    const watch: WatchId = .fromRaw(1);
     const filter = try CompiledFilter.compilePolicy(std.testing.allocator, .{}, .{ .case_sensitive = false });
     try tree.watches.put(tree.gpa, watch, .{ .root = try tree.gpa.dupe(u8, "/w"), .target = .directory, .recursive = true, .filter = filter });
     const cases = [_]struct { []const u8, bool }{ .{ "/w/A", true }, .{ "/w/a", false } };
     for (cases, 0..) |c, i| {
-        const id: NodeId = @fromBackingInt(@intCast(i));
+        const id: NodeId = .fromRaw(i);
         const spelling = try tree.gpa.dupe(u8, c[0]);
         try tree.nodes.put(tree.gpa, id, .{ .watch = watch, .path = spelling, .role = .file, .dir = undefined, .snapshot = undefined, .meta = undefined, .parent = null, .policy = .{ .case_sensitive = c[1] } });
         try tree.index.put(tree.gpa, .{ .watch = watch, .path = spelling }, id);
@@ -1216,7 +1221,7 @@ test "filesystem identity chooses each parent directory policy across mixed root
     for ([_][]const u8{ "one", "two" }, 0..) |name, i| {
         const root = try tmp.dir.realPathFileAlloc(io, name, gpa);
         defer gpa.free(root);
-        const id: WatchId = @fromBackingInt(@intCast(i));
+        const id: WatchId = .fromRaw(@intCast(i));
         try t.addWatch(io, id, root, .{ .recursive = true, .filter = .{ .ignore = &.{"FOO"} } }, &added, &batch);
         const sub = try std.Io.Dir.path.join(gpa, &.{ root, "sub" });
         defer gpa.free(sub);

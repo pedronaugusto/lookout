@@ -17,6 +17,7 @@
 //! works on all of them.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
@@ -252,7 +253,8 @@ pub const Watcher = struct {
     gpa: Allocator,
     options: Options,
     batch: Batch,
-    next_id: u32,
+    /// The last id issued; never reissued, and refused rather than wrapped.
+    ids: aegis.id.Counter(WatchId.Domain, u32),
     impl: Impl,
     /// Polling registrations selected per watch beside the native backend.
     polling: Poll,
@@ -423,7 +425,7 @@ pub const Watcher = struct {
             .gpa = gpa,
             .options = kept_options,
             .batch = .init(options),
-            .next_id = 0,
+            .ids = .init(0),
             .impl = impl,
             .polling = Poll.init(gpa, options) catch |err| switch (err) {},
             .table = .empty,
@@ -510,7 +512,8 @@ pub const Watcher = struct {
     fn register(w: *Watcher, io: Io, abs: []const u8, options: AddOptions) AddError!WatchId {
         if (w.claimed(abs)) return error.PathAlreadyWatched;
         const stat = try Io.Dir.cwd().statFile(io, abs, .{ .follow_symlinks = false });
-        const id: WatchId = @fromBackingInt(@intCast(w.next_id));
+        var ids = w.ids;
+        const id = try ids.next();
         const owned = try w.gpa.dupe(u8, abs);
         errdefer w.gpa.free(owned);
         const mirror = try w.gpa.dupe(u8, abs);
@@ -525,7 +528,7 @@ pub const Watcher = struct {
         });
         errdefer _ = w.table.swapRemove(id);
         try w.addBackend(io, id, abs, abs, options);
-        w.next_id += 1;
+        w.ids = ids;
         if (options.follow_symlinks and options.recursive and stat.kind == .directory) {
             w.follow(io, id, abs, options.filter, options.max_followed_links, false) catch |err| {
                 w.removeBackend(io, id);
@@ -533,9 +536,7 @@ pub const Watcher = struct {
                 return err;
             };
         }
-        // Issued once: held from here, and below every id still to come.
         assert(w.table.contains(id));
-        assert(@backingInt(id) < w.next_id);
         return id;
     }
 
@@ -616,7 +617,8 @@ pub const Watcher = struct {
         var filter = try CompiledFilter.compilePolicy(w.gpa, options.filter, options.identity orelse .{});
         errdefer filter.deinit();
 
-        const id: WatchId = @fromBackingInt(@intCast(w.next_id));
+        var ids = w.ids;
+        const id = try ids.next();
         const owned = try w.gpa.dupe(u8, target);
         errdefer w.gpa.free(owned);
         try w.table.put(w.gpa, id, .{
@@ -641,7 +643,7 @@ pub const Watcher = struct {
         try w.pending.append(w.gpa, p);
         errdefer _ = w.pending.pop();
         try w.anchorPending(io, p);
-        w.next_id += 1;
+        w.ids = ids;
         owns_target = false;
         assert(w.table.contains(id));
         assert(w.waiting(id));
@@ -1384,11 +1386,8 @@ pub const Watcher = struct {
             return @ptrCast(@alignCast(context)); // safe: linkHost passes the watcher itself as the context
         }
 
-        fn issue(context: *anyopaque) WatchId {
-            const w = of(context);
-            const id: WatchId = @fromBackingInt(@intCast(w.next_id));
-            w.next_id += 1;
-            return id;
+        fn issue(context: *anyopaque) Links.Host.IssueError!WatchId {
+            return of(context).ids.next();
         }
 
         /// The alias goes in first: a backend may report while it
@@ -1748,6 +1747,75 @@ test "auto chooses polling per network or FUSE watch and explicit backends retai
         try tmp.dir.deleteFile(io, "remote/kept");
         try tmp.dir.deleteFile(io, "remote/excluded.tmp");
     }
+}
+
+test "a watcher that has issued every id refuses another instead of reusing one" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    for ([_][]const u8{ "a", "b", "c" }) |name| try tmp.dir.createDirPath(io, name);
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var w = try Watcher.init(gpa, .{ .backend = .poll });
+    defer w.deinit(io);
+    // Two ids are left: the last two this watcher can ever issue.
+    w.ids = .init(std.math.maxInt(u32) - 2);
+    var ids: [2]WatchId = undefined;
+    for (&ids, [_][]const u8{ "a", "b" }) |*id, name| {
+        const absolute = try std.Io.Dir.path.join(gpa, &.{ root, name });
+        defer gpa.free(absolute);
+        id.* = try w.add(io, absolute, .{});
+    }
+    try testing.expect(ids[0] != ids[1]);
+    const c = try std.Io.Dir.path.join(gpa, &.{ root, "c" });
+    defer gpa.free(c);
+    try testing.expectError(error.IdExhausted, w.add(io, c, .{}));
+    // A watch parked on a path that is not there needs an id as well.
+    const later = try std.Io.Dir.path.join(gpa, &.{ root, "c", "later" });
+    defer gpa.free(later);
+    try testing.expectError(error.IdExhausted, w.add(io, later, .{ .pending = true }));
+    // Removing a watch gives nothing back: its id may still be in an event.
+    w.remove(io, ids[0]);
+    try testing.expectError(error.IdExhausted, w.add(io, c, .{}));
+    const held = try w.watches(gpa);
+    defer gpa.free(held);
+    try testing.expectEqual(@as(usize, 1), held.len);
+    try testing.expectEqual(ids[1], held[0].id);
+}
+
+test "a followed link the watcher has no id left for is a hole in the watch" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "watched");
+    try tmp.dir.createDirPath(io, "elsewhere");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const watched = try std.Io.Dir.path.join(gpa, &.{ root, "watched" });
+    defer gpa.free(watched);
+    const elsewhere = try std.Io.Dir.path.join(gpa, &.{ root, "elsewhere" });
+    defer gpa.free(elsewhere);
+    const link = try std.Io.Dir.path.join(gpa, &.{ watched, "link" });
+    defer gpa.free(link);
+    try tmp.dir.symLink(io, elsewhere, "watched/link", .{ .is_directory = true });
+    var w = try Watcher.init(gpa, .{ .backend = .poll, .latency = .fromMilliseconds(0), .poll_interval = .fromMilliseconds(1) });
+    defer w.deinit(io);
+    // One id is left, and the watch itself takes it.
+    w.ids = .init(std.math.maxInt(u32) - 1);
+    const id = try w.add(io, watched, .{ .recursive = true, .follow_symlinks = true });
+    var told = false;
+    const deadline = Deadline.fromMs(io, 5_000);
+    while (!told and !deadline.expired(io)) {
+        for (try w.poll(io, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } })) |event| {
+            if (event.id == id and event.kind == .unwatched and std.mem.eql(u8, event.path, link)) told = true;
+        }
+    }
+    try testing.expect(told);
 }
 
 test "pending watches recheck filesystem facts when they move to their root" {

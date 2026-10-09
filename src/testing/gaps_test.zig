@@ -642,7 +642,7 @@ test "the delivery buffer is the size the caller asked for" {
 
         var watcher: Watcher = try .init(gpa, .{
             .backend = .fsevents,
-            .buffer_bytes = 64 * 1024,
+            .buffer_bytes = .fromRaw(64 * 1024),
             .max_dir_entries = 1_000_000,
         });
         defer watcher.deinit(io);

@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 const lookout = @import("../lookout.zig");
 const ms = @import("../testing/timeout.zig").ms;
+const LockProbe = @import("../testing/LockProbe.zig");
 const checkpoint_format = @import("../Checkpoint/format.zig");
 const Deadline = @import("../Deadline.zig");
 const path_cmp = @import("../path.zig");
@@ -216,9 +217,11 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     // is read again.
     try f.budget.misread(sub, true, 0);
     {
-        access.acquire(&f.sink.lock);
-        defer access.release(&f.sink.lock);
-        f.sink.overflowed = true;
+        {
+            var held = f.sink.delivery.acquire();
+            defer held.deinit();
+            held.value().overflowed = true;
+        }
         access.signal(f.sink);
     }
     try expectOneOverflow(io, &watcher, tree, root, .directory);
@@ -232,10 +235,10 @@ fn stopDeliveries(f: *FsEvents, stream: anytype) void {
     c.FSEventStreamStop(stream.ref);
     c.dispatch_sync_f(f.queue, null, settled);
     {
-        access.acquire(&f.sink.lock);
-        defer access.release(&f.sink.lock);
-        f.sink.len = 0;
-        f.sink.overflowed = false;
+        var held = f.sink.delivery.acquire();
+        defer held.deinit();
+        held.value().len = 0;
+        held.value().overflowed = false;
     }
     _ = access.readable(f, 0);
 }
@@ -527,9 +530,11 @@ test "checkpoints preserve independent cursors and unread stream records" {
     backend.streams.get(a).?.cursor = 101;
     backend.streams.get(b).?.cursor = 202;
     // Unread callbacks cannot affect either saved cursor.
-    access.acquire(&backend.sink.lock);
-    access.append(backend.sink, a, flag.item_modified, 303, first);
-    access.release(&backend.sink.lock);
+    {
+        var held = backend.sink.delivery.acquire();
+        defer held.deinit();
+        access.append(held.value(), a, flag.item_modified, 303, first);
+    }
     var checkpoint = (try watcher.checkpoint(gpa)).?;
     defer checkpoint.deinit();
     try std.testing.expectEqual(@as(u64, 101), checkpoint.state.value.watches[0].cursor);
@@ -1059,4 +1064,31 @@ test "a path made while nobody watched is created when the log names it" {
     const live = try watcher.poll(io, ms(0));
     try testing.expectEqual(@as(usize, 1), live.len);
     try testing.expectEqual(lookout.Kind.modified, live[0].kind);
+}
+
+test "the polling thread never allocates while the delivery thread's lock is held" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+    defer watcher.deinit(io);
+    const f = &watcher.impl.fsevents;
+    var probe: LockProbe = .{ .child = gpa, .lock = &f.sink.delivery.lock };
+    f.gpa = probe.allocator();
+    defer f.gpa = gpa;
+    const id: WatchId = .fromRaw(7);
+    {
+        var held = f.sink.delivery.acquire();
+        defer held.deinit();
+        for (0..64) |_| access.append(held.value(), id, flag.item_created, 1, "/not/watched/by/anyone");
+    }
+    // A copy of what is held, and a drain that moves it to staging: both
+    // need room for what the delivery thread left, and neither may make it
+    // while that thread waits.
+    const copy = try f.copyHeld(f.gpa);
+    defer f.gpa.free(copy.bytes);
+    try testing.expect(copy.bytes.len > 0);
+    try access.drain(f, io, &watcher.batch);
+    try testing.expect(probe.calls > 0);
+    try testing.expectEqual(@as(usize, 0), probe.under_lock);
 }

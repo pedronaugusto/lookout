@@ -40,9 +40,7 @@ const Batch = @import("../Batch.zig");
 const Volume = @import("fsevents/Volume.zig");
 const CheckpointPaths = @import("../Checkpoint/History.zig");
 const checkpoint_format = @import("../Checkpoint/format.zig");
-/// The lock between the delivery thread and the polling one. Both of
-/// its sections are a bounded `memcpy`.
-const SpinLock = @import("../SpinLock.zig");
+const aegis = @import("aegis");
 const Budget = @import("../Budget.zig");
 const Deadline = @import("../Deadline.zig");
 const name_policy = @import("../identity.zig");
@@ -124,7 +122,7 @@ pub const KnownKey = struct {
 
 pub const KnownKeyContext = struct {
     pub fn hash(_: KnownKeyContext, key: KnownKey) u32 {
-        return @truncate(path_cmp.hashOwned(@backingInt(key.id), key.path));
+        return @truncate(path_cmp.hashOwned(key.id.raw(), key.path));
     }
 
     pub fn eql(_: KnownKeyContext, a: KnownKey, b: KnownKey, _: usize) bool {
@@ -140,9 +138,9 @@ pub const KnownKeyContext = struct {
 /// memory held for the life of the watcher, which is the price of the
 /// delivery thread never having to allocate and never having to wait.
 const bounds: buffer.Bounds = .{
-    .min = 4 * 1024,
-    .max = 64 * 1024 * 1024,
-    .default = 4 * 1024 * 1024,
+    .min = .fromRaw(4 * 1024),
+    .max = .fromRaw(64 * 1024 * 1024),
+    .default = .fromRaw(4 * 1024 * 1024),
 };
 
 /// How long a delivery whose rename is missing its partner is waited
@@ -155,28 +153,76 @@ const bounds: buffer.Bounds = .{
 const grace_ms = 25;
 const grace_rounds = 4;
 
-/// What the delivery thread writes and `drain` reads.
+/// What the delivery thread writes and `drain` reads, and what `deliver`
+/// and `drain` take turns over.
 ///
 /// Deliberately a byte buffer and not a list of allocations: the thread
 /// filling it is not lookout's, and a backend that allocates there would
 /// be holding a general-purpose allocator's lock inside a system
 /// callback.
-const Sink = struct {
-    lock: SpinLock,
+const Delivery = struct {
     /// Sized by `@import("../options.zig").Options.buffer_bytes`, allocated once at `init`
     /// and never moved: the delivery thread writes into it.
     buffer: []u8,
+    /// How much of `buffer` is written. A slice offset the delivery thread
+    /// advances under the lock and checks against `buffer.len` at every
+    /// append, so it stays plain (a measured boundary, not a unit).
     len: usize,
     /// Set when a delivery did not fit. Cleared by the drain that reports
     /// it.
     overflowed: bool,
     /// How many times the system has called `deliver`, and how many paths
-    /// it brought, since the last drain. Counted rather than logged
+    /// it brought, since the last drain, and reset by it: no danger there.
+    /// Counted rather than logged
     /// because the counting happens on a thread lookout does not own and
     /// must not write to a file from. See `trace`.
     deliveries: usize,
     /// Paths `append` had no room for since the last drain.
     dropped: usize,
+
+    /// Written here and read back in `drain`, both through
+    /// src/backend/fsevents/records.zig, which is where the layout is
+    /// written down and where it is fuzzed.
+    fn append(d: *Delivery, id: WatchId, flags: u32, event: u64, subject: []const u8) void {
+        if (d.len + records.encodedLen(subject) > d.buffer.len) {
+            d.overflowed = true;
+            d.dropped += 1;
+            return;
+        }
+        d.len += records.encode(d.buffer[d.len..], id, flags, event, subject);
+        assert(d.len <= d.buffer.len);
+    }
+
+    /// The same record for a path held as a volume prefix and the rest,
+    /// encoded into the buffer without joining them first.
+    fn appendVolumePath(d: *Delivery, id: WatchId, flags: u32, event: u64, prefix: []const u8, tail: []const u8) void {
+        const length = records.encodedVolumePathLen(prefix, tail);
+        if (d.len + length > d.buffer.len) {
+            d.overflowed = true;
+            d.dropped += 1;
+            return;
+        }
+        d.len += records.encodeVolumePath(d.buffer[d.len..], id, flags, event, prefix, tail);
+        assert(d.len <= d.buffer.len);
+    }
+};
+
+/// What a copy out of the `Delivery` found besides the bytes.
+const Handed = struct {
+    overflowed: bool,
+    deliveries: usize,
+    dropped: usize,
+};
+
+/// The delivery thread's end and the polling thread's end of one queue.
+///
+/// The lock between the two is a spin lock: the delivery thread is the
+/// system's, has no `std.Io` to block on, and every section held under it
+/// is bounded -- a copy of at most `buffer` bytes, a few counters -- with
+/// no allocation, no syscall and no lookout logic inside. Where a section
+/// needs memory, it is made before the lock is taken.
+const Sink = struct {
+    delivery: aegis.Guarded(Delivery),
     /// Set by `wake` from another thread, and cleared by the `wait` that
     /// answers it.
     woken: std.atomic.Value(bool),
@@ -186,22 +232,38 @@ const Sink = struct {
     /// costs nothing: one byte pending is as good as a thousand.
     wake_w: posix.fd_t,
 
-    /// Written here and read back in `drain`, both through
-    /// src/backend/fsevents/records.zig, which is where the layout is
-    /// written down and where it is fuzzed.
-    fn append(s: *Sink, id: WatchId, flags: u32, event: u64, subject: []const u8) void {
-        if (s.len + records.encodedLen(subject) > s.buffer.len) {
-            s.overflowed = true;
-            s.dropped += 1;
-            return;
-        }
-        s.len += records.encode(s.buffer[s.len..], id, flags, event, subject);
-        assert(s.len <= s.buffer.len);
-    }
-
     fn signal(s: *Sink) void {
         const byte: [1]u8 = .{0};
         _ = std.c.write(s.wake_w, &byte, 1);
+    }
+
+    /// Appends the bytes the delivery thread has handed over to `into`,
+    /// and with `take` empties the sink and its counts. `into` is grown
+    /// before the lock is taken, because the delivery thread spins on the
+    /// lock and an allocation is not a bounded section: it is sized to
+    /// what the sink holds, and sized again if more arrived meanwhile.
+    /// Nothing leaves the sink when the allocation fails.
+    fn copyOut(s: *Sink, gpa: Allocator, into: *std.ArrayList(u8), take: bool) Allocator.Error!Handed {
+        var room: usize = 0;
+        while (true) {
+            try into.ensureUnusedCapacity(gpa, room);
+            var held = s.delivery.acquire();
+            defer held.deinit();
+            const d = held.value();
+            if (d.len > into.capacity - into.items.len) {
+                room = d.len;
+                continue;
+            }
+            into.appendSliceAssumeCapacity(d.buffer[0..d.len]);
+            const handed: Handed = .{ .overflowed = d.overflowed, .deliveries = d.deliveries, .dropped = d.dropped };
+            if (take) {
+                d.len = 0;
+                d.overflowed = false;
+                d.deliveries = 0;
+                d.dropped = 0;
+            }
+            return handed;
+        }
     }
 };
 
@@ -335,15 +397,10 @@ pub fn init(gpa: Allocator, options: Options) contract.InitError!FsEvents {
 
     const sink = try gpa.create(Sink);
     errdefer gpa.destroy(sink);
-    const bytes = try gpa.alloc(u8, buffer.clamp(options.buffer_bytes, bounds));
+    const bytes = try gpa.alloc(u8, buffer.clamp(options.buffer_bytes, bounds).raw());
     errdefer gpa.free(bytes);
     sink.* = .{
-        .lock = .{},
-        .buffer = bytes,
-        .len = 0,
-        .overflowed = false,
-        .deliveries = 0,
-        .dropped = 0,
+        .delivery = .init(.{ .buffer = bytes, .len = 0, .overflowed = false, .deliveries = 0, .dropped = 0 }),
         .woken = .init(false),
         .wake_r = fds[0],
         .wake_w = fds[1],
@@ -398,7 +455,12 @@ pub fn deinit(f: *FsEvents, io: Io) void {
     c.dispatch_release(f.queue);
     _ = std.c.close(f.sink.wake_r);
     _ = std.c.close(f.sink.wake_w);
-    f.gpa.free(f.sink.buffer);
+    {
+        // Every stream is destroyed, so nothing contends for the buffer.
+        var held = f.sink.delivery.acquire();
+        defer held.deinit();
+        f.gpa.free(held.value().buffer);
+    }
     f.gpa.destroy(f.sink);
     f.* = undefined;
 }
@@ -476,12 +538,10 @@ pub fn discardCheckpoint(f: *FsEvents, root: []const u8) void {
 /// delivered while nobody polls -- which is the whole claim of a buffer
 /// the caller sized -- reads it here. The copy is the caller's to free.
 pub fn copyHeld(f: *FsEvents, gpa: Allocator) Allocator.Error!Held {
-    f.sink.lock.acquire();
-    defer f.sink.lock.release();
-    return .{
-        .bytes = try gpa.dupe(u8, f.sink.buffer[0..f.sink.len]),
-        .overflowed = f.sink.overflowed,
-    };
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(gpa);
+    const handed = try f.sink.copyOut(gpa, &bytes, false);
+    return .{ .bytes = try bytes.toOwnedSlice(gpa), .overflowed = handed.overflowed };
 }
 
 /// See `copyHeld`. Read `bytes` with `fsevents_records.iterate`.
@@ -574,7 +634,7 @@ pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested
         stream.before = before;
         f.resume_used[index] = true;
     }
-    trace.log("fsevents seeded watch={d} known={d}", .{ @backingInt(id), f.known.count() });
+    trace.log("fsevents seeded watch={d} known={d}", .{ id.raw(), f.known.count() });
 }
 
 /// Queues a change a checkpoint carried, as the watch resuming it would
@@ -664,7 +724,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
     stream.published.store(true, .release);
 
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
-        @backingInt(id), @tagName(scope), abs_path, stream_path,
+        id.raw(), @tagName(scope), abs_path, stream_path,
     });
     stream.ref = try createStream(stream, if (stream.persistent) volume.relative(stream_path) else stream_path, since, f.stream_latency);
     // Invalidation is what unschedules a stream, and it requires one that
@@ -676,7 +736,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
     c.FSEventStreamSetDispatchQueue(stream.ref, f.queue);
     if (c.FSEventStreamStart(stream.ref) == 0) return error.WatchLimitReached;
     trace.log("fsevents started watch={d} since={d} latency={d} streams={d} latest={d} dev={d} now={d}", .{
-        @backingInt(id),                             since,
+        id.raw(),                                    since,
         f.stream_latency,                            f.streams.count() + 1,
         c.FSEventStreamGetLatestEventId(stream.ref), c.FSEventStreamGetDeviceBeingWatched(stream.ref),
         c.FSEventsGetCurrentEventId(),
@@ -752,9 +812,10 @@ pub fn remove(f: *FsEvents, io: Io, id: WatchId) void {
         }
     }
     f.staging.shrinkRetainingCapacity(withoutStream(f.staging.items, id));
-    f.sink.lock.acquire();
-    defer f.sink.lock.release();
-    f.sink.len = withoutStream(f.sink.buffer[0..f.sink.len], id);
+    var held = f.sink.delivery.acquire();
+    defer held.deinit();
+    const d = held.value();
+    d.len = withoutStream(d.buffer[0..d.len], id);
 }
 
 /// Compacts whole records written by Sink, without allocating or changing
@@ -829,7 +890,7 @@ fn stillCounted(f: *const FsEvents, dir: []const u8) bool {
 
 fn destroy(f: *FsEvents, stream: *Stream) void {
     trace.log("fsevents stop watch={d} root={s} streams={d}", .{
-        @backingInt(stream.id), stream.root, f.streams.count(),
+        stream.id.raw(), stream.root, f.streams.count(),
     });
     // Stop, invalidate, release, in that order and with nothing between.
     // `FSEventStreamInvalidate` is what unschedules the stream from the
@@ -876,26 +937,24 @@ fn deliver(
     // is published before it is started, so this never drops a delivery
     if (!stream.published.load(.acquire)) return;
 
-    stream.sink.lock.acquire();
-    defer stream.sink.lock.release();
-    stream.sink.deliveries += 1;
-    for (0..count) |i| {
-        const subject = std.mem.span(list[i]);
-        if (stream.persistent) {
-            // The callback cannot allocate. Reserve and encode the two path
-            // pieces directly into the bounded sink under its existing lock.
-            const prefix = std.mem.trimEnd(u8, stream.volume.prefix, "/");
-            const tail = std.mem.trimStart(u8, subject, "/");
-            const length = records.encodedVolumePathLen(prefix, tail);
-            if (stream.sink.len + length > stream.sink.buffer.len) {
-                stream.sink.overflowed = true;
-                stream.sink.dropped += 1;
-                continue;
-            }
-            stream.sink.len += records.encodeVolumePath(stream.sink.buffer[stream.sink.len..], stream.id, flags[i], ids[i], prefix, tail);
-            assert(stream.sink.len <= stream.sink.buffer.len);
-        } else stream.sink.append(stream.id, flags[i], ids[i], subject);
+    {
+        var held = stream.sink.delivery.acquire();
+        defer held.deinit();
+        const d = held.value();
+        d.deliveries += 1;
+        for (0..count) |i| {
+            const subject = std.mem.span(list[i]);
+            if (stream.persistent) {
+                // The callback cannot allocate. Encode the two path pieces
+                // directly into the bounded sink under its existing lock.
+                const prefix = std.mem.trimEnd(u8, stream.volume.prefix, "/");
+                const tail = std.mem.trimStart(u8, subject, "/");
+                d.appendVolumePath(stream.id, flags[i], ids[i], prefix, tail);
+            } else d.append(stream.id, flags[i], ids[i], subject);
+        }
     }
+    // After the lock: the write is a system call, which no section held
+    // against the polling thread may make.
     stream.sink.signal();
 }
 
@@ -968,19 +1027,12 @@ fn drain(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!void {
     var deliveries: usize = 0;
     var dropped: usize = 0;
     if (f.staging.items.len == 0 and !f.staging_overflowed) {
-        f.sink.lock.acquire();
-        defer f.sink.lock.release();
-        overflowed = f.sink.overflowed;
-        deliveries = f.sink.deliveries;
-        dropped = f.sink.dropped;
-        f.staging.appendSlice(f.gpa, f.sink.buffer[0..f.sink.len]) catch {
-            // Nothing has left the sink, including its loss notice.
-            return error.OutOfMemory;
-        };
-        f.sink.len = 0;
-        f.sink.overflowed = false;
-        f.sink.deliveries = 0;
-        f.sink.dropped = 0;
+        // Nothing has left the sink when this fails, including its loss
+        // notice.
+        const handed = try f.sink.copyOut(f.gpa, &f.staging, true);
+        overflowed = handed.overflowed;
+        deliveries = handed.deliveries;
+        dropped = handed.dropped;
         f.staging_overflowed = overflowed;
     }
     if (trace.enabled() and (deliveries != 0 or f.staging.items.len != 0)) {
@@ -1010,7 +1062,7 @@ fn drain(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!void {
             error.TruncatedRecord => break,
         } orelse break;
         trace.log("fsevents record watch={d} event={d} flags=0x{x} path={s}", .{
-            @backingInt(record.id), record.event, record.flags, record.path,
+            record.id.raw(), record.event, record.flags, record.path,
         });
         try delivered.append(f.gpa, record);
     }
@@ -1160,7 +1212,7 @@ fn report(
 ) contract.PollError!void {
     const record = delivered[at];
     const stream = f.streams.get(record.id) orelse {
-        trace.log("fsevents drop no-stream watch={d} path={s}", .{ @backingInt(record.id), record.path });
+        trace.log("fsevents drop no-stream watch={d} path={s}", .{ record.id.raw(), record.path });
         return;
     };
     // Before the scope check, not after it: the path a loss is reported
@@ -1765,7 +1817,7 @@ test "FSEvents refuses a watch whose initial names could not be remembered" {
         f.budget.gpa = failing.allocator();
         var batch = Batch.init(.{});
         defer batch.deinit(gpa);
-        if (f.add(io, @fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch)) |_| {
+        if (f.add(io, .fromRaw(0), root, .{ .recursive = true }, &batch)) |_| {
             if (failing.has_induced_failure) std.debug.print("add succeeded after allocation {d} failed, with {d} remembered names\n", .{ fail_index, f.known.count() });
             try testing.expectEqual(false, failing.has_induced_failure);
             try testing.expectEqual(@as(usize, 4), f.known.count());
@@ -1795,7 +1847,7 @@ test "seeding remembers each entry with the metadata an lstat reads" {
     defer f.deinit(io);
     var batch = Batch.init(.{});
     defer batch.deinit(gpa);
-    try f.add(io, @fromBackingInt(@intCast(0)), root, .{ .recursive = true }, &batch);
+    try f.add(io, .fromRaw(0), root, .{ .recursive = true }, &batch);
     // A replayed record is compared with a later lstat: the seeded value
     // must be exactly what that lstat reads for an unchanged entry.
     try testing.expectEqual(@as(usize, 6), f.known.count());
@@ -1817,8 +1869,8 @@ test "removing an FSEvents stream releases its unreported delivery state" {
     defer f.deinit(io);
     var batch = Batch.init(.{});
     defer batch.deinit(gpa);
-    const gone: WatchId = @fromBackingInt(@intCast(0));
-    const kept: WatchId = @fromBackingInt(@intCast(1));
+    const gone: WatchId = .fromRaw(0);
+    const kept: WatchId = .fromRaw(1);
     try f.add(io, gone, root, .{}, &batch);
     try f.add(io, kept, root, .{}, &batch);
     // This test owns the two records below. Stop and join native replay
@@ -1826,16 +1878,17 @@ test "removing an FSEvents stream releases its unreported delivery state" {
     c.FSEventStreamStop(f.streams.get(gone).?.ref);
     c.FSEventStreamStop(f.streams.get(kept).?.ref);
     c.dispatch_sync_f(f.queue, null, settled);
-    f.sink.lock.acquire();
-    f.sink.len = 0;
-    f.sink.overflowed = false;
-    f.sink.lock.release();
-    // A stopped pending registration can be replaced under the same id.
-    // Its buffered records and rename half belong to the old stream.
-    f.sink.lock.acquire();
-    f.sink.append(gone, flag.item_created, 1, root);
-    f.sink.append(kept, flag.item_modified, 2, root);
-    f.sink.lock.release();
+    {
+        var held = f.sink.delivery.acquire();
+        defer held.deinit();
+        const d = held.value();
+        d.len = 0;
+        d.overflowed = false;
+        // A stopped pending registration can be replaced under the same id.
+        // Its buffered records and rename half belong to the old stream.
+        d.append(gone, flag.item_created, 1, root);
+        d.append(kept, flag.item_modified, 2, root);
+    }
     try f.staging.resize(gpa, 2 * records.encodedLen(root));
     const first = records.encode(f.staging.items, gone, flag.item_created, 3, root);
     _ = records.encode(f.staging.items[first..], kept, flag.item_modified, 4, root);
@@ -2050,7 +2103,7 @@ const c = struct {
 test "a failed FSEvents rekey keeps every remembered name" {
     const io = std.testing.io;
     const testing = std.testing;
-    const id: WatchId = @fromBackingInt(@intCast(0));
+    const id: WatchId = .fromRaw(0);
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
@@ -2094,7 +2147,7 @@ test "allocation failure during delivery retains FSEvents bytes and position" {
         defer f.deinit(io);
         var batch = Batch.init(.{});
         defer batch.deinit(failing.allocator());
-        const id: WatchId = @fromBackingInt(@intCast(0));
+        const id: WatchId = .fromRaw(0);
         try f.add(io, id, root, .{}, &batch);
         // No disk changes after registration: only this synthetic delivery.
         try synthesize(testing.allocator, f.streams.get(id).?, &.{
@@ -2135,7 +2188,7 @@ test "a file stream accepts the replay sentinel outside its event scope" {
     defer backend.deinit(io);
     var batch = Batch.init(.{});
     defer batch.deinit(gpa);
-    const id: WatchId = @fromBackingInt(@intCast(0));
+    const id: WatchId = .fromRaw(0);
     try backend.add(io, id, root, .{}, &batch);
     const stream = backend.streams.get(id).?;
     stream.resumed = true;
@@ -2149,15 +2202,13 @@ test "a file stream accepts the replay sentinel outside its event scope" {
 // Integration fixtures use the adapter’s own callback and native declarations.
 pub const test_access = if (builtin.is_test) struct {
     pub const Asking = AskingFixture;
-    pub const append = Sink.append;
+    pub const append = Delivery.append;
     pub const signal = Sink.signal;
-    pub const acquire = SpinLock.acquire;
     pub const c = cAccess;
     pub const drain = drainFixture;
     pub const hold = holdFixture;
     pub const readable = readableFixture;
     pub const rejoin = rejoinFixture;
-    pub const release = SpinLock.release;
     pub const reportPlain = reportPlainFixture;
     pub const resolveHeld = resolveHeldFixture;
     pub const settled = settledFixture;

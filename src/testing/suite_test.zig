@@ -817,7 +817,7 @@ test "refilter changes a live watch's admitted paths and registrations" {
             if (saw) break;
         }
         try std.testing.expect(saw);
-        try std.testing.expectError(error.UnknownWatch, f.watcher.refilter(f.io, @fromBackingInt(@intCast(0xffffffff)), .none));
+        try std.testing.expectError(error.UnknownWatch, f.watcher.refilter(f.io, .fromRaw(0xffffffff), .none));
     }
 }
 
@@ -1009,12 +1009,12 @@ fn dumpDelivery(f: *const Fixture, phase: []const u8) void {
     });
     for (f.watcher.batch.events.items) |event| {
         std.debug.print("event id={d} kind={s} path={s} from={?s}\n", .{
-            @backingInt(event.id), @tagName(event.kind), event.path, event.from,
+            event.id.raw(), @tagName(event.kind), event.path, event.from,
         });
     }
     for (f.watcher.batch.held.keys(), f.watcher.batch.held.values()) |key, held| {
         std.debug.print("held id={d} kind={s} path={s} from={?s} last_ns={d} size={?d}\n", .{
-            @backingInt(key.id), @tagName(held.kind), key.path, held.from, held.last_ns, held.size,
+            key.id.raw(), @tagName(held.kind), key.path, held.from, held.last_ns, held.size,
         });
     }
 }
@@ -1516,7 +1516,7 @@ test "the Windows read buffer is the size the caller asked for" {
 
         var watcher: Watcher = try .init(gpa, .{
             .backend = .windows,
-            .buffer_bytes = 4 * 1024,
+            .buffer_bytes = .fromRaw(4 * 1024),
         });
         defer watcher.deinit(io);
         _ = try watcher.add(io, root, .{});
@@ -1542,7 +1542,7 @@ test "the Windows read buffer is the size the caller asked for" {
 
         var watcher: Watcher = try .init(gpa, .{
             .backend = .windows,
-            .buffer_bytes = 1024 * 1024,
+            .buffer_bytes = .fromRaw(1024 * 1024),
         });
         defer watcher.deinit(io);
         _ = try watcher.add(io, root, .{});
@@ -1913,7 +1913,7 @@ const Ledger = struct {
 
     fn note(l: *Ledger, events: []const lookout.Event) !void {
         for (events) |event| {
-            trace.log("suite ledger id={d} {s} {s}", .{ @backingInt(event.id), @tagName(event.kind), event.path });
+            trace.log("suite ledger id={d} {s} {s}", .{ event.id.raw(), @tagName(event.kind), event.path });
             try l.seen.append(std.testing.allocator, .{
                 .id = event.id,
                 .kind = event.kind,
@@ -1955,7 +1955,7 @@ const Ledger = struct {
             defer gpa.free(p);
             if (l.count(want.id, want.kind, p) == 0) {
                 std.debug.print("{s}: no {s} for watch {d} at {s} within {d} ms\n", .{
-                    @tagName(f.watcher.backend()), @tagName(want.kind), @backingInt(want.id), p, timeout_ms,
+                    @tagName(f.watcher.backend()), @tagName(want.kind), want.id.raw(), p, timeout_ms,
                 });
             }
         }
@@ -2396,7 +2396,7 @@ test "a folder several watches share is counted once against its budget" {
         for (ledger.seen.items) |key| {
             if (key.kind == .overflow) {
                 std.debug.print("{s}: watch {d} overflowed at {s} with four entries under a budget of four\n", .{
-                    @tagName(backend), @backingInt(key.id), key.path,
+                    @tagName(backend), key.id.raw(), key.path,
                 });
             }
             try std.testing.expect(key.kind != .overflow);

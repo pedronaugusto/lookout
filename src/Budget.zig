@@ -15,6 +15,7 @@
 //! thousand past it.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -23,8 +24,10 @@ const path = @import("path.zig");
 const Budget = @This();
 
 gpa: Allocator,
-/// Mirrors `lookout.Watcher.Options.max_dir_entries`.
-max: usize,
+/// Mirrors `lookout.Watcher.Options.max_dir_entries`: a directory holding
+/// more entries than this is past the budget, and one holding exactly this
+/// many is not.
+limit: aegis.bounded.Limit(usize),
 /// The entries of each directory the backend has been told about, by
 /// name: a set, so that a creation reported twice, or a removal of a
 /// name never counted, moves nothing. Keys and names owned here, compared
@@ -46,7 +49,7 @@ const Remembered = struct {
 pub const Move = enum { appeared, vanished, unchanged };
 
 pub fn init(gpa: Allocator, max: usize) Budget {
-    return .{ .gpa = gpa, .max = max, .counts = .empty, .walking = .empty };
+    return .{ .gpa = gpa, .limit = .init(max), .counts = .empty, .walking = .empty };
 }
 
 pub fn deinit(b: *Budget) void {
@@ -154,7 +157,7 @@ pub fn note(b: *Budget, io: Io, dir: []const u8, name: []const u8, move: Move) A
             freeNames(b.gpa, &remembered.names);
             remembered.* = .{ .names = fresh };
             // The scan already includes this change.
-            return fresh.count() > b.max;
+            return b.past(fresh.count());
         }
         const names = &remembered.names;
         switch (move) {
@@ -162,7 +165,7 @@ pub fn note(b: *Budget, io: Io, dir: []const u8, name: []const u8, move: Move) A
             .vanished => if (names.fetchSwapRemove(name)) |kv| b.gpa.free(kv.key),
             .unchanged => {},
         }
-        return names.count() > b.max;
+        return b.past(names.count());
     }
 
     // Publish only a complete listing. Until the map takes it, this scope
@@ -175,7 +178,13 @@ pub fn note(b: *Budget, io: Io, dir: []const u8, name: []const u8, move: Move) A
     const owned = try b.gpa.dupe(u8, dir);
     errdefer b.gpa.free(owned);
     try b.counts.put(b.gpa, owned, .{ .names = names });
-    return names.count() > b.max;
+    return b.past(names.count());
+}
+
+/// Whether a directory holding `entries` is past the budget.
+fn past(b: *const Budget, entries: usize) bool {
+    b.limit.check(entries) catch return true;
+    return false;
 }
 
 /// Drops `dir` and every directory under it, for a subtree that has gone.
@@ -351,7 +360,7 @@ pub fn counter(
 
 fn rank(id: anytype) u64 {
     return switch (@typeInfo(@TypeOf(id))) {
-        .@"enum" => @backingInt(id),
+        .@"enum" => id.raw(),
         else => id,
     };
 }

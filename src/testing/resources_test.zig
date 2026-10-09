@@ -194,7 +194,7 @@ test "a watched directory costs what it is budgeted" {
                 // The delivery buffer is one per watcher rather than one
                 // per directory, so it is not what is being measured
                 // here; the floor keeps it out of the number.
-                .buffer_bytes = 4 * 1024,
+                .buffer_bytes = .fromRaw(4 * 1024),
             });
             defer watcher.deinit(io);
             _ = try watcher.add(io, root, .{ .recursive = true });

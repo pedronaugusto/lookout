@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `WatchId` is an aegis id (`aegis.id.Id`) and ids come from a checked issuer. Read the number with `id.raw()` where `@backingInt(id)` did, and make one with `.fromRaw(n)`. The first id a watcher issues is 1, no longer 0. Ids are never reissued, and a watcher that has issued all of them (2^32 - 1, removed watches included) now refuses the next `add` with `error.IdExhausted` where it overflowed: a panic in safe builds and a reused id in ReleaseFast. A followed link the watcher has no id left for is reported `unwatched`, as one past `max_followed_links` is.
+
+- `Options.buffer_bytes` is a byte count, `aegis.units.Bytes(usize)`: write `.buffer_bytes = .fromRaw(1 << 20)`. Nothing else in `Options` is a size in bytes, so a count of events or entries can no longer be given for it.
+
 - Remove the OS-global `folds_case` and Latin-1 normalization engine. Canonical kernel paths are exact identity keys, and public path helpers require canonical spellings. `WatchInfo.requested` retains the caller root. Name capabilities are nullable per-root/per-directory facts; unknown means exact matching, with explicit `AddOptions.identity` and independent `Filter.case`/`Filter.normalization` overrides.
 
 - NFC matching is owned by sweep and operates on composed scalars after parsing syntax. Multi-scalar NFC class members return `InvalidPattern`; raw glob text is retained. Baseline format 2 and checkpoint format 3 persist matching policy and preferences, and refuse older formats.
@@ -107,6 +111,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   kernel backend is ended by `wake`, a change or the timeout, with the
   cancellation reported then. `wake` gives the flag-and-wake recipe that
   stops a polling task on every backend.
+
+- Depends on [aegis](https://github.com/pedronaugusto/aegis). The state the system's delivery thread shares with `poll`, and the retained path history that checkpoints lease from, sit beside their lock in an aegis `Guarded`, so a lock and what it guards can no longer be taken apart; history revisions and watch ids are distinct aegis id types; the limits on directory entries and followed links are aegis limits. Lease reclamation is unchanged.
 
 ### Removed
 
@@ -358,6 +364,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   were left out of what the watcher knew, so their next change read as a
   creation; on `kqueue` and the `poll` backend the directory was reported
   `unwatched`. `add` now runs to the end once it has begun.
+
+- On Apple targets the polling thread no longer allocates while the system's delivery thread may be waiting on the lock they share: `poll` made the room for the bytes it takes before it takes them, and sizes it again if more arrived meanwhile, and the delivery thread signals its wake pipe after it has let go. An allocation, or a write to the pipe, under that spin lock held the system's thread for as long as it took.
 
 ## [0.3.0] - 2026-09-20
 

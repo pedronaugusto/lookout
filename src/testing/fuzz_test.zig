@@ -163,7 +163,7 @@ fn writeDelivery(smith: *testing.Smith, out: []u8) usize {
     const path_len = smith.slice(&path);
     return fsevents_records.encode(
         out,
-        @fromBackingInt(@intCast(smith.value(u2))),
+        .fromRaw(smith.value(u2)),
         flagsOf(smith),
         smith.value(u16),
         path[0..path_len],

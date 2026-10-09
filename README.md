@@ -41,7 +41,9 @@ for (try watcher.poll(io, one_second)) |event| {
 
 ## Design
 
-The watcher module uses Zig's standard library and two packages of the same family,
+The watcher module uses Zig's standard library and three packages of the same family,
+[aegis](https://github.com/pedronaugusto/aegis) for typed ids, byte counts, limits and
+the lock beside the data the system's delivery thread shares,
 [airlock](https://github.com/pedronaugusto/airlock) for the baseline file and
 [sweep](https://github.com/pedronaugusto/sweep) for filter patterns. A watcher keeps
 the allocator it is made with for watches, paths and event storage, and keeps no
@@ -195,6 +197,9 @@ native build too.
 
 - [Zig](https://ziglang.org) 0.17.0 and its standard library. On Apple targets the
   module links libc and CoreServices; nothing else is linked anywhere.
+- [aegis](https://github.com/pedronaugusto/aegis) supplies the watch and revision
+  ids, the byte count of `Options.buffer_bytes`, the limits and the guarded state
+  shared with the system's delivery thread.
 - [airlock](https://github.com/pedronaugusto/airlock) writes the baseline file
   atomically and, on request, durably.
 - [sweep](https://github.com/pedronaugusto/sweep) compiles and matches filter
@@ -217,7 +222,7 @@ examples` runs the examples separately. `zig build bench` holds lookout's own sp
 claims to their ceilings in ReleaseFast; run it on a quiet machine. `zig build test`
 runs each once with `--smoke`, judging nothing. CI also runs
 `zig build lint`, which includes `zig build check-consumer`: a project that depends
-on lookout by path, built with only airlock and sweep fetched.
+on lookout by path, built with only aegis, airlock and sweep fetched.
 
 [CI](.github/workflows/ci.yml) has three tiers. The fast tier runs the source
 checks and the Linux Debug suite with the examples and each benchmark once, and

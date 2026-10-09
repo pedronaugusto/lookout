@@ -53,7 +53,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
             if (overlapped == &watch.overlapped) break;
         }
     }
-    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, @backingInt(id), &watch.overlapped) != 0);
+    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, id.raw(), &watch.overlapped) != 0);
 
     var overflows: usize = 0;
     var waited: u32 = 0;
@@ -131,7 +131,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
             if (overlapped == &watch.overlapped) break;
         }
     }
-    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, @backingInt(id), &watch.overlapped) != 0);
+    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, id.raw(), &watch.overlapped) != 0);
 
     var overflowed = false;
     waited = 0;

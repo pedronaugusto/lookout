@@ -15,6 +15,7 @@
 //! under two names by one watch.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -39,12 +40,16 @@ const WatchId = types.WatchId;
 /// what every id promises.
 pub const Host = struct {
     context: *anyopaque,
-    issue_fn: *const fn (context: *anyopaque) WatchId,
+    issue_fn: *const fn (context: *anyopaque) IssueError!WatchId,
     /// Registers the link's target under the link's id.
     register_fn: *const fn (io: Io, context: *anyopaque, link: *Link) RegisterError!void,
     unregister_fn: *const fn (io: Io, context: *anyopaque, id: WatchId) void,
 
-    fn issue(h: Host) WatchId {
+    /// The watcher has no id left to give. The link is a hole in the
+    /// watch, as one past `max` is.
+    pub const IssueError = error{IdExhausted};
+
+    fn issue(h: Host) IssueError!WatchId {
         return h.issue_fn(h.context);
     }
 
@@ -72,8 +77,8 @@ root: []u8,
 /// Its filter, copied: a link it prunes is not followed, and the
 /// registrations on links' targets ask it of every path below them.
 filter: CompiledFilter,
-/// `AddOptions.max_followed_links`.
-max: usize,
+/// `AddOptions.max_followed_links`: the most links followed at once.
+limit: aegis.bounded.Limit(usize),
 /// What the root is.
 identity: Identity,
 followed: std.ArrayList(*Link) = .empty,
@@ -147,7 +152,7 @@ pub fn create(gpa: Allocator, io: Io, owner: WatchId, root: []const u8, filter: 
         .owner = owner,
         .root = owned,
         .filter = try CompiledFilter.recompile(gpa, filter, policy),
-        .max = max,
+        .limit = .init(max),
         .identity = identity,
     };
     return l;
@@ -196,8 +201,14 @@ pub fn consider(l: *const Links, io: Io, subject: []const u8) Allocator.Error!Ve
     if (reached.kind != .directory) return .idle;
     const identity = identityOf(io, real) orelse return .idle;
     if (l.reaches(io, real, identity)) return .reached;
-    if (l.followed.items.len >= l.max) return .full;
+    if (l.full()) return .full;
     return .{ .follow = .{ .target = try l.gpa.dupe(u8, real), .identity = identity } };
+}
+
+/// Whether following one more link would pass the limit.
+fn full(l: *const Links) bool {
+    l.limit.check(l.followed.items.len + 1) catch return true;
+    return false;
 }
 
 /// Whether the watch reaches the directory `target`, which is `identity`,
@@ -314,7 +325,12 @@ pub fn follow(l: *Links, io: Io, host: Host, batch: *Batch, subject: []const u8)
             return null;
         },
         .follow => |found| {
-            const link = try l.adopt(subject, found.target, found.identity, host.issue());
+            const id = host.issue() catch {
+                l.gpa.free(found.target);
+                try batch.trouble(l.gpa, io, l.owner, subject, .directory);
+                return null;
+            };
+            const link = try l.adopt(subject, found.target, found.identity, id);
             host.register(io, link) catch |err| {
                 l.forget(link);
                 if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -329,7 +345,7 @@ pub fn follow(l: *Links, io: Io, host: Host, batch: *Batch, subject: []const u8)
 /// Makes the record of a link about to be followed, taking `target`.
 fn adopt(l: *Links, subject: []const u8, target: []u8, identity: Identity, id: WatchId) Allocator.Error!*Link {
     // `consider` says `full` at the ceiling, so a link adopted is within it.
-    assert(l.followed.items.len < l.max);
+    assert(!l.full());
     errdefer l.gpa.free(target);
     try l.followed.ensureUnusedCapacity(l.gpa, 1);
     const link = try l.gpa.create(Link);
@@ -551,7 +567,7 @@ test "a link is followed only into a directory the watch does not reach" {
 
     // Nothing is followed here, so nothing is registered or let go.
     const Idle = struct {
-        fn issue(_: *anyopaque) WatchId {
+        fn issue(_: *anyopaque) Host.IssueError!WatchId {
             unreachable;
         }
         fn register(_: Io, _: *anyopaque, _: *Link) Host.RegisterError!void {
@@ -561,7 +577,7 @@ test "a link is followed only into a directory the watch does not reach" {
     };
     var nothing: u8 = 0;
     const idle: Host = .{ .context = &nothing, .issue_fn = Idle.issue, .register_fn = Idle.register, .unregister_fn = Idle.unregister };
-    const l = (try create(gpa, io, @fromBackingInt(@intCast(0)), root, .none, .{}, null, 64)) orelse return error.SkipZigTest;
+    const l = (try create(gpa, io, .fromRaw(0), root, .none, .{}, null, 64)) orelse return error.SkipZigTest;
     defer l.destroy(io, idle);
     for (cases) |case| {
         const subject = try std.Io.Dir.path.join(gpa, &.{ root, case.link });
@@ -575,7 +591,7 @@ test "a link is followed only into a directory the watch does not reach" {
     try testing.expectEqual(Verdict.none, try l.consider(io, plain));
 
     // Past the most a watch follows, the one link that would be followed is not.
-    l.max = 0;
+    l.limit = .init(0);
     const out = try std.Io.Dir.path.join(gpa, &.{ root, "out" });
     defer gpa.free(out);
     try testing.expectEqual(Verdict.full, try l.consider(io, out));
