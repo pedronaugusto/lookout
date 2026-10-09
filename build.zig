@@ -9,8 +9,9 @@ pub fn build(b: *std.Build) !void {
     //=====================================================================
     // The module.
     //
-    // Pure Zig over two packages of its own, airlock for the durable
-    // baseline file and sweep for the filter patterns, both std-only:
+    // Pure Zig over three packages of its own, aegis for the typed state
+    // and counts, airlock for the durable baseline file and sweep for the
+    // filter patterns, all std-only:
     // which backend is compiled in is decided by `builtin.target.os.tag`
     // inside src/lookout.zig, so a consumer adds the import and nothing
     // else.
@@ -47,7 +48,9 @@ pub fn build(b: *std.Build) !void {
     const airlock_dependency = b.dependency("airlock", .{ .target = target, .optimize = optimize });
     const airlock = airlock_dependency.module("airlock");
     const sweep = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep");
+    const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "aegis", .module = aegis },
         .{ .name = "airlock", .module = airlock },
         .{ .name = "sweep", .module = sweep },
     };
@@ -199,12 +202,12 @@ pub fn build(b: *std.Build) !void {
                 .link_libc = darwin,
             },
         });
-        // The build a consumer gets: airlock and sweep, and nothing lookout
+        // The build a consumer gets: aegis, airlock and sweep, and nothing lookout
         // fetches for itself.
         preflight.addConsumerCheck(b, .{
             .package = "lookout",
             .program = b.path("ci/consumer.zig"),
-            .packages = &.{ b.dependency("airlock", .{}), b.dependency("sweep", .{}) },
+            .packages = &.{ b.dependency("aegis", .{}), b.dependency("airlock", .{}), b.dependency("sweep", .{}) },
         });
     }
     return needed;
@@ -217,6 +220,7 @@ pub fn build(b: *std.Build) !void {
 /// than reaching it through `lookout`.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "aegis", .module = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis") },
         .{ .name = "airlock", .module = b.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock") },
         .{ .name = "sweep", .module = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep") },
     };

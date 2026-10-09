@@ -37,7 +37,7 @@ const shakedown = @import("shakedown");
 const Context = struct {
     filter: CompiledFilter,
     subjects: [][]u8,
-    fn run(c: *Context, n: u64) !void {
+    fn run(c: *Context, n: u64) error{}!void {
         var kept: usize = 0;
         for (0..n) |i| {
             const subject = c.subjects[i % c.subjects.len];
@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
     for (cases) |case| {
         var c: Context = .{ .filter = try .compilePolicy(init.gpa, .{ .ignore = case.ignore, .only = case.only }, .{ .case_sensitive = !folded, .normalization = if (nfc) .nfc else .exact }), .subjects = subjects };
         defer c.filter.deinit();
-        try shakedown.bench.run(init.gpa, init.io, &stdout.interface, &c, &.{.{ .name = case.name, .unit = "two-questions", .initial = 20_000, .run = Context.run }}, .{ .commit = "filesystem-policy" }, .{ .smoke = smoke });
+        try shakedown.bench.run(error{}, init.gpa, init.io, &stdout.interface, &c, &.{.{ .name = case.name, .unit = "two-questions", .initial = 20_000, .run = Context.run }}, .{ .commit = "filesystem-policy" }, .{ .smoke = smoke });
     }
     try stdout.interface.flush();
 }
