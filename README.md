@@ -41,6 +41,10 @@ for (try watcher.poll(io, one_second)) |event| {
 
 ## Design
 
+[docs/design.md](docs/design.md) gives the layers, who owns which state, what
+always holds, and the reasons behind the decisions. What follows is what a user
+of the API needs to know.
+
 The watcher module uses Zig's standard library and three packages of the same family,
 [aegis](https://github.com/pedronaugusto/aegis) for typed ids, byte counts, limits and
 the lock beside the data the system's delivery thread shares,
