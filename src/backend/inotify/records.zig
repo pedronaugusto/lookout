@@ -79,7 +79,7 @@ pub fn iterate(bytes: []const u8) Iterator {
 
 /// Writes one record the way the kernel writes it, and answers how many
 /// bytes that took. The inverse of `Iterator.next`, for the tests below
-/// and for the corpus the fuzz target starts from.
+/// and for the fuzz properties.
 pub fn encode(out: []u8, record: Record) usize {
     const name = record.name orelse "";
     assert(out.len >= header_len + name.len);

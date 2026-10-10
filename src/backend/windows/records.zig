@@ -143,7 +143,7 @@ pub fn arrival(rest: Iterator) Arrival {
 
 /// Writes one record the way the kernel writes it, and answers how many
 /// bytes that took. The inverse of `Iterator.next`, for the tests below
-/// and for the corpus the fuzz target starts from.
+/// and for the fuzz properties.
 ///
 /// `last` ends the chain, which is what a zero `NextEntryOffset` means.
 pub fn encode(out: []u8, action: u32, name: []const u8, last: bool) usize {

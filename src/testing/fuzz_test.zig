@@ -17,7 +17,8 @@
 //!
 //! The decoders are out of the backends, in files that compile on every
 //! target, so all four run on whatever host is in front of the change.
-//! Run them with `zig build test --fuzz`.
+//! They are shakedown `check` properties: `zig build test` runs seeded cases
+//! of each, and `zig build test --fuzz` searches.
 
 const std = @import("std");
 const testing = std.testing;
@@ -27,10 +28,21 @@ const inotify_records = @import("../backend/inotify/records.zig");
 const windows_records = @import("../backend/windows/records.zig");
 const lookout = @import("../lookout.zig");
 const WatchId = lookout.WatchId;
+const shakedown = @import("shakedown");
+const gen = shakedown.gen;
+const Case = shakedown.Case;
+const Source = shakedown.Source;
 
 /// How much of one read a target builds. Large enough for a run of
 /// records and small enough that a failing input is readable.
 const buffer_len = 512;
+
+/// Fills a prefix of `out` of any length with bytes, and answers its length.
+fn bytesInto(s: *Source, out: []u8) usize {
+    const len = gen.intRange(s, usize, 0, out.len);
+    s.bytes(out[0..len]);
+    return len;
+}
 
 /// Whether `needle` is a slice of `haystack` -- the invariant that a
 /// decoded name points into the input and not past it or beside it.
@@ -50,43 +62,41 @@ fn inside(haystack: []const u8, needle: []const u8) bool {
 /// well-formed run with a damaged record in the middle of it is the
 /// input that matters.
 fn splice(
-    smith: *testing.Smith,
+    s: *Source,
     out: []u8,
     room: usize,
-    encoder: *const fn (*testing.Smith, []u8) usize,
+    encoder: *const fn (*Source, []u8) usize,
 ) usize {
-    @disableInstrumentation();
     var len: usize = 0;
-    while (!smith.eosWeightedSimple(4, 1)) {
+    while (s.more(4)) {
         if (out.len - len < room) break;
-        len += if (smith.boolWeighted(1, 3))
-            encoder(smith, out[len..])
+        len += if (s.chance(750_000))
+            encoder(s, out[len..])
         else
-            smith.slice(out[len..][0..@min(room, out.len - len)]);
+            bytesInto(s, out[len..][0..@min(room, out.len - len)]);
     }
     return len;
 }
 
 test "the inotify read buffer decodes or says why" {
-    try testing.fuzz({}, fuzzInotify, .{});
+    try shakedown.check(testing.allocator, {}, fuzzInotify, .{});
 }
 
-fn writeInotify(smith: *testing.Smith, out: []u8) usize {
-    @disableInstrumentation();
+fn writeInotify(s: *Source, out: []u8) usize {
     var name: [24]u8 = undefined;
-    const name_len = smith.slice(&name);
+    const name_len = bytesInto(s, &name);
     return inotify_records.encode(out, .{
-        .wd = smith.value(i8),
-        .mask = smith.value(u32),
-        .cookie = smith.value(u8),
+        .wd = gen.int(s, i8),
+        .mask = gen.int(s, u32),
+        .cookie = gen.int(s, u8),
         .name = name[0..name_len],
     });
 }
 
-fn fuzzInotify(_: void, smith: *testing.Smith) !void {
-    @disableInstrumentation();
+fn fuzzInotify(_: void, c: *Case) !void {
+    const s = c.source;
     var buffer: [buffer_len]u8 = undefined;
-    const bytes = buffer[0..splice(smith, &buffer, 64, writeInotify)];
+    const bytes = buffer[0..splice(s, &buffer, 64, writeInotify)];
 
     var it = inotify_records.iterate(bytes);
     var seen: usize = 0;
@@ -110,29 +120,28 @@ fn fuzzInotify(_: void, smith: *testing.Smith) !void {
 }
 
 test "the ReadDirectoryChangesW chain decodes or says why" {
-    try testing.fuzz({}, fuzzWindows, .{});
+    try shakedown.check(testing.allocator, {}, fuzzWindows, .{});
 }
 
-fn writeWindows(smith: *testing.Smith, out: []u8) usize {
-    @disableInstrumentation();
+fn writeWindows(s: *Source, out: []u8) usize {
     var name: [24]u8 = undefined;
     // An even length, because a whole number of UTF-16 code units is
     // what the kernel writes; the fuzzer reaches the odd ones by
     // damaging a header rather than by being handed one.
-    const name_len = smith.slice(&name) / 2 * 2;
+    const name_len = bytesInto(s, &name) / 2 * 2;
     return windows_records.encode(
         out,
-        smith.value(u3),
+        gen.int(s, u3),
         name[0..name_len],
-        smith.boolWeighted(1, 3),
+        s.chance(750_000),
     );
 }
 
-fn fuzzWindows(_: void, smith: *testing.Smith) !void {
-    @disableInstrumentation();
+fn fuzzWindows(_: void, c: *Case) !void {
+    const s = c.source;
     const gpa = testing.allocator;
     var buffer: [buffer_len]u8 = undefined;
-    const bytes = buffer[0..splice(smith, &buffer, 64, writeWindows)];
+    const bytes = buffer[0..splice(s, &buffer, 64, writeWindows)];
 
     var it = windows_records.iterate(bytes);
     var seen: usize = 0;
@@ -154,18 +163,17 @@ fn fuzzWindows(_: void, smith: *testing.Smith) !void {
 }
 
 test "the FSEvents delivery decodes or says why" {
-    try testing.fuzz({}, fuzzDelivery, .{});
+    try shakedown.check(testing.allocator, {}, fuzzDelivery, .{});
 }
 
-fn writeDelivery(smith: *testing.Smith, out: []u8) usize {
-    @disableInstrumentation();
+fn writeDelivery(s: *Source, out: []u8) usize {
     var path: [24]u8 = undefined;
-    const path_len = smith.slice(&path);
+    const path_len = bytesInto(s, &path);
     return fsevents_records.encode(
         out,
-        .fromRaw(smith.value(u2)),
-        flagsOf(smith),
-        smith.value(u16),
+        .fromRaw(gen.int(s, u2)),
+        flagsOf(s),
+        gen.int(s, u16),
         path[0..path_len],
     );
 }
@@ -173,8 +181,7 @@ fn writeDelivery(smith: *testing.Smith, out: []u8) usize {
 /// A combination of the flags FSEvents sets, weighted towards the ones
 /// the backend reads rather than spread over thirty-two bits that mean
 /// nothing to it.
-fn flagsOf(smith: *testing.Smith) u32 {
-    @disableInstrumentation();
+fn flagsOf(s: *Source) u32 {
     const flag = fsevents_records.flag;
     const named = [_]u32{
         flag.must_scan_sub_dirs,  flag.user_dropped,   flag.kernel_dropped,
@@ -182,18 +189,18 @@ fn flagsOf(smith: *testing.Smith) u32 {
         flag.item_removed,        flag.item_renamed,   flag.item_modified,
         flag.item_inode_meta_mod, flag.item_xattr_mod, flag.item_is_dir,
     };
-    var flags: u32 = smith.value(u8);
-    while (!smith.eosWeightedSimple(2, 1)) {
-        flags |= named[smith.index(named.len)];
+    var flags: u32 = gen.int(s, u8);
+    while (s.more(2)) {
+        flags |= named[gen.intRange(s, usize, 0, named.len - 1)];
     }
     return flags;
 }
 
-fn fuzzDelivery(_: void, smith: *testing.Smith) !void {
-    @disableInstrumentation();
+fn fuzzDelivery(_: void, c: *Case) !void {
+    const s = c.source;
     const gpa = testing.allocator;
     var buffer: [buffer_len]u8 = undefined;
-    const bytes = buffer[0..splice(smith, &buffer, 64, writeDelivery)];
+    const bytes = buffer[0..splice(s, &buffer, 64, writeDelivery)];
 
     var delivered: std.ArrayList(fsevents_records.Record) = .empty;
     defer delivered.deinit(gpa);
@@ -211,7 +218,7 @@ fn fuzzDelivery(_: void, smith: *testing.Smith) !void {
         try delivered.append(gpa, record);
     }
 
-    const fake: Fake = .{ .seed = smith.value(u32) };
+    const fake: Fake = .{ .seed = gen.int(s, u32) };
     const used = try gpa.alloc(bool, delivered.items.len);
     defer gpa.free(used);
     @memset(used, false);
@@ -235,15 +242,15 @@ fn fuzzDelivery(_: void, smith: *testing.Smith) !void {
 }
 
 test "a rename pairs across the boundary of a delivery" {
-    try testing.fuzz({}, fuzzCarry, .{});
+    try shakedown.check(testing.allocator, {}, fuzzCarry, .{});
 }
 
 /// Drives `fsevents_records.Pairing` over a run of deliveries the way
 /// the backend drives it, and counts what went in and what came back.
-fn fuzzCarry(_: void, smith: *testing.Smith) !void {
-    @disableInstrumentation();
+fn fuzzCarry(_: void, c: *Case) !void {
+    const s = c.source;
     const gpa = testing.allocator;
-    const fake: Fake = .{ .seed = smith.value(u32) };
+    const fake: Fake = .{ .seed = gen.int(s, u32) };
 
     var pairing: fsevents_records.Pairing = .{};
     defer if (pairing.held) |half| gpa.free(half.path);
@@ -255,9 +262,9 @@ fn fuzzCarry(_: void, smith: *testing.Smith) !void {
     var alone: usize = 0;
 
     var deliveries: usize = 0;
-    while (!smith.eosWeightedSimple(3, 1) and deliveries < 8) : (deliveries += 1) {
+    while (s.more(3) and deliveries < 8) : (deliveries += 1) {
         var buffer: [buffer_len]u8 = undefined;
-        const bytes = buffer[0..splice(smith, &buffer, 64, writeDelivery)];
+        const bytes = buffer[0..splice(s, &buffer, 64, writeDelivery)];
 
         var delivered: std.ArrayList(fsevents_records.Record) = .empty;
         defer delivered.deinit(gpa);
@@ -358,8 +365,7 @@ const Snapshot = @import("../Snapshot.zig");
 /// A path out of the pieces two spellings of one path differ by: case,
 /// composition, both separators and runs of them, the dot components, a
 /// drive and the Windows prefixes, a NUL and bytes that are not UTF-8.
-fn generatePath(smith: *testing.Smith, buf: []u8) []u8 {
-    @disableInstrumentation();
+fn generatePath(s: *Source, buf: []u8) []u8 {
     const pieces = [_][]const u8{
         "/",        "\\",   "a",       "B",       "\u{e9}",  "e\u{301}", "\u{c9}", "E\u{301}",
         "\xff",     "\xc3", "..",      ".",       "C:",      "\\\\?\\",  "//",     "\u{65e5}",
@@ -367,8 +373,8 @@ fn generatePath(smith: *testing.Smith, buf: []u8) []u8 {
         "\\\\h\\s", "a/",   "/a",      "\u{c5}",
     };
     var end: usize = 0;
-    while (!smith.eosWeightedSimple(4, 1)) {
-        const piece = pieces[smith.index(pieces.len)];
+    while (s.more(4)) {
+        const piece = pieces[gen.intRange(s, usize, 0, pieces.len - 1)];
         if (end + piece.len > buf.len) break;
         @memcpy(buf[end..][0..piece.len], piece);
         end += piece.len;
@@ -459,28 +465,28 @@ fn checkPaths(a: []const u8, b: []const u8) !void {
 }
 
 test "canonical paths compare, hash and cut their original bytes" {
-    try testing.fuzz({}, fuzzPaths, .{});
+    try shakedown.check(testing.allocator, {}, fuzzPaths, .{});
 }
 
-fn fuzzPaths(_: void, smith: *testing.Smith) !void {
-    @disableInstrumentation();
+fn fuzzPaths(_: void, c: *Case) !void {
+    const s = c.source;
     var left: [96]u8 = undefined;
     var right: [96]u8 = undefined;
-    const a = generatePath(smith, &left);
+    const a = generatePath(s, &left);
     // Often the same path in another spelling, or one under it.
-    const b = switch (smith.valueRangeAtMost(u8, 0, 2)) {
-        0 => generatePath(smith, &right),
+    const b = switch (gen.intRange(s, u8, 0, 2)) {
+        0 => generatePath(s, &right),
         1 => respelled: {
             var end: usize = 0;
             for (a) |byte| {
-                right[end] = if (std.ascii.isAlphabetic(byte) and smith.boolWeighted(1, 1)) byte ^ 0x20 else byte;
+                right[end] = if (std.ascii.isAlphabetic(byte) and gen.boolean(s)) byte ^ 0x20 else byte;
                 end += 1;
             }
             break :respelled right[0..end];
         },
         else => under: {
             @memcpy(right[0..a.len], a);
-            const tail = generatePath(smith, right[a.len..]);
+            const tail = generatePath(s, right[a.len..]);
             break :under right[0 .. a.len + tail.len];
         },
     };
@@ -677,12 +683,11 @@ test "an ignore list agrees with the reference over every short pattern and path
 
 /// A pattern built from wildcards, separators and the letters the paths
 /// below are made of.
-fn generatePattern(smith: *testing.Smith, buf: []u8) []u8 {
-    @disableInstrumentation();
+fn generatePattern(s: *Source, buf: []u8) []u8 {
     const pieces = [_][]const u8{ "*", "**", "?", "/", "a", "b", "A", "\u{e9}", "e\u{301}", "**/", "/**", "." };
     var end: usize = 0;
-    while (!smith.eosWeightedSimple(3, 1)) {
-        const piece = pieces[smith.index(pieces.len)];
+    while (s.more(3)) {
+        const piece = pieces[gen.intRange(s, usize, 0, pieces.len - 1)];
         if (end + piece.len > buf.len) break;
         @memcpy(buf[end..][0..piece.len], piece);
         end += piece.len;
@@ -691,19 +696,18 @@ fn generatePattern(smith: *testing.Smith, buf: []u8) []u8 {
 }
 
 /// A path below `/w`, one to four components of the same letters.
-fn generateBelow(smith: *testing.Smith, buf: []u8) []u8 {
-    @disableInstrumentation();
+fn generateBelow(s: *Source, buf: []u8) []u8 {
     const root = if (builtin.target.os.tag == .windows) "C:\\w" else "/w";
     const names = [_][]const u8{ "a", "b", "ab", "ba", "A", "\u{e9}", "e\u{301}", "a.b", "aa" };
     @memcpy(buf[0..root.len], root);
     var end: usize = root.len;
-    const depth = smith.valueRangeAtMost(u8, 1, 4);
+    const depth = gen.intRange(s, u8, 1, 4);
     for (0..depth) |_| {
         buf[end] = std.Io.Dir.path.sep;
         end += 1;
-        const parts = smith.valueRangeAtMost(u8, 1, 2);
+        const parts = gen.intRange(s, u8, 1, 2);
         for (0..parts) |_| {
-            const name = names[smith.index(names.len)];
+            const name = names[gen.intRange(s, usize, 0, names.len - 1)];
             @memcpy(buf[end..][0..name.len], name);
             end += name.len;
         }
@@ -719,18 +723,18 @@ fn native(buf: []u8, pattern: []const u8) []const u8 {
 }
 
 test "a filter keeps what its patterns name and walks to it" {
-    try testing.fuzz({}, fuzzFilter, .{});
+    try shakedown.check(testing.allocator, {}, fuzzFilter, .{});
 }
 
-fn fuzzFilter(_: void, smith: *testing.Smith) !void {
-    @disableInstrumentation();
+fn fuzzFilter(_: void, c: *Case) !void {
+    const s = c.source;
     const gpa = testing.allocator;
     const root = if (builtin.target.os.tag == .windows) "C:\\w" else "/w";
     var pattern_buf: [48]u8 = undefined;
     var native_buf: [48]u8 = undefined;
-    const pattern = native(&native_buf, generatePattern(smith, &pattern_buf));
+    const pattern = native(&native_buf, generatePattern(s, &pattern_buf));
     var subject_buf: [128]u8 = undefined;
-    const subject = generateBelow(smith, &subject_buf);
+    const subject = generateBelow(s, &subject_buf);
     const rel = path_cmp.relative(root, subject).?;
     errdefer std.debug.print("pattern '{s}' subject '{s}'\n", .{ pattern, subject });
 
@@ -773,7 +777,7 @@ fn fuzzFilter(_: void, smith: *testing.Smith) !void {
 }
 
 test "a baseline of an arbitrary tree diffs to what changed in it" {
-    try testing.fuzz({}, fuzzBaseline, .{});
+    try shakedown.check(testing.allocator, {}, fuzzBaseline, .{ .cases = 64 });
 }
 
 /// A tree: relative path to a file's contents, or to null for a directory.
@@ -806,8 +810,8 @@ const model_names = [_][]const u8{ "a", "b", "c d", "\u{65e5}", "e.txt" };
 /// What `Baseline.diff` says about one path, as the models predict it.
 const Expected = struct { kind: lookout.Kind, target: lookout.Target };
 
-fn fuzzBaseline(_: void, smith: *testing.Smith) !void {
-    @disableInstrumentation();
+fn fuzzBaseline(_: void, c: *Case) !void {
+    const s = c.source;
     fuzzingIo();
     defer fuzzedIo();
     const gpa = testing.allocator;
@@ -819,16 +823,16 @@ fn fuzzBaseline(_: void, smith: *testing.Smith) !void {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", a);
 
-    const before = try generateModel(a, smith);
+    const before = try generateModel(a, s);
     try applyModel(tmp.dir, &before);
 
-    const recursive = smith.boolWeighted(1, 3);
+    const recursive = s.chance(750_000);
     var base = try Baseline.seed(gpa, io, root, .{ .recursive = recursive });
     defer base.deinit();
 
     var after: Model = .empty;
     for (before.keys(), before.values()) |key, value| try after.put(a, key, value);
-    try changeModel(a, smith, tmp.dir, &after);
+    try changeModel(a, s, tmp.dir, &after);
 
     const expected = try expectDiff(a, &before, &after, recursive);
     const found = try base.diff(io);
@@ -839,22 +843,21 @@ fn fuzzBaseline(_: void, smith: *testing.Smith) !void {
 
 /// Up to a dozen paths, each a file or a directory below an existing
 /// directory or at the top.
-fn generateModel(a: std.mem.Allocator, smith: *testing.Smith) !Model {
-    @disableInstrumentation();
+fn generateModel(a: std.mem.Allocator, s: *Source) !Model {
     var model: Model = .empty;
     var generated: usize = 0;
-    while (generated < 12 and !smith.eosWeightedSimple(3, 1)) : (generated += 1) {
+    while (generated < 12 and s.more(3)) : (generated += 1) {
         const dirs = blk: {
             var list: std.ArrayList([]const u8) = .empty;
             try list.append(a, "");
             for (model.keys(), model.values()) |key, value| if (value == null) try list.append(a, key);
             break :blk list.items;
         };
-        const parent = dirs[smith.index(dirs.len)];
-        const name = model_names[smith.index(model_names.len)];
+        const parent = dirs[gen.intRange(s, usize, 0, dirs.len - 1)];
+        const name = model_names[gen.intRange(s, usize, 0, model_names.len - 1)];
         const key = if (parent.len == 0) try a.dupe(u8, name) else try std.Io.Dir.path.join(a, &.{ parent, name });
         if (model.contains(key)) continue;
-        const contents: ?[]const u8 = if (smith.boolWeighted(1, 2)) null else try a.dupe(u8, "xxx");
+        const contents: ?[]const u8 = if (s.chance(666_667)) null else try a.dupe(u8, "xxx");
         try model.put(a, key, contents);
     }
     return model;
@@ -863,14 +866,13 @@ fn generateModel(a: std.mem.Allocator, smith: *testing.Smith) !Model {
 /// Changes some of the tree in `dir` and in `model` alike: removes a path
 /// and what is below it, rewrites a file to another length, turns one kind
 /// into the other, adds new ones.
-fn changeModel(a: std.mem.Allocator, smith: *testing.Smith, dir: std.Io.Dir, model: *Model) !void {
-    @disableInstrumentation();
+fn changeModel(a: std.mem.Allocator, s: *Source, dir: std.Io.Dir, model: *Model) !void {
     const io = testing.io;
     var changes: usize = 0;
-    while (changes < 6 and model.count() != 0 and !smith.eosWeightedSimple(2, 1)) : (changes += 1) {
-        const at = smith.index(model.count());
+    while (changes < 6 and model.count() != 0 and s.more(2)) : (changes += 1) {
+        const at = gen.intRange(s, usize, 0, model.count() - 1);
         const key = model.keys()[at];
-        switch (smith.valueRangeAtMost(u8, 0, 3)) {
+        switch (gen.intRange(s, u8, 0, 3)) {
             0, 2 => {
                 // Gone, with everything below it; or gone and back as the
                 // other kind.
@@ -883,7 +885,7 @@ fn changeModel(a: std.mem.Allocator, smith: *testing.Smith, dir: std.Io.Dir, mod
                         model.swapRemoveAt(i);
                     } else i += 1;
                 }
-                if (smith.boolWeighted(1, 1)) {
+                if (gen.boolean(s)) {
                     const contents: ?[]const u8 = if (was_dir) "y" else null;
                     try model.put(a, key, contents);
                     if (contents) |c| try dir.writeFile(io, .{ .sub_path = key, .data = c }) else try dir.createDirPath(io, key);
@@ -895,7 +897,7 @@ fn changeModel(a: std.mem.Allocator, smith: *testing.Smith, dir: std.Io.Dir, mod
                 try dir.writeFile(io, .{ .sub_path = key, .data = contents });
             },
             else => if (model.values()[at] == null) {
-                const name = model_names[smith.index(model_names.len)];
+                const name = model_names[gen.intRange(s, usize, 0, model_names.len - 1)];
                 const child = try std.Io.Dir.path.join(a, &.{ key, name });
                 if (!model.contains(child)) {
                     try model.put(a, child, "new");
@@ -967,11 +969,11 @@ fn matchDiff(root: []const u8, expected: *const std.array_hash_map.String(Expect
 }
 
 test "a checkpoint token reads back as itself or not at all" {
-    try testing.fuzz({}, fuzzCheckpoint, .{});
+    try shakedown.check(testing.allocator, {}, fuzzCheckpoint, .{});
 }
 
-fn fuzzCheckpoint(_: void, smith: *testing.Smith) !void {
-    @disableInstrumentation();
+fn fuzzCheckpoint(_: void, c: *Case) !void {
+    const s = c.source;
     const gpa = testing.allocator;
     const absolute = if (builtin.target.os.tag == .windows) "\"C:\\\\w\"" else "\"/w\"";
     const pieces = [_][]const u8{
@@ -987,9 +989,9 @@ fn fuzzCheckpoint(_: void, smith: *testing.Smith) !void {
     };
     var buf: [1024]u8 = undefined;
     var end: usize = 0;
-    while (!smith.eosWeightedSimple(8, 1)) {
+    while (s.more(8)) {
         var chunk: [16]u8 = undefined;
-        const piece = if (smith.boolWeighted(1, 6)) chunk[0..smith.slice(&chunk)] else pieces[smith.index(pieces.len)];
+        const piece = if (s.chance(857_143)) chunk[0..bytesInto(s, &chunk)] else pieces[gen.intRange(s, usize, 0, pieces.len - 1)];
         if (end + piece.len > buf.len) break;
         @memcpy(buf[end..][0..piece.len], piece);
         end += piece.len;
@@ -1010,39 +1012,20 @@ fn fuzzCheckpoint(_: void, smith: *testing.Smith) !void {
     try testing.expectEqualStrings(token, second);
 }
 
-test "the path, pattern, baseline and checkpoint properties hold over seeded rounds" {
-    var prng: std.Random.DefaultPrng = .init(0x100c);
-    var bytes: [256]u8 = undefined;
-    for (0..64) |i| {
-        for (&bytes) |*byte| byte.* = switch (prng.random().uintLessThan(u8, 10)) {
-            0...6 => 0,
-            7, 8 => prng.random().uintLessThan(u8, 16),
-            else => prng.random().int(u8),
-        };
-        inline for (.{ fuzzPaths, fuzzFilter, fuzzBaseline, fuzzCheckpoint, fuzzBaselineStorage }) |property| {
-            var smith: testing.Smith = .{ .in = &bytes };
-            property({}, &smith) catch |err| {
-                std.debug.print("seeded round {d}: {t}\n", .{ i, err });
-                return err;
-            };
-        }
-    }
-}
-
 test "a persisted baseline loader accepts only intact validated storage" {
-    try testing.fuzz({}, fuzzBaselineStorage, .{});
+    try shakedown.check(testing.allocator, {}, fuzzBaselineStorage, .{});
 }
 
-fn fuzzBaselineStorage(_: void, smith: *testing.Smith) !void {
-    @disableInstrumentation();
+fn fuzzBaselineStorage(_: void, c: *Case) !void {
+    const s = c.source;
     const gpa = testing.allocator;
     var buf: [2048]u8 = undefined;
-    const bytes = buf[0..smith.slice(&buf)];
+    const bytes = buf[0..bytesInto(s, &buf)];
     // Generate a structured checksummed input as well: mutation alone cannot
     // find a cryptographic checksum or the whole JSON schema.
-    if (smith.boolWeighted(1, 1)) {
+    if (gen.boolean(s)) {
         const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
-        const meta: Snapshot.Meta = .{ .size = smith.value(u64), .mtime_ns = smith.value(i96), .ctime_ns = smith.value(i96), .file_kind = .file };
+        const meta: Snapshot.Meta = .{ .size = gen.int(s, u64), .mtime_ns = gen.int(s, i96), .ctime_ns = gen.int(s, i96), .file_kind = .file };
         const wrapped = try baseline_format.encode(gpa, .{ .platform = baseline_format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{.{ .path = root, .truncated = false, .check_contents = false, .entries = &.{.{ .name = bytes, .meta = meta }} }} });
         defer gpa.free(wrapped);
         var structured = baseline_format.parse(gpa, wrapped) catch |err| {
