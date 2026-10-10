@@ -46,6 +46,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `wake` returns at once on the `poll` backend too, where it took up to `poll_interval` or a tenth of a second. A wake while nothing waits is kept as before.
 
+- A watcher holds the object `wake` sets: one descriptor on Linux (an eventfd, where the inotify backend held a pipe of two), a pipe of two on macOS and the BSDs, where neither the `kqueue` nor the `poll` backend held a descriptor for it, and an event on Windows.
+
+- Under `std.Io.Threaded` a blocked `poll` wakes about 150 times a second to look for a cancellation, where it slept in the kernel until something happened. That is reactor's fallback for an `Io` that is not a runtime, and it costs about 1.5 ms of CPU a second (macOS and Linux, measured). A reactor runtime holds no thread and wakes for nothing.
+
 - A consumer's build fetches reactor beside aegis, airlock and sweep.
 
 ### Added
