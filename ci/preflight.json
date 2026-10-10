@@ -35,7 +35,7 @@
     "build.zig"
   ],
   "glint": {
-    "rules": [
+    "rules": [{"id": "P001", "level": "gate"}, {"id": "P003", "level": "gate"}, 
       {
         "id": "A004",
         "level": "gate"
