@@ -1,7 +1,6 @@
 {
   "land": true,
   "attest": true,
-  "package": "lookout",
   "compile_step": "install",
   "targets": [
     "x86_64-linux-gnu",
@@ -17,5 +16,12 @@
   "portable_hosts": [
     "windows-latest"
   ],
-  "sanitizer": "test"
+  "jobs": [
+    {
+      "name": "ThreadSanitizer (Linux)",
+      "step": "test",
+      "args": ["-Dthread-sanitizer=true", "-Doptimize=debug", "-Dci-lint=false"],
+      "tiers": ["release"]
+    }
+  ]
 }
