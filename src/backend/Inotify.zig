@@ -27,17 +27,17 @@ const assert = std.debug.assert;
 const Io = std.Io;
 const posix = std.posix;
 const linux = std.os.linux;
+const reactor = @import("reactor");
 
 const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Budget = @import("../Budget.zig");
-const Deadline = @import("../Deadline.zig");
 const identity = @import("../identity.zig");
 const CompiledFilter = @import("../CompiledFilter.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("inotify/records.zig");
 const walk = @import("../walk.zig");
-const Waker = @import("../Waker.zig");
+const timing = @import("../timing.zig");
 const Options = @import("../options.zig").Options;
 const contract = @import("../watch_contract.zig");
 const AddOptions = @import("../options.zig").AddOptions;
@@ -50,10 +50,6 @@ const Inotify = @This();
 gpa: Allocator,
 /// The inotify descriptor, which is what `lookout.Watcher.fd` hands out.
 ifd: posix.fd_t,
-/// Read and write ends of the pipe `wake` pokes. Both non-blocking, so
-/// neither a waker nor a waiter can be held up by the other.
-wake_r: posix.fd_t,
-wake_w: posix.fd_t,
 /// The caller's watches.
 watches: std.array_hash_map.Auto(WatchId, Watch),
 /// Kernel watch descriptor to the directory or file it stands for.
@@ -127,7 +123,7 @@ const base_mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
 /// kernel refuses a read smaller than the next event, never a short one.
 const read_buffer_len = 8192;
 
-/// Creates the inotify descriptor and the pipe `wake` pokes.
+/// Creates the inotify descriptor.
 pub fn init(gpa: Allocator, options: Options) contract.InitError!Inotify {
     // `linux.errno`, not `posix.errno`: these are raw syscalls, and on a
     // target that links libc `posix.errno` reads libc's thread-local
@@ -141,21 +137,10 @@ pub fn init(gpa: Allocator, options: Options) contract.InitError!Inotify {
         else => return error.Unexpected,
     }
     const ifd: posix.fd_t = @intCast(rc);
-    errdefer _ = linux.close(ifd);
-
-    var fds: [2]i32 = undefined;
-    switch (linux.errno(linux.pipe2(&fds, .{ .CLOEXEC = true, .NONBLOCK = true }))) {
-        .SUCCESS => {},
-        .MFILE => return error.ProcessFdQuotaExceeded,
-        .NFILE => return error.SystemFdQuotaExceeded,
-        else => return error.Unexpected,
-    }
 
     return .{
         .gpa = gpa,
         .ifd = ifd,
-        .wake_r = fds[0],
-        .wake_w = fds[1],
         .watches = .empty,
         .wds = .empty,
         .budget = .init(gpa, options.max_dir_entries),
@@ -169,7 +154,6 @@ pub fn init(gpa: Allocator, options: Options) contract.InitError!Inotify {
 
 /// Closes the descriptors and releases every watch.
 pub fn deinit(n: *Inotify, io: Io) void {
-    _ = io; // Every backend takes it; this one closes nothing through it.
     for (n.wds.values()) |*registration| {
         n.gpa.free(registration.path);
         registration.watches.deinit(n.gpa);
@@ -183,9 +167,10 @@ pub fn deinit(n: *Inotify, io: Io) void {
     for (n.pending_renames.values()) |half| n.gpa.free(half.path);
     n.pending_renames.deinit(n.gpa);
     n.budget.deinit();
-    _ = linux.close(n.wake_r);
-    _ = linux.close(n.wake_w);
-    _ = linux.close(n.ifd);
+    // Through `io`: a reactor runtime keeps what it knows of a descriptor
+    // it has waited on until it is told the descriptor is gone.
+    const queue: Io.File = .{ .handle = n.ifd, .flags = .{ .nonblocking = true } };
+    queue.close(io);
     n.* = undefined;
 }
 
@@ -193,20 +178,6 @@ pub fn deinit(n: *Inotify, io: Io) void {
 /// something to report.
 pub fn fd(n: *const Inotify) ?posix.fd_t {
     return n.ifd;
-}
-
-/// How another thread pokes a blocked `wait`: the write end of the pipe
-/// it is also polling, which is fixed for the life of the watcher. See
-/// `lookout.Watcher.wake`.
-pub fn waker(n: *const Inotify) Waker {
-    return .{ .context = @intCast(n.wake_w), .call = poke };
-}
-
-/// Writes one byte to the pipe. Non-blocking, so a full pipe costs
-/// nothing: one byte pending is as good as a thousand.
-fn poke(context: usize) void {
-    const byte: [1]u8 = .{0};
-    _ = linux.write(@intCast(context), &byte, 1);
 }
 
 /// How many kernel watches this backend holds, which is what the
@@ -400,23 +371,23 @@ fn pruned(n: *const Inotify, io: Io, id: WatchId, subject: []const u8) bool {
 }
 
 /// Waits on the inotify descriptor until it reports something `batch` did
-/// not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(n: *Inotify, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+/// not already hold, `wakeup` is set, or `timeout` runs out.
+pub fn wait(n: *Inotify, io: Io, batch: *Batch, wakeup: *reactor.Wake, timeout: Io.Timeout) contract.PollError!void {
     // A read takes records off the descriptor, and a directory that
     // appears is registered below it one directory at a time, so nothing
-    // in here is a place to stop: see `Watcher.poll`. The wait itself is
-    // out of `std.Io`'s reach.
+    // in here is a place to stop but the wait for the descriptor to be
+    // readable, which takes nothing: see `Watcher.poll` and
+    // `timing.ready`.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    try n.collect(io, batch, timeout_ms);
+    try n.collect(io, batch, wakeup, timeout.toDeadline(io));
     // Whatever is still held when the wait is over never found its other
     // half, however many reads it waited through.
     try n.flushRenames(io, batch);
 }
 
-fn collect(n: *Inotify, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+fn collect(n: *Inotify, io: Io, batch: *Batch, wakeup: *reactor.Wake, until: Io.Timeout) contract.PollError!void {
     const before = batch.revision;
-    const deadline: Deadline = .fromMs(io, timeout_ms);
 
     while (true) {
         if (n.read_len != 0) {
@@ -426,30 +397,10 @@ fn collect(n: *Inotify, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollEr
             }
             if (batch.revision != before) return;
         }
-        // Clamped rather than returned on, so that a `timeout_ms` of zero
-        // still performs one non-blocking check. Returning early here
-        // would make a zero-timeout `poll` report nothing, ever.
-        var fds: [2]posix.pollfd = .{
-            .{ .fd = n.ifd, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = n.wake_r, .events = posix.POLL.IN, .revents = 0 },
-        };
-        const ready = posix.poll(&fds, deadline.pollMs(io)) catch |err| switch (err) {
-            error.SystemResources => return error.SystemResources,
-            else => return error.Unexpected,
-        };
-        if (ready == 0) {
-            if (!deadline.expired(io)) continue;
-            return;
-        }
-
-        var woken = false;
-        if (fds[1].revents & posix.POLL.IN != 0) {
-            n.drainWake();
-            woken = true;
-        }
-        if (fds[0].revents & posix.POLL.IN != 0) {
-            if (!try n.read(io, batch)) continue;
-        }
+        // A timeout already run out still gets one look.
+        const member = try timing.ready(io, &.{ .{ .readable = n.ifd }, .{ .wake = wakeup } }, until) orelse return;
+        const woken = member == 1;
+        if (!woken and !try n.read(io, batch)) continue;
         if (!woken and batch.revision == before) continue;
         // A half with no partner yet is worth one more look: the other
         // half is in the queue if the burst was simply longer than one
@@ -520,11 +471,6 @@ fn consume(n: *Inotify, io: Io, bytes: []const u8, offset: *usize, batch: *Batch
 /// The queue is the whole watcher's, and so is what it lost.
 fn everyDirectory(_: void, _: []const u8) bool {
     return true;
-}
-
-fn drainWake(n: *Inotify) void {
-    var scratch: [256]u8 = undefined;
-    while (posix.read(n.wake_r, &scratch) catch @as(usize, 0) > 0) {}
 }
 
 /// What one kernel event says, once the flags have been read.

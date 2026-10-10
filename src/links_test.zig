@@ -9,7 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const lookout = @import("lookout.zig");
 const ms = @import("testing/timeout.zig").ms;
-const Deadline = @import("Deadline.zig");
+const timing = @import("timing.zig");
 const path_cmp = @import("path.zig");
 
 const Kind = lookout.Kind;
@@ -53,7 +53,7 @@ const Fixture = struct {
             .tmp = tmp,
             .root = root,
             .io = io,
-            .watcher = try .init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(20), .latency = .fromMilliseconds(20) }),
+            .watcher = try .init(gpa, std.testing.io, .{ .backend = backend, .poll_interval = .fromMilliseconds(20), .latency = .fromMilliseconds(20) }),
         };
     }
 
@@ -118,8 +118,8 @@ const Fixture = struct {
     fn expect(f: *Fixture, sub_path: []const u8, kind: ?Kind, forbidden: []const []const u8) !void {
         const want = try f.path(sub_path);
         defer gpa.free(want);
-        const deadline = Deadline.fromMs(io, timeout_ms);
-        while (!deadline.expired(io)) {
+        const deadline = timing.within(timeout_ms).toDeadline(io);
+        while (!timing.expired(io, deadline)) {
             for (try f.watcher.poll(f.io, ms(100))) |event| {
                 try f.allowed(event, forbidden);
                 if (!path_cmp.eql(event.path, want)) continue;
@@ -135,8 +135,8 @@ const Fixture = struct {
     /// events in two polls, and what is written below it is only seen
     /// once it is followed again.
     fn await(f: *Fixture, wanted: usize, above: bool) !void {
-        const deadline = Deadline.fromMs(io, timeout_ms);
-        while (!deadline.expired(io)) {
+        const deadline = timing.within(timeout_ms).toDeadline(io);
+        while (!timing.expired(io, deadline)) {
             const held = f.watcher.stats().registrations;
             if (if (above) held > wanted else held == wanted) return;
             _ = try f.watcher.poll(f.io, ms(100));
@@ -147,8 +147,8 @@ const Fixture = struct {
 
     /// Listens for a while, failing on any event at or below `forbidden`.
     fn quiet(f: *Fixture, forbidden: []const []const u8) !void {
-        const deadline = Deadline.fromMs(io, quiet_ms);
-        while (!deadline.expired(io)) {
+        const deadline = timing.within(quiet_ms).toDeadline(io);
+        while (!timing.expired(io, deadline)) {
             for (try f.watcher.poll(f.io, ms(100))) |event| try f.allowed(event, forbidden);
         }
     }
@@ -166,7 +166,7 @@ const Fixture = struct {
     /// What a plain recursive watch of `watched` costs, with no links
     /// followed: the registrations a following watch must come back to.
     fn plainRegistrations(f: *Fixture, backend: lookout.Backend, filter: lookout.Filter) !usize {
-        var plain = try Watcher.init(gpa, .{ .backend = backend });
+        var plain = try Watcher.init(gpa, std.testing.io, .{ .backend = backend });
         defer plain.deinit(io);
         const root = try f.path("watched");
         defer gpa.free(root);
@@ -394,10 +394,10 @@ test "a link past the most a watch follows is reported unwatched" {
         defer gpa.free(root);
         _ = try f.watcher.add(f.io, root, .{ .recursive = true, .follow_symlinks = true, .max_followed_links = 1 });
 
-        const deadline = Deadline.fromMs(io, timeout_ms);
+        const deadline = timing.within(timeout_ms).toDeadline(io);
         var unwatched: ?[]u8 = null;
         defer if (unwatched) |p| gpa.free(p);
-        while (unwatched == null and !deadline.expired(io)) {
+        while (unwatched == null and !timing.expired(io, deadline)) {
             for (try f.watcher.poll(f.io, ms(100))) |event| {
                 if (event.kind == .unwatched) unwatched = try gpa.dupe(u8, event.path);
             }

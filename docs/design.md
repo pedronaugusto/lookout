@@ -38,8 +38,8 @@ From the top, as `ci/layers.zig` lists them from the bottom:
  baseline storage   the versioned, checksummed file format
  records            Snapshot (a directory's listing), checkpoint records, FSEvents records
  event contracts    Kind, Event, WatchId, Backend and the predicates
- path policy        Budget (entries per directory), Deadline, CompiledFilter
- primitives         Waker, path, walk, buffer sizing, filesystem facts, name identity, Filter, trace
+ path policy        Budget (entries per directory), CompiledFilter
+ primitives         timing, path, walk, buffer sizing, filesystem facts, name identity, Filter, trace
 ```
 
 Each layer imports only the ones below it. The rule is not a convention:
@@ -71,12 +71,16 @@ see which. A comptime check holds `supported` equal to what the union contains.
 | The FSEvents delivery buffer | the delivery `Sink`, behind an aegis lock the system's thread and `poll` share |
 | The history an FSEvents checkpoint resumes from | `Checkpoint.History`, a shared revision a checkpoint leases rather than copies |
 | A tree as it was, for answering an overflow or a restart | `Baseline`, the caller's; its file is written through airlock |
-| How another thread ends a blocked `poll` | `Waker`, taken from the backend once at `init` and never written again |
+| How another thread ends a blocked `poll` | The watcher's `reactor.Wake`, made at `init` and only signaled after; on Windows also the completion port, fixed at `init` |
+| How a backend waits, and the arithmetic on timeouts around it | `timing`, over reactor's `waitAny`; the backends hold no clock arithmetic of their own |
 
-`Watcher` is not thread-safe, and only two of its fields are touched by another
-thread: the `woken` flag and the `Waker`. `wake` never reads the backend's
-state, because reading any of it, even to learn which backend this is, races
-with the polling thread's writes.
+`Watcher` is not thread-safe, and only three of its fields are touched by
+another thread: the `woken` flag, the `Wake` and, on Windows, the port. `wake`
+never reads the backend's state, because reading any of it, even to learn which
+backend this is, races with the polling thread's writes. `woken` is the fact
+and the `Wake` only ends a sleep, so a wake that finds nothing waiting is kept
+by the flag, and the object it left set costs the next wait one early return
+that the loop absorbs.
 
 ## What always holds
 
@@ -85,13 +89,16 @@ with the polling thread's writes.
   queue it owns; that thread copies each path and its flags into a fixed
   buffer under a short lock and writes one byte to a pipe, and nothing else.
   A test counts allocations made while that lock is held: there are none.
-- **`std.Io` is never stored.** `add`, `remove`, `refilter`, `poll` and
-  `deinit` each take the `io` they go through. A baseline keeps its allocator
-  and takes `io` per call; a checkpoint can outlive its watcher.
+- **`std.Io` is never stored.** `init`, `add`, `remove`, `refilter`, `poll` and
+  `deinit` each take the `io` they go through; `init`'s only makes the object
+  `wake` sets. A baseline keeps its allocator and takes `io` per call; a
+  checkpoint can outlive its watcher.
 - **`poll` is a cancellation point on every backend, and a cancellation never
   costs an event.** Kernel backends read what the kernel handed them under
   cancel protection, because an event read and not yet recorded would be lost;
-  the cancellation is reported after, with the batch intact for the next poll.
+  the wait for the descriptor to have something takes nothing, so it alone is
+  open to a cancellation, and one that lands anywhere else is reported after,
+  with the batch intact for the next poll.
 - **Loss is a notice, never silence.** A kernel queue that overflowed, a buffer
   that filled, a directory past `max_dir_entries`, a window past `max_events`
   and a watch the system had no room for all become `overflow` or `unwatched`
@@ -149,6 +156,13 @@ with the polling thread's writes.
   buffer filled, and is `overflow`. A rename of the watched root happens in the
   parent, which the watch is not on, and is `silent`; the answer is a
   predicate, not a surprise.
+- **The port stays lookout's; only its wait is reactor's.** reactor's
+  `kernel.overlapped` issues one call from a task of its own runtime and
+  answers `Unsupported` on any other `Io`. A watcher keeps one read outstanding
+  per watch with no task to hold it, and runs on whatever `Io` its caller has,
+  so the reads, their buffers and the port are lookout's and the one call that
+  waits on the port goes through `reactor.blocking`. The port cannot be waited
+  on beside a `Wake`, which is why `wake` also posts to it.
 
 ### Events and waiting
 
@@ -165,15 +179,24 @@ with the polling thread's writes.
   caller's timeout and the next one due, so a `poll` with no timeout cannot
   sleep through a deadline the watcher set itself. A backend waits until the
   batch has *changed*, not until it has grown, for the same reason.
-- **Time is `Io.Duration` and `Io.Timeout`, kept to the millisecond and rounded
-  up**, so a wait never ends before its deadline. An expired timeout is clamped
-  to zero rather than returned on, so a zero duration still makes one
-  non-blocking check.
-- **`wake` is the one way to let go of a blocked `poll` on any backend.**
-  Cancellation interrupts a wait only where the mechanism allows it. `wake` sets
-  a flag and nudges the backend's waiter; a wake that lands between two polls
-  is kept for the next, which is why a task stops with a flag it reads between
-  polls plus a `wake`, and not with either alone.
+- **Time is `Io.Duration` and `Io.Timeout`, and the rounding is reactor's.** A
+  backend waits through `reactor.waitAny` on its descriptor and the watcher's
+  `Wake`, which rounds up so a wait never ends before its deadline, and an
+  expired timeout still gets one non-blocking look, so a zero duration makes a
+  check. Only the Windows port is waited on in milliseconds, which `timing`
+  rounds the same way.
+- **Every wait is reactor's, and what a cancellation can do follows.** On a
+  reactor runtime the wait is an operation of the task's own loop: it holds no
+  thread and a cancellation ends it. On any other `std.Io` it is the calling
+  thread, looking for a cancellation every few milliseconds, which costs a
+  wakeup in each. Windows is the exception: its wait is a call on the
+  completion port that nothing interrupts, made through reactor's `blocking`
+  so that it holds up no worker, and a cancellation lands when it returns.
+- **`wake` is the one way to let go of a blocked `poll` from another thread.**
+  It sets a flag and signals the `Wake` every backend's wait includes, and on
+  Windows posts to the port; a wake that lands between two polls is kept for
+  the next, which is why a task stops with a flag it reads between polls plus a
+  `wake`, and not with either alone.
 - **A rename is `renamed` with `from` where the backend pairs it**, and
   `removed` plus `created` where it cannot. A name a filter excludes is
   treated exactly as a name outside the watch, so a file saved by writing an

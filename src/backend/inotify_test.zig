@@ -29,7 +29,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     const file = try std.Io.Dir.path.join(gpa, &.{ root, "a.txt" });
     defer gpa.free(file);
 
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .inotify });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .inotify });
     defer watcher.deinit(io);
     const dir = try watcher.add(io, root, .{ .recursive = true });
     const single = try watcher.add(io, file, .{});
@@ -97,7 +97,7 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .inotify, .max_dir_entries = 3 });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .inotify, .max_dir_entries = 3 });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     while ((try watcher.poll(io, ms(200))).len != 0) {}
@@ -155,7 +155,7 @@ test "a watch on a file keeps no count keyed by the file" {
     const file = try std.Io.Dir.path.join(gpa, &.{ root, "file" });
     defer gpa.free(file);
 
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .inotify });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .inotify });
     defer watcher.deinit(io);
     const id = try watcher.add(io, file, .{});
     while ((try watcher.poll(io, ms(200))).len != 0) {}

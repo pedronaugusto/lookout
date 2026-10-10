@@ -30,7 +30,7 @@ pub fn main() !void {
 
     // --- README:usage ---
 
-    var watcher: lookout.Watcher = try .init(gpa, .{});
+    var watcher: lookout.Watcher = try .init(gpa, io, .{});
     defer watcher.deinit(io);
 
     const id = try watcher.add(io, dir_path, .{ .recursive = true });
@@ -67,7 +67,7 @@ pub fn main() !void {
     // costs nothing; where the kernel recurses it is the events that are
     // dropped, and `prunesIgnored` is how a program asks which it got.
     try scratch.createDirPath(io, "build");
-    var filtered: lookout.Watcher = try .init(gpa, .{});
+    var filtered: lookout.Watcher = try .init(gpa, io, .{});
     defer filtered.deinit(io);
     _ = try filtered.add(io, dir_path, .{
         .recursive = true,
@@ -86,7 +86,7 @@ pub fn main() !void {
     // promoted to the real watch with the appearance reported against it.
     const later = try std.Io.Dir.path.join(gpa, &.{ dir_path, "later", "inside" });
     defer gpa.free(later);
-    var pending: lookout.Watcher = try .init(gpa, .{});
+    var pending: lookout.Watcher = try .init(gpa, io, .{});
     defer pending.deinit(io);
     _ = try pending.add(io, later, .{ .pending = true, .recursive = true });
 

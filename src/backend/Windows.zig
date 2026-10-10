@@ -29,17 +29,17 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 const windows = std.os.windows;
+const reactor = @import("reactor");
 
 const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Budget = @import("../Budget.zig");
-const Deadline = @import("../Deadline.zig");
 const identity = @import("../identity.zig");
 const CompiledFilter = @import("../CompiledFilter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("windows/records.zig");
-const Waker = @import("../Waker.zig");
+const timing = @import("../timing.zig");
 const trace = @import("../trace.zig");
 const Options = @import("../options.zig").Options;
 const contract = @import("../watch_contract.zig");
@@ -232,16 +232,12 @@ pub fn fd(w: *const Windows) ?std.posix.fd_t {
     return null;
 }
 
-/// How another thread pokes a blocked `wait`: the completion port, which
-/// is fixed for the life of the watcher. See `lookout.Watcher.wake`.
-pub fn waker(w: *const Windows) Waker {
-    return .{ .context = @intFromPtr(w.port), .call = post }; // safe: the port's handle value, fixed for the watcher's life, turned back by post alone
-}
-
-/// Posts a completion under a key no watch has, which a blocked `wait`
-/// takes as its cue to come back.
-fn post(context: usize) void {
-    const port: windows.HANDLE = @ptrFromInt(context);
+/// Makes a blocked `wait` on `port` come back: a completion posted under
+/// a key no watch has, which `wait` takes as its cue. A completion port is
+/// not an object `reactor.Wake` can be waited on beside, so this is what
+/// `lookout.Watcher.wake` does on this backend besides setting the `Wake`.
+/// Called from any thread; the port is fixed for the life of the watcher.
+pub fn post(port: windows.HANDLE) void {
     _ = c.PostQueuedCompletionStatus(port, 0, wake_key, null);
 }
 
@@ -427,15 +423,20 @@ fn free(w: *Windows, watch: *Watch) void {
 }
 
 /// Waits on the completion port until a read produces something `batch`
-/// did not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(w: *Windows, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+/// did not already hold, or `timeout` runs out.
+///
+/// `wakeup` is not waited on: this backend is woken through the port,
+/// which `post` does, and the object stays set.
+pub fn wait(w: *Windows, io: Io, batch: *Batch, wakeup: *reactor.Wake, timeout: Io.Timeout) contract.PollError!void {
+    _ = wakeup;
     // A completion is taken off the port by the call that waits for it,
     // and the read it completes is re-armed before the next, so nothing
-    // in here is a place to stop: see `Watcher.poll`. The wait itself is
-    // out of `std.Io`'s reach.
+    // in here is a place to stop: see `Watcher.poll`. The call that waits
+    // cannot be interrupted either, so a cancellation lands when it comes
+    // back.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    try w.collect(io, batch, timeout_ms);
+    try w.collect(io, batch, timeout.toDeadline(io));
     // Whatever is still held when the wait is over never found its other
     // half: the path moved somewhere this watch cannot see it. A removal
     // is resolved first, being the older of the two.
@@ -456,19 +457,18 @@ fn flushRenames(w: *Windows, io: Io, batch: *Batch) contract.PollError!void {
     }
 }
 
-fn collect(w: *Windows, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+fn collect(w: *Windows, io: Io, batch: *Batch, until: Io.Timeout) contract.PollError!void {
     const before = batch.revision;
-    const deadline: Deadline = .fromMs(io, timeout_ms);
 
     while (true) {
-        // Clamped rather than returned on, so that a `timeout_ms` of zero
-        // still takes one look at the port.
-        const timeout: u32 = if (timeout_ms == null) c.infinite else deadline.windowsMs(io);
+        // A timeout already run out still takes one look at the port.
+        // A finite timeout is never the value that means none.
+        const timeout: u32 = if (timing.remainingMs(io, until)) |ms| @min(ms, c.infinite - 1) else c.infinite;
         switch (try w.take(io, batch, timeout)) {
             .woken => return,
             // A finite timeout may have been clamped to what this API
             // can represent, so only the original deadline ends it.
-            .quiet => if (deadline.expired(io)) return else continue,
+            .quiet => if (timing.expired(io, until)) return else continue,
             .taken => {},
         }
         // A removal that ended its read is worth waiting a moment for:
@@ -517,6 +517,31 @@ const Completion = struct {
     failure: ?u32,
 };
 
+/// What one call on the port returned.
+const Packet = struct {
+    transferred: u32,
+    key: usize,
+    overlapped: ?*c.Overlapped,
+    /// The error code when the call failed or the packet is a failed read.
+    failure: ?u32,
+};
+
+/// One wait on the completion port for up to `timeout` milliseconds, which
+/// is all `take` asks of the system: a plain call that can take as long as
+/// the timeout, so it is made through `reactor.blocking`.
+fn dequeue(port: windows.HANDLE, timeout: u32) Packet {
+    var transferred: u32 = 0;
+    var key: usize = 0;
+    var overlapped: ?*c.Overlapped = null;
+    const ok = c.GetQueuedCompletionStatus(port, &transferred, &key, &overlapped, timeout);
+    return .{
+        .transferred = transferred,
+        .key = key,
+        .overlapped = overlapped,
+        .failure = if (ok == 0) c.GetLastError() else null,
+    };
+}
+
 fn take(w: *Windows, io: Io, batch: *Batch, timeout: u32) contract.PollError!Taken {
     // A completion already taken is ready even if the port is quiet.
     for (w.watches.values()) |watch| {
@@ -525,24 +550,26 @@ fn take(w: *Windows, io: Io, batch: *Batch, timeout: u32) contract.PollError!Tak
             return .taken;
         }
     }
-    var transferred: u32 = 0;
-    var key: usize = 0;
-    var overlapped: ?*c.Overlapped = null;
-    const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, timeout);
-    const failure: ?u32 = if (ok == 0) c.GetLastError() else null;
-    if (overlapped == null and ok == 0) {
-        if (failure.? != c.wait_timeout) return error.Unexpected;
+    // Where it holds up no worker: under a reactor runtime the call runs
+    // on a lane with this task parked, under any other `Io` on this
+    // thread. A refusal never runs it here.
+    const packet = reactor.blocking(io, .wait, dequeue, .{ w.port, timeout }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.ConcurrencyUnavailable => return error.SystemResources,
+    };
+    if (packet.overlapped == null and packet.failure != null) {
+        if (packet.failure.? != c.wait_timeout) return error.Unexpected;
         return .quiet;
     }
-    if (key == wake_key) return .woken;
+    if (packet.key == wake_key) return .woken;
     // A C/OS boundary: the key is the id this port was given at
     // registration, widened by the OS.
-    const id: WatchId = .fromRaw(@truncate(key));
-    const watch = w.live(id, overlapped) orelse {
-        w.retire(overlapped);
+    const id: WatchId = .fromRaw(@truncate(packet.key));
+    const watch = w.live(id, packet.overlapped) orelse {
+        w.retire(packet.overlapped);
         return .taken;
     };
-    watch.completion = .{ .transferred = transferred, .failure = failure };
+    watch.completion = .{ .transferred = packet.transferred, .failure = packet.failure };
     try w.complete(io, watch, batch);
     return .taken;
 }

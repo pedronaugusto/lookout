@@ -9,9 +9,9 @@ pub fn build(b: *std.Build) !void {
     //=====================================================================
     // The module.
     //
-    // Pure Zig over three packages of its own, aegis for the typed state
-    // and counts, airlock for the durable baseline file and sweep for the
-    // filter patterns, all std-only:
+    // Pure Zig over four packages of its own, aegis for the typed state
+    // and counts, airlock for the durable baseline file, reactor for the
+    // waits and sweep for the filter patterns, all std-only:
     // which backend is compiled in is decided by `builtin.target.os.tag`
     // inside src/lookout.zig, so a consumer adds the import and nothing
     // else.
@@ -49,9 +49,12 @@ pub fn build(b: *std.Build) !void {
     const airlock = airlock_dependency.module("airlock");
     const sweep = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep");
     const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
+    const reactor_dependency = b.dependency("reactor", .{ .target = target, .optimize = optimize });
+    const reactor = reactor_dependency.module("reactor");
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "aegis", .module = aegis },
         .{ .name = "airlock", .module = airlock },
+        .{ .name = "reactor", .module = reactor },
         .{ .name = "sweep", .module = sweep },
     };
 
@@ -202,12 +205,19 @@ pub fn build(b: *std.Build) !void {
                 .link_libc = darwin,
             },
         });
-        // The build a consumer gets: aegis, airlock and sweep, and nothing lookout
-        // fetches for itself.
+        // The build a consumer gets: aegis, airlock, reactor and sweep, and
+        // nothing lookout fetches for itself.
         preflight.addConsumerCheck(b, .{
             .package = "lookout",
             .program = b.path("ci/consumer.zig"),
-            .packages = &.{ b.dependency("aegis", .{}), b.dependency("airlock", .{}), b.dependency("sweep", .{}) },
+            .packages = &.{
+                b.dependency("aegis", .{}),
+                b.dependency("airlock", .{}),
+                reactor_dependency,
+                // The aegis reactor was built with is its own to pin.
+                reactor_dependency.builder.dependency("aegis", .{}),
+                b.dependency("sweep", .{}),
+            },
         });
     }
     return needed;
@@ -222,6 +232,7 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "aegis", .module = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis") },
         .{ .name = "airlock", .module = b.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock") },
+        .{ .name = "reactor", .module = b.dependency("reactor", .{ .target = target, .optimize = optimize }).module("reactor") },
         .{ .name = "sweep", .module = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep") },
     };
     const darwin = target.result.os.tag.isDarwin();

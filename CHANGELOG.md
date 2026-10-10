@@ -18,7 +18,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Requires Zig 0.17.0; Zig 0.16 no longer builds lookout. On the BSDs and Apple targets the mount query is declared in Zig instead of imported from C headers, and a named Apple target links against `-Dmacos-sdk=<path>` or the pinned framework SDK: the build no longer asks the host for its SDK at configure time, and `--sysroot` is no longer read.
 
-- A `Watcher` keeps no `std.Io`. `Watcher.init(gpa, options)` takes none; `add`, `remove`, `refilter`, `poll` and `deinit` take the `io` they go through, as `std.Io.File.close(io)` does.
+- A `Watcher` keeps no `std.Io`. `Watcher.init(gpa, io, options)` takes the one that makes the object `wake` sets, and `add`, `remove`, `refilter`, `poll` and `deinit` take the `io` they go through, as `std.Io.File.close(io)` does.
 
 - `Watcher.poll(io, timeout)` takes a `std.Io.Timeout` instead of a millisecond count: `.none` waits indefinitely, and a timeout already run out, a zero duration among them, checks once without blocking. Waits are kept to the millisecond, rounded up.
 
@@ -41,6 +41,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - After `poll` returns `OutOfMemory`, retrying reports `overflow` for every still-live watch root; unread kernel deliveries remain pending where possible, and recovery survives repeated allocation failures and wakeups.
 
 - `Watcher.InitError` includes `OutOfMemory`; FSEvents preserves sink and buffer allocator failures instead of reporting `SystemResources`.
+
+- Every backend's wait is [reactor](https://github.com/pedronaugusto/reactor)'s, and lookout depends on it. A blocked `poll` is now cancelable on every backend but Windows: a cancellation ends the wait at once where it used to be reported after something happened, the timeout ran out or `wake` was called. On a reactor runtime the wait holds no thread; on any other `std.Io` the calling thread looks for a cancellation every few milliseconds, where it used to sleep in the kernel until its descriptor was ready. On Windows the wait on the completion port is made through `reactor.blocking`, so it holds up no worker, and a cancellation still lands when it returns.
+
+- `wake` returns at once on the `poll` backend too, where it took up to `poll_interval` or a tenth of a second. A wake while nothing waits is kept as before.
+
+- A consumer's build fetches reactor beside aegis, airlock and sweep.
 
 ### Added
 

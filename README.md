@@ -24,7 +24,7 @@ buffered standard output writer, `output`.
 ```zig
 const lookout = @import("lookout");
 
-var watcher: lookout.Watcher = try .init(gpa, .{});
+var watcher: lookout.Watcher = try .init(gpa, io, .{});
 defer watcher.deinit(io);
 
 const id = try watcher.add(io, dir_path, .{ .recursive = true });
@@ -110,9 +110,13 @@ Each change carries its `target`, file or directory, from the listing that saw i
 removed directory is known for one without a `stat`.
 
 `poll` takes a `std.Io.Timeout` and is a `std.Io` cancellation point. Cancellation preserves
-gathered events for a later poll. Native waits observe cancellation when they wake; use
-`wake` to end a blocked wait on any backend. `fd` returns a pollable descriptor where
-the backend provides one.
+gathered events for a later poll. Every backend waits through reactor, so a cancellation
+ends a blocked `poll` on every backend but Windows, where the completion port is waited on
+by a call nothing can interrupt and the cancellation lands when it comes back. Under a
+reactor runtime the wait holds no thread; under any other `std.Io` the calling thread
+waits and looks for a cancellation every few milliseconds. `wake` ends a blocked wait from
+another thread on every backend. `fd` returns a pollable descriptor where the backend
+provides one.
 
 FSEvents checkpoints retain per-watch volume and log identity, durable cursors and
 pending changes and the path baseline the watch knew. Capture retains a shared
@@ -206,6 +210,9 @@ native build too.
   shared with the system's delivery thread.
 - [airlock](https://github.com/pedronaugusto/airlock) writes the baseline file
   atomically and, on request, durably.
+- [reactor](https://github.com/pedronaugusto/reactor) waits for a backend's
+  descriptor and for `wake`, over any `std.Io`, and on Windows runs the wait on
+  the completion port off the runtime's workers.
 - [sweep](https://github.com/pedronaugusto/sweep) compiles and matches filter
   patterns.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
@@ -226,7 +233,7 @@ examples` runs the examples separately. `zig build bench` holds lookout's own sp
 claims to their ceilings in ReleaseFast; run it on a quiet machine. `zig build test`
 runs each once with `--smoke`, judging nothing. CI also runs
 `zig build lint`, which includes `zig build check-consumer`: a project that depends
-on lookout by path, built with only aegis, airlock and sweep fetched.
+on lookout by path, built with only aegis, airlock, reactor and sweep fetched.
 
 [CI](.github/workflows/ci.yml) has three tiers. The fast tier runs the source
 checks and the Linux Debug suite with the examples and each benchmark once, and

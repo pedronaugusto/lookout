@@ -4,7 +4,7 @@ const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "primitives", .patterns = &.{
-        "src/Waker.zig",
+        "src/timing.zig",
         "src/filesystem.zig",
         "src/identity.zig",
         "src/backend/inotify/records.zig",
@@ -17,7 +17,6 @@ pub const layers: []const gantry.rules.Layer = &.{
     } },
     .{ .name = "path policy", .patterns = &.{
         "src/Budget.zig",
-        "src/Deadline.zig",
         "src/CompiledFilter.zig",
     } },
     .{ .name = "event contracts", .patterns = &.{
@@ -69,6 +68,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
         "airlock",
         "airlock.testing",
         "builtin",
+        "reactor",
         "shakedown",
         "std",
         "sweep",
@@ -77,7 +77,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
 };
 
 pub const required = [_][]const u8{
-    "src/Waker.zig",
+    "src/timing.zig",
     "src/filesystem.zig",
     "src/identity.zig",
     "src/backend/inotify/records.zig",
@@ -87,7 +87,6 @@ pub const required = [_][]const u8{
     "src/trace.zig",
     "src/walk.zig",
     "src/Budget.zig",
-    "src/Deadline.zig",
     "src/Filter.zig",
     "src/CompiledFilter.zig",
     "src/types.zig",

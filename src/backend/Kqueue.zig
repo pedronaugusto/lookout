@@ -22,12 +22,12 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
+const reactor = @import("reactor");
 
 const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
-const Deadline = @import("../Deadline.zig");
 const Tree = @import("../Tree.zig");
-const Waker = @import("../Waker.zig");
+const timing = @import("../timing.zig");
 const Options = @import("../options.zig").Options;
 const contract = @import("../watch_contract.zig");
 const AddOptions = @import("../options.zig").AddOptions;
@@ -65,11 +65,6 @@ const interest: u32 = std.c.NOTE.DELETE | std.c.NOTE.WRITE | std.c.NOTE.EXTEND |
 /// larger stack frame; the kernel keeps whatever does not fit.
 const events_per_call = 64;
 
-/// The identifier of the user event `wake` triggers. An `EVFILT_USER`
-/// identifier shares no namespace with the descriptors `EVFILT_VNODE`
-/// uses, so any value will do and this one is the first.
-const wake_ident: usize = 1;
-
 /// `O_EVTONLY` on Darwin opens a descriptor that does not count as a
 /// reference for unmounting, which is what a watcher wants. The other BSDs
 /// have no equivalent.
@@ -99,20 +94,6 @@ pub fn init(gpa: Allocator, options: Options) contract.InitError!Kqueue {
     };
     // A file's descriptor is this backend's, and goes with its node.
     k.tree.keeps_dropped = true;
-    // The one thing on this queue that is not a file: how another
-    // thread makes a blocked `wait` come back.
-    const change: posix.Kevent = .{
-        .ident = wake_ident,
-        .filter = std.c.EVFILT.USER,
-        .flags = std.c.EV.ADD | std.c.EV.CLEAR,
-        .fflags = 0,
-        .data = 0,
-        .udata = 0,
-    };
-    if (std.c.kevent(k.kq, (&change)[0..1], 1, undefined, 0, null) < 0) {
-        _ = std.c.close(k.kq);
-        return error.Unexpected;
-    }
     return k;
 }
 
@@ -123,7 +104,10 @@ pub fn deinit(k: *Kqueue, io: Io) void {
     }
     k.registrations.deinit(k.gpa);
     k.tree.deinit(io);
-    _ = std.c.close(k.kq);
+    // Through `io`: a reactor runtime keeps what it knows of a descriptor
+    // it has waited on until it is told the descriptor is gone.
+    const queue: Io.File = .{ .handle = k.kq, .flags = .{ .nonblocking = true } };
+    queue.close(io);
     k.* = undefined;
 }
 
@@ -131,26 +115,6 @@ pub fn deinit(k: *Kqueue, io: Io) void {
 /// something to report.
 pub fn fd(k: *const Kqueue) ?posix.fd_t {
     return k.kq;
-}
-
-/// How another thread pokes a blocked `wait`: the kernel queue itself,
-/// which is fixed for the life of the watcher. See
-/// `lookout.Watcher.wake`.
-pub fn waker(k: *const Kqueue) Waker {
-    return .{ .context = @intCast(k.kq), .call = trigger };
-}
-
-/// Triggers the user event a blocked `wait` is also listening for.
-fn trigger(context: usize) void {
-    const change: posix.Kevent = .{
-        .ident = wake_ident,
-        .filter = std.c.EVFILT.USER,
-        .flags = 0,
-        .fflags = std.c.NOTE.TRIGGER,
-        .data = 0,
-        .udata = 0,
-    };
-    _ = std.c.kevent(@intCast(context), (&change)[0..1], 1, undefined, 0, null);
 }
 
 /// How many paths the kernel queue has accepted. Nodes awaiting a retry
@@ -194,59 +158,43 @@ pub fn refilter(k: *Kqueue, io: Io, id: WatchId, filter: lookout.Filter, batch: 
 }
 
 /// Waits on the kernel queue until it reports something `batch` did not
-/// already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(k: *Kqueue, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
-    // `kevent` both waits and takes the events off the queue, so once it
-    // has returned, what it returned is recorded before anything stops:
-    // see `Watcher.poll`. The wait itself is out of `std.Io`'s reach.
+/// already hold, `wakeup` is set, or `timeout` runs out.
+pub fn wait(k: *Kqueue, io: Io, batch: *Batch, wakeup: *reactor.Wake, timeout: Io.Timeout) contract.PollError!void {
+    // `kevent` takes the events off the queue, so once it has returned,
+    // what it returned is recorded before anything stops: see
+    // `Watcher.poll`. Only the wait for the queue to be readable, which
+    // takes nothing, can be canceled: `timing.ready`.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
     const before = batch.revision;
     if (k.retry_registration) try k.retryRegistrations(io, batch);
-    const deadline: Deadline = .fromMs(io, timeout_ms);
+    const until = timeout.toDeadline(io);
 
     while (true) {
-        const woken = try k.drain(io, batch);
-        if (woken or batch.revision != before) return;
-        // The one thing the shared deadline does not hand out: this is
-        // the only backend that wants a `timespec`, and Windows gives
-        // the name no shape to build one from.
-        var storage: std.c.timespec = undefined;
-        const timeout_ptr: ?*const std.c.timespec = ptr: {
-            const remaining = deadline.remainingMs(io) orelse break :ptr null;
-            storage = .{
-                .sec = @intCast(remaining / std.time.ms_per_s),
-                .nsec = @intCast((remaining % std.time.ms_per_s) * std.time.ns_per_ms),
-            };
-            break :ptr &storage;
-        };
+        try k.drain(io, batch);
+        if (batch.revision != before) return;
+        const member = try timing.ready(io, &.{ .{ .readable = k.kq }, .{ .wake = wakeup } }, until) orelse return;
+        if (member == 1) return;
 
+        // Readable: the events are there, so this call does not wait.
         const empty: [0]posix.Kevent = .{};
-        const count = std.c.kevent(k.kq, &empty, 0, &k.delivery, k.delivery.len, timeout_ptr);
+        const now: std.c.timespec = .{ .sec = 0, .nsec = 0 };
+        const count = std.c.kevent(k.kq, &empty, 0, &k.delivery, k.delivery.len, &now);
         if (count < 0) switch (posix.errno(count)) {
             .INTR => continue,
             else => return error.Unexpected,
         };
-        if (count == 0 and timeout_ptr != null) return;
-
         k.delivery_len = @intCast(count);
         k.delivery_at = 0;
     }
 }
 
-fn drain(k: *Kqueue, io: Io, batch: *Batch) contract.PollError!bool {
-    var woken = false;
+fn drain(k: *Kqueue, io: Io, batch: *Batch) contract.PollError!void {
     while (k.delivery_at < k.delivery_len) : (k.delivery_at += 1) {
-        const event = k.delivery[k.delivery_at];
-        if (event.filter == std.c.EVFILT.USER) {
-            woken = true;
-            continue;
-        }
-        try k.handle(io, event, batch);
+        try k.handle(io, k.delivery[k.delivery_at], batch);
     }
     k.delivery_len = 0;
     k.delivery_at = 0;
-    return woken;
 }
 
 /// Turns one kernel event into lookout events.
@@ -456,19 +404,21 @@ test "allocation failure during delivery retains unread kqueue flags" {
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
         var k = try Kqueue.init(failing.allocator(), .{});
         defer k.deinit(io);
+        var wakeup: reactor.Wake = try .init(io);
+        defer wakeup.deinit(io);
         var batch = Batch.init(.{});
         defer batch.deinit(failing.allocator());
         try k.add(io, .fromRaw(0), first, .{}, &batch);
         try k.add(io, .fromRaw(1), last, .{}, &batch);
-        try k.wait(io, &batch, 0);
+        try k.wait(io, &batch, &wakeup, timing.within(0));
         batch.reset(failing.allocator());
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "first", .data = "changed" });
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "last", .data = "changed" });
         failing.fail_index = failing.alloc_index + fail_index;
-        const answer = k.wait(io, &batch, 0);
+        const answer = k.wait(io, &batch, &wakeup, timing.within(0));
         failing.fail_index = std.math.maxInt(usize);
         if (answer) |_| break else |err| try testing.expectEqual(error.OutOfMemory, err);
-        try k.wait(io, &batch, 0);
+        try k.wait(io, &batch, &wakeup, timing.within(0));
         var saw_first = false;
         var saw_last = false;
         for (batch.events.items) |event| {
@@ -490,6 +440,8 @@ test "a failed kqueue registration is retried before waiting again" {
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
     var k = try Kqueue.init(failing.allocator(), .{});
     defer k.deinit(io);
+    var wakeup: reactor.Wake = try .init(io);
+    defer wakeup.deinit(io);
     var batch = Batch.init(.{});
     defer batch.deinit(failing.allocator());
     try k.add(io, .fromRaw(0), root, .{ .recursive = true }, &batch);
@@ -508,13 +460,13 @@ test "a failed kqueue registration is retried before waiting again" {
     try testing.expectError(error.OutOfMemory, k.register(io, added.items, &batch));
     failing.fail_index = std.math.maxInt(usize);
     try testing.expectEqual(k.registrations.count(), k.registrationCount());
-    try k.wait(io, &batch, 0);
+    try k.wait(io, &batch, &wakeup, timing.within(0));
     batch.reset(failing.allocator());
     for (0..40) |i| {
         var name: [64]u8 = undefined;
         try tmp.dir.writeFile(testing.io, .{ .sub_path = try std.mem.print(&name, "child/file{d}", .{i}), .data = "changed size" });
     }
-    try k.wait(io, &batch, 0);
+    try k.wait(io, &batch, &wakeup, timing.within(0));
     var modified: usize = 0;
     for (batch.events.items) |event| {
         if (event.kind == .modified) modified += 1;

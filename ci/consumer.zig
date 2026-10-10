@@ -5,6 +5,7 @@ const lookout = @import("lookout");
 pub fn main() !void {
     var threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
     defer threaded.deinit();
-    var watcher: lookout.Watcher = try .init(std.heap.page_allocator, .{});
-    defer watcher.deinit(threaded.io());
+    const io = threaded.io();
+    var watcher: lookout.Watcher = try .init(std.heap.page_allocator, io, .{});
+    defer watcher.deinit(io);
 }

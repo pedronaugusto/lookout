@@ -30,7 +30,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .windows });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .windows });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     while ((try watcher.poll(io, ms(200))).len != 0) {}
@@ -100,7 +100,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .windows, .max_dir_entries = 3 });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .windows, .max_dir_entries = 3 });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     while ((try watcher.poll(io, ms(200))).len != 0) {}
@@ -165,7 +165,7 @@ test "allocation failure during delivery releases a removed Windows completion" 
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(root);
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
-    var watcher = try lookout.Watcher.init(failing.allocator(), .{ .backend = .windows });
+    var watcher = try lookout.Watcher.init(failing.allocator(), std.testing.io, .{ .backend = .windows });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "change", .data = "x" });

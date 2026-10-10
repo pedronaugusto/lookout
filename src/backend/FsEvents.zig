@@ -34,6 +34,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
+const reactor = @import("reactor");
 
 const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
@@ -42,7 +43,6 @@ const CheckpointPaths = @import("../Checkpoint/History.zig");
 const checkpoint_format = @import("../Checkpoint/format.zig");
 const aegis = @import("aegis");
 const Budget = @import("../Budget.zig");
-const Deadline = @import("../Deadline.zig");
 const name_policy = @import("../identity.zig");
 const CompiledFilter = @import("../CompiledFilter.zig");
 const buffer = @import("../buffer.zig");
@@ -50,7 +50,7 @@ const path_cmp = @import("../path.zig");
 const records = @import("fsevents/records.zig");
 const trace = @import("../trace.zig");
 const walk = @import("../walk.zig");
-const Waker = @import("../Waker.zig");
+const timing = @import("../timing.zig");
 const Checkpoint = @import("../Checkpoint.zig");
 const Options = @import("../options.zig").Options;
 const contract = @import("../watch_contract.zig");
@@ -223,18 +223,15 @@ const Handed = struct {
 /// needs memory, it is made before the lock is taken.
 const Sink = struct {
     delivery: aegis.Guarded(Delivery),
-    /// Set by `wake` from another thread, and cleared by the `wait` that
-    /// answers it.
-    woken: std.atomic.Value(bool),
     /// Read end, handed out by `fd`. Non-blocking.
-    wake_r: posix.fd_t,
+    arrival_r: posix.fd_t,
     /// Write end, poked once per delivery. Non-blocking, so a full pipe
     /// costs nothing: one byte pending is as good as a thousand.
-    wake_w: posix.fd_t,
+    arrival_w: posix.fd_t,
 
     fn signal(s: *Sink) void {
         const byte: [1]u8 = .{0};
-        _ = std.c.write(s.wake_w, &byte, 1);
+        _ = std.c.write(s.arrival_w, &byte, 1);
     }
 
     /// Appends the bytes the delivery thread has handed over to `into`,
@@ -372,7 +369,7 @@ const Stream = struct {
 const lost_track: u32 = flag.must_scan_sub_dirs | flag.user_dropped | flag.kernel_dropped;
 
 /// Creates the delivery queue, the buffer it fills, and the pipe the
-/// watcher is woken through.
+/// delivery thread tells the watcher a delivery has arrived through.
 pub fn init(gpa: Allocator, options: Options) contract.InitError!FsEvents {
     var fds: [2]posix.fd_t = undefined;
     if (std.c.pipe(&fds) != 0) return switch (posix.errno(@as(c_int, -1))) {
@@ -401,9 +398,8 @@ pub fn init(gpa: Allocator, options: Options) contract.InitError!FsEvents {
     errdefer gpa.free(bytes);
     sink.* = .{
         .delivery = .init(.{ .buffer = bytes, .len = 0, .overflowed = false, .deliveries = 0, .dropped = 0 }),
-        .woken = .init(false),
-        .wake_r = fds[0],
-        .wake_w = fds[1],
+        .arrival_r = fds[0],
+        .arrival_w = fds[1],
     };
 
     const queue = c.dispatch_queue_create("dev.lookout.fsevents", null) orelse
@@ -442,7 +438,6 @@ fn latencySeconds(ms: u32) f64 {
 /// Stops every stream, waits for the delivery thread to be done with
 /// them, and closes the pipe.
 pub fn deinit(f: *FsEvents, io: Io) void {
-    _ = io; // Every backend takes it; this one closes nothing through it.
     for (f.streams.values()) |stream| f.destroy(stream);
     f.streams.deinit(f.gpa);
     f.staging.deinit(f.gpa);
@@ -453,8 +448,11 @@ pub fn deinit(f: *FsEvents, io: Io) void {
     f.paths.release();
     if (f.pairing.held) |half| f.gpa.free(half.path);
     c.dispatch_release(f.queue);
-    _ = std.c.close(f.sink.wake_r);
-    _ = std.c.close(f.sink.wake_w);
+    // Through `io`: a reactor runtime keeps what it knows of a descriptor
+    // it has waited on until it is told the descriptor is gone.
+    const read_end: Io.File = .{ .handle = f.sink.arrival_r, .flags = .{ .nonblocking = true } };
+    read_end.close(io);
+    _ = std.c.close(f.sink.arrival_w);
     {
         // Every stream is destroyed, so nothing contends for the buffer.
         var held = f.sink.delivery.acquire();
@@ -465,10 +463,10 @@ pub fn deinit(f: *FsEvents, io: Io) void {
     f.* = undefined;
 }
 
-/// The read end of the wake pipe. Readable when a delivery has arrived
+/// The read end of the arrival pipe. Readable when a delivery has arrived
 /// that `lookout.Watcher.poll` has not drained yet.
 pub fn fd(f: *const FsEvents) ?posix.fd_t {
-    return f.sink.wake_r;
+    return f.sink.arrival_r;
 }
 
 /// Copies only polling-thread state. Callback bytes are still in the log
@@ -549,20 +547,6 @@ pub const Held = struct {
     bytes: []u8,
     overflowed: bool,
 };
-
-/// How another thread pokes a blocked `wait`: the sink, which is
-/// allocated once at `init`, never moves, and is already shared with the
-/// delivery thread. See `lookout.Watcher.wake`.
-pub fn waker(f: *const FsEvents) Waker {
-    return .{ .context = @intFromPtr(f.sink), .call = poke }; // safe: the sink's address, allocated at init and never moved, turned back by poke alone
-}
-
-/// Marks the sink woken and pokes the pipe a blocked `wait` is polling.
-fn poke(context: usize) void {
-    const sink: *Sink = @ptrFromInt(context);
-    sink.woken.store(true, .release);
-    sink.signal();
-}
 
 /// How many FSEvents streams this backend holds: one per watch, because
 /// the kernel recurses and a whole tree costs no more than a single path.
@@ -958,37 +942,44 @@ fn deliver(
     stream.sink.signal();
 }
 
-/// Waits on the wake pipe until the drain produces something `batch` did
-/// not already hold, or `timeout_ms` expires. `null` never gives up.
-pub fn wait(f: *FsEvents, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+/// Waits on the arrival pipe until the drain produces something `batch`
+/// did not already hold, `wakeup` is set, or `timeout` runs out.
+pub fn wait(f: *FsEvents, io: Io, batch: *Batch, wakeup: *reactor.Wake, timeout: Io.Timeout) contract.PollError!void {
     // A drain takes the delivery thread's records and decides what each
     // one was, asking the file system as it goes, so nothing in here is a
-    // place to stop: see `Watcher.poll`. The wait itself is out of
-    // `std.Io`'s reach.
+    // place to stop but the wait for the pipe to be readable, which takes
+    // nothing: see `Watcher.poll` and `timing.ready`.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    try f.collect(io, batch, timeout_ms);
+    try f.collect(io, batch, wakeup, timeout.toDeadline(io));
     // Whatever is still held when the wait is over never found its
     // partner, however many deliveries it waited through.
     try f.resolveHeld(io, batch);
 }
 
-fn collect(f: *FsEvents, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollError!void {
+fn collect(f: *FsEvents, io: Io, batch: *Batch, wakeup: *reactor.Wake, until: Io.Timeout) contract.PollError!void {
     const before = batch.revision;
-    const deadline: Deadline = .fromMs(io, timeout_ms);
 
     while (true) {
         try f.drain(io, batch);
-        if (f.sink.woken.swap(false, .acquire)) return;
         if (batch.revision != before or f.pairing.held != null) {
             // A rename with no partner yet is worth waiting a moment
             // for: the other half is on its way if the burst was simply
             // longer than one delivery, and deciding now would turn one
             // `renamed` into a removal and a creation.
+            var woken = false;
             var round: usize = 0;
             while (f.pairing.held != null and round < grace_rounds) : (round += 1) {
-                if (!f.readable(grace_ms)) break;
-                try f.drain(io, batch);
+                switch (try f.arrival(io, wakeup, timing.within(grace_ms))) {
+                    .delivery => try f.drain(io, batch),
+                    .quiet => break,
+                    // The wake is consumed by the wait that saw it, so
+                    // it has to end this one too.
+                    .woken => {
+                        woken = true;
+                        break;
+                    },
+                }
             }
             // A half alone, its partner not come within the grace, is
             // decided now rather than when the next delivery happens to
@@ -996,25 +987,36 @@ fn collect(f: *FsEvents, io: Io, batch: *Batch, timeout_ms: ?u32) contract.PollE
             // file saved by a rename and then deleted carries the rename
             // in its flags.
             try f.resolveHeld(io, batch);
-            if (batch.revision != before) return;
+            if (woken or batch.revision != before) return;
         }
-        // Clamped rather than returned on, so that a `timeout_ms` of zero
-        // still performs one non-blocking check.
-        if (!f.readable(deadline.pollMs(io))) {
-            if (!deadline.expired(io)) continue;
-            return;
+        switch (try f.arrival(io, wakeup, until)) {
+            .delivery => {},
+            .quiet, .woken => return,
         }
     }
 }
 
-/// Waits for the wake pipe, and empties it. `false` when nothing came.
-fn readable(f: *FsEvents, timeout: i32) bool {
-    var fds: [1]posix.pollfd = .{.{ .fd = f.sink.wake_r, .events = posix.POLL.IN, .revents = 0 }};
-    const ready = posix.poll(&fds, timeout) catch return false;
-    if (ready == 0) return false;
+/// What ended a wait on the arrival pipe.
+const Arrival = enum {
+    /// The delivery thread wrote to the pipe, which is now empty.
+    delivery,
+    /// The timeout ran out. A timeout already run out still gets a look.
+    quiet,
+    /// `wakeup` was set.
+    woken,
+};
+
+fn arrival(f: *FsEvents, io: Io, wakeup: *reactor.Wake, until: Io.Timeout) contract.PollError!Arrival {
+    const member = try timing.ready(io, &.{ .{ .readable = f.sink.arrival_r }, .{ .wake = wakeup } }, until) orelse return .quiet;
+    if (member == 1) return .woken;
+    f.emptyArrival();
+    return .delivery;
+}
+
+/// Reads the arrival pipe dry. It is non-blocking, so this never waits.
+fn emptyArrival(f: *FsEvents) void {
     var scratch: [256]u8 = undefined;
-    while (std.c.read(f.sink.wake_r, &scratch, scratch.len) > 0) {}
-    return true;
+    while (std.c.read(f.sink.arrival_r, &scratch, scratch.len) > 0) {}
 }
 
 /// Takes everything the delivery thread has left and turns it into
@@ -1789,11 +1791,11 @@ fn incomplete(f: *FsEvents, io: Io, batch: *Batch, stream: *const Stream) Alloca
     try batch.push(f.gpa, io, stream.id, stream.root, .overflow, stream.rootTarget());
 }
 
-test "the wake pipe is closed on exec" {
+test "the arrival pipe is closed on exec" {
     const io = std.testing.io;
     var f = try FsEvents.init(std.testing.allocator, .{});
     defer f.deinit(io);
-    for ([_]posix.fd_t{ f.sink.wake_r, f.sink.wake_w }) |end| {
+    for ([_]posix.fd_t{ f.sink.arrival_r, f.sink.arrival_w }) |end| {
         try std.testing.expect(std.c.fcntl(end, c.f_getfd, @as(c_int, 0)) & c.fd_cloexec != 0);
     }
 }
@@ -2207,7 +2209,7 @@ pub const test_access = if (builtin.is_test) struct {
     pub const c = cAccess;
     pub const drain = drainFixture;
     pub const hold = holdFixture;
-    pub const readable = readableFixture;
+    pub const emptyArrival = emptyArrivalFixture;
     pub const rejoin = rejoinFixture;
     pub const reportPlain = reportPlainFixture;
     pub const resolveHeld = resolveHeldFixture;
@@ -2222,7 +2224,7 @@ const settledFixture = settled;
 
 const cAccess = c;
 
-const readableFixture = readable;
+const emptyArrivalFixture = emptyArrival;
 
 const drainFixture = drain;
 

@@ -16,9 +16,9 @@ const Io = std.Io;
 
 const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
-const Deadline = @import("../Deadline.zig");
 const Tree = @import("../Tree.zig");
-const Waker = @import("../Waker.zig");
+const reactor = @import("reactor");
+const timing = @import("../timing.zig");
 const Options = @import("../options.zig").Options;
 const AddOptions = @import("../options.zig").AddOptions;
 const milliseconds = @import("../options.zig").milliseconds;
@@ -31,11 +31,6 @@ const Poll = @This();
 gpa: Allocator,
 interval_ms: u32,
 tree: Tree,
-
-/// The longest this backend sleeps without looking at the flag `wake`
-/// sets. A wake is answered within this even when `poll_interval` is
-/// minutes.
-const slice_ms = 100;
 
 /// Creates a backend that watches nothing. It holds no kernel resource
 /// and allocates nothing, so its error set is empty: `lookout.Watcher.init`
@@ -146,16 +141,6 @@ pub fn fd(p: *const Poll) ?std.posix.fd_t {
     return null;
 }
 
-/// Nothing to poke: there is nothing to interrupt here, only a sleep to
-/// cut short, and `wait` reads the flag `lookout.Watcher.wake` sets
-/// between the slices it sleeps in. That flag lives in the watcher rather
-/// than here because this struct is what the polling thread writes, and
-/// a thread that wakes it must not touch it. See `Waker`.
-pub fn waker(p: *const Poll) Waker {
-    _ = p;
-    return .none;
-}
-
 /// How many paths this backend re-lists or re-stats on every tick. See
 /// `lookout.Watcher.Stats`.
 pub fn registrationCount(p: *const Poll) usize {
@@ -189,40 +174,25 @@ pub fn refilter(p: *Poll, io: Io, id: WatchId, filter: lookout.Filter, batch: *B
 }
 
 /// Scans, then sleeps and scans again until the scan produces an event
-/// `batch` did not already hold, `woken` is set, or `timeout_ms` expires.
-/// `null` never gives up.
-///
-/// `woken` is `lookout.Watcher`'s own flag, and it is only read here:
-/// clearing it is the watcher's, which answers the wake.
+/// `batch` did not already hold, `wakeup` is set, or `timeout` runs out.
+/// The sleep is a wait on `wakeup` alone, so a wake ends it at once and a
+/// cancellation does too.
 pub fn wait(
     p: *Poll,
     io: Io,
     batch: *Batch,
-    timeout_ms: ?u32,
-    woken: *const std.atomic.Value(bool),
+    wakeup: *reactor.Wake,
+    timeout: Io.Timeout,
 ) contract.PollError!void {
     const before = batch.revision;
-    const deadline: Deadline = .fromMs(io, timeout_ms);
+    const until = timeout.toDeadline(io);
 
     while (true) {
         try p.scan(io, batch);
         if (batch.revision != before) return;
-        if (woken.load(.acquire)) return;
-
-        var napped: u32 = 0;
-        const nap_ms = nap: {
-            const remaining = deadline.remainingMs(io) orelse break :nap p.interval_ms;
-            if (remaining == 0) return;
-            break :nap @min(p.interval_ms, remaining);
-        };
-        // Slept in slices so that `wake` is answered without waiting out
-        // a whole tick, which on a long interval is a long time.
-        while (napped < nap_ms) {
-            const slice = @min(slice_ms, nap_ms - napped);
-            try io.sleep(.fromMilliseconds(slice), .awake);
-            napped += slice;
-            if (woken.load(.acquire)) break;
-        }
+        if (timing.expired(io, until)) return;
+        const tick = timing.soonest(io, until, timing.within(p.interval_ms));
+        if (try timing.ready(io, &.{.{ .wake = wakeup }}, tick) != null) return;
     }
 }
 

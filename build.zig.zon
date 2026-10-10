@@ -31,13 +31,17 @@
             .lazy = true,
         },
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#e99eccb269dfeeb4569bce843743ec80c6e094c3",
-            .hash = "shakedown-0.1.0-BR8U4-XJEAB46Facu1RERO-yErm9BwNcJGUxxk9vMLQv",
+            .url = "git+https://github.com/pedronaugusto/shakedown#a3db7b9c9b60b76dafe1d6f2fa9aab9a8cde3c95",
+            .hash = "shakedown-0.1.0-BR8U4zMOEgCECMxdaaSV5AdzkdaiM8oJVsq6fb9t6tMo",
             .lazy = true,
         },
         .aegis = .{
             .url = "git+https://github.com/pedronaugusto/aegis#a5d17d0f346d8edacce34b86eea953eb096931da",
             .hash = "aegis-0.0.0-rsxoupEWAwBXhrB2fwXEkUcw6KOANFGN9PRnfOhKmPtV",
+        },
+        .reactor = .{
+            .url = "git+https://github.com/pedronaugusto/reactor#063172e73c82bca2ec3067fcd9c116b8de76c8ba",
+            .hash = "reactor-0.1.0-MjQ-WEwbEQDAPTNiXyit5DA1MxIxy5aQGX2aA_7n7Da_",
         },
     },
 }

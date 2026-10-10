@@ -5,7 +5,7 @@ const lookout = @import("../lookout.zig");
 const ms = @import("../testing/timeout.zig").ms;
 const LockProbe = @import("../testing/LockProbe.zig");
 const checkpoint_format = @import("../Checkpoint/format.zig");
-const Deadline = @import("../Deadline.zig");
+const timing = @import("../timing.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("fsevents/records.zig");
 const Record = records.Record;
@@ -35,7 +35,7 @@ test "FSEvents access failures preserve known paths and report an incomplete ans
     const kept = try std.Io.Dir.path.join(gpa, &.{ root, "kept" });
     defer gpa.free(kept);
 
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     const f = &watcher.impl.fsevents;
@@ -92,7 +92,7 @@ test "the flags that say the system lost track are one overflow, and the watch g
     var baseline: Baseline = try .seed(gpa, io, root, .{ .recursive = true });
     defer baseline.deinit();
 
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const tree = try watcher.add(io, root, .{ .recursive = true });
     const single = try watcher.add(io, file, .{});
@@ -169,7 +169,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     const sub = try std.Io.Dir.path.join(gpa, &.{ root, "sub" });
     defer gpa.free(sub);
 
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .max_dir_entries = 3 });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents, .max_dir_entries = 3 });
     defer watcher.deinit(io);
     const tree = try watcher.add(io, root, .{ .recursive = true });
     while ((try watcher.poll(io, ms(200))).len != 0) {}
@@ -240,7 +240,7 @@ fn stopDeliveries(f: *FsEvents, stream: anytype) void {
         held.value().len = 0;
         held.value().overflowed = false;
     }
-    _ = access.readable(f, 0);
+    access.emptyArrival(f);
 }
 
 test "a rename whose halves arrive in two deliveries is one rename" {
@@ -279,7 +279,7 @@ test "a rename whose halves arrive in two deliveries is one rename" {
         gpa.free(a);
     };
 
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     const f = &watcher.impl.fsevents;
@@ -340,7 +340,7 @@ test "the entry budget is one directory's, with every creation delivered" {
         try tmp.dir.createDirPath(io, std.mem.print(&name, "d{d}", .{d}) catch unreachable);
     }
 
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .max_dir_entries = 512 });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents, .max_dir_entries = 512 });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{ .recursive = true });
     const f = &watcher.impl.fsevents;
@@ -396,7 +396,7 @@ test "a poll that expires before the replay begins is not the end of it" {
     var token: []u8 = undefined;
     defer gpa.free(token);
     {
-        var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+        var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
         defer watcher.deinit(io);
         const first = try watcher.add(io, root, .{ .recursive = true });
         // Taken before the deletion, and holding nothing unread.
@@ -414,7 +414,7 @@ test "a poll that expires before the replay begins is not the end of it" {
     const clocked = clock.io();
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, .{
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{
         .backend = .fsevents,
         .checkpoint = checkpoint,
         .latency = .fromMilliseconds(0),
@@ -459,7 +459,7 @@ test "a deletion numbered after the checkpoint marker is reported exactly once h
     var token: []u8 = undefined;
     defer gpa.free(token);
     {
-        var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+        var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
         defer watcher.deinit(io);
         const first = try watcher.add(io, root, .{ .recursive = true });
         // Taken before the deletion, and holding nothing unread.
@@ -477,7 +477,7 @@ test "a deletion numbered after the checkpoint marker is reported exactly once h
     const clocked = clock.io();
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, .{
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{
         .backend = .fsevents,
         .checkpoint = checkpoint,
         .latency = .fromMilliseconds(0),
@@ -516,7 +516,7 @@ test "checkpoints preserve independent cursors and unread stream records" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     try tmp.dir.createDirPath(std.testing.io, "first");
     try tmp.dir.createDirPath(std.testing.io, "second");
@@ -539,7 +539,7 @@ test "checkpoints preserve independent cursors and unread stream records" {
     defer checkpoint.deinit();
     try std.testing.expectEqual(@as(u64, 101), checkpoint.state.value.watches[0].cursor);
     try std.testing.expectEqual(@as(u64, 202), checkpoint.state.value.watches[1].cursor);
-    var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint });
+    var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = checkpoint });
     defer resumed.deinit(io);
     // Registration order does not determine which cursor belongs to it.
     const rb = try resumed.add(io, second, .{});
@@ -556,7 +556,7 @@ test "a checkpoint refuses a different volume or FSEvents log before restoring c
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     try testing.expectEqual(watcher.impl.fsevents.streams.get(id).?.volume.device, c.FSEventStreamGetDeviceBeingWatched(watcher.impl.fsevents.streams.get(id).?.ref));
@@ -568,7 +568,7 @@ test "a checkpoint refuses a different volume or FSEvents log before restoring c
         defer changed.deinit();
         const watches = @constCast(changed.value.watches);
         if (volume) watches[0].identity.volume[0] ^= 1 else watches[0].identity.log[0] ^= 1;
-        var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = .{ .state = changed } });
+        var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = .{ .state = changed } });
         defer resumed.deinit(io);
         try testing.expectError(error.InvalidCheckpoint, resumed.add(io, root, .{}));
         try testing.expectEqual(@as(usize, 0), resumed.impl.fsevents.streams.count());
@@ -585,7 +585,7 @@ test "a checkpoint is unavailable without an unchanged persistent log" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     const stream = watcher.impl.fsevents.streams.get(id).?;
@@ -607,7 +607,7 @@ test "a recursive mount keeps live coverage and refuses a single-device checkpoi
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .latency = .fromMilliseconds(0) });
+    var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .latency = .fromMilliseconds(0) });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{ .recursive = true });
     const backend = &watcher.impl.fsevents;
@@ -642,13 +642,13 @@ test "an absent pending root refuses a checkpoint from another volume" {
     defer gpa.free(root);
     const absent = try std.Io.Dir.path.join(gpa, &.{ root, "absent" });
     defer gpa.free(absent);
-    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     _ = try watcher.add(io, absent, .{ .pending = true });
     var saved = (try watcher.checkpoint(gpa)).?;
     defer saved.deinit();
     @constCast(saved.state.value.watches)[0].identity.volume[0] ^= 1;
-    var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = saved });
+    var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = saved });
     defer resumed.deinit(io);
     try testing.expectError(error.InvalidCheckpoint, resumed.add(io, absent, .{ .pending = true }));
     try testing.expectEqual(@as(usize, 0), resumed.pending.items.len);
@@ -666,12 +666,12 @@ test "a pending promotion rescans when its saved log identity is refused" {
     defer gpa.free(root);
     const absent = try std.Io.Dir.path.join(gpa, &.{ root, "absent" });
     defer gpa.free(absent);
-    var first = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    var first = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer first.deinit(io);
     _ = try first.add(io, absent, .{ .pending = true });
     var saved = (try first.checkpoint(gpa)).?;
     defer saved.deinit();
-    var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = saved });
+    var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = saved });
     defer resumed.deinit(io);
     const id = try resumed.add(io, absent, .{ .pending = true });
     const backend = &resumed.impl.fsevents;
@@ -706,15 +706,15 @@ test "fresh FSEvents replay reports no pre-add state or sibling paths" {
     defer gpa.free(old);
     const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "new.txt" });
     defer gpa.free(wanted);
-    var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .latency = .fromMilliseconds(0) });
+    var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .latency = .fromMilliseconds(0) });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     try tmp.dir.writeFile(io, .{ .sub_path = "watched/new.txt", .data = "after" });
     try tmp.dir.writeFile(io, .{ .sub_path = "sibling.txt", .data = "after" });
     const stream = watcher.impl.fsevents.streams.get(id).?;
     var found = false;
-    const deadline = Deadline.fromMs(io, 5_000);
-    while (!deadline.expired(io)) {
+    const deadline = timing.within(5_000).toDeadline(io);
+    while (!timing.expired(io, deadline)) {
         for (try watcher.poll(io, ms(100))) |event| {
             try testing.expectEqual(id, event.id);
             try testing.expect(path_cmp.within(root, event.path));
@@ -753,6 +753,7 @@ fn expectInitAllocationFailure(fail_index: usize) !void {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
     try std.testing.expectError(error.OutOfMemory, lookout.Watcher.init(
         failing.allocator(),
+        std.testing.io,
         .{ .backend = .fsevents },
     ));
 }
@@ -775,7 +776,7 @@ fn expectHeldRenameFailure(comptime transfer: enum { resolve, replace, rejoin })
     defer testing.allocator.free(root);
     const old = try std.Io.Dir.path.join(testing.allocator, &.{ root, "old" });
     defer testing.allocator.free(old);
-    var watcher = try lookout.Watcher.init(testing.allocator, .{ .backend = .fsevents });
+    var watcher = try lookout.Watcher.init(testing.allocator, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     const backend = &watcher.impl.fsevents;
@@ -828,12 +829,12 @@ test "a recursive pending checkpoint resumes on its nonrecursive ancestor" {
     defer gpa.free(root);
     const absent = try std.Io.Dir.path.join(gpa, &.{ root, "pending" });
     defer gpa.free(absent);
-    var first = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+    var first = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer first.deinit(io);
     _ = try first.add(io, absent, .{ .pending = true, .recursive = true });
     var checkpoint = (try first.checkpoint(gpa)).?;
     defer checkpoint.deinit();
-    var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint });
+    var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = checkpoint });
     defer resumed.deinit(io);
     const id = try resumed.add(io, absent, .{ .pending = true, .recursive = true });
     try testing.expectEqual(@as(usize, 1), resumed.pending.items.len);
@@ -857,7 +858,7 @@ test "checkpoint capture allocation does not grow with the remembered tree" {
             var name: [32]u8 = undefined;
             try tmp.dir.writeFile(io, .{ .sub_path = try std.mem.print(&name, "file-{d}", .{i}), .data = "" });
         };
-        var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+        var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
         defer watcher.deinit(io);
         _ = try watcher.add(io, root, .{ .recursive = true });
         var counting: std.testing.FailingAllocator = .init(gpa, .{});
@@ -878,7 +879,7 @@ test "a shared checkpoint token keeps its revision after the watch is removed" {
     defer gpa.free(root);
     var saved: lookout.Checkpoint = undefined;
     {
-        var watcher = try lookout.Watcher.init(gpa, .{ .backend = .fsevents });
+        var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
         defer watcher.deinit(io);
         const id = try watcher.add(io, root, .{});
         saved = (try watcher.checkpoint(gpa)).?;
@@ -891,7 +892,7 @@ test "a shared checkpoint token keeps its revision after the watch is removed" {
     var parsed = try lookout.Checkpoint.parse(gpa, token);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 2), parsed.state.value.watches[0].baseline.flat.len);
-    var resumed = try lookout.Watcher.init(gpa, .{ .backend = .fsevents, .checkpoint = saved, .latency = .fromMilliseconds(0) });
+    var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = saved, .latency = .fromMilliseconds(0) });
     defer resumed.deinit(io);
     const restored = try resumed.add(io, root, .{});
     stopDeliveries(&resumed.impl.fsevents, resumed.impl.fsevents.streams.get(restored).?);
@@ -903,7 +904,7 @@ test "a shared checkpoint token keeps its revision after the watch is removed" {
 /// A checkpoint of one recursive watch on `root`, holding `changes` and
 /// nothing unread, as a token.
 fn tokenWith(gpa: std.mem.Allocator, io: Io, root: []const u8, filter: lookout.Filter, changes: []const checkpoint_format.Change) ![]u8 {
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{ .recursive = true, .filter = filter });
     stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(id).?);
@@ -952,7 +953,7 @@ test "a resumed checkpoint restores only the changes its watch reports" {
 
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency = .fromMilliseconds(0) });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency = .fromMilliseconds(0) });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{ .recursive = true, .filter = filter });
     stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(id).?);
@@ -984,13 +985,13 @@ test "a checkpoint resumes only under the patterns it was taken with" {
     for ([_]lookout.Filter{ .{}, .{ .ignore = &.{"*.log"} }, .{ .ignore = &.{"*.tmp"}, .only = &.{"*.zig"} } }) |other| {
         var checkpoint = try lookout.Checkpoint.parse(gpa, token);
         defer checkpoint.deinit();
-        var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint });
+        var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = checkpoint });
         defer watcher.deinit(io);
         try testing.expectError(error.InvalidCheckpoint, watcher.add(io, root, .{ .recursive = true, .filter = other }));
     }
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = checkpoint });
     defer watcher.deinit(io);
     _ = try watcher.add(io, root, .{ .recursive = true, .filter = .{ .ignore = &.{"*.tmp"} } });
 }
@@ -1037,7 +1038,7 @@ test "a path made while nobody watched is created when the log names it" {
 
     var checkpoint = try lookout.Checkpoint.parse(gpa, token);
     defer checkpoint.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency = .fromMilliseconds(0) });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = checkpoint, .latency = .fromMilliseconds(0) });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{ .recursive = true });
     const stream = watcher.impl.fsevents.streams.get(id).?;
@@ -1070,7 +1071,7 @@ test "the polling thread never allocates while the delivery thread's lock is hel
     const testing = std.testing;
     const gpa = testing.allocator;
     const io = testing.io;
-    var watcher: lookout.Watcher = try .init(gpa, .{ .backend = .fsevents });
+    var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const f = &watcher.impl.fsevents;
     var probe: LockProbe = .{ .child = gpa, .lock = &f.sink.delivery.lock };

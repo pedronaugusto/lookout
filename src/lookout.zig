@@ -12,29 +12,30 @@
 //! take `Watcher.fd` and wait on the watcher alongside its other descriptors.
 //!
 //! `poll` is a `std.Io` cancellation point on every backend, and a
-//! cancellation never costs an event: see `Watcher.poll`. What ends a poll
-//! that is blocked differs by backend, and `Watcher.wake` is the one way that
-//! works on all of them.
+//! cancellation never costs an event: see `Watcher.poll`. Its waits are
+//! reactor's, so on a reactor runtime a blocked `poll` holds no thread and a
+//! cancellation ends it, and on any other `std.Io` the calling thread waits.
+//! `Watcher.wake` ends a blocked `poll` from another thread on every backend.
 
 const std = @import("std");
 const aegis = @import("aegis");
 const builtin = @import("builtin");
+const reactor = @import("reactor");
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
 const Batch = @import("Batch.zig");
-const Deadline = @import("Deadline.zig");
 const Links = @import("Links.zig");
 const Tree = @import("Tree.zig");
-const Waker = @import("Waker.zig");
 const walk = @import("walk.zig");
 const path_cmp = @import("path.zig");
 const fs_type = @import("filesystem.zig");
 const contract = @import("watch_contract.zig");
 const backends = @import("backend.zig");
 const options_mod = @import("options.zig");
+const timing = @import("timing.zig");
 
 /// The filesystem fact measured at each watch registration.
 pub const Filesystem = fs_type.Kind;
@@ -67,7 +68,7 @@ test "failed overflow reporting leaves the lost watch queued for retry" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var watcher = try Watcher.init(gpa, .{ .backend = .poll });
+    var watcher = try Watcher.init(gpa, std.testing.io, .{ .backend = .poll });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
     try watcher.batch.dropped.put(gpa, id, {});
@@ -270,12 +271,19 @@ pub const Watcher = struct {
     /// into them.
     following: std.ArrayList(*Links),
     /// Set by `wake` and cleared by the `poll` that answers it. One of
-    /// the two fields of a `Watcher` another thread may touch.
+    /// the fields of a `Watcher` another thread may touch.
     woken: std.atomic.Value(bool),
-    /// How `wake` reaches the backend's wait, taken from it at `init` and
-    /// only read after: the other field another thread may touch. `wake`
-    /// never touches `impl`, which is the polling thread's to write.
-    waker: Waker,
+    /// What `wake` sets to end the backend's wait, and what every
+    /// backend's wait includes beside its own descriptor. It only ends a
+    /// sleep: `woken` is the fact. Another field a thread that is not the
+    /// poller may touch, and the only way it reaches a blocked `poll`;
+    /// `wake` never touches `impl`, which is the polling thread's to
+    /// write.
+    wakeup: reactor.Wake,
+    /// Windows' completion port, which `wake` posts to as well: a port is
+    /// not an object a wait can include `wakeup` with. Fixed at `init` and
+    /// only read after, like `wakeup`. Null for a watcher on polling.
+    port: Port,
     /// Whether the events in `batch` were handed to the caller by the last
     /// `poll`, and so are the caller's until the next one begins. A `poll`
     /// that returned an error handed nothing out, and what it had gathered
@@ -370,6 +378,18 @@ pub const Watcher = struct {
     /// chose. See `backend.zig`.
     const Impl = backends.Impl;
 
+    /// The completion port a Windows backend waits on, which `wake` also
+    /// posts to. Nothing elsewhere has one.
+    const Port = if (builtin.os.tag == .windows) ?std.os.windows.HANDLE else void;
+
+    fn portOf(impl: *const Impl) Port {
+        if (comptime builtin.os.tag != .windows) return {};
+        return switch (impl.*) {
+            .windows => |*backend_impl| backend_impl.port,
+            else => null,
+        };
+    }
+
     /// Errors `init` can return when creating the backend's resources.
     /// FSEvents also allocates its delivery sink and `Options.buffer_bytes`
     /// buffer here, even with no watches. Allocator failures are
@@ -404,13 +424,16 @@ pub const Watcher = struct {
     ///
     /// `gpa` is kept for the watch tables and for the event buffer handed
     /// out by `poll`. Every call that reaches the file system takes the
-    /// `std.Io` it goes through; none is kept. Call `deinit` to release
-    /// both the allocations and the descriptors.
-    pub fn init(gpa: Allocator, options: Options) InitError!Watcher {
+    /// `std.Io` it goes through; none is kept, and the `io` given here
+    /// only makes the object `wake` sets. Call `deinit` to release both
+    /// the allocations and the descriptors.
+    pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Watcher {
         const resolved: Backend = switch (options.backend) {
             .auto => default_backend,
             else => |b| b,
         };
+        var wakeup: reactor.Wake = try .init(io);
+        errdefer wakeup.deinit(io);
         const impl: Impl = switch (resolved) {
             .auto => unreachable,
             inline else => |tag| impl: {
@@ -432,9 +455,8 @@ pub const Watcher = struct {
             .pending = .empty,
             .following = .empty,
             .woken = .init(false),
-            .waker = switch (impl) {
-                inline else => |*backend_impl| backend_impl.waker(),
-            },
+            .wakeup = wakeup,
+            .port = portOf(&impl),
             .handed_out = false,
         };
     }
@@ -448,6 +470,7 @@ pub const Watcher = struct {
         switch (w.impl) {
             inline else => |*impl| impl.deinit(io),
         }
+        w.wakeup.deinit(io);
         for (w.pending.items) |p| w.destroyPending(p);
         w.pending.deinit(w.gpa);
         for (w.table.values()) |*held| w.release(held);
@@ -1077,22 +1100,25 @@ pub const Watcher = struct {
     ///
     /// **Cancellation.** `poll` is a `std.Io` cancellation point on every
     /// backend: a cancellation requested before it is called, or while it
-    /// waits, is `error.Canceled`. It is looked for on entry and each time
-    /// the backend's wait comes back, and nowhere else — never half way
-    /// through reading what the kernel reported, which runs under
-    /// `std.Io`'s cancel protection. So a cancellation costs no event: a
-    /// `poll` that returns an error has handed nothing out, and whatever it
-    /// had gathered is returned by the next one.
+    /// waits, is `error.Canceled`. It is looked for on entry, while the
+    /// backend waits for its descriptor to have something, and each time
+    /// that wait comes back, and nowhere else — never half way through
+    /// reading what the kernel reported, which runs under `std.Io`'s cancel
+    /// protection. So a cancellation costs no event: a `poll` that returns
+    /// an error has handed nothing out, and whatever it had gathered is
+    /// returned by the next one.
     ///
-    /// What ends a poll that is *blocked* is the part that differs. The
-    /// `poll` backend waits in an `Io` sleep, and a cancellation ends that
-    /// sleep. The kernel backends wait in the kernel — `kevent`, `poll(2)`
-    /// on an inotify descriptor or on the FSEvents pipe, an I/O completion
-    /// port — where `std.Io` has no way to reach, so the wait ends when
-    /// something happens, when the timeout runs out, or when `wake` is
-    /// called, and the cancellation is reported then. `wake` is the one way
-    /// to end a blocked poll that works on every backend; see it for how to
-    /// stop a task that is polling.
+    /// The wait is reactor's `waitAny` on the backend's descriptor and the
+    /// watcher's `Wake`. On a reactor runtime it is an operation of the
+    /// task's own loop, which holds no thread and which a cancellation
+    /// ends at once. On any other `std.Io` the calling thread waits and
+    /// looks for a cancellation every few milliseconds. The one wait a
+    /// cancellation cannot end is Windows': a completion port is waited on
+    /// by a call nothing can interrupt, so there the cancellation is
+    /// reported when something happens, when the timeout runs out, or when
+    /// `wake` is called. `wake` is the one way to end a blocked poll from
+    /// another thread, on every backend; see it for how to stop a task
+    /// that is polling.
     pub fn poll(w: *Watcher, io: Io, timeout: Io.Timeout) PollError![]const Event {
         // What the last `poll` handed out is the caller's until now. What a
         // `poll` that failed gathered was never handed out, and is this
@@ -1100,7 +1126,7 @@ pub const Watcher = struct {
         if (w.handed_out) w.batch.reset(w.gpa);
         w.handed_out = false;
         try io.checkCancel();
-        const events = w.gather(io, .start(io, timeout)) catch |err| {
+        const events = w.gather(io, timeout.toDeadline(io)) catch |err| {
             if (err == error.OutOfMemory) {
                 // A shared delivery can touch several roots, and a failed
                 // operation may already have changed backend bookkeeping.
@@ -1116,10 +1142,10 @@ pub const Watcher = struct {
     }
 
     /// `poll`, less the bookkeeping of what has been handed out.
-    fn gather(w: *Watcher, io: Io, deadline: Deadline) PollError![]const Event {
+    fn gather(w: *Watcher, io: Io, until: Io.Timeout) PollError![]const Event {
         // Report before a wake or an indefinite wait can return or block.
         try w.recover(io);
-        _ = try w.gatherWindow(io, deadline);
+        _ = try w.gatherWindow(io, until);
         // Pending-watch reconciliation can discard ancestor events. The
         // recovery obligation is the caller's root, and ends only when
         // poll actually hands the notice out, never during reconciliation.
@@ -1134,12 +1160,12 @@ pub const Watcher = struct {
         }
     }
 
-    fn gatherWindow(w: *Watcher, io: Io, deadline: Deadline) PollError![]const Event {
+    fn gatherWindow(w: *Watcher, io: Io, until: Io.Timeout) PollError![]const Event {
         // Before anything blocks: a watch that came back half
         // registered says so at once rather than when the tree next
         // happens to change.
         try w.batch.flush(w.gpa, io);
-        const immediate = deadline.expired(io);
+        const immediate = timing.expired(io, until);
         if (w.woken.swap(false, .acquire)) return w.batch.events.items;
 
         while (w.batch.events.items.len == 0) {
@@ -1147,16 +1173,12 @@ pub const Watcher = struct {
             // wait is the shorter of the caller's timeout and the next
             // one due; otherwise a `poll` with no timeout would sleep through a
             // deadline the watcher set itself.
-            const left = deadline.remainingMs(io);
-            const wait_ms: ?u32 = if (w.batch.nextDueMs(io)) |due|
-                if (left) |l| @min(l, due) else due
-            else
-                left;
+            const bound = if (w.batch.nextDueMs(io)) |due| timing.soonest(io, until, timing.within(due)) else until;
 
-            try w.wait(io, wait_ms);
+            try w.wait(io, bound);
             try w.collect(io);
             if (w.woken.swap(false, .acquire)) return w.batch.events.items;
-            if (w.batch.events.items.len == 0 and deadline.expired(io)) return &.{};
+            if (w.batch.events.items.len == 0 and timing.expired(io, until)) return &.{};
         }
         // Debouncing has already waited for the path to be quiet, so
         // there is nothing left for a coalescing tail to merge.
@@ -1167,11 +1189,9 @@ pub const Watcher = struct {
         // The coalescing tail: keep reading for `latency` past the first
         // event so that an editor writing a file in four chunks is one
         // `modified` and not four.
-        const tail: Deadline = .fromMs(io, latency_ms);
-        while (true) {
-            const left = tail.remainingMs(io) orelse 0;
-            if (left == 0) break;
-            try w.wait(io, left);
+        const tail = timing.within(latency_ms).toDeadline(io);
+        while (!timing.expired(io, tail)) {
+            try w.wait(io, tail);
             try w.collect(io);
             // A wake that arrives now is answered by this poll, which
             // returns what it has rather than waiting out the tail.
@@ -1182,13 +1202,14 @@ pub const Watcher = struct {
 
     /// One wait of the backend's, and the cancellation point after it.
     ///
-    /// Each backend decides what of its wait can be interrupted: the kernel
-    /// backends read what the kernel handed them under cancel protection,
-    /// because an event read and not yet recorded would be lost, and the
-    /// `poll` backend protects its scans and leaves its sleep open. Here is
-    /// where a cancellation that arrived during any of it is reported,
-    /// with everything the wait read already in the batch.
-    fn wait(w: *Watcher, io: Io, wait_ms: ?u32) PollError!void {
+    /// Each backend waits for its descriptor and for `wakeup` through
+    /// `reactor.waitAny`, and a cancellation ends that wait: nothing has
+    /// been taken off the descriptor yet. What it reads afterwards it reads
+    /// under cancel protection, because an event read and not yet recorded
+    /// would be lost, and the `poll` backend protects its scans the same
+    /// way. Here is where a cancellation that arrived during any of that is
+    /// reported, with everything the wait read already in the batch.
+    fn wait(w: *Watcher, io: Io, until: Io.Timeout) PollError!void {
         const mixed = w.polling.registrationCount() != 0;
         if (mixed) {
             const before = w.batch.revision;
@@ -1198,12 +1219,9 @@ pub const Watcher = struct {
                 return;
             }
         }
-        const bounded = if (mixed) @min(wait_ms orelse w.polling.interval_ms, w.polling.interval_ms) else wait_ms;
+        const bounded = if (mixed) timing.soonest(io, until, timing.within(w.polling.interval_ms)) else until;
         switch (w.impl) {
-            // Nothing to interrupt, only a sleep to cut short: it reads
-            // the flag `wake` sets between the slices it sleeps in.
-            .poll => |*impl| try impl.wait(io, &w.batch, bounded, &w.woken),
-            inline else => |*impl| try impl.wait(io, &w.batch, bounded),
+            inline else => |*impl| try impl.wait(io, &w.batch, &w.wakeup, bounded),
         }
         if (mixed) try w.polling.scan(io, &w.batch);
         try io.checkCancel();
@@ -1251,13 +1269,12 @@ pub const Watcher = struct {
     /// next `poll` return at once, and calling it many times is the same
     /// as calling it once.
     ///
-    /// On the `poll` backend the return takes up to
-    /// `Options.poll_interval`, or a tenth of a second, whichever is
-    /// less: there is nothing to interrupt, only a sleep to cut short.
+    /// The wait it ends is the backend's, so it returns at once on every
+    /// backend, the `poll` backend's sleep between scans included.
     ///
-    /// This, and not cancellation, is what lets go of a poll blocked on a
-    /// kernel backend: see `poll`. A task that polls in a loop is stopped
-    /// the same way on every backend, with a flag it reads between polls:
+    /// A task that polls in a loop is stopped the same way on every
+    /// backend, with a flag it reads between polls, and a cancellation
+    /// works too wherever `poll` says it does:
     ///
     /// ```
     /// // The task.
@@ -1271,13 +1288,15 @@ pub const Watcher = struct {
     /// ```
     ///
     /// The flag is what makes it certain. A `wake` alone can be answered by
-    /// the poll that is running when it arrives, and a cancellation
-    /// requested after that is not seen by the next poll until something
-    /// ends its wait; a wake that lands between two polls is kept for the
-    /// next one, so the flag is always read.
+    /// the poll that is running when it arrives, and a wake that lands
+    /// between two polls is kept for the next one, so the flag is always
+    /// read.
     pub fn wake(w: *Watcher) void {
         w.woken.store(true, .release);
-        w.waker.wake();
+        w.wakeup.signal();
+        if (comptime builtin.os.tag == .windows) {
+            if (w.port) |port| backends.Windows.post(port);
+        }
     }
 
     /// Copies the boundary of what poll has handed out. The snapshot owns
@@ -1518,11 +1537,10 @@ test {
     _ = Filter;
     _ = Links;
     _ = Tree;
-    _ = Waker;
+    _ = timing;
     _ = fs_type;
     _ = @import("Snapshot.zig");
     _ = @import("Budget.zig");
-    _ = @import("Deadline.zig");
     _ = @import("buffer.zig");
     _ = @import("path.zig");
     _ = @import("walk.zig");
@@ -1570,7 +1588,7 @@ test "a failed pending promotion keeps each registered path owned" {
         var failing = testing.FailingAllocator.init(arena.allocator(), .{});
         var failed = false;
         {
-            var watcher = try Watcher.init(failing.allocator(), .{ .backend = .poll });
+            var watcher = try Watcher.init(failing.allocator(), std.testing.io, .{ .backend = .poll });
             defer watcher.deinit(io);
             _ = try watcher.add(io, target, .{ .pending = true, .recursive = true });
             try tmp.dir.createDirPath(testing.io, "later/child");
@@ -1606,7 +1624,7 @@ test "a pending promotion refused its checkpoint releases its path once under al
         defer testing.allocator.free(root);
         const target = try std.Io.Dir.path.join(testing.allocator, &.{ root, "later" });
         defer testing.allocator.free(target);
-        var first = try Watcher.init(testing.allocator, .{ .backend = .fsevents });
+        var first = try Watcher.init(testing.allocator, std.testing.io, .{ .backend = .fsevents });
         defer first.deinit(io);
         _ = try first.add(io, target, .{ .pending = true });
         var saved = (try first.checkpoint(testing.allocator)).?;
@@ -1618,7 +1636,7 @@ test "a pending promotion refused its checkpoint releases its path once under al
         var failing = testing.FailingAllocator.init(arena.allocator(), .{});
         var failed = false;
         {
-            var watcher = try Watcher.init(failing.allocator(), .{ .backend = .fsevents, .checkpoint = saved });
+            var watcher = try Watcher.init(failing.allocator(), std.testing.io, .{ .backend = .fsevents, .checkpoint = saved });
             defer watcher.deinit(io);
             _ = try watcher.add(io, target, .{ .pending = true });
             // The log the token names is not the one the path appears on.
@@ -1669,7 +1687,7 @@ test "a pending watch whose way down cannot be watched says so" {
     inline for (.{ Backend.poll, Backend.auto }) |choice| {
         // The ancestor refused at `add`: an error, not an id that waits on
         // nothing.
-        var watcher = try Watcher.init(gpa, .{ .backend = choice });
+        var watcher = try Watcher.init(gpa, std.testing.io, .{ .backend = choice });
         defer watcher.deinit(io);
         if (watcher.add(io, target, .{ .pending = true })) |_| {
             // A backend that registers a folder it cannot list -- FSEvents
@@ -1685,7 +1703,7 @@ test "a pending watch whose way down cannot be watched says so" {
     // to `locked` once it appears, cannot register it, and says so.
     try tmp.dir.setFilePermissions(io, "locked", .fromMode(0o755), .{});
     try tmp.dir.deleteDir(io, "locked");
-    var watcher = try Watcher.init(gpa, .{ .backend = .poll });
+    var watcher = try Watcher.init(gpa, std.testing.io, .{ .backend = .poll });
     defer watcher.deinit(io);
     const id = try watcher.add(io, target, .{ .pending = true });
     try tmp.dir.createDirPath(io, "locked");
@@ -1717,7 +1735,7 @@ test "auto chooses polling per network or FUSE watch and explicit backends retai
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
     for ([_]Backend{ .auto, default_backend, .poll }) |selected| {
-        var w = try Watcher.init(gpa, .{ .backend = selected, .latency = .fromMilliseconds(0), .poll_interval = .fromMilliseconds(1) });
+        var w = try Watcher.init(gpa, std.testing.io, .{ .backend = selected, .latency = .fromMilliseconds(0), .poll_interval = .fromMilliseconds(1) });
         defer w.deinit(io);
         var ids: [3]WatchId = undefined;
         for ([_][]const u8{ "local", "remote", "fuse" }, 0..) |name, index| {
@@ -1734,8 +1752,8 @@ test "auto chooses polling per network or FUSE watch and explicit backends retai
         try tmp.dir.writeFile(io, .{ .sub_path = "remote/kept", .data = "one" });
         try tmp.dir.writeFile(io, .{ .sub_path = "remote/excluded.tmp", .data = "one" });
         var found = false;
-        const deadline = Deadline.fromMs(io, 5_000);
-        while (!found and !deadline.expired(io)) {
+        const deadline = timing.within(5_000).toDeadline(io);
+        while (!found and !timing.expired(io, deadline)) {
             for (try w.poll(io, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } })) |event| {
                 try testing.expect(!std.mem.endsWith(u8, event.path, "excluded.tmp"));
                 if (event.id == ids[1] and std.mem.endsWith(u8, event.path, "kept")) found = true;
@@ -1758,7 +1776,7 @@ test "a watcher that has issued every id refuses another instead of reusing one"
     for ([_][]const u8{ "a", "b", "c" }) |name| try tmp.dir.createDirPath(io, name);
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    var w = try Watcher.init(gpa, .{ .backend = .poll });
+    var w = try Watcher.init(gpa, std.testing.io, .{ .backend = .poll });
     defer w.deinit(io);
     // Two ids are left: the last two this watcher can ever issue.
     w.ids = .init(std.math.maxInt(u32) - 2);
@@ -1803,14 +1821,14 @@ test "a followed link the watcher has no id left for is a hole in the watch" {
     const link = try std.Io.Dir.path.join(gpa, &.{ watched, "link" });
     defer gpa.free(link);
     try tmp.dir.symLink(io, elsewhere, "watched/link", .{ .is_directory = true });
-    var w = try Watcher.init(gpa, .{ .backend = .poll, .latency = .fromMilliseconds(0), .poll_interval = .fromMilliseconds(1) });
+    var w = try Watcher.init(gpa, std.testing.io, .{ .backend = .poll, .latency = .fromMilliseconds(0), .poll_interval = .fromMilliseconds(1) });
     defer w.deinit(io);
     // One id is left, and the watch itself takes it.
     w.ids = .init(std.math.maxInt(u32) - 1);
     const id = try w.add(io, watched, .{ .recursive = true, .follow_symlinks = true });
     var told = false;
-    const deadline = Deadline.fromMs(io, 5_000);
-    while (!told and !deadline.expired(io)) {
+    const deadline = timing.within(5_000).toDeadline(io);
+    while (!told and !timing.expired(io, deadline)) {
         for (try w.poll(io, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } })) |event| {
             if (event.id == id and event.kind == .unwatched and std.mem.eql(u8, event.path, link)) told = true;
         }
@@ -1835,7 +1853,7 @@ test "pending watches recheck filesystem facts when they move to their root" {
     defer gpa.free(root);
     const absent = try std.Io.Dir.path.join(gpa, &.{ root, "appeared" });
     defer gpa.free(absent);
-    var w = try Watcher.init(gpa, .{ .latency = .fromMilliseconds(0) });
+    var w = try Watcher.init(gpa, std.testing.io, .{ .latency = .fromMilliseconds(0) });
     defer w.deinit(io);
     const id = try w.add(io, absent, .{ .pending = true });
     try testing.expectEqual(Filesystem.local, w.capabilities(id).?.filesystem);
@@ -1860,7 +1878,7 @@ test "filesystem identity keeps requested roots and explicit policy separate fro
     defer gpa.free(asked);
     const kernel = try identity.canonical(gpa, io, asked);
     defer gpa.free(kernel);
-    var w = try Watcher.init(gpa, .{ .backend = .poll });
+    var w = try Watcher.init(gpa, std.testing.io, .{ .backend = .poll });
     defer w.deinit(io);
     const policy: NamePolicy = .{ .case_sensitive = false, .normalization = .nfc };
     const id = try w.add(io, asked, .{ .recursive = true, .identity = policy });
@@ -1888,7 +1906,7 @@ test "normalized pending refilter retains explicit policy before promotion" {
     defer testing.allocator.free(root);
     const missing = try Io.Dir.path.join(testing.allocator, &.{ root, "later" });
     defer testing.allocator.free(missing);
-    var watcher = try Watcher.init(testing.allocator, .{ .backend = .poll });
+    var watcher = try Watcher.init(testing.allocator, std.testing.io, .{ .backend = .poll });
     defer watcher.deinit(io);
     const id = try watcher.add(io, missing, .{ .pending = true, .identity = .{ .normalization = .nfc } });
     try testing.expectError(error.InvalidPattern, watcher.refilter(io, id, .{ .ignore = &.{"[x\u{301}]"} }));

@@ -319,7 +319,7 @@ const Fixture = struct {
         errdefer dir.close(c.io);
         const root = try dir.realPathFileAlloc(c.io, ".", c.gpa);
         errdefer c.gpa.free(root);
-        return .{ .io = c.io, .gpa = c.gpa, .dir = dir, .root = root, .watcher = try Watcher.init(c.gpa, options), .name = name };
+        return .{ .io = c.io, .gpa = c.gpa, .dir = dir, .root = root, .watcher = try Watcher.init(c.gpa, c.io, options), .name = name };
     }
 
     fn deinit(f: *Fixture) void {

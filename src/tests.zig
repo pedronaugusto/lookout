@@ -7,6 +7,7 @@ test {
     _ = @import("lookout.zig");
     _ = @import("testing/suite_test.zig");
     _ = @import("testing/resources_test.zig");
+    _ = @import("testing/runtime_test.zig");
     _ = @import("testing/gaps_test.zig");
     _ = @import("testing/fuzz_test.zig");
     _ = @import("links_test.zig");

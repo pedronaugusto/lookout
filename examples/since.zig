@@ -47,7 +47,7 @@ pub fn main() !void {
     var token: []u8 = undefined;
     defer gpa.free(token);
     {
-        var watcher: lookout.Watcher = try .init(gpa, .{});
+        var watcher: lookout.Watcher = try .init(gpa, io, .{});
         defer watcher.deinit(io);
         _ = try watcher.add(io, dir_path, .{ .recursive = true });
         try scratch.writeFile(io, .{ .sub_path = "seen.txt", .data = "while watching" });
@@ -69,7 +69,7 @@ pub fn main() !void {
     // The second run hands the token back.
     var resumed = try lookout.Checkpoint.parse(gpa, token);
     defer resumed.deinit();
-    var watcher: lookout.Watcher = try .init(gpa, .{ .checkpoint = resumed });
+    var watcher: lookout.Watcher = try .init(gpa, io, .{ .checkpoint = resumed });
     defer watcher.deinit(io);
     _ = try watcher.add(io, dir_path, .{ .recursive = true });
 

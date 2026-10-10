@@ -33,7 +33,7 @@ test "poll reports each change from another thread" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, .{
+        var watcher: Watcher = try .init(gpa, std.testing.io, .{
             .backend = backend,
             .poll_interval = .fromMilliseconds(interval_ms),
             // Collect the backend's delivery without a coalescing tail.
@@ -99,7 +99,7 @@ test "a burst arrives whole, or says what it lost" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, .{
+        var watcher: Watcher = try .init(gpa, std.testing.io, .{
             .backend = backend,
             .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 1_000_000,
@@ -188,7 +188,7 @@ test "a watched directory costs what it is budgeted" {
         // costs" is a number and not an impression.
         var counting: shakedown.alloc.Counting = .init(std.testing.allocator);
         {
-            var watcher: Watcher = try .init(counting.allocator(), .{
+            var watcher: Watcher = try .init(counting.allocator(), std.testing.io, .{
                 .backend = backend,
                 .poll_interval = .fromMilliseconds(20),
                 // The delivery buffer is one per watcher rather than one

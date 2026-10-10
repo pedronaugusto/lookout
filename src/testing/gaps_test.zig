@@ -92,7 +92,7 @@ test "a change inside a renamed directory is not a creation" {
         try tmp.dir.createDirPath(io, "sub");
         try tmp.dir.writeFile(io, .{ .sub_path = "sub/a.txt", .data = "one" });
 
-        var watcher: Watcher = try .init(gpa, .{
+        var watcher: Watcher = try .init(gpa, std.testing.io, .{
             .backend = backend,
             .poll_interval = .fromMilliseconds(20),
         });
@@ -178,7 +178,7 @@ test "a watch spelled in another case than the disk still reports" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, .{
+        var watcher: Watcher = try .init(gpa, std.testing.io, .{
             .backend = backend,
             .poll_interval = .fromMilliseconds(20),
         });
@@ -231,7 +231,7 @@ test "explicit case insensitive filtering excludes across filesystem policies" {
 
         try tmp.dir.createDirPath(io, "skip");
 
-        var watcher: Watcher = try .init(gpa, .{
+        var watcher: Watcher = try .init(gpa, std.testing.io, .{
             .backend = backend,
             .poll_interval = .fromMilliseconds(20),
         });
@@ -277,7 +277,7 @@ test "a slow write is one event, and it arrives after the writing stops" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var watcher: Watcher = try .init(gpa, .{
+    var watcher: Watcher = try .init(gpa, std.testing.io, .{
         .backend = .poll,
         .poll_interval = .fromMilliseconds(20),
         .settle = .fromMilliseconds(200),
@@ -373,7 +373,7 @@ test "a burst of renames is paired across the reads it is split over" {
         });
     }
 
-    var watcher: Watcher = try .init(gpa, .{
+    var watcher: Watcher = try .init(gpa, std.testing.io, .{
         .backend = backend,
         .max_dir_entries = 1_000_000,
     });
@@ -462,7 +462,7 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
             try tmp.dir.createDirPath(io, std.mem.print(&name, "d{d}", .{d}) catch unreachable);
         }
 
-        var watcher: Watcher = try .init(gpa, .{
+        var watcher: Watcher = try .init(gpa, std.testing.io, .{
             .backend = backend,
             .poll_interval = .fromMilliseconds(20),
             .max_dir_entries = 512,
@@ -521,7 +521,7 @@ test "a root deleted and recreated inside one window is not a move" {
         const target = try std.Io.Dir.path.join(gpa, &.{ root, "target" });
         defer gpa.free(target);
 
-        var watcher: Watcher = try .init(gpa, .{
+        var watcher: Watcher = try .init(gpa, std.testing.io, .{
             .backend = backend,
             .poll_interval = .fromMilliseconds(20),
         });
@@ -575,7 +575,7 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
-    var watcher: Watcher = try .init(gpa, .{
+    var watcher: Watcher = try .init(gpa, std.testing.io, .{
         .backend = .inotify,
         .max_dir_entries = 1_000_000,
         .max_events = 0,
@@ -640,7 +640,7 @@ test "the delivery buffer is the size the caller asked for" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, .{
+        var watcher: Watcher = try .init(gpa, std.testing.io, .{
             .backend = .fsevents,
             .buffer_bytes = .fromRaw(64 * 1024),
             .max_dir_entries = 1_000_000,
@@ -670,7 +670,7 @@ test "the delivery buffer is the size the caller asked for" {
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
 
-        var watcher: Watcher = try .init(gpa, .{
+        var watcher: Watcher = try .init(gpa, std.testing.io, .{
             .backend = .fsevents,
             .max_dir_entries = 1_000_000,
         });
@@ -802,7 +802,7 @@ fn deliveryFailure(io: std.Io, backend: lookout.Backend) !void {
                 try tmp.dir.writeFile(testing.io, .{ .sub_path = "last", .data = "old" });
             }
             var failing = testing.FailingAllocator.init(testing.allocator, .{});
-            var watcher = try Watcher.init(failing.allocator(), .{
+            var watcher = try Watcher.init(failing.allocator(), std.testing.io, .{
                 .backend = backend,
                 .latency = .fromMilliseconds(0),
                 .poll_interval = .fromMilliseconds(1),
@@ -883,7 +883,7 @@ test "allocation failure during delivery keeps every root pending through failed
         const b = try tmp.dir.realPathFileAlloc(testing.io, "b", testing.allocator);
         defer testing.allocator.free(b);
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
-        var watcher = try Watcher.init(failing.allocator(), .{
+        var watcher = try Watcher.init(failing.allocator(), std.testing.io, .{
             .backend = .poll,
             .debounce = .fromMilliseconds(60_000),
             .latency = .fromMilliseconds(0),
@@ -931,7 +931,7 @@ test "recovery remains visible while a watch is waiting for its path" {
     const waiting = try std.Io.Dir.path.join(testing.allocator, &.{ root, "later" });
     defer testing.allocator.free(waiting);
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
-    var watcher = try Watcher.init(failing.allocator(), .{
+    var watcher = try Watcher.init(failing.allocator(), std.testing.io, .{
         .backend = .poll,
         .latency = .fromMilliseconds(20),
         .poll_interval = .fromMilliseconds(1),
@@ -957,7 +957,7 @@ test "filesystem identity reports two native case-distinct entries on sensitive 
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
         if (!(identity.read(io, root).case_sensitive orelse false)) continue;
-        var watcher = try Watcher.init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(1), .latency = .fromMilliseconds(0) });
+        var watcher = try Watcher.init(gpa, std.testing.io, .{ .backend = backend, .poll_interval = .fromMilliseconds(1), .latency = .fromMilliseconds(0) });
         defer watcher.deinit(io);
         const id = try watcher.add(io, root, .{});
         try tmp.dir.writeFile(io, .{ .sub_path = "Case", .data = "one" });
@@ -984,7 +984,7 @@ test "normalized filtering composes native names and keeps plain e and kernel sp
         defer tmp.cleanup();
         const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(root);
-        var watcher = try Watcher.init(gpa, .{ .backend = backend, .poll_interval = .fromMilliseconds(1), .latency = .fromMilliseconds(0) });
+        var watcher = try Watcher.init(gpa, std.testing.io, .{ .backend = backend, .poll_interval = .fromMilliseconds(1), .latency = .fromMilliseconds(0) });
         defer watcher.deinit(io);
         const id = try watcher.add(io, root, .{ .filter = .{ .ignore = &.{"[é]"}, .case = .sensitive, .normalization = .nfc } });
         try tmp.dir.writeFile(io, .{ .sub_path = "é", .data = "one" });
@@ -1019,7 +1019,7 @@ test "filesystem identity canonicalizes existing Unicode root aliases before cla
     defer gpa.free(alias);
     // Establish equivalence from the filesystem itself, with no OS guess.
     _ = std.Io.Dir.cwd().statFile(io, alias, .{}) catch return error.SkipZigTest;
-    var watcher = try Watcher.init(gpa, .{ .backend = .poll });
+    var watcher = try Watcher.init(gpa, std.testing.io, .{ .backend = .poll });
     defer watcher.deinit(io);
     _ = try watcher.add(io, stored, .{});
     try std.testing.expectError(error.PathAlreadyWatched, watcher.add(io, alias, .{}));
