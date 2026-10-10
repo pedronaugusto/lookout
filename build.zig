@@ -109,11 +109,10 @@ pub fn build(b: *std.Build) !void {
     // production source imports them. Their error is returned last, so one
     // configure pass asks for them and for preflight together.
     var needed: error{LazyDependencyNeeded}!void = {};
-    if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |shakedown| {
-        tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
-    } else |err| needed = err;
+    // One shakedown in the graph: the one airlock's seam is built on.
     if (airlock_build.testing(airlock_dependency)) |seam| {
         tests.root_module.addImport("airlock.testing", seam);
+        tests.root_module.addImport("shakedown", seam.import_table.get("shakedown").?);
     } else |err| needed = err;
     if (darwin) {
         if (sdk) |paths| paths.addTo(tests.root_module);

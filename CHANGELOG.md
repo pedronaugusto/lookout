@@ -79,6 +79,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Smith fuzz tests are shakedown `check` properties.
 - The fetched package holds the build files, `src` and the three documents; the benchmarks, examples, `ci/` and `.github/` stay in the repository, and a project depending on lookout builds the module and nothing else.
 - A path is matched against all of a watch's patterns in one pass over it, whatever their number and shape: a filter of twenty ignore patterns and three include patterns decides a path about six times faster than before, and one pattern about one and a half times.
 
