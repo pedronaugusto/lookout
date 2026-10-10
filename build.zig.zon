@@ -40,8 +40,8 @@
             .hash = "aegis-0.0.0-rsxouifgBgBOnC8-wtmFrZSIUjR9aEYPYmZD1G-hASAz",
         },
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor#286105e9eee61d4ee1abf4ce4f3bc445bdb4492e",
-            .hash = "reactor-0.1.0-MjQ-WAXREQAIXx8Nf7W-Vz7Go1b5cgTpiBgFu7lfb3FY",
+            .url = "git+https://github.com/pedronaugusto/reactor#8b15c6d64979083d2c72ce8a30a522452227b42c",
+            .hash = "reactor-0.1.0-MjQ-WL3VEQARICc47AMIR1FTqiBjFotE2XBlLkmul9QR",
         },
     },
 }
