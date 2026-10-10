@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- The FSEvents backend signals arrivals through a reactor `Wake` where it made a pipe of its own outside conduit's fork gap; `Watcher.fd` hands out the wake's descriptor as before.
 - Pins the newest green aegis, airlock, reactor, shakedown, sweep and preflight. The filter's cache is asked for sweep's `Set.Bytes` (`.fromRaw(1 << 16)`), which sweep now takes as the most a cache holds.
 - CI gates glint's A004 and Z026 through the `glint` object of `ci/preflight.json` with the whole default rule set (it ran the A rules alone from `ci/glint.json`); the retired exception files are gone, and the byte-size tests order sizes with aegis `add`, `sub` and `compare`.
 - `WatchId` is an aegis id (`aegis.id.Id`) and ids come from a checked issuer. Read the number with `id.raw()` where `@backingInt(id)` did, and make one with `.fromRaw(n)`. The first id a watcher issues is 1, no longer 0. Ids are never reissued, and a watcher that has issued all of them (2^32 - 1, removed watches included) now refuses the next `add` with `error.IdExhausted` where it overflowed: a panic in safe builds and a reused id in ReleaseFast. A followed link the watcher has no id left for is reported `unwatched`, as one past `max_followed_links` is.

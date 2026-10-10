@@ -13,10 +13,10 @@
 //!
 //! * FSEvents delivers on a dispatch queue, which is a thread the system
 //!   owns. lookout starts none of its own and never calls the caller back
-//!   on it: the delivery thread appends to a fixed buffer and writes one
-//!   byte to a pipe, and everything else happens on the thread that calls
-//!   `lookout.Watcher.poll`. `lookout.Watcher.fd` hands out the read end of
-//!   that pipe, so a program with a wait loop of its own still works.
+//!   on it: the delivery thread appends to a fixed buffer and signals a
+//!   reactor `Wake`, and everything else happens on the thread that calls
+//!   `lookout.Watcher.poll`. `lookout.Watcher.fd` hands out the wake's
+//!   descriptor, so a program with a wait loop of its own still works.
 //!   How much that buffer holds is `@import("../options.zig").Options.buffer_bytes`.
 //! * FSEvents coalesces on its own, before lookout sees anything. Its
 //!   stream uses `@import("../options.zig").Options.latency` for that window and
@@ -223,15 +223,12 @@ const Handed = struct {
 /// needs memory, it is made before the lock is taken.
 const Sink = struct {
     delivery: aegis.Guarded(Delivery),
-    /// Read end, handed out by `fd`. Non-blocking.
-    arrival_r: posix.fd_t,
-    /// Write end, poked once per delivery. Non-blocking, so a full pipe
-    /// costs nothing: one byte pending is as good as a thousand.
-    arrival_w: posix.fd_t,
+    /// Set once per delivery; its handle is handed out by `fd`. A signal
+    /// pending is as good as a thousand.
+    arrival: reactor.Wake,
 
     fn signal(s: *Sink) void {
-        const byte: [1]u8 = .{0};
-        _ = std.c.write(s.arrival_w, &byte, 1);
+        s.arrival.signal();
     }
 
     /// Appends the bytes the delivery thread has handed over to `into`,
@@ -371,26 +368,13 @@ const lost_track: u32 = flag.must_scan_sub_dirs | flag.user_dropped | flag.kerne
 /// Creates the delivery queue, the buffer it fills, and the pipe the
 /// delivery thread tells the watcher a delivery has arrived through.
 pub fn init(gpa: Allocator, options: Options) contract.InitError!FsEvents {
-    var fds: [2]posix.fd_t = undefined;
-    if (std.c.pipe(&fds) != 0) return switch (posix.errno(@as(c_int, -1))) {
-        .MFILE => error.ProcessFdQuotaExceeded,
-        .NFILE => error.SystemFdQuotaExceeded,
-        else => error.Unexpected,
+    // The wake is reactor's: closed on exec, and made where a child being
+    // started cannot be handed it half-made. `init` ignores the `Io` it is given.
+    var wake = reactor.Wake.init(Io.Threaded.global_single_threaded.io()) catch |err| return switch (err) {
+        error.SystemResources => error.ProcessFdQuotaExceeded,
+        error.Unexpected => error.Unexpected,
     };
-    errdefer {
-        _ = std.c.close(fds[0]);
-        _ = std.c.close(fds[1]);
-    }
-    // Both ends non-blocking: the delivery thread must never block on a
-    // full pipe, and the drain must never block on an empty one. And both
-    // closed on exec, as the other backends' descriptors are: a host that
-    // starts processes would hand every child the pair.
-    for (fds) |end| {
-        const flags = std.c.fcntl(end, c.f_getfl, @as(c_int, 0));
-        if (flags < 0) return error.Unexpected;
-        if (std.c.fcntl(end, c.f_setfl, flags | c.o_nonblock) < 0) return error.Unexpected;
-        if (std.c.fcntl(end, c.f_setfd, c.fd_cloexec) < 0) return error.Unexpected;
-    }
+    errdefer wake.deinit(Io.Threaded.global_single_threaded.io());
 
     const sink = try gpa.create(Sink);
     errdefer gpa.destroy(sink);
@@ -398,8 +382,7 @@ pub fn init(gpa: Allocator, options: Options) contract.InitError!FsEvents {
     errdefer gpa.free(bytes);
     sink.* = .{
         .delivery = .init(.{ .buffer = bytes, .len = 0, .overflowed = false, .deliveries = 0, .dropped = 0 }),
-        .arrival_r = fds[0],
-        .arrival_w = fds[1],
+        .arrival = wake,
     };
 
     const queue = c.dispatch_queue_create("dev.lookout.fsevents", null) orelse
@@ -450,9 +433,7 @@ pub fn deinit(f: *FsEvents, io: Io) void {
     c.dispatch_release(f.queue);
     // Through `io`: a reactor runtime keeps what it knows of a descriptor
     // it has waited on until it is told the descriptor is gone.
-    const read_end: Io.File = .{ .handle = f.sink.arrival_r, .flags = .{ .nonblocking = true } };
-    read_end.close(io);
-    _ = std.c.close(f.sink.arrival_w);
+    f.sink.arrival.deinit(io);
     {
         // Every stream is destroyed, so nothing contends for the buffer.
         var held = f.sink.delivery.acquire();
@@ -466,7 +447,7 @@ pub fn deinit(f: *FsEvents, io: Io) void {
 /// The read end of the arrival pipe. Readable when a delivery has arrived
 /// that `lookout.Watcher.poll` has not drained yet.
 pub fn fd(f: *const FsEvents) ?posix.fd_t {
-    return f.sink.arrival_r;
+    return f.sink.arrival.handle();
 }
 
 /// Copies only polling-thread state. Callback bytes are still in the log
@@ -1007,16 +988,15 @@ const Arrival = enum {
 };
 
 fn arrival(f: *FsEvents, io: Io, wakeup: *reactor.Wake, until: Io.Timeout) contract.PollError!Arrival {
-    const member = try timing.ready(io, &.{ .{ .readable = f.sink.arrival_r }, .{ .wake = wakeup } }, until) orelse return .quiet;
+    const member = try timing.ready(io, &.{ .{ .wake = &f.sink.arrival }, .{ .wake = wakeup } }, until) orelse return .quiet;
     if (member == 1) return .woken;
     f.emptyArrival();
     return .delivery;
 }
 
-/// Reads the arrival pipe dry. It is non-blocking, so this never waits.
+/// Clears the arrival signal; a program's own wait on `fd` ends here too.
 fn emptyArrival(f: *FsEvents) void {
-    var scratch: [256]u8 = undefined;
-    while (std.c.read(f.sink.arrival_r, &scratch, scratch.len) > 0) {}
+    f.sink.arrival.clear();
 }
 
 /// Takes everything the delivery thread has left and turns it into
@@ -1791,13 +1771,11 @@ fn incomplete(f: *FsEvents, io: Io, batch: *Batch, stream: *const Stream) Alloca
     try batch.push(f.gpa, io, stream.id, stream.root, .overflow, stream.rootTarget());
 }
 
-test "the arrival pipe is closed on exec" {
+test "the arrival wake is closed on exec" {
     const io = std.testing.io;
     var f = try FsEvents.init(std.testing.allocator, .{});
     defer f.deinit(io);
-    for ([_]posix.fd_t{ f.sink.arrival_r, f.sink.arrival_w }) |end| {
-        try std.testing.expect(std.c.fcntl(end, c.f_getfd, @as(c_int, 0)) & c.fd_cloexec != 0);
-    }
+    try std.testing.expect(std.c.fcntl(f.sink.arrival.handle(), c.f_getfd, @as(c_int, 0)) & c.fd_cloexec != 0);
 }
 
 test "FSEvents refuses a watch whose initial names could not be remembered" {
