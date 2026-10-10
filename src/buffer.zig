@@ -75,8 +75,8 @@ test "zero is the default, and the default is passed on unchanged" {
 
 test "a size outside the range is brought to the nearer end" {
     try testing.expectEqual(example.min, clamp(bytes(1), example));
-    try testing.expectEqual(example.min, clamp(bytes(example.min.raw() - 1), example));
-    try testing.expectEqual(example.max, clamp(bytes(example.max.raw() + 1), example));
+    try testing.expectEqual(example.min, clamp(try example.min.sub(bytes(1)), example));
+    try testing.expectEqual(example.max, clamp(try example.max.add(bytes(1)), example));
     try testing.expectEqual(example.max, clamp(bytes(std.math.maxInt(usize)), example));
 }
 
@@ -84,5 +84,5 @@ test "a size that is not a whole number of words is rounded down" {
     try testing.expectEqual(bytes(8 * 1024), clamp(bytes(8 * 1024 + 3), example));
     try testing.expectEqual(bytes(8 * 1024 + 4), clamp(bytes(8 * 1024 + 7), example));
     // Rounding never takes a size below the floor.
-    try testing.expect(clamp(bytes(example.min.raw() + 1), example).raw() >= example.min.raw());
+    try testing.expect(clamp(try example.min.add(bytes(1)), example).compare(example.min) != .lt);
 }

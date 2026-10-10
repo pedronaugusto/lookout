@@ -2808,6 +2808,7 @@ test "a watch that cannot cover a subtree says so instead of going quiet" {
         const io = std.testing.io;
         try f.tmp.dir.createDir(io, "closed", @fromBackingInt(@intCast(0o000)));
         // Put it back before the fixture tries to delete the tree.
+        // glint-ignore: Z026 -- the fixture's tree delete reports a directory that stayed closed
         defer f.tmp.dir.setFilePermissions(io, "closed", .default_dir, .{}) catch {};
 
         _ = try f.watcher.add(f.io, f.root, .{ .recursive = true });

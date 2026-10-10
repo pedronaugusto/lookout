@@ -191,9 +191,10 @@ const Matcher = struct {
         cache: sweep.Set.Cache,
     };
 
-    /// The smallest cache sweep takes: a filter holds few patterns, and a
-    /// full cache only clears, it never changes an answer.
-    const cache_options: sweep.Set.Cache.Options = .{ .capacity = 1 << 16 };
+    /// The most a cache takes: a filter holds few patterns, so a reading uses
+    /// well under this, and a full cache only clears, it never changes an
+    /// answer.
+    const cache_options: sweep.Set.Cache.Options = .{ .capacity = .fromRaw(1 << 16) };
 
     /// Null when no list holds a pattern.
     fn create(gpa: Allocator, ignore: []const []const u8, only: []const []const u8, options: sweep.Options) Error!?*Matcher {

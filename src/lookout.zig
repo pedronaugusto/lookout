@@ -380,10 +380,10 @@ pub const Watcher = struct {
 
     /// The completion port a Windows backend waits on, which `wake` also
     /// posts to. Nothing elsewhere has one.
-    const Port = if (builtin.os.tag == .windows) ?std.os.windows.HANDLE else void;
+    const Port = if (builtin.target.os.tag == .windows) ?std.os.windows.HANDLE else void;
 
     fn portOf(impl: *const Impl) Port {
-        if (comptime builtin.os.tag != .windows) return {};
+        if (comptime builtin.target.os.tag != .windows) return {};
         return switch (impl.*) {
             .windows => |*backend_impl| backend_impl.port,
             else => null,
@@ -1294,7 +1294,7 @@ pub const Watcher = struct {
     pub fn wake(w: *Watcher) void {
         w.woken.store(true, .release);
         w.wakeup.signal();
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             if (w.port) |port| backends.Windows.post(port);
         }
     }
@@ -1675,6 +1675,7 @@ test "a pending watch whose way down cannot be watched says so" {
     const target = try std.Io.Dir.path.join(gpa, &.{ locked, "later" });
     defer gpa.free(target);
     try tmp.dir.setFilePermissions(io, "locked", .fromMode(0o300), .{});
+    // glint-ignore: Z026 -- the permissions go back so the tmp dir can be deleted; a failure shows there
     defer tmp.dir.setFilePermissions(io, "locked", .fromMode(0o755), .{}) catch {};
     // Searchable, so the path resolves as absent rather than refused,
     // and not readable, so the folder cannot be listed or opened for

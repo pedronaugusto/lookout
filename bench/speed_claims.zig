@@ -100,6 +100,7 @@ const Claims = struct {
                     // unreachable: "w" and a usize's digits fit in 32 bytes
                     .sub_path = std.mem.print(&name, "w{d}.txt", .{self.round}) catch unreachable,
                     .data = "x",
+                    // glint-ignore: Z026 -- a write that fails leaves no change to observe, which the round reports as EventNotObserved
                 }) catch {};
             }
         };
@@ -182,6 +183,7 @@ const Claims = struct {
 
             /// Lets the task go from another thread, after 50 ms.
             fn release(self: *@This()) void {
+                // glint-ignore: Z026 -- a cancelled sleep only shortens the delay; the release that follows is what the row needs
                 self.io.sleep(.fromMilliseconds(50), .awake) catch {};
                 self.go.store(true, .release);
             }
@@ -220,6 +222,7 @@ const Claims = struct {
             io: Io,
             watcher: *Watcher,
             fn run(self: *@This()) void {
+                // glint-ignore: Z026 -- a cancelled sleep only shortens the delay; the release that follows is what the row needs
                 self.io.sleep(.fromMilliseconds(100), .awake) catch {};
                 self.watcher.wake();
             }
@@ -270,6 +273,7 @@ const Claims = struct {
             // No second task to stop: there is nothing to claim.
             error.ConcurrencyUnavailable => return true,
         };
+        // glint-ignore: Z026 -- a cancelled sleep only shortens the settling pause; the row's own clock starts after it
         io.sleep(.fromMilliseconds(50), .awake) catch {};
 
         const started: Io.Timestamp = .now(io, .awake);
@@ -313,7 +317,7 @@ const Fixture = struct {
         const cwd = Io.Dir.cwd();
         // A delayed native record from a previous fixture must not name
         // the tree whose idle wake is being measured now.
-        const name = try std.fmt.allocPrint(c.gpa, "fixture-{d}", .{Io.Clock.awake.now(c.io).nanoseconds});
+        const name = try c.gpa.print("fixture-{d}", .{Io.Clock.awake.now(c.io).nanoseconds});
         errdefer c.gpa.free(name);
         var dir = try cwd.createDirPathOpen(c.io, name, .{ .open_options = .{ .iterate = true } });
         errdefer dir.close(c.io);
@@ -326,6 +330,7 @@ const Fixture = struct {
         f.watcher.deinit(f.io);
         f.gpa.free(f.root);
         f.dir.close(f.io);
+        // glint-ignore: Z026 -- scratch under the cache; the next run names its own tree and the cache clean removes this one
         Io.Dir.cwd().deleteTree(f.io, f.name) catch {};
         f.gpa.free(f.name);
     }

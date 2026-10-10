@@ -22,6 +22,7 @@ pub fn main() !void {
     // A scratch directory beside the executable, remade on every run.
     const cwd = std.Io.Dir.cwd();
     try cwd.deleteTree(io, "lookout-example");
+    // glint-ignore: Z026 -- scratch beside the executable; the next run remakes it first
     defer cwd.deleteTree(io, "lookout-example") catch {};
     var scratch = try cwd.createDirPathOpen(io, "lookout-example", .{});
     defer scratch.close(io);

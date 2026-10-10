@@ -27,6 +27,7 @@ pub fn main() !void {
 
     const cwd = std.Io.Dir.cwd();
     try cwd.deleteTree(io, "lookout-since");
+    // glint-ignore: Z026 -- scratch beside the executable; the next run remakes it first
     defer cwd.deleteTree(io, "lookout-since") catch {};
     var scratch = try cwd.createDirPathOpen(io, "lookout-since", .{});
     defer scratch.close(io);
