@@ -26,8 +26,8 @@
             .hash = "sweep-0.1.0-6Erwaaw5OwBJqKlJUwn1uRwGg5O7npXywhcNWQmYVCaB",
         },
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight#387e188a9b8e9f0a157d528606cc2db4175db7de",
-            .hash = "preflight-0.1.0-LX1ZwgwgCQAGeK4DZqDnyq6HZfbJkupClWp56O8kY_Db",
+            .url = "git+https://github.com/pedronaugusto/preflight#c04e49d329eaa1cb985cdb6ee07f906dd7d84743",
+            .hash = "preflight-0.1.0-LX1ZwjczCQDSSG7aH5c5oWXPdmltZQH2SCPUEKCdr6oG",
             .lazy = true,
         },
         .shakedown = .{
