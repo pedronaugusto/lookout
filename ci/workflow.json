@@ -1,4 +1,6 @@
 {
+  "land": true,
+  "attest": true,
   "package": "lookout",
   "compile_step": "install",
   "targets": [

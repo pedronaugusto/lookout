@@ -114,8 +114,8 @@ gathered events for a later poll. Every backend waits through reactor, so a canc
 ends a blocked `poll` on every backend but Windows, where the completion port is waited on
 by a call nothing can interrupt and the cancellation lands when it comes back. Under a
 reactor runtime the wait holds no thread and wakes for nothing; under any other `std.Io`
-the calling thread waits and looks for a cancellation every few milliseconds, which keeps
-an idle `poll` waking about 150 times a second. `wake` ends a blocked wait from
+the wait goes through the Io's own batch, which a cancellation or `wake` ends, so an idle `poll`
+costs about 0.1 ms of CPU every two seconds. `wake` ends a blocked wait from
 another thread on every backend. `fd` returns a pollable descriptor where the backend
 provides one.
 
