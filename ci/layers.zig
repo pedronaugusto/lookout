@@ -1,6 +1,7 @@
 //! Production source layers, lowest first. Every production source has one
 //! place; test code is in no layer.
 const gantry = @import("gantry");
+const family = @import("preflight_rules");
 
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "primitives", .patterns = &.{
@@ -115,7 +116,9 @@ pub const required = [_][]const u8{
 
 /// Tokens only their owners may spell: each backend alone speaks to its
 /// kernel interface.
-pub const owned: []const gantry.rules.TokenRule = &.{
+pub const owned: []const gantry.rules.TokenRule = &(family.durability ++ package_owned);
+
+const package_owned = [_]gantry.rules.TokenRule{
     .{ .name = "inotify backend", .tokens = &.{ "inotify_init1", "inotify_add_watch", "inotify_rm_watch" }, .owners = &.{ "src/backend/Inotify.zig", "src/backend/inotify/**" } },
     .{ .name = "fsevents backend", .tokens = &.{ "FSEventStreamCreate", "FSEventStreamStart" }, .owners = &.{ "src/backend/FsEvents.zig", "src/backend/fsevents/**" } },
     .{ .name = "kqueue backend", .tokens = &.{"kevent"}, .owners = &.{"src/backend/Kqueue.zig"} },
