@@ -18,30 +18,33 @@
             .lazy = true,
         },
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock#3bd76f4143c90491c459f3673c44e80dc5dce6de",
-            .hash = "airlock-0.1.0-rfvu6JWGBQDnJgHdK2V7IPnribpvkrn4uHh1hGAXvD62",
+            .url = "git+https://github.com/pedronaugusto/airlock#89ab03ec7a7e9d16cca47e5e903cea722a18e30f",
+            .hash = "airlock-0.1.0-rfvu6H6LBQAvdjI7-HVGb07snh9b1XUe9d3FNsRu_v67",
         },
+
         .sweep = .{
-            .url = "git+https://github.com/pedronaugusto/sweep#9d3f789b31a37fd511018055e1e9bf3e26777a0e",
-            .hash = "sweep-0.1.0-6ErwacXZOwCtumIp7Bsz0_J0LVPV2mm1i_pia3JALTk0",
+            .url = "git+https://github.com/pedronaugusto/sweep#e24630adbbd695ba034d5f7dd53263bada94794a",
+            .hash = "sweep-0.1.0-6ErwaeDZOwARwvP6ycJMhox0ED7T2G4RnQ_2Cb1lhjS_",
         },
+
+        .aegis = .{
+            .url = "git+https://github.com/pedronaugusto/aegis#39d3bea8da17f1094ee85577e636b127f93e0973",
+            .hash = "aegis-0.0.0-rsxouiIXBwCCAncc-oK7MrA3OcZBLFlIBm1d0K9ME3uR",
+        },
+
+        .reactor = .{
+            .url = "git+https://github.com/pedronaugusto/reactor#b593f969e9513e6ea92dcf1d66cea356c46ae9a0",
+            .hash = "reactor-0.1.0-MjQ-WAofEgC6lAdvnmSzINVwRH4cQEdWULjbSu1nYXuw",
+        },
+    },
+    .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight#5a2d7c3f8efb70ead532a923ebb411a6324f2581",
-            .hash = "preflight-0.1.0-LX1Zwtq3CgC2_Gb44-qgEk3AqRQAMkx9dZbsdp_GTx4T",
-            .lazy = true,
+            .url = "git+https://github.com/pedronaugusto/preflight#93cf3dae957424720ef109f656c80bef320acc8b",
+            .hash = "preflight-0.1.0-LX1ZwpsLDAA6OTQHa2XpJ4d5JxReq5cVxvBbJuPYB3_i",
         },
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#df9eaae4621d40d14030e20caf9ce3fc054f8fb2",
-            .hash = "shakedown-0.1.0-BR8U4xnCFQClsekAX4ywCQ5FmsTrmJ9cRpST4tzeiDFn",
-            .lazy = true,
-        },
-        .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#d364f80a4e5e9ae4c0ea4735336383da268ff24c",
-            .hash = "aegis-0.0.0-rsxougITBwCZsF9Qy82pq-gvba1nwTTK28cL4uZPV3Qq",
-        },
-        .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor#c2b640b00dd8744c47a93ee1d49b95b5294cd6e5",
-            .hash = "reactor-0.1.0-MjQ-WBcZEgDvxPblD0l9d_6BDsCqNvJ-N8aQE-IHglCo",
+            .url = "git+https://github.com/pedronaugusto/shakedown#49eec3939fd02f20a4a6b442305fa4d09a82420b",
+            .hash = "shakedown-0.1.0-BR8U40rLFQC0c7SVGxKoBmCPKEUfotD2sR7G9DKEgJas",
         },
     },
 }

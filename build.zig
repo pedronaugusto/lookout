@@ -2,10 +2,10 @@ const std = @import("std");
 /// airlock's build, for its test seam.
 const airlock_build = @import("airlock");
 
-pub fn build(b: *std.Build) !void {
-    // lazyImport compares every package of the dependency tree at comptime;
-    // a large tree runs past the default quota of 1000 branches.
-    @setEvalBranchQuota(100_000);
+/// What a project that depends on lookout builds: the `lookout` module, on
+/// aegis, airlock, reactor and sweep, and the options for linking CoreServices
+/// against a named Apple SDK.
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -72,10 +72,25 @@ pub fn build(b: *std.Build) !void {
         if (sdk) |paths| paths.addTo(module);
         module.linkFramework("CoreServices", .{});
     }
+}
 
-    // Everything below is lookout's own: a project depending on lookout
-    // builds the module and nothing else, and fetches nothing for it.
-    if (b.pkg_hash.len != 0) return;
+/// lookout's development: its tests, examples, checks and benchmarks, under
+/// preflight's gate. Run through bay.
+pub fn dev(b: *std.Build, tools: type) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const darwin = target.result.os.tag.isDarwin();
+    // The options of `build`, passed on to lookout.
+    macos_sdk_option = b.option([]const u8, "macos-sdk", "The Apple SDK to link a named Apple target against");
+    bundled_sdk_option = b.option(bool, "bundled-macos-sdk", "Use the pinned framework SDK for cross-linking Apple targets");
+    use_aegis = tools.shakedown.useAegis;
+    const preflight = tools.preflight;
+    const package = lookoutPackage(b, target, optimize);
+    const p = package.builder;
+    const module = package.module("lookout");
+    const airlock_dependency = p.dependency("airlock", .{ .target = target, .optimize = optimize });
+    const reactor_dependency = p.dependency("reactor", .{ .target = target, .optimize = optimize });
+    const imports = lookoutImports(p, target, optimize);
 
     //=====================================================================
     // Tests.
@@ -89,7 +104,7 @@ pub fn build(b: *std.Build) !void {
     // reads them on the caller's, and the suite writes to the tree from a
     // thread of its own while it waits. Whether that crossing is free of
     // races is a claim a race detector can check and a reader cannot:
-    // `zig build test -Dthread-sanitizer`.
+    // `bay test -Dthread-sanitizer`.
     const thread_sanitizer = b.option(
         bool,
         "thread-sanitizer",
@@ -100,7 +115,7 @@ pub fn build(b: *std.Build) !void {
         .name = "lookout-tests",
         .filters = if (b.option([]const u8, "test-filter", "Select tests by name")) |filter| &.{filter} else &.{},
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests.zig"),
+            .root_source_file = p.path("src/tests.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = darwin,
@@ -108,19 +123,13 @@ pub fn build(b: *std.Build) !void {
             .imports = imports,
         }),
     });
-    // shakedown, and airlock's seam on it, are lazy and test-only: no
-    // production source imports them. Their error is returned last, so one
-    // configure pass asks for them and for preflight together.
-    var needed: error{LazyDependencyNeeded}!void = {};
-    // One shakedown in the graph: the one airlock's seam is built on.
-    if (airlock_build.testing(airlock_dependency)) |seam| {
-        tests.root_module.addImport("airlock.testing", seam);
-        tests.root_module.addImport("shakedown", seam.import_table.get("shakedown").?);
-    } else |err| needed = err;
-    if (darwin) {
-        if (sdk) |paths| paths.addTo(tests.root_module);
-        tests.root_module.linkFramework("CoreServices", .{});
-    }
+    // airlock's seam, which is lazy: its error ends this configure pass until
+    // it is fetched. One shakedown in the graph: the one the seam is built on,
+    // bound to airlock's aegis, which is lookout's.
+    const seam = airlock_build.testing(airlock_dependency) catch return;
+    tests.root_module.addImport("airlock.testing", seam);
+    tests.root_module.addImport("shakedown", seam.import_table.get("shakedown").?);
+    if (darwin) linkLike(module, tests.root_module);
 
     const test_step = b.step("test", "Run the lookout tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -137,7 +146,7 @@ pub fn build(b: *std.Build) !void {
     // Built AND run, against the module a consumer gets. An example that
     // is only compiled proves the names still resolve; running it is what
     // proves the library still works. examples/usage.zig is also where
-    // README.md's Usage block comes from -- see zig build docs -- usage -- so
+    // README.md's Usage block comes from -- see bay docs -- usage -- so
     // the snippet a reader copies cannot drift from code CI executes.
     //=====================================================================
 
@@ -146,7 +155,7 @@ pub fn build(b: *std.Build) !void {
         const example = b.addExecutable(.{
             .name = std.Io.Dir.path.stem(source),
             .root_module = b.createModule(.{
-                .root_source_file = b.path(source),
+                .root_source_file = p.path(source),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "lookout", .module = module }},
@@ -154,7 +163,7 @@ pub fn build(b: *std.Build) !void {
         });
         const run = b.addRunArtifact(example);
         run.step.dependOn(b.getInstallStep());
-        run.setCwd(b.path("zig-out"));
+        run.setCwd(p.path("zig-out"));
         examples_step.dependOn(&run.step);
     }
     test_step.dependOn(examples_step);
@@ -179,99 +188,98 @@ pub fn build(b: *std.Build) !void {
 
     //=====================================================================
     // CI wiring
-    //
-    // Only in lookout's own tree. preflight is a lazy dependency, and a
-    // lazy package's build.zig can only be reached through `lazyImport`: a
-    // plain `@import` of it fails to compile in any project that depends
-    // on lookout and has not fetched preflight, which is every such
-    // project.
     //=====================================================================
 
-    if (b.lazyImport(@This(), "preflight")) |preflight| {
-        // What `LOOKOUT_TRACE` prints is at the info level. `zig build
-        // bench` holds lookout's speed claims to their ceilings, on every
-        // backend the target has, in ReleaseFast on a quiet machine; `zig
-        // build test` runs each once with `--smoke`, judging nothing.
-        preflight.addCi(b, .{
-            .tests = test_step,
-            .portable_tests = true,
-            .test_log_level = .info,
-            .bench = .{
-                .programs = &.{
-                    .{ .name = "lookout-bench", .source = "bench/speed_claims.zig" },
-                    .{ .name = "lookout-filter-bench", .source = "bench/filter.zig" },
-                },
-                .imports = benchImports,
-                .target = target,
-                .optimize = optimize,
-                .link_libc = darwin,
+    // What `LOOKOUT_TRACE` prints is at the info level. `bay bench` holds
+    // lookout's speed claims to their ceilings, on every backend the target
+    // has, in ReleaseFast on a quiet machine; `bay test` runs each once with
+    // `--smoke`, judging nothing.
+    preflight.addCi(b, p, .{
+        .tests = test_step,
+        .portable_tests = true,
+        .test_log_level = .info,
+        .bench = .{
+            .programs = &.{
+                .{ .name = "lookout-bench", .source = "bench/speed_claims.zig" },
+                .{ .name = "lookout-filter-bench", .source = "bench/filter.zig" },
             },
-        });
-        // The build a consumer gets: aegis, airlock, reactor and sweep, and
-        // nothing lookout fetches for itself.
-        preflight.addConsumerCheck(b, .{
-            .package = "lookout",
-            .program = b.path("ci/consumer.zig"),
-            .packages = &.{
-                b.dependency("aegis", .{}),
-                b.dependency("airlock", .{}),
-                reactor_dependency,
-                // The aegis reactor was built with is its own to pin.
-                reactor_dependency.builder.dependency("aegis", .{}),
-                b.dependency("sweep", .{}),
-            },
-        });
-    }
-    return needed;
+            .imports = benchImports,
+            .target = target,
+            .optimize = optimize,
+            .link_libc = darwin,
+        },
+    });
+    // The build a consumer gets: aegis, airlock, reactor and sweep, and
+    // nothing lookout fetches for itself.
+    preflight.addConsumerCheck(b, p, .{
+        .package = "lookout",
+        .program = p.path("ci/consumer.zig"),
+        .packages = &.{
+            p.dependency("aegis", .{}),
+            p.dependency("airlock", .{}),
+            reactor_dependency,
+            // The aegis reactor was built with is its own to pin.
+            reactor_dependency.builder.dependency("aegis", .{}),
+            p.dependency("sweep", .{}),
+        },
+    });
+}
+
+/// `-Dmacos-sdk` and `-Dbundled-macos-sdk`, as `dev` read them, for the
+/// benchmarks' imports.
+var macos_sdk_option: ?[]const u8 = null;
+var bundled_sdk_option: ?bool = null;
+
+/// `tools.shakedown.useAegis`, set by `dev` for the benchmark imports, which are built without `tools`.
+var use_aegis: *const fn (*std.Build.Dependency, *std.Build.Module) void = undefined;
+
+/// lookout as the development build has it: the package, with the options passed on.
+fn lookoutPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Dependency {
+    return b.dependency("lookout", .{ .target = target, .optimize = optimize, .@"macos-sdk" = macos_sdk_option, .@"bundled-macos-sdk" = bundled_sdk_option });
+}
+
+/// What lookout imports, from the package's own build `p`.
+fn lookoutImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
+    return p.allocator.dupe(std.Build.Module.Import, &.{
+        .{ .name = "aegis", .module = p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis") },
+        .{ .name = "airlock", .module = p.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock") },
+        .{ .name = "reactor", .module = p.dependency("reactor", .{ .target = target, .optimize = optimize }).module("reactor") },
+        .{ .name = "sweep", .module = p.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep") },
+    }) catch @panic("OOM");
+}
+
+/// CoreServices, linked against the Apple SDK the published module `published`
+/// links against, as `build` chose it.
+fn linkLike(published: *std.Build.Module, m: *std.Build.Module) void {
+    for (published.include_dirs.items) |dir| switch (dir) {
+        .framework_path_system => |path| m.addSystemFrameworkPath(path),
+        .path_system => |path| m.addSystemIncludePath(path),
+        else => {},
+    };
+    for (published.lib_paths.items) |path| m.addLibraryPath(path);
+    m.linkFramework("CoreServices", .{});
 }
 
 /// lookout, and its filter on its own, in the mode a benchmark builds in:
 /// an imported module keeps its own mode, so a ReleaseFast benchmark over
 /// the Debug module would time the Debug module. The filter is internal to
 /// lookout, so the filter benchmark builds it as a module of its own rather
-/// than reaching it through `lookout`.
+/// than reaching it through `lookout`. And shakedown, bound to lookout's aegis.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
-    const imports: []const std.Build.Module.Import = &.{
-        .{ .name = "aegis", .module = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis") },
-        .{ .name = "airlock", .module = b.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock") },
-        .{ .name = "reactor", .module = b.dependency("reactor", .{ .target = target, .optimize = optimize }).module("reactor") },
-        .{ .name = "sweep", .module = b.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep") },
-    };
-    const darwin = target.result.os.tag.isDarwin();
-    const lookout = b.createModule(.{
-        .root_source_file = b.path("src/lookout.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = darwin,
-        .imports = imports,
-    });
-    if (darwin) {
-        // The Apple SDK the published module links against, as `build`
-        // chose it.
-        const published = b.modules.get("lookout").?;
-        for (published.include_dirs.items) |dir| switch (dir) {
-            .framework_path_system => |path| lookout.addSystemFrameworkPath(path),
-            .path_system => |path| lookout.addSystemIncludePath(path),
-            else => {},
-        };
-        for (published.lib_paths.items) |path| lookout.addLibraryPath(path);
-        lookout.linkFramework("CoreServices", .{});
-    }
+    const package = lookoutPackage(b, target, optimize);
+    const p = package.builder;
     const filter = b.createModule(.{
-        .root_source_file = b.path("src/CompiledFilter.zig"),
+        .root_source_file = p.path("src/CompiledFilter.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = imports,
+        .imports = lookoutImports(p, target, optimize),
     });
-    if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |shakedown| {
-        return b.allocator.dupe(std.Build.Module.Import, &.{
-            .{ .name = "lookout", .module = lookout },
-            .{ .name = "filter", .module = filter },
-            .{ .name = "shakedown", .module = shakedown.module("shakedown") },
-        }) catch @panic("OOM");
-    } else |_| return b.allocator.dupe(std.Build.Module.Import, &.{
-        .{ .name = "lookout", .module = lookout },
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
+    use_aegis(shakedown, p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis"));
+    return b.allocator.dupe(std.Build.Module.Import, &.{
+        .{ .name = "lookout", .module = package.module("lookout") },
         .{ .name = "filter", .module = filter },
+        .{ .name = "shakedown", .module = shakedown.module("shakedown") },
     }) catch @panic("OOM");
 }
 

@@ -217,23 +217,25 @@ native build too.
 - [sweep](https://github.com/pedronaugusto/sweep) compiles and matches filter
   patterns.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
-  the tests and CI.
+  the tests and CI. It and shakedown are dev dependencies, which
+  [bay](https://github.com/pedronaugusto/bay) gives lookout's own development and a
+  project that depends on lookout never sees.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the clock, fault
   injection and counting allocator the tests run on, and under airlock's test
-  seam, `airlock.testing`, which counts and fails a durable save's syncs;
-  fetched only for the tests.
+  seam, `airlock.testing`, which counts and fails a durable save's syncs.
 - A pinned macOS SDK package, fetched only to link a named Apple target without
   an SDK of its own.
 
 ## Testing
 
-`zig build test` runs the suite and examples in Debug by default, exercising the
+Development runs through bay.
+
+`bay test` runs the suite and examples in Debug by default, exercising the
 backends available on the host. Tests cover filters, pending paths, renames,
-overflow, cancellation, settling, checkpoints and resource cleanup. `zig build
-examples` runs the examples separately. `zig build bench` holds lookout's own speed
-claims to their ceilings in ReleaseFast; run it on a quiet machine. `zig build test`
+overflow, cancellation, settling, checkpoints and resource cleanup. `bay examples` runs the examples separately. `bay bench` holds lookout's own speed
+claims to their ceilings in ReleaseFast; run it on a quiet machine. `bay test`
 runs each once with `--smoke`, judging nothing. CI also runs
-`zig build lint`, which includes `zig build check-consumer`: a project that depends
+`bay lint`, which includes `bay check-consumer`: a project that depends
 on lookout by path, built with only aegis, airlock, reactor and sweep fetched.
 
 [CI](.github/workflows/ci.yml) has three tiers. The fast tier runs the source
@@ -244,7 +246,7 @@ The release tier runs the tests and examples in Debug and ReleaseSafe on all thr
 hosts, plus ReleaseFast on Ubuntu; it compiles ReleaseSmall without running it, and
 runs ThreadSanitizer in Debug on Ubuntu.
 
-The default `zig build` compiles the backend-bearing tests and library. CI uses it for
+`bay dev install` compiles the backend-bearing tests and library. CI uses it for
 `x86_64-linux-gnu`, `aarch64-linux-gnu`, `x86_64-linux-musl`, `x86_64-windows-gnu`,
 `x86_64-windows-msvc`, `aarch64-windows-gnu`, `x86_64-freebsd` and `x86_64-netbsd`.
 These jobs do not execute the targets or compile the examples. Apple targets are built

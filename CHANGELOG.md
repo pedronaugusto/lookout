@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- lookout is developed with [bay](https://github.com/pedronaugusto/bay): preflight and shakedown are dev dependencies, and the tests, examples, checks and benchmarks are the development build's (`bay test`, `bay check`, `bay bench`). lookout ships with aegis, airlock, reactor and sweep, and the options `-Dmacos-sdk` and `-Dbundled-macos-sdk`; what a project that depends on it builds is unchanged. airlock, aegis, reactor and sweep are pinned to the revisions airlock's own bay build is made with.
 - The FSEvents backend signals arrivals through a reactor `Wake` where it made a pipe of its own outside conduit's fork gap; `Watcher.fd` hands out the wake's descriptor as before.
 - Pins the newest green aegis, airlock, reactor, shakedown, sweep and preflight. The filter's cache is asked for sweep's `Set.Bytes` (`.fromRaw(1 << 16)`), which sweep now takes as the most a cache holds.
 - CI gates glint's A004 and Z026 through the `glint` object of `ci/preflight.json` with the whole default rule set (it ran the A rules alone from `ci/glint.json`); the retired exception files are gone, and the byte-size tests order sizes with aegis `add`, `sub` and `compare`.
