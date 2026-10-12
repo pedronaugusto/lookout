@@ -63,3 +63,5 @@ jobs:
       contents: write
     steps:
       - uses: pedronaugusto/preflight/.github/actions/land@8c363bb6b25cf05218899f5296bd47143f044b49
+        with:
+          version: ${{ needs.gate.outputs.version }}
