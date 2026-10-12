@@ -6,9 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-12
+
 ### Fixed
 
 - The pinned macOS SDK is fetched by git at its commit, not as GitHub's archive of it: the archive GitHub served a CI runner unpacked to other files than the pinned hash, so a cold cache could not build for a named Apple target.
+
+### Changed
+
+- Pins airlock 0.2.1, sweep 0.2.1, aegis 0.1.1, reactor 0.2.2, preflight 0.3.4 and shakedown 0.2.6.
 
 ## [0.4.0] - 2026-10-12
 
@@ -674,7 +680,8 @@ First release.
   `inotify` backend is executed rather than merely compiled from a machine that
   is not Linux.
 
-[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/pedronaugusto/lookout/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/pedronaugusto/lookout/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pedronaugusto/lookout/releases/tag/v0.3.0
 [0.2.0]: https://github.com/pedronaugusto/lookout/releases/tag/v0.2.0
