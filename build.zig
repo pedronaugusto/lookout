@@ -268,11 +268,9 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
         .optimize = optimize,
         .imports = lookoutImports(p, target, optimize),
     });
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "lookout", .module = package.module("lookout") },
         .{ .name = "filter", .module = filter },
-        .{ .name = "shakedown", .module = shakedown.module("shakedown") },
     }) catch @panic("OOM");
 }
 
