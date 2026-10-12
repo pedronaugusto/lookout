@@ -7,6 +7,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/timing.zig",
         "src/filesystem.zig",
         "src/identity.zig",
+        "src/backend/fsevents/CoreServices.zig",
         "src/backend/inotify/records.zig",
         "src/backend/windows/records.zig",
         "src/buffer.zig",

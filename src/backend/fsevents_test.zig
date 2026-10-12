@@ -232,7 +232,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
 /// delivery it may be making waited out on its serial queue, and what it
 /// left thrown away. What a test drains after this is what it delivered.
 fn stopDeliveries(f: *FsEvents, stream: anytype) void {
-    c.FSEventStreamStop(stream.ref);
+    f.core_services.FSEventStreamStop(stream.ref);
     c.dispatch_sync_f(f.queue, null, settled);
     {
         var held = f.sink.delivery.acquire();
@@ -559,7 +559,7 @@ test "a checkpoint refuses a different volume or FSEvents log before restoring c
     var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
-    try testing.expectEqual(watcher.impl.fsevents.streams.get(id).?.volume.device, c.FSEventStreamGetDeviceBeingWatched(watcher.impl.fsevents.streams.get(id).?.ref));
+    try testing.expectEqual(watcher.impl.fsevents.streams.get(id).?.volume.device, watcher.impl.fsevents.core_services.FSEventStreamGetDeviceBeingWatched(watcher.impl.fsevents.streams.get(id).?.ref));
     try watcher.batch.deferChange(gpa, io, id, root, .modified, null, .directory);
     var saved = (try watcher.checkpoint(gpa)).?;
     defer saved.deinit();
@@ -613,7 +613,7 @@ test "a recursive mount keeps live coverage and refuses a single-device checkpoi
     const backend = &watcher.impl.fsevents;
     try synthesize(gpa, backend.streams.get(id).?, &.{.{ .path = root, .flags = 0x40 }});
     try access.drain(backend, io, &watcher.batch);
-    try testing.expectEqual(@as(i32, 0), c.FSEventStreamGetDeviceBeingWatched(backend.streams.get(id).?.ref));
+    try testing.expectEqual(@as(i32, 0), backend.core_services.FSEventStreamGetDeviceBeingWatched(backend.streams.get(id).?.ref));
     try testing.expectEqual(@as(?Checkpoint, null), try watcher.checkpoint(gpa));
     try testing.expectEqual(@as(usize, 1), watcher.batch.events.items.len);
     try testing.expectEqual(lookout.Kind.overflow, watcher.batch.events.items[0].kind);

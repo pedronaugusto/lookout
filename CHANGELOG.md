@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- The options `-Dmacos-sdk` and `-Dbundled-macos-sdk` are gone, and so is the pinned macOS SDK package. The FSEvents backend opens CoreServices from the system when the first watcher is made instead of linking it, so an Apple target links only libSystem, from what Zig ships, and a named Apple target builds on any host with no SDK. A system without CoreServices, or without a function lookout calls, makes `Watcher.init` return `error.BackendUnavailable`.
+
 ## [0.4.2] - 2026-10-13
 
 ### Changed

@@ -4,13 +4,14 @@
 const std = @import("std");
 const format = @import("../../Checkpoint/format.zig");
 const path = @import("../../path.zig");
+const CoreServices = @import("CoreServices.zig");
 const Volume = @This();
 
 device: i32,
 prefix: []u8,
 identity: ?format.Identity,
 
-pub fn read(gpa: std.mem.Allocator, root: []const u8) !Volume {
+pub fn read(cs: *const CoreServices, gpa: std.mem.Allocator, root: []const u8) !Volume {
     const name = try gpa.dupeSentinel(u8, root, 0);
     defer gpa.free(name);
     var attrs: AttrList = .{ .common = 0x2, .volume = 0x80001000 }; // DEVID, VOL_INFO | MOUNTPOINT
@@ -22,7 +23,7 @@ pub fn read(gpa: std.mem.Allocator, root: []const u8) !Volume {
     // APFS's Data volume is also visible through firmlinks in the root
     // namespace. FSEvents still names those entries relative to that volume.
     const prefix = if (path.within(mounted, root)) mounted else if (std.mem.eql(u8, mounted, "/System/Volumes/Data")) "/" else return error.Unexpected;
-    return .{ .device = mount.device, .prefix = try gpa.dupe(u8, prefix), .identity = readIdentity(name, mount.device) };
+    return .{ .device = mount.device, .prefix = try gpa.dupe(u8, prefix), .identity = readIdentity(cs, name, mount.device) };
 }
 
 pub fn deinit(v: *Volume, gpa: std.mem.Allocator) void {
@@ -35,13 +36,13 @@ pub fn relative(v: Volume, absolute: []const u8) []const u8 {
     return std.mem.trimStart(u8, tail, "/");
 }
 
-pub fn readIdentity(name: [*:0]const u8, device: i32) ?format.Identity {
+pub fn readIdentity(cs: *const CoreServices, name: [*:0]const u8, device: i32) ?format.Identity {
     var attrs: AttrList = .{ .volume = 0x80040000 }; // VOL_INFO | UUID
     var volume: extern struct { len: u32, uuid: [16]u8 } = undefined;
     if (getattrlist(name, &attrs, &volume, @sizeOf(@TypeOf(volume)), 0) != 0) return null;
-    const log = FSEventsCopyUUIDForDevice(device) orelse return null;
-    defer CFRelease(log);
-    return .{ .volume = std.fmt.bytesToHex(volume.uuid, .lower), .log = std.fmt.bytesToHex(CFUUIDGetUUIDBytes(log).bytes, .lower) };
+    const log = cs.FSEventsCopyUUIDForDevice(device) orelse return null;
+    defer cs.CFRelease(log);
+    return .{ .volume = std.fmt.bytesToHex(volume.uuid, .lower), .log = std.fmt.bytesToHex(cs.CFUUIDGetUUIDBytes(log).bytes, .lower) };
 }
 
 pub fn deviceOf(name: [*:0]const u8) ?i32 {
@@ -72,6 +73,3 @@ const Mount = extern struct {
     storage: [1024]u8,
 };
 extern "c" fn getattrlist([*:0]const u8, *AttrList, *anyopaque, usize, c_ulong) c_int;
-extern "c" fn FSEventsCopyUUIDForDevice(i32) ?*anyopaque;
-extern "c" fn CFUUIDGetUUIDBytes(*anyopaque) extern struct { bytes: [16]u8 };
-extern "c" fn CFRelease(*anyopaque) void;

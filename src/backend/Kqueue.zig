@@ -78,7 +78,7 @@ const file_open_flags: posix.O = switch (builtin.target.os.tag) {
 };
 
 /// Creates the kernel queue.
-pub fn init(gpa: Allocator, options: Options) contract.InitError!Kqueue {
+pub fn init(gpa: Allocator, _: Io, options: Options) contract.InitError!Kqueue {
     const rc = std.c.kqueue();
     if (rc < 0) return switch (posix.errno(rc)) {
         .MFILE => error.ProcessFdQuotaExceeded,
@@ -402,7 +402,7 @@ test "allocation failure during delivery retains unread kqueue flags" {
         const last = try tmp.dir.realPathFileAlloc(testing.io, "last", testing.allocator);
         defer testing.allocator.free(last);
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
-        var k = try Kqueue.init(failing.allocator(), .{});
+        var k = try Kqueue.init(failing.allocator(), io, .{});
         defer k.deinit(io);
         var wakeup: reactor.Wake = try .init(io);
         defer wakeup.deinit(io);
@@ -438,7 +438,7 @@ test "a failed kqueue registration is retried before waiting again" {
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(root);
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
-    var k = try Kqueue.init(failing.allocator(), .{});
+    var k = try Kqueue.init(failing.allocator(), io, .{});
     defer k.deinit(io);
     var wakeup: reactor.Wake = try .init(io);
     defer wakeup.deinit(io);

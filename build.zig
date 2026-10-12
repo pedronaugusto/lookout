@@ -3,8 +3,7 @@ const std = @import("std");
 const airlock_build = @import("airlock");
 
 /// What a project that depends on lookout builds: the `lookout` module, on
-/// aegis, airlock, reactor and sweep, and the options for linking CoreServices
-/// against a named Apple SDK.
+/// aegis, airlock, reactor and sweep.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -20,33 +19,11 @@ pub fn build(b: *std.Build) void {
     // else.
     //=====================================================================
 
-    // FSEvents lives in CoreServices, and the externs that reach it are
-    // the only thing in the package that needs a system library. Every
-    // other target stays free-standing Zig.
+    // FSEvents lives in CoreServices, which the backend opens when the
+    // first watcher is made rather than linking it, so an Apple target
+    // links only libSystem, from what Zig ships: it builds on any host,
+    // with no SDK.
     const darwin = target.result.os.tag.isDarwin();
-
-    // Zig finds the host's SDK by itself for a native build and not for a
-    // named target, so `-Dtarget=aarch64-macos` fails to find CoreServices
-    // even on a Mac. A named Apple target links against the SDK given here
-    // (`-Dmacos-sdk=$(xcrun --show-sdk-path)`) or, without one, against the
-    // pinned framework SDK. build.zig cannot ask xcrun itself: the build
-    // configuration is cached, and a path read from a process at configure
-    // time would outlive the SDK it names.
-    const macos_sdk = b.option([]const u8, "macos-sdk", "The Apple SDK to link a named Apple target against");
-    const bundled_sdk = b.option(bool, "bundled-macos-sdk", "Use the pinned framework SDK for cross-linking Apple targets") orelse
-        (macos_sdk == null and !target.query.isNative());
-
-    const sdk: ?Sdk = sdk: {
-        if (!darwin) break :sdk null;
-        if (macos_sdk) |root| break :sdk .{
-            .frameworks = .{ .cwd_relative = b.pathJoin(&.{ root, "System", "Library", "Frameworks" }) },
-            .include = .{ .cwd_relative = b.pathJoin(&.{ root, "usr", "include" }) },
-            .lib = .{ .cwd_relative = b.pathJoin(&.{ root, "usr", "lib" }) },
-        };
-        if (!bundled_sdk) break :sdk null;
-        const pinned = b.dependencyLazy("macos_sdk", .{}) catch break :sdk null;
-        break :sdk .{ .frameworks = pinned.path("Frameworks"), .include = pinned.path("include"), .lib = pinned.path("lib") };
-    };
 
     const airlock_dependency = b.dependency("airlock", .{ .target = target, .optimize = optimize });
     const airlock = airlock_dependency.module("airlock");
@@ -61,17 +38,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "sweep", .module = sweep },
     };
 
-    const module = b.addModule("lookout", .{
+    _ = b.addModule("lookout", .{
         .root_source_file = b.path("src/lookout.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = darwin,
         .imports = imports,
     });
-    if (darwin) {
-        if (sdk) |paths| paths.addTo(module);
-        module.linkFramework("CoreServices", .{});
-    }
 }
 
 /// lookout's development: its tests, examples, checks and benchmarks, under
@@ -80,9 +53,6 @@ pub fn dev(b: *std.Build, tools: type) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const darwin = target.result.os.tag.isDarwin();
-    // The options of `build`, passed on to lookout.
-    macos_sdk_option = b.option([]const u8, "macos-sdk", "The Apple SDK to link a named Apple target against");
-    bundled_sdk_option = b.option(bool, "bundled-macos-sdk", "Use the pinned framework SDK for cross-linking Apple targets");
     const preflight = tools.preflight;
     const package = lookoutPackage(b, target, optimize);
     const p = package.builder;
@@ -126,7 +96,6 @@ pub fn dev(b: *std.Build, tools: type) void {
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     tests.root_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency, shakedown.module("shakedown")));
     tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
-    if (darwin) linkLike(module, tests.root_module);
 
     const test_step = b.step("test", "Run the lookout tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -222,14 +191,9 @@ pub fn dev(b: *std.Build, tools: type) void {
     });
 }
 
-/// `-Dmacos-sdk` and `-Dbundled-macos-sdk`, as `dev` read them, for the
-/// benchmarks' imports.
-var macos_sdk_option: ?[]const u8 = null;
-var bundled_sdk_option: ?bool = null;
-
-/// lookout as the development build has it: the package, with the options passed on.
+/// lookout as the development build has it: the package, for `target` and `optimize`.
 fn lookoutPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Dependency {
-    return b.dependency("lookout", .{ .target = target, .optimize = optimize, .@"macos-sdk" = macos_sdk_option, .@"bundled-macos-sdk" = bundled_sdk_option });
+    return b.dependency("lookout", .{ .target = target, .optimize = optimize });
 }
 
 /// What lookout imports, from the package's own build `p`.
@@ -240,18 +204,6 @@ fn lookoutImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         .{ .name = "reactor", .module = p.dependency("reactor", .{ .target = target, .optimize = optimize }).module("reactor") },
         .{ .name = "sweep", .module = p.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep") },
     }) catch @panic("OOM");
-}
-
-/// CoreServices, linked against the Apple SDK the published module `published`
-/// links against, as `build` chose it.
-fn linkLike(published: *std.Build.Module, m: *std.Build.Module) void {
-    for (published.include_dirs.items) |dir| switch (dir) {
-        .framework_path_system => |path| m.addSystemFrameworkPath(path),
-        .path_system => |path| m.addSystemIncludePath(path),
-        else => {},
-    };
-    for (published.lib_paths.items) |path| m.addLibraryPath(path);
-    m.linkFramework("CoreServices", .{});
 }
 
 /// lookout, and its filter on its own, in the mode a benchmark builds in:
@@ -279,17 +231,4 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
 const example_sources = [_][]const u8{
     "examples/usage.zig",
     "examples/since.zig",
-};
-
-/// Where an Apple SDK keeps what CoreServices links against.
-const Sdk = struct {
-    frameworks: std.Build.LazyPath,
-    include: std.Build.LazyPath,
-    lib: std.Build.LazyPath,
-
-    fn addTo(sdk: Sdk, module: *std.Build.Module) void {
-        module.addSystemFrameworkPath(sdk.frameworks);
-        module.addSystemIncludePath(sdk.include);
-        module.addLibraryPath(sdk.lib);
-    }
 };

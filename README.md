@@ -196,19 +196,20 @@ differences that affect event handling.
 | --- | --- |
 | Polling | Entries whose mtime or ctime is not strictly older than their snapshot in a conservative two-second tick are checked by content until they age; hashes cover files up to 1 MiB, and larger or unreadable racy entries report modification. |
 
-Apple targets link libc and CoreServices for FSEvents and need a macOS SDK. A
-native macOS build finds the host's SDK by itself. A named Apple target links
-against the SDK given with `-Dmacos-sdk=$(xcrun --show-sdk-path)` or, without one,
-a pinned SDK package; `-Dbundled-macos-sdk=true` selects the pinned SDK for a
-native build too.
+On Apple targets the FSEvents backend opens CoreServices from the system when
+the first watcher is made, so the build links only libSystem, from what Zig
+ships, and a named Apple target builds on any host with no SDK. A system
+without CoreServices makes `Watcher.init` return `error.BackendUnavailable`.
 
 ## Built with
 
 - [Zig](https://ziglang.org) 0.17.0 and its standard library. On Apple targets the
-  module links libc and CoreServices; nothing else is linked anywhere.
+  module links libc and opens CoreServices at run time; nothing else is linked
+  anywhere.
 - [aegis](https://github.com/pedronaugusto/aegis) supplies the watch and revision
-  ids, the byte count of `Options.buffer_bytes`, the limits and the guarded state
-  shared with the system's delivery thread.
+  ids, the byte count of `Options.buffer_bytes`, the limits, the guarded state
+  shared with the system's delivery thread and the one opening of CoreServices
+  every watcher in a process shares.
 - [airlock](https://github.com/pedronaugusto/airlock) writes the baseline file
   atomically and, on request, durably.
 - [reactor](https://github.com/pedronaugusto/reactor) waits for a backend's
@@ -223,8 +224,6 @@ native build too.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the clock, fault
   injection and counting allocator the tests run on, and under airlock's test
   seam, `airlock.testing`, which counts and fails a durable save's syncs.
-- A pinned macOS SDK package, fetched only to link a named Apple target without
-  an SDK of its own.
 
 ## Testing
 

@@ -191,7 +191,7 @@ const Watch = struct {
 };
 
 /// Creates the completion port.
-pub fn init(gpa: Allocator, options: Options) contract.InitError!Windows {
+pub fn init(gpa: Allocator, _: Io, options: Options) contract.InitError!Windows {
     const port = c.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 0) orelse
         return error.SystemResources;
     return .{

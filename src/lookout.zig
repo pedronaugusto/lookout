@@ -425,8 +425,9 @@ pub const Watcher = struct {
     /// `gpa` is kept for the watch tables and for the event buffer handed
     /// out by `poll`. Every call that reaches the file system takes the
     /// `std.Io` it goes through; none is kept, and the `io` given here
-    /// only makes the object `wake` sets. Call `deinit` to release both
-    /// the allocations and the descriptors.
+    /// makes the object `wake` sets and opens CoreServices for FSEvents,
+    /// the first time a watcher in the process needs it. Call `deinit` to
+    /// release both the allocations and the descriptors.
     pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Watcher {
         const resolved: Backend = switch (options.backend) {
             .auto => default_backend,
@@ -439,7 +440,7 @@ pub const Watcher = struct {
             inline else => |tag| impl: {
                 const name = @tagName(tag);
                 if (!@hasField(Impl, name)) return error.BackendUnavailable;
-                break :impl @unionInit(Impl, name, try @FieldType(Impl, name).init(gpa, options));
+                break :impl @unionInit(Impl, name, try @FieldType(Impl, name).init(gpa, io, options));
             },
         };
         var kept_options = options;
@@ -450,7 +451,7 @@ pub const Watcher = struct {
             .batch = .init(options),
             .ids = .init(0),
             .impl = impl,
-            .polling = Poll.init(gpa, options) catch |err| switch (err) {},
+            .polling = Poll.init(gpa, io, options) catch |err| switch (err) {},
             .table = .empty,
             .pending = .empty,
             .following = .empty,

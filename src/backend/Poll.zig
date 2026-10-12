@@ -36,7 +36,7 @@ tree: Tree,
 /// and allocates nothing, so its error set is empty: `lookout.Watcher.init`
 /// still treats it as every other backend's init, and a watcher building
 /// one beside its native backend needs no error path for it.
-pub fn init(gpa: Allocator, options: Options) error{}!Poll {
+pub fn init(gpa: Allocator, _: Io, options: Options) error{}!Poll {
     var tree: Tree = .init(gpa, options.max_dir_entries, false);
     tree.check_contents = true;
     return .{
@@ -48,7 +48,7 @@ pub fn init(gpa: Allocator, options: Options) error{}!Poll {
 
 test "a zero polling interval still sleeps between quiet scans" {
     const io = std.testing.io;
-    var p = try Poll.init(std.testing.allocator, .{ .poll_interval = .fromMilliseconds(0) });
+    var p = try Poll.init(std.testing.allocator, io, .{ .poll_interval = .fromMilliseconds(0) });
     defer p.deinit(io);
     try std.testing.expectEqual(@as(u32, 1), p.interval_ms);
 }
@@ -98,7 +98,7 @@ test "polling racy entries compare bytes even when size and timestamps match" {
             });
             const timed = stamped.io();
             try tmp.dir.writeFile(io, .{ .sub_path = "nested/file", .data = "one" });
-            var p = try Poll.init(gpa, .{});
+            var p = try Poll.init(gpa, io, .{});
             defer p.deinit(timed);
             var batch: Batch = .init(.{});
             defer batch.deinit(gpa);
@@ -288,7 +288,7 @@ test "a failed polling removal allocation releases its staged path" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "gone", .data = "x" });
     const root = try tmp.dir.realPathFileAlloc(testing.io, "gone", testing.allocator);
     defer testing.allocator.free(root);
-    var poll = try Poll.init(testing.allocator, .{});
+    var poll = try Poll.init(testing.allocator, io, .{});
     defer poll.deinit(io);
     var batch: Batch = .init(.{});
     defer batch.deinit(testing.allocator);

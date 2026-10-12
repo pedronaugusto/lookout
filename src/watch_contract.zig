@@ -11,7 +11,8 @@ const WatchId = types.WatchId;
 /// `OutOfMemory`. Other backends allocate as watches are added.
 pub const InitError = error{
     /// `Options.backend` names a backend this target was not built
-    /// with. See `supported`.
+    /// with, or, for FSEvents, the system has no CoreServices framework
+    /// to open, or one without a function lookout calls. See `supported`.
     BackendUnavailable,
     /// The system-wide descriptor table is full.
     SystemFdQuotaExceeded,

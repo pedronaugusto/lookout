@@ -124,7 +124,7 @@ const base_mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY |
 const read_buffer_len = 8192;
 
 /// Creates the inotify descriptor.
-pub fn init(gpa: Allocator, options: Options) contract.InitError!Inotify {
+pub fn init(gpa: Allocator, _: Io, options: Options) contract.InitError!Inotify {
     // `linux.errno`, not `posix.errno`: these are raw syscalls, and on a
     // target that links libc `posix.errno` reads libc's thread-local
     // variable, which a raw syscall never writes.

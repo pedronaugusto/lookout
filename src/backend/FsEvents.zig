@@ -39,6 +39,7 @@ const reactor = @import("reactor");
 const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Volume = @import("fsevents/Volume.zig");
+const CoreServices = @import("fsevents/CoreServices.zig");
 const CheckpointPaths = @import("../Checkpoint/History.zig");
 const checkpoint_format = @import("../Checkpoint/format.zig");
 const aegis = @import("aegis");
@@ -65,6 +66,8 @@ const flag = records.flag;
 const FsEvents = @This();
 
 gpa: Allocator,
+/// The FSEvents functions, opened from the system by `init`.
+core_services: *const CoreServices,
 /// The serial queue every stream delivers on.
 queue: c.dispatch_queue_t,
 /// Shared with the delivery thread. Heap-allocated because its address is
@@ -265,7 +268,7 @@ const Sink = struct {
 const Stream = struct {
     id: WatchId,
     sink: *Sink,
-    ref: c.FsEventStreamRef,
+    ref: CoreServices.FsEventStreamRef,
     volume: Volume,
     /// False for host streams covering scopes with more than one device.
     persistent: bool,
@@ -365,16 +368,19 @@ const Stream = struct {
 /// loss the system does not say how to recover from is still a loss.
 const lost_track: u32 = flag.must_scan_sub_dirs | flag.user_dropped | flag.kernel_dropped;
 
-/// Creates the delivery queue, the buffer it fills, and the pipe the
-/// delivery thread tells the watcher a delivery has arrived through.
-pub fn init(gpa: Allocator, options: Options) contract.InitError!FsEvents {
+/// Opens CoreServices, then creates the delivery queue, the buffer it
+/// fills, and the pipe the delivery thread tells the watcher a delivery has
+/// arrived through. `error.BackendUnavailable` when the system has no
+/// CoreServices to open.
+pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!FsEvents {
+    const core_services = try CoreServices.load(io);
     // The wake is reactor's: closed on exec, and made where a child being
-    // started cannot be handed it half-made. `init` ignores the `Io` it is given.
-    var wake = reactor.Wake.init(Io.Threaded.global_single_threaded.io()) catch |err| return switch (err) {
+    // started cannot be handed it half-made.
+    var wake = reactor.Wake.init(io) catch |err| return switch (err) {
         error.SystemResources => error.ProcessFdQuotaExceeded,
         error.Unexpected => error.Unexpected,
     };
-    errdefer wake.deinit(Io.Threaded.global_single_threaded.io());
+    errdefer wake.deinit(io);
 
     const sink = try gpa.create(Sink);
     errdefer gpa.destroy(sink);
@@ -400,6 +406,7 @@ pub fn init(gpa: Allocator, options: Options) contract.InitError!FsEvents {
     const paths = try CheckpointPaths.init(gpa);
     return .{
         .gpa = gpa,
+        .core_services = core_services,
         .queue = queue,
         .sink = sink,
         .streams = .empty,
@@ -467,7 +474,7 @@ pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_
         const identity = stream.volume.identity orelse return null;
         const name = try gpa.dupeSentinel(u8, stream.root, 0);
         defer gpa.free(name);
-        const current = Volume.readIdentity(name, stream.volume.device) orelse return null;
+        const current = Volume.readIdentity(f.core_services, name, stream.volume.device) orelse return null;
         if (!Volume.matches(identity, current)) return null;
         const changes = try batch.capture(gpa, root.id, include_ready);
         errdefer gpa.free(changes);
@@ -644,7 +651,8 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
     else
         abs_path;
 
-    var volume = try Volume.read(f.gpa, stream_path);
+    const cs = f.core_services;
+    var volume = try Volume.read(cs, f.gpa, stream_path);
     errdefer volume.deinit(f.gpa);
     const policy = name_policy.read(io, abs_path).policy(options.identity);
     const resumed = if (force_live) null else f.resumeIndex(requested);
@@ -660,9 +668,9 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
         if (!Volume.matches(identity, f.restarting.?.state.value.watches[index].identity)) return error.InvalidCheckpoint;
     }
     const since = if (resumed) |index| f.restarting.?.state.value.watches[index].cursor else if (!force_live and volume.identity != null)
-        c.FSEventsGetLastEventIdForDeviceBeforeTime(volume.device, c.CFAbsoluteTimeGetCurrent() + 978307200)
+        cs.FSEventsGetLastEventIdForDeviceBeforeTime(volume.device, cs.CFAbsoluteTimeGetCurrent() + 978307200)
     else
-        c.FSEventsGetCurrentEventId();
+        cs.FSEventsGetCurrentEventId();
     // Start at the captured boundary, including fresh subscriptions. SinceNow
     // is resolved later by fseventsd and can skip the caller's first write.
     const stream = try f.gpa.create(Stream);
@@ -691,20 +699,20 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
         id.raw(), @tagName(scope), abs_path, stream_path,
     });
-    stream.ref = try createStream(stream, if (stream.persistent) volume.relative(stream_path) else stream_path, since, f.stream_latency);
+    stream.ref = try createStream(cs, stream, if (stream.persistent) volume.relative(stream_path) else stream_path, since, f.stream_latency);
     // Invalidation is what unschedules a stream, and it requires one that
     // is scheduled, so this may only run after the line below it.
     errdefer {
-        c.FSEventStreamInvalidate(stream.ref);
-        c.FSEventStreamRelease(stream.ref);
+        cs.FSEventStreamInvalidate(stream.ref);
+        cs.FSEventStreamRelease(stream.ref);
     }
-    c.FSEventStreamSetDispatchQueue(stream.ref, f.queue);
-    if (c.FSEventStreamStart(stream.ref) == 0) return error.WatchLimitReached;
+    cs.FSEventStreamSetDispatchQueue(stream.ref, f.queue);
+    if (cs.FSEventStreamStart(stream.ref) == 0) return error.WatchLimitReached;
     trace.log("fsevents started watch={d} since={d} latency={d} streams={d} latest={d} dev={d} now={d}", .{
-        id.raw(),                                    since,
-        f.stream_latency,                            f.streams.count() + 1,
-        c.FSEventStreamGetLatestEventId(stream.ref), c.FSEventStreamGetDeviceBeingWatched(stream.ref),
-        c.FSEventsGetCurrentEventId(),
+        id.raw(),                                     since,
+        f.stream_latency,                             f.streams.count() + 1,
+        cs.FSEventStreamGetLatestEventId(stream.ref), cs.FSEventStreamGetDeviceBeingWatched(stream.ref),
+        cs.FSEventsGetCurrentEventId(),
     });
 
     return stream;
@@ -712,26 +720,27 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
 
 /// Builds the CoreFoundation array FSEvents wants and creates the stream.
 fn createStream(
+    cs: *const CoreServices,
     stream: *Stream,
     subject: []const u8,
     since: u64,
     latency: f64,
-) contract.AddError!c.FsEventStreamRef {
-    const cf_path = c.CFStringCreateWithBytes(
+) contract.AddError!CoreServices.FsEventStreamRef {
+    const cf_path = cs.CFStringCreateWithBytes(
         null,
         subject.ptr,
         @intCast(subject.len),
         c.cf_string_encoding_utf8,
         0,
     ) orelse return error.SystemResources;
-    defer c.CFRelease(cf_path);
+    defer cs.CFRelease(cf_path);
 
     const values: [1]?*const anyopaque = .{cf_path};
-    const paths = c.CFArrayCreate(null, &values, 1, c.cf_type_array_call_backs) orelse
+    const paths = cs.CFArrayCreate(null, &values, 1, cs.kCFTypeArrayCallBacks) orelse
         return error.SystemResources;
-    defer c.CFRelease(paths);
+    defer cs.CFRelease(paths);
 
-    var context: c.FsEventStreamContext = .{ .info = stream };
+    var context: CoreServices.FsEventStreamContext = .{ .info = stream };
     // `kFSEventStreamCreateFlagFileEvents` is what makes FSEvents name
     // files rather than only the directories containing them.
     // `NoDefer` makes the first event of a burst arrive at once rather
@@ -744,9 +753,9 @@ fn createStream(
     // NoDefer makes the first event immediate; this latency controls how
     // long later events may be collected, matching lookout's own tail.
     return (if (stream.persistent)
-        c.FSEventStreamCreateRelativeToDevice(null, deliver, &context, stream.volume.device, paths, since, latency, flags)
+        cs.FSEventStreamCreateRelativeToDevice(null, deliver, &context, stream.volume.device, paths, since, latency, flags)
     else
-        c.FSEventStreamCreate(null, deliver, &context, paths, since, latency, flags)) orelse error.SystemResources;
+        cs.FSEventStreamCreate(null, deliver, &context, paths, since, latency, flags)) orelse error.SystemResources;
 }
 
 /// A tree crossing a mount needs the host's live namespace. A host cursor
@@ -865,9 +874,9 @@ fn destroy(f: *FsEvents, stream: *Stream) void {
     // assertion and do nothing, which leaves the stream registered with
     // the system after it has been released, still holding the pointer
     // to the memory freed below.
-    c.FSEventStreamStop(stream.ref);
-    c.FSEventStreamInvalidate(stream.ref);
-    c.FSEventStreamRelease(stream.ref);
+    f.core_services.FSEventStreamStop(stream.ref);
+    f.core_services.FSEventStreamInvalidate(stream.ref);
+    f.core_services.FSEventStreamRelease(stream.ref);
     // Invalidation says no further delivery will be made; it does not say
     // that one already running has returned, and `stream` is what it
     // holds a pointer to. The queue is serial, so an empty block run
@@ -888,7 +897,7 @@ fn settled(_: ?*anyopaque) callconv(.c) void {}
 /// allocation, no parsing, no lookout logic on a thread lookout does not
 /// own.
 fn deliver(
-    ref: c.FsEventStreamRef,
+    ref: CoreServices.FsEventStreamRef,
     info: ?*anyopaque,
     count: usize,
     paths: ?*anyopaque,
@@ -1773,7 +1782,7 @@ fn incomplete(f: *FsEvents, io: Io, batch: *Batch, stream: *const Stream) Alloca
 
 test "the arrival wake is closed on exec" {
     const io = std.testing.io;
-    var f = try FsEvents.init(std.testing.allocator, .{});
+    var f = try FsEvents.init(std.testing.allocator, io, .{});
     defer f.deinit(io);
     try std.testing.expect(std.c.fcntl(f.sink.arrival.handle(), c.f_getfd, @as(c_int, 0)) & c.fd_cloexec != 0);
 }
@@ -1791,7 +1800,7 @@ test "FSEvents refuses a watch whose initial names could not be remembered" {
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing = testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
-        var f = try FsEvents.init(gpa, .{});
+        var f = try FsEvents.init(gpa, io, .{});
         defer f.deinit(io);
         f.gpa = failing.allocator();
         f.budget.gpa = failing.allocator();
@@ -1823,7 +1832,7 @@ test "seeding remembers each entry with the metadata an lstat reads" {
     try tmp.dir.symLink(io, "top", "sub/link", .{});
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    var f = try FsEvents.init(gpa, .{});
+    var f = try FsEvents.init(gpa, io, .{});
     defer f.deinit(io);
     var batch = Batch.init(.{});
     defer batch.deinit(gpa);
@@ -1845,7 +1854,7 @@ test "removing an FSEvents stream releases its unreported delivery state" {
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
     defer gpa.free(root);
-    var f = try FsEvents.init(gpa, .{});
+    var f = try FsEvents.init(gpa, io, .{});
     defer f.deinit(io);
     var batch = Batch.init(.{});
     defer batch.deinit(gpa);
@@ -1855,8 +1864,8 @@ test "removing an FSEvents stream releases its unreported delivery state" {
     try f.add(io, kept, root, .{}, &batch);
     // This test owns the two records below. Stop and join native replay
     // callbacks before constructing that exact delivery.
-    c.FSEventStreamStop(f.streams.get(gone).?.ref);
-    c.FSEventStreamStop(f.streams.get(kept).?.ref);
+    f.core_services.FSEventStreamStop(f.streams.get(gone).?.ref);
+    f.core_services.FSEventStreamStop(f.streams.get(kept).?.ref);
     c.dispatch_sync_f(f.queue, null, settled);
     {
         var held = f.sink.delivery.acquire();
@@ -1971,6 +1980,7 @@ const Synthetic = struct { path: []const u8, flags: u32, event: ?u64 = null };
 /// callback it would call and into the buffer that callback writes.
 /// Nothing between the system's queue and `drain` is bypassed.
 fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
+    const cs = CoreServices.get() orelse return error.BackendUnavailable;
     var paths: [4][*:0]const u8 = undefined;
     var flags: [4]u32 = undefined;
     var ids: [4]u64 = undefined;
@@ -1979,27 +1989,23 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
     for (items) |item| {
         paths[filled] = try gpa.dupeSentinel(u8, if (stream.persistent) stream.volume.relative(item.path) else item.path, 0);
         flags[filled] = item.flags;
-        ids[filled] = item.event orelse c.FSEventsGetCurrentEventId();
+        ids[filled] = item.event orelse cs.FSEventsGetCurrentEventId();
         filled += 1;
     }
     deliver(stream.ref, stream, filled, @ptrCast(&paths), &flags, &ids); // safe: the same C array of C strings FSEvents hands deliver
 }
 
-/// Polls until one `overflow` arrives, checks it against the watch it is
-/// for, and then that no second one follows it.
-/// The CoreFoundation, CoreServices and libdispatch surface lookout uses.
+/// The libdispatch surface lookout uses, which is libSystem's and so linked
+/// into every Apple program, and the constants FSEvents and `fcntl` take.
+/// The CoreFoundation and CoreServices functions are `CoreServices`, opened
+/// at run time.
 ///
-/// Hand-written rather than `@cImport`ed: this is nine functions and a
-/// handful of constants against a stable system ABI, and declaring them
-/// here keeps the package free of a C compilation step.
+/// Hand-written rather than `@cImport`ed: a handful of functions and
+/// constants against a stable system ABI, and declaring them here keeps the
+/// package free of a C compilation step.
 const c = struct {
-    // Apple's names, in Zig's casing: `CFStringRef` is `CfStringRef` and
-    // `kFSEventStreamCreateFlagNoDefer` is `stream_create_flag_no_defer`.
-    // Functions keep their symbol names.
-    const CfAllocatorRef = ?*anyopaque;
-    const CfStringRef = *anyopaque;
-    const CfArrayRef = *anyopaque;
-    const FsEventStreamRef = *anyopaque;
+    // Apple's names, in Zig's casing: `kFSEventStreamCreateFlagNoDefer` is
+    // `stream_create_flag_no_defer`. Functions keep their symbol names.
     const dispatch_queue_t = *anyopaque;
 
     const cf_string_encoding_utf8: u32 = 0x0800_0100;
@@ -2015,61 +2021,6 @@ const c = struct {
     const f_setfl: c_int = 4;
     const fd_cloexec: c_int = 1;
     const o_nonblock: c_int = 0x0004;
-
-    const FsEventStreamContext = extern struct {
-        version: c_long = 0,
-        info: ?*anyopaque = null,
-        retain: ?*const anyopaque = null,
-        release: ?*const anyopaque = null,
-        copyDescription: ?*const anyopaque = null,
-    };
-
-    const FsEventStreamCallback = *const fn (
-        stream: FsEventStreamRef,
-        info: ?*anyopaque,
-        num_events: usize,
-        event_paths: ?*anyopaque,
-        event_flags: [*]const u32,
-        event_ids: [*]const u64,
-    ) callconv(.c) void;
-
-    const cf_type_array_call_backs = @extern(*const anyopaque, .{ .name = "kCFTypeArrayCallBacks" });
-
-    extern "c" fn CFStringCreateWithBytes(
-        alloc: CfAllocatorRef,
-        bytes: [*]const u8,
-        num_bytes: c_long,
-        encoding: u32,
-        is_external_representation: u8,
-    ) ?CfStringRef;
-    extern "c" fn CFArrayCreate(
-        allocator: CfAllocatorRef,
-        values: [*]const ?*const anyopaque,
-        num_values: c_long,
-        call_backs: ?*const anyopaque,
-    ) ?CfArrayRef;
-    extern "c" fn CFRelease(cf: *anyopaque) void;
-
-    extern "c" fn FSEventStreamCreate(
-        allocator: CfAllocatorRef,
-        callback: FsEventStreamCallback,
-        context: ?*FsEventStreamContext,
-        paths_to_watch: CfArrayRef,
-        since_when: u64,
-        latency: f64,
-        flags: u32,
-    ) ?FsEventStreamRef;
-    extern "c" fn FSEventStreamSetDispatchQueue(stream: FsEventStreamRef, q: ?dispatch_queue_t) void;
-    extern "c" fn FSEventStreamStart(stream: FsEventStreamRef) u8;
-    extern "c" fn FSEventStreamGetLatestEventId(stream: FsEventStreamRef) u64;
-    pub extern "c" fn FSEventStreamGetDeviceBeingWatched(stream: FsEventStreamRef) i32;
-    extern "c" fn FSEventsGetCurrentEventId() u64;
-    extern "c" fn FSEventsGetLastEventIdForDeviceBeforeTime(device: i32, time: f64) u64;
-    extern "c" fn CFAbsoluteTimeGetCurrent() f64;
-    extern "c" fn FSEventStreamCreateRelativeToDevice(allocator: CfAllocatorRef, callback: FsEventStreamCallback, context: ?*FsEventStreamContext, device: i32, paths: CfArrayRef, since: u64, latency: f64, flags: u32) ?FsEventStreamRef;
-    pub extern "c" fn FSEventStreamStop(stream: FsEventStreamRef) void;
-    extern "c" fn FSEventStreamInvalidate(stream: FsEventStreamRef) void;
-    extern "c" fn FSEventStreamRelease(stream: FsEventStreamRef) void;
 
     extern "c" fn dispatch_queue_create(label: ?[*:0]const u8, attr: ?*anyopaque) ?dispatch_queue_t;
     extern "c" fn dispatch_release(object: *anyopaque) void;
@@ -2087,7 +2038,7 @@ test "a failed FSEvents rekey keeps every remembered name" {
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
-        var backend = try FsEvents.init(testing.allocator, .{});
+        var backend = try FsEvents.init(testing.allocator, io, .{});
         defer backend.deinit(io);
         try backend.remember(id, "/old");
         try backend.remember(id, "/old/child");
@@ -2123,7 +2074,7 @@ test "allocation failure during delivery retains FSEvents bytes and position" {
         const last = try std.Io.Dir.path.join(testing.allocator, &.{ root, "last" });
         defer testing.allocator.free(last);
         var failing = testing.FailingAllocator.init(testing.allocator, .{});
-        var f = try FsEvents.init(failing.allocator(), .{ .latency = .fromMilliseconds(0) });
+        var f = try FsEvents.init(failing.allocator(), io, .{ .latency = .fromMilliseconds(0) });
         defer f.deinit(io);
         var batch = Batch.init(.{});
         defer batch.deinit(failing.allocator());
@@ -2164,7 +2115,7 @@ test "a file stream accepts the replay sentinel outside its event scope" {
     const root = try tmp.dir.realPathFileAlloc(testing.io, "file", gpa);
     defer gpa.free(root);
     const parent = std.Io.Dir.path.dirname(root).?;
-    var backend = try FsEvents.init(gpa, .{});
+    var backend = try FsEvents.init(gpa, io, .{});
     defer backend.deinit(io);
     var batch = Batch.init(.{});
     defer batch.deinit(gpa);
@@ -2216,4 +2167,5 @@ const resolveHeldFixture = resolveHeld;
 
 test {
     _ = records;
+    _ = CoreServices;
 }
