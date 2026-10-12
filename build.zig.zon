@@ -13,10 +13,11 @@
     },
     .dependencies = .{
         .macos_sdk = .{
-            .url = "https://codeload.github.com/frostplexx/zig-build-macos-sdk/tar.gz/e98f2cf83eb57f65efadd93e896a51956ba5adc7",
+            .url = "git+https://github.com/frostplexx/zig-build-macos-sdk#e98f2cf83eb57f65efadd93e896a51956ba5adc7",
             .hash = "N-V-__8AACDrEQQ49TXhy6tl2QpY2w2QqKDz2VXmUUrEbfZ2",
             .lazy = true,
         },
+
         .airlock = .{
             .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.2.1#f9929e0e44537b00068d4513c3c0a2da074fe8f3",
             .hash = "airlock-0.2.1-rfvu6NmOBQBVaP82aqCDE13vlQj6wwp0XaHfYo7DtYtF",

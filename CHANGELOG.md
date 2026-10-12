@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The pinned macOS SDK is fetched by git at its commit, not as GitHub's archive of it: the archive GitHub served a CI runner unpacked to other files than the pinned hash, so a cold cache could not build for a named Apple target.
+
 ## [0.4.0] - 2026-10-12
 
 ### Breaking
