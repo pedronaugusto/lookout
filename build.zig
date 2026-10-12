@@ -123,12 +123,12 @@ pub fn dev(b: *std.Build, tools: type) void {
             .imports = imports,
         }),
     });
-    // airlock's seam, which is lazy: its error ends this configure pass until
-    // it is fetched. One shakedown in the graph: the one the seam is built on,
-    // bound to airlock's aegis, which is lookout's.
-    const seam = airlock_build.testing(airlock_dependency) catch return;
-    tests.root_module.addImport("airlock.testing", seam);
-    tests.root_module.addImport("shakedown", seam.import_table.get("shakedown").?);
+    // One shakedown in the graph: lookout's, bound to airlock's aegis, which is
+    // lookout's, and airlock's seam built on it.
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
+    use_aegis(shakedown, airlock_build.aegis(airlock_dependency));
+    tests.root_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency, shakedown.module("shakedown")));
+    tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
     if (darwin) linkLike(module, tests.root_module);
 
     const test_step = b.step("test", "Run the lookout tests");

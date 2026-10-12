@@ -8,75 +8,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- The tests build airlock's seam on lookout's own shakedown, bound to airlock's aegis (airlock 0.2.0's `testing` and `aegis`).
 - lookout is developed with [bay](https://github.com/pedronaugusto/bay): preflight and shakedown are dev dependencies, and the tests, examples, checks and benchmarks are the development build's (`bay test`, `bay check`, `bay bench`). lookout ships with aegis, airlock, reactor and sweep, and the options `-Dmacos-sdk` and `-Dbundled-macos-sdk`; what a project that depends on it builds is unchanged. airlock, aegis, reactor and sweep are pinned to the revisions airlock's own bay build is made with.
 - The FSEvents backend signals arrivals through a reactor `Wake` where it made a pipe of its own outside conduit's fork gap; `Watcher.fd` hands out the wake's descriptor as before.
 - Pins the newest green aegis, airlock, reactor, shakedown, sweep and preflight. The filter's cache is asked for sweep's `Set.Bytes` (`.fromRaw(1 << 16)`), which sweep now takes as the most a cache holds.
 - CI gates glint's A004 and Z026 through the `glint` object of `ci/preflight.json` with the whole default rule set (it ran the A rules alone from `ci/glint.json`); the retired exception files are gone, and the byte-size tests order sizes with aegis `add`, `sub` and `compare`.
 - `WatchId` is an aegis id (`aegis.id.Id`) and ids come from a checked issuer. Read the number with `id.raw()` where `@backingInt(id)` did, and make one with `.fromRaw(n)`. The first id a watcher issues is 1, no longer 0. Ids are never reissued, and a watcher that has issued all of them (2^32 - 1, removed watches included) now refuses the next `add` with `error.IdExhausted` where it overflowed: a panic in safe builds and a reused id in ReleaseFast. A followed link the watcher has no id left for is reported `unwatched`, as one past `max_followed_links` is.
-
 - `Options.buffer_bytes` is a byte count, `aegis.units.Bytes(usize)`: write `.buffer_bytes = .fromRaw(1 << 20)`. Nothing else in `Options` is a size in bytes, so a count of events or entries can no longer be given for it.
-
 - Remove the OS-global `folds_case` and Latin-1 normalization engine. Canonical kernel paths are exact identity keys, and public path helpers require canonical spellings. `WatchInfo.requested` retains the caller root. Name capabilities are nullable per-root/per-directory facts; unknown means exact matching, with explicit `AddOptions.identity` and independent `Filter.case`/`Filter.normalization` overrides.
-
 - NFC matching is owned by sweep and operates on composed scalars after parsing syntax. Multi-scalar NFC class members return `InvalidPattern`; raw glob text is retained. Baseline format 2 and checkpoint format 3 persist matching policy and preferences, and refuse older formats.
-
 - Requires Zig 0.17.0; Zig 0.16 no longer builds lookout. On the BSDs and Apple targets the mount query is declared in Zig instead of imported from C headers, and a named Apple target links against `-Dmacos-sdk=<path>` or the pinned framework SDK: the build no longer asks the host for its SDK at configure time, and `--sysroot` is no longer read.
-
 - A `Watcher` keeps no `std.Io`. `Watcher.init(gpa, io, options)` takes the one that makes the object `wake` sets, and `add`, `remove`, `refilter`, `poll` and `deinit` take the `io` they go through, as `std.Io.File.close(io)` does.
-
 - `Watcher.poll(io, timeout)` takes a `std.Io.Timeout` instead of a millisecond count: `.none` waits indefinitely, and a timeout already run out, a zero duration among them, checks once without blocking. Waits are kept to the millisecond, rounded up.
-
 - `Options` and `AddOptions` are `Watcher.Options` and `Watcher.AddOptions`. Their spans are `std.Io.Duration`s: `poll_interval`, `latency`, `settle` and `debounce` replace `poll_interval_ms`, `latency_ms`, `settle_ms` and `debounce_ms`.
-
 - A `Baseline` keeps its allocator and no `std.Io`: `deinit()` takes no allocator, `diff(io)` and `save(io, filename, options)` take the `io`. `save` takes the `SaveOptions` that `saveWithOptions` took, which is gone. `Baseline.Error` is `Baseline.SeedError` and `Baseline.DiffError`.
-
 - Filter patterns are git's, matched by [sweep](https://github.com/pedronaugusto/sweep): `**` crosses directories only as a whole component (`build/**`, `**/x`, `a/**/b`), and anywhere else it is `*`, so `a**/c` now names `ax/c` and no longer `ax/y/c`. `[...]` brackets are syntax, and so is a `\` escape except on Windows, where `\` is a separator. `?` is one character on Linux too, where it was one byte. Case follows measured directory policy; canonical composition is an explicit NFC preference where capability is unknown. A pattern git refuses (an unclosed `[`, an unknown `[:class:]`, a trailing `\`) makes `Watcher.add`, `Watcher.refilter`, `Baseline.seed` and `Baseline.load` return `error.InvalidPattern`, and one past sweep's length `error.PatternTooLong`.
-
 - `Filter` is what a caller asks for and nothing more: `Filter.dupe`, `Filter.deinit`, `Filter.excludes`, `Filter.prunes` and `Filter.isEmpty` are gone, and a filter owns nothing.
-
 - FSEvents checkpoints persist the known path baseline and report paths gone on resume exactly once, even when deletion records arrive late or are numbered after the replay marker; version-1 tokens are refused.
-
 - Checkpoints require volume and FSEvents log identities and use per-device history; `add` returns `InvalidCheckpoint` for a changed identity or unavailable history, and mounted volumes need separate watches for resumable history.
-
 - Replace `Watcher.position`, `Position`, `Options.since` and `tracksPosition` with owned `Watcher.checkpoint(gpa)`, `Checkpoint`, `Options.checkpoint` and `tracksCheckpoint`; tokens keep per-watch cursors and unhanded changes, and old scalar tokens are refused.
-
 - `overflow` and `unwatched` bypass debounce and settling, clear held changes on the same watch and path, and retain their precedence until delivery: ordinary changes < overflow < unwatched.
-
 - After `poll` returns `OutOfMemory`, retrying reports `overflow` for every still-live watch root; unread kernel deliveries remain pending where possible, and recovery survives repeated allocation failures and wakeups.
-
 - `Watcher.InitError` includes `OutOfMemory`; FSEvents preserves sink and buffer allocator failures instead of reporting `SystemResources`.
-
 - Every backend's wait is [reactor](https://github.com/pedronaugusto/reactor)'s, and lookout depends on it. A blocked `poll` is now cancelable on every backend but Windows: a cancellation ends the wait at once where it used to be reported after something happened, the timeout ran out or `wake` was called. On a reactor runtime the wait holds no thread; on any other `std.Io` the calling thread looks for a cancellation every few milliseconds, where it used to sleep in the kernel until its descriptor was ready. On Windows the wait on the completion port is made through `reactor.blocking`, so it holds up no worker, and a cancellation still lands when it returns.
-
 - `wake` returns at once on the `poll` backend too, where it took up to `poll_interval` or a tenth of a second. A wake while nothing waits is kept as before.
-
 - A watcher holds the object `wake` sets: one descriptor on Linux (an eventfd, where the inotify backend held a pipe of two), a pipe of two on macOS and the BSDs, where neither the `kqueue` nor the `poll` backend held a descriptor for it, and an event on Windows.
-
 - Under `std.Io.Threaded` a blocked `poll` wakes about 150 times a second to look for a cancellation, where it slept in the kernel until something happened. That is reactor's fallback for an `Io` that is not a runtime, and it costs about 1.5 ms of CPU a second (macOS and Linux, measured). A reactor runtime holds no thread and wakes for nothing.
-
 - A consumer's build fetches reactor beside aegis, airlock and sweep.
 
 ### Added
 
 - `Watcher.AddOptions.follow_symlinks` makes a recursive watch follow links to directories and report changes below a link under the link's path. A link into a directory the watch already reaches is refused by device and inode, or volume and file id; `max_followed_links` bounds each watch and a link past it is reported `unwatched`. Off by default.
-
 - `Baseline.save(io, filename, .{ .durable = true })` makes the replacement survive a power cut on Linux, macOS and Windows: the new file is synced before it replaces the old one and its directory after. A failed sync before the replacement leaves the old file; a failed directory sync after it is `error.PublishedNotDurable`, with the new file in place; a filesystem that refuses the syncs is `error.LevelUnavailable`. A save writes its temporary file under `Baseline.temp_prefix`.
-
 - `Watcher.capabilities(id)` reports the filesystem fact and backend per watch; `.auto` uses polling on network and FUSE mounts, while explicit backend choices are kept.
-
 - `Baseline.save` and `load` atomically persist versioned, checksummed tree snapshots on every backend and refuse corrupt, foreign and old-version files by name.
-
 - `Baseline.Change` carries the `target` its listing found, file or directory, including for a path that has gone.
-
 - `Watcher.refilter(id, filter)` changes a live watch's filter without
   removing its registration or changing its id. Newly admitted directories
   are registered where the backend watches directories individually;
   excluded ones are released, and newly reached directories enter the
   entry budget.
-
 - Export `path.relative` and `path.within` for callers that need the same
   platform case folding and separator handling as lookout's watches.
-
 - `zig build bench` runs lookout's own speed checks, each held to its ceiling on every backend the target has: a change while `poll` is blocked, a rename then delete, a cancellation before `poll`, a wake, a task stopped by a flag, and what a filter costs a path. `zig build test` runs each once with `--smoke`, judging nothing; CI times none.
 
 ### Changed
@@ -84,155 +57,92 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The Smith fuzz tests are shakedown `check` properties.
 - The fetched package holds the build files, `src` and the three documents; the benchmarks, examples, `ci/` and `.github/` stay in the repository, and a project depending on lookout builds the module and nothing else.
 - A path is matched against all of a watch's patterns in one pass over it, whatever their number and shape: a filter of twenty ignore patterns and three include patterns decides a path about six times faster than before, and one pattern about one and a half times.
-
 - Resuming an FSEvents checkpoint reports only what the watch would report live: a saved change outside the watch or excluded by its filter is dropped, and a saved rename with one side left out is the creation or removal of the other. Token paths must be absolute, without NUL or `.`/`..` components, or the token is `error.InvalidCheckpoint`.
-
 - Checkpoint tokens record the watch's `ignore` and `only` patterns, and a watch resumed under other patterns is refused with `error.InvalidCheckpoint`. A predicate filter (`allow`) cannot be recorded and is not compared.
-
 - `Watcher.LinkHost` is no longer public: followed links reach the watcher through `Links.Host`, an interface of private functions, so nothing outside `add` can issue an id or register under one.
-
 - `LOOKOUT_TRACE` lines go to `std.log` under the `lookout` scope at the info level instead of straight to standard error, so the program's log function and level decide where they land. The examples print through a buffered standard output writer.
-
 - `Baseline` and `Checkpoint` signatures name their public error sets qualified, and the baseline and checkpoint `ParseError` sets are spelled out; their members are unchanged.
-
 - Checkpoints retain a shared path revision instead of copying the tree on each capture; tokens keep the full resume baseline.
-
 - Hash folded paths in blocks rather than one code point at a time; the values are unchanged.
-
 - FSEvents `add` reads each entry's initial metadata with its directory listing, one `getattrlistbulk` call for many entries, and remembers it in one lookup, instead of an `lstat` and four lookups per entry.
-
 - The README usage excerpt keeps the example calls without the surrounding commentary.
-
 - `LOOKOUT_TRACE` traces the Windows backend too: each record a read
   carries, and what was made of it.
-
 - `poll` is a `std.Io` cancellation point on every backend. It looks for a
   cancellation on entry and each time the backend's wait comes back, and
   returns `error.Canceled` for one requested before it was called or while
   it waited. It used to be one only where a file-system call happened to
   see it, which on a kernel backend blocked in the kernel was the first
   directory re-read after the next change.
-
 - A `poll` that returns an error hands nothing out. What it had gathered
   is returned by the next `poll` rather than dropped with it.
-
 - `add` looks for a cancellation once, on entry, and then registers the
   whole watch. A cancellation requested while it runs is left for the next
   cancellation point.
-
 - `PollError`, `poll`, `wake`, the README and the module documentation now
   state the rule: cancellation is honoured on every backend, a blocked
   wait on the `poll` backend is ended by one, and a blocked wait on a
   kernel backend is ended by `wake`, a change or the timeout, with the
   cancellation reported then. `wake` gives the flag-and-wake recipe that
   stops a polling task on every backend.
-
 - Depends on [aegis](https://github.com/pedronaugusto/aegis). The state the system's delivery thread shares with `poll`, and the retained path history that checkpoints lease from, sit beside their lock in an aegis `Guarded`, so a lock and what it guards can no longer be taken apart; history revisions and watch ids are distinct aegis id types; the limits on directory entries and followed links are aegis limits. Lease reclamation is unchanged.
+- Pins aegis 0.1.0, airlock 0.2.0, sweep 0.2.0 and reactor 0.2.0.
 
 ### Removed
 
 - The Windows workaround that marked a no-follow content handle nonblocking: Zig 0.17 opens it synchronously, and the flag would now be wrong.
-
 - The test modules' `error_tracing = false`: Zig 0.17's fuzz runner builds with error return traces.
 
 ### Fixed
 
 - On FSEvents, a watch taken on a folder above a recursive watch's subfolders -- one that does not recurse, or a pending watch parked there -- started each subfolder's entry count again without reading it, so the recursive watch counted those folders from nothing and was never told when one passed `Options.max_dir_entries`. A count is now started again only for a folder the walk reads.
-
 - `Baseline.save` keeps the permissions of the file it replaces: a baseline made readable by its owner alone stays so after the next save.
-
 - Glob patterns match in time proportional to the pattern and the name, however many `*` and `**` they hold. Each `*` used to retry the rest of the pattern at every position, so a file name chosen against a pattern such as `*a*a*a*a*b` could stall the watcher's thread for most of a minute.
-
 - After an FSEvents resume, a path the checkpoint's baseline did not hold is reported `created` when the log names it, not `modified`.
-
 - A pending watch whose ancestor the backend refuses to register fails its `add` with that error instead of returning an id that waits on nothing. Refused later, while stepping down to a folder that appeared, the watch stops waiting and reports `unwatched` against its path. An allocation failure while parking is returned rather than swallowed.
-
 - A pending promotion whose checkpoint is refused no longer frees its path twice when resetting the checkpoint or parking again runs out of memory.
-
 - The FSEvents wake pipe is closed on exec, as the other backends' descriptors are.
-
 - Reading or writing a checkpoint token holds the path history's lock for one step at a time, not for the whole token, and releasing a checkpoint on another thread no longer frees through the watcher's allocator while the watcher runs; the watcher's thread frees what released revisions held on its next change.
-
 - `Watcher.watches` lists the watches in the order they were added after a `remove` as well; removal reordered them.
-
 - A checkpoint token that names one root twice is refused as `error.InvalidCheckpoint`: a watcher never writes one, and resuming it could reach an unreachable after a refused registration. The poll backend's `init` has an empty error set.
-
 - FSEvents reports a known path whose removal arrives after the name is taken again as `removed`; a symbolic link replaced in two steps was not reported at all.
-
 - Open the baseline parent with a syncable directory handle on Linux.
-
 - The kqueue and poll backends find a watched path's node in one lookup and drop a removed directory at the cost of what was below it: adding a tree checked every file against every node, and each removal and rescan passed over every node and registration, quadratic in the tree (50,000 files took minutes to add). A name that comes back as another kind replaces its node.
-
 - An include pattern with `**` inside a name, such as `a**/c`, walks to what it names: the directories it crosses were pruned and the files below them never reported.
-
 - Correct the Windows no-follow file flag so polling content reads wait for completion without crashing.
-
 - Compare racy polling entries by content on every platform so same-size writes within one timestamp tick are reported.
-
 - Capture the FSEvents registration boundary before starting the stream so changes made immediately after `add` returns are reported.
-
 - Device-relative FSEvents records naming a volume root retain its canonical spelling, so the root cannot acquire a second remembered name with a trailing separator.
-
 - Pending watches propagate checkpoint identity refusal from `add`; a refusal during later reconciliation reports overflow and starts fresh instead of retrying the rejected snapshot forever.
-
 - Recursive FSEvents scopes crossing a mounted volume keep live coverage through a host stream, report the registration gap as overflow and withhold checkpoints that cannot describe every device.
-
 - An incomplete directory-budget reread keeps its prior names and reports uncertainty until a complete listing succeeds, instead of treating inaccessible entries as absent.
-
 - FSEvents accepts replay completion as stream state before applying path scope, so a file watch can finish catching up when the sentinel names its parent.
-
 - A paired rename releases the source path's settling or debounce hold after recording the destination, so the old name cannot later report a stale modification.
-
 - Correct the baseline scope, polling registration count, recovery handout and minimum delivery-buffer descriptions.
-
 - Removing an FSEvents registration releases its queued records and held rename half after callbacks finish, so a pending promotion or failed-add retry cannot inherit the old stream's delivery.
-
 - FSEvents refuses and releases a watch when allocating its initial remembered names fails, instead of accepting a partial baseline and reporting existing files as new.
-
 - Filter reconciliation registers newly admitted files in non-recursive kqueue watches and releases excluded file registrations even when their names could lead to an included descendant.
-
 - Pending promotion transfers its registered path to the watch table before reporting, so later allocation failure cannot free it twice.
-
 - Recovery notices remain pending until returned to the caller, including when reconciliation discards the ancestor events of a pending watch.
-
 - Kqueue owns a table of accepted registrations and retries missing nodes before waiting, so a failed registration cannot leave scanned files quietly unwatched.
-
 - Tree scans publish directory listings and file metadata after reporting succeeds, rolling back newly adopted nodes on failure so a retry sees the whole change.
-
 - FSEvents moves remembered subtree names together only after every replacement path and map slot is ready.
-
 - FSEvents retains a held rename and its pairing when reporting, replacement or rejoining fails.
-
 - Tree adoption releases frontier and directory paths that failed registration has not taken.
-
 - Windows retains held removals and rename paths until their batch transfer succeeds, so allocation failures leave them retryable.
-
 - Polling releases a staged removal path when its removal list cannot grow, retaining the registration for retry.
-
 - Failed tree registration releases its directory snapshot and any file nodes created before the failure.
-
 - A tree walk releases its root path when allocating the initial frontier fails.
-
 - A failed first budget count publishes no directory or partial listing, so cleanup and retry remain valid.
-
 - Document polling's open directory handles, both backends that recurse in the kernel, and baseline retry and truncation behavior.
-
 - Queued unwatched events, held changes and overflow notices remain pending until their transfer into the batch succeeds.
-
 - FSEvents reports overflow when a path's existence cannot be checked, retaining known paths and refusing ambiguous rename pairs.
-
 - A baseline reports a missing root once, until the root has been seen again.
-
 - Truncated directory scans retain remembered entries and subtrees until a complete listing can establish what changed.
-
 - Polling and kqueue tree scans retain registrations when listing or file metadata access fails instead of reporting removals.
-
 - Document the FSEvents sink and buffer allocated at initialization and their allocator failures.
-
 - Baseline diffs commit listings and returned paths together, so failed traversal or allocation leaves every change available to a retry.
-
 - Baseline scans propagate directory access failures instead of reporting inaccessible paths as removed.
-
 - Windows: a name renamed over from a name the watch does not see --
   outside it, or excluded by its filter -- is `created` there, and
   `renamed` from a name it does see, as on `inotify` and FSEvents. So a
@@ -246,7 +156,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hundred milliseconds, for the next read to say. A delete and a create
   of one name back to back are written the same way as a move onto it
   from another directory, and are reported as that move: `created`.
-
 - Entry counts are read again from disk when changes are lost: the
   `inotify` queue overflowing, a Windows read the kernel could not hold
   (an empty read, `ERROR_NOTIFY_ENUM_DIR`, or one that cannot be
@@ -257,7 +166,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no `overflow`. What is read again is what the loss touched: on Windows
   and FSEvents, the folders the watch that lost them was counting, below
   where the loss was said.
-
 - A watch on a file holds no entry budget for its folder, on every
   backend. Windows and FSEvents read the file's folder to see the file,
   and counted the folder through that watch: seeded from disk, then
@@ -268,7 +176,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now, which is what `inotify`, `kqueue` and the `poll` backend already
   did. FSEvents also no longer counts a watched directory's own root
   against the folder above it, which no watch reports.
-
 - A pending watch takes the path it waits for from the `add` on. A
   second `add` of that path was accepted until a `poll` promoted the
   first, and the promotion then registered the path a second time, so
@@ -278,7 +185,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `poll` came between. A path that, once there, turns out to lead through
   a symbolic link to a path another watch has is not registered again
   either: the pending watch stops waiting and reports `unwatched`.
-
 - A folder several watches reach is counted once against
   `Options.max_dir_entries`. Windows and FSEvents hand every watch its
   own record of each change, and each record was counted, so a folder
@@ -291,7 +197,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it is promoted, keeps the count the others still use; it was dropped
   and read again from disk, which counted changes still on their way a
   second time.
-
 - A pending watch no longer takes the folder it is parked in. It recorded
   that ancestor as watched, so a later `add` of the same folder failed
   with `PathAlreadyWatched`, and a pending watch added after the folder
@@ -306,12 +211,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the `poll` backend dropped every watch's registrations under a path
   that went, so of two watches on it only the one the system reported
   first said `removed`.
-
 - `kqueue`: an entry below a watch that could not be registered is
   dropped with everything under it. The drop compared each path against
   the entry's own, which it had just freed, so what was under it could
   be left registered.
-
 - `wake` read the backend's state while the polling thread was writing
   it: finding which backend to poke loaded the whole backend union, and
   on the `poll` backend the polling thread's own loads of that union read
@@ -322,7 +225,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing else; the `poll` backend's sleep reads the watcher's own flag.
   A `wake` that arrives during the coalescing tail now ends that `poll`
   rather than the next one.
-
 - A rename between a name the filter keeps and one it excludes is
   reported by one rule on every backend that pairs renames: an excluded
   name is treated exactly as a name outside the watch. Only the new name
@@ -338,7 +240,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Windows skipped an excluded new name before pairing, so the kept old
   name stayed held for the next rename's new name: lost, or paired with
   the wrong one.
-
 - FSEvents: a rename half with no partner, on a file that was already
   known, is checked for on disk. Renamed out of the watch, it is
   `removed`; it was reported `modified`, or nothing, from flags that
@@ -346,23 +247,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   something was renamed over it from outside the watch, and it is
   `created`, as `inotify` and Windows report the same move; it was
   dropped.
-
 - A pending watch whose path appeared while it moved down to a nearer
   ancestor — `mkdir -p` making both in one breath — was left parked on
   nothing, so a `poll` with no timeout waited until some other change. It
   is promoted at once. Seen once on Linux under load; the window is between
   a look and a registration and no test forces it.
-
 - FSEvents: a file saved by renaming a new file over it and later deleted
   was reported gone only when some other change came along, so a `poll`
   with no timeout could wait for ever. FSEvents keeps a path's flags, so
   the deletion arrives as a rename half with no partner; a half alone is
   now decided once its pairing grace has passed, whatever the timeout.
-
 - FSEvents: the stream a delivery reads is published to the delivery
   thread with a release and read with an acquire. The start ordered them
   already, inside the framework; a race detector now sees it too.
-
 - A cancellation that arrived while a watcher was re-reading the tree was
   taken for the answer to the question being asked. A directory whose
   listing was cut short was reported `removed` and its subtree stopped
@@ -372,14 +269,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of it. The re-reading now runs under cancel protection: the kernel
   backends' reading of what the kernel reported, the `poll` backend's
   scans, and the re-examination of parked watches.
-
 - A cancellation during a recursive `add` was taken for a directory that
   could not be read. On `inotify` the directory and everything below it
   were left without a kernel watch, with nothing said; on FSEvents they
   were left out of what the watcher knew, so their next change read as a
   creation; on `kqueue` and the `poll` backend the directory was reported
   `unwatched`. `add` now runs to the end once it has begun.
-
 - On Apple targets the polling thread no longer allocates while the system's delivery thread may be waiting on the lock they share: `poll` made the room for the bytes it takes before it takes them, and sizes it again if more arrived meanwhile, and the delivery thread signals its wake pipe after it has let go. An allocation, or a write to the pipe, under that spin lock held the system's thread for as long as it took.
 
 ## [0.3.0] - 2026-09-20
