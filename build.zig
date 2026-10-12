@@ -83,7 +83,6 @@ pub fn dev(b: *std.Build, tools: type) void {
     // The options of `build`, passed on to lookout.
     macos_sdk_option = b.option([]const u8, "macos-sdk", "The Apple SDK to link a named Apple target against");
     bundled_sdk_option = b.option(bool, "bundled-macos-sdk", "Use the pinned framework SDK for cross-linking Apple targets");
-    use_aegis = tools.shakedown.useAegis;
     const preflight = tools.preflight;
     const package = lookoutPackage(b, target, optimize);
     const p = package.builder;
@@ -123,10 +122,8 @@ pub fn dev(b: *std.Build, tools: type) void {
             .imports = imports,
         }),
     });
-    // One shakedown in the graph: lookout's, bound to airlock's aegis, which is
-    // lookout's, and airlock's seam built on it.
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-    use_aegis(shakedown, airlock_build.aegis(airlock_dependency));
+    // shakedown, and airlock's seam built on it.
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     tests.root_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency, shakedown.module("shakedown")));
     tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
     if (darwin) linkLike(module, tests.root_module);
@@ -230,9 +227,6 @@ pub fn dev(b: *std.Build, tools: type) void {
 var macos_sdk_option: ?[]const u8 = null;
 var bundled_sdk_option: ?bool = null;
 
-/// `tools.shakedown.useAegis`, set by `dev` for the benchmark imports, which are built without `tools`.
-var use_aegis: *const fn (*std.Build.Dependency, *std.Build.Module) void = undefined;
-
 /// lookout as the development build has it: the package, with the options passed on.
 fn lookoutPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Dependency {
     return b.dependency("lookout", .{ .target = target, .optimize = optimize, .@"macos-sdk" = macos_sdk_option, .@"bundled-macos-sdk" = bundled_sdk_option });
@@ -264,7 +258,7 @@ fn linkLike(published: *std.Build.Module, m: *std.Build.Module) void {
 /// an imported module keeps its own mode, so a ReleaseFast benchmark over
 /// the Debug module would time the Debug module. The filter is internal to
 /// lookout, so the filter benchmark builds it as a module of its own rather
-/// than reaching it through `lookout`. And shakedown, bound to lookout's aegis.
+/// than reaching it through `lookout`. And shakedown.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const package = lookoutPackage(b, target, optimize);
     const p = package.builder;
@@ -274,8 +268,7 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
         .optimize = optimize,
         .imports = lookoutImports(p, target, optimize),
     });
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-    use_aegis(shakedown, p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis"));
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "lookout", .module = package.module("lookout") },
         .{ .name = "filter", .module = filter },
