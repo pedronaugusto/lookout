@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-13
+
+### Changed
+
+- Pins airlock 0.3.1, sweep 0.2.2, aegis 0.1.3, reactor 0.2.3, preflight 0.4.1 and shakedown 0.3.2.
+
 ## [0.5.0] - 2026-10-13
 
 ### Breaking
@@ -692,7 +698,8 @@ First release.
   `inotify` backend is executed rather than merely compiled from a machine that
   is not Linux.
 
-[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/pedronaugusto/lookout/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/pedronaugusto/lookout/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/pedronaugusto/lookout/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/pedronaugusto/lookout/compare/v0.4.0...v0.4.1
