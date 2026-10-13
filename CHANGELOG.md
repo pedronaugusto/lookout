@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-13
+
 ### Breaking
 
 - The options `-Dmacos-sdk` and `-Dbundled-macos-sdk` are gone, and so is the pinned macOS SDK package. The FSEvents backend opens CoreServices from the system when the first watcher is made instead of linking it, so an Apple target links only libSystem, from what Zig ships, and a named Apple target builds on any host with no SDK. A system without CoreServices, or without a function lookout calls, makes `Watcher.init` return `error.BackendUnavailable`.
@@ -690,7 +692,8 @@ First release.
   `inotify` backend is executed rather than merely compiled from a machine that
   is not Linux.
 
-[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/pedronaugusto/lookout/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/pedronaugusto/lookout/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/pedronaugusto/lookout/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/pedronaugusto/lookout/compare/v0.3.0...v0.4.0
