@@ -37,13 +37,6 @@ const Source = shakedown.Source;
 /// records and small enough that a failing input is readable.
 const buffer_len = 512;
 
-/// Fills a prefix of `out` of any length with bytes, and answers its length.
-fn bytesInto(s: *Source, out: []u8) usize {
-    const len = gen.intRange(s, usize, 0, out.len);
-    s.bytes(out[0..len]);
-    return len;
-}
-
 /// Whether `needle` is a slice of `haystack` -- the invariant that a
 /// decoded name points into the input and not past it or beside it.
 fn inside(haystack: []const u8, needle: []const u8) bool {
@@ -73,7 +66,7 @@ fn splice(
         len += if (s.chance(750_000))
             encoder(s, out[len..])
         else
-            bytesInto(s, out[len..][0..@min(room, out.len - len)]);
+            gen.bytesInto(s, out[len..][0..@min(room, out.len - len)]).len;
     }
     return len;
 }
@@ -84,7 +77,7 @@ test "the inotify read buffer decodes or says why" {
 
 fn writeInotify(s: *Source, out: []u8) usize {
     var name: [24]u8 = undefined;
-    const name_len = bytesInto(s, &name);
+    const name_len = gen.bytesInto(s, &name).len;
     return inotify_records.encode(out, .{
         .wd = gen.int(s, i8),
         .mask = gen.int(s, u32),
@@ -128,7 +121,7 @@ fn writeWindows(s: *Source, out: []u8) usize {
     // An even length, because a whole number of UTF-16 code units is
     // what the kernel writes; the fuzzer reaches the odd ones by
     // damaging a header rather than by being handed one.
-    const name_len = bytesInto(s, &name) / 2 * 2;
+    const name_len = gen.bytesInto(s, &name).len / 2 * 2;
     return windows_records.encode(
         out,
         gen.int(s, u3),
@@ -168,7 +161,7 @@ test "the FSEvents delivery decodes or says why" {
 
 fn writeDelivery(s: *Source, out: []u8) usize {
     var path: [24]u8 = undefined;
-    const path_len = bytesInto(s, &path);
+    const path_len = gen.bytesInto(s, &path).len;
     return fsevents_records.encode(
         out,
         .fromRaw(gen.int(s, u2)),
@@ -991,7 +984,7 @@ fn fuzzCheckpoint(_: void, c: *Case) !void {
     var end: usize = 0;
     while (s.more(8)) {
         var chunk: [16]u8 = undefined;
-        const piece = if (s.chance(857_143)) chunk[0..bytesInto(s, &chunk)] else pieces[gen.intRange(s, usize, 0, pieces.len - 1)];
+        const piece = if (s.chance(857_143)) gen.bytesInto(s, &chunk) else pieces[gen.intRange(s, usize, 0, pieces.len - 1)];
         if (end + piece.len > buf.len) break;
         @memcpy(buf[end..][0..piece.len], piece);
         end += piece.len;
@@ -1020,7 +1013,7 @@ fn fuzzBaselineStorage(_: void, c: *Case) !void {
     const s = c.source;
     const gpa = testing.allocator;
     var buf: [2048]u8 = undefined;
-    const bytes = buf[0..bytesInto(s, &buf)];
+    const bytes = gen.bytesInto(s, &buf);
     // Generate a structured checksummed input as well: mutation alone cannot
     // find a cryptographic checksum or the whole JSON schema.
     if (gen.boolean(s)) {

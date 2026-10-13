@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The fuzz properties draw any bytes with shakedown's `gen.bytesInto`, where the package kept its own copy.
+
 ## [0.5.2] - 2026-10-14
 
 ### Changed
