@@ -3509,6 +3509,10 @@ test "a crash before checkpoint persistence replays the uncommitted delivery" {
     defer before.deinit();
     try f.write("delivered.txt", "one");
     try f.expectEvent("delivered.txt", .created);
+    // The write can reach the stream as more than one record (the creation,
+    // then its content): the checkpoint is taken once all of it is delivered,
+    // as a program takes it after handling what it was given.
+    try f.settle();
     var after = (try f.watcher.checkpoint(gpa)).?;
     defer after.deinit();
     const wanted = try f.path("delivered.txt");
