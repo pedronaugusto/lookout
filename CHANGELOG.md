@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-14
+
 ### Changed
 
 - The fuzz properties draw any bytes with shakedown's `gen.bytesInto`, where the package kept its own copy.
@@ -708,7 +710,8 @@ First release.
   `inotify` backend is executed rather than merely compiled from a machine that
   is not Linux.
 
-[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/pedronaugusto/lookout/compare/v0.5.1...v0.5.3
 [0.5.1]: https://github.com/pedronaugusto/lookout/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/pedronaugusto/lookout/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/pedronaugusto/lookout/compare/v0.4.1...v0.4.2
