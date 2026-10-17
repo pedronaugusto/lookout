@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The poll backend missed, now and then, a write that kept a file's size right after the file was written: a filesystem stamps times from a coarser clock than the one a scan reads, so the write before the scan could be stamped in the two-second tick before the scan's, which the scan took as old enough to trust, and the write after it with the same stamp. That tick is compared by content too.
+
 ## [0.5.3] - 2026-10-14
 
 ### Changed

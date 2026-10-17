@@ -88,13 +88,16 @@ test "polling racy entries compare bytes even when size and timestamps match" {
     defer gpa.free(file_path);
 
     // The clock is in the same two-second filesystem tick as the stamps,
-    // then crosses its edge.
-    for ([_]bool{ false, true }) |ctime_only| {
+    // then crosses its edge; or, as a filesystem's coarser clock trails the
+    // one the scan reads, the stamps are in the tick before the clock's.
+    for ([_]bool{ false, true }) |trailing| for ([_]bool{ false, true }) |ctime_only| {
         for (0..3) |scope| {
-            var clock: shakedown.Clock = .init(io, .{ .real = .fromNanoseconds(3 * std.time.ns_per_s + 500 * std.time.ns_per_ms) });
+            const now: i96 = if (trailing) 4 * std.time.ns_per_s + 5 * std.time.ns_per_ms else 3 * std.time.ns_per_s + 500 * std.time.ns_per_ms;
+            const stamp: i96 = if (trailing) 4 * std.time.ns_per_s - 10 * std.time.ns_per_ms else 2 * std.time.ns_per_s;
+            var clock: shakedown.Clock = .init(io, .{ .real = .fromNanoseconds(now) });
             var stamped: Stamped.L = .init(clock.io(), .{
-                .mtime_ns = if (ctime_only) 0 else 2 * std.time.ns_per_s,
-                .ctime_ns = if (ctime_only) 2 * std.time.ns_per_s else 0,
+                .mtime_ns = if (ctime_only) 0 else stamp,
+                .ctime_ns = if (ctime_only) stamp else 0,
             });
             const timed = stamped.io();
             try tmp.dir.writeFile(io, .{ .sub_path = "nested/file", .data = "one" });
@@ -124,7 +127,7 @@ test "polling racy entries compare bytes even when size and timestamps match" {
             try p.scan(timed, &batch);
             try testing.expectEqual(@as(usize, 0), batch.events.items.len);
         }
-    }
+    };
 }
 
 /// Releases the watch tables and the directory handles they hold open.

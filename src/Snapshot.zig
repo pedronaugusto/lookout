@@ -64,8 +64,12 @@ const timestamp_tick_ns = 2 * std.time.ns_per_s;
 
 /// Captures metadata and, for polling, content while its timestamp is racy.
 /// taken_ns is sampled before stat so a scan crossing a tick stays racy.
+/// A filesystem stamps times from a coarser clock than the one taken_ns is
+/// read from (a kernel tick of milliseconds behind it), so a write after
+/// the scan can be stamped in the tick before taken_ns's: that tick counts
+/// as racy too.
 pub fn capture(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat, taken_ns: i96, check_contents: bool, was_racy: bool) Meta {
-    const tick = @divFloor(taken_ns, timestamp_tick_ns);
+    const tick = @divFloor(taken_ns, timestamp_tick_ns) - 1;
     const racy = check_contents and stat.kind != .directory and
         (@divFloor(stat.mtime.nanoseconds, timestamp_tick_ns) >= tick or
             @divFloor(stat.ctime.nanoseconds, timestamp_tick_ns) >= tick);
@@ -286,12 +290,18 @@ test "racy content checks stop reading at the cap and after timestamps age" {
     try testing.expect(before.content_hash != null);
     try testing.expect(fio.count(.fileReadPositional) > 0);
 
+    // A scan in the next tick still finds it racy: the filesystem's clock
+    // trails the one the scan reads, and stamps a write after the scan in
+    // the tick before.
+    const next_tick = capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s + 5 * std.time.ns_per_ms, true, before.racy);
+    try testing.expect(next_tick.racy);
+
     // Even an entry aging on this scan needs its final content comparison.
-    const aged = capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s, true, before.racy);
+    const aged = capture(io, tmp.dir, "file", stat, 6 * std.time.ns_per_s, true, next_tick.racy);
     try testing.expect(!aged.racy);
     try testing.expect(!before.contentChanged(aged));
     const reads = fio.count(.fileReadPositional);
-    const quiet = capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s, true, aged.racy);
+    const quiet = capture(io, tmp.dir, "file", stat, 6 * std.time.ns_per_s, true, aged.racy);
     try testing.expect(!quiet.racy);
     try testing.expectEqual(reads, fio.count(.fileReadPositional));
 
