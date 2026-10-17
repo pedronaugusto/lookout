@@ -251,7 +251,10 @@ compiles the tests for macOS, Windows and every configured target without runnin
 them. The merge tier adds the Debug suite on `macos-latest` and `windows-latest`.
 The release tier runs the tests and examples in Debug and ReleaseSafe on all three
 hosts, plus ReleaseFast on Ubuntu; it compiles ReleaseSmall without running it, and
-runs ThreadSanitizer in Debug on Ubuntu.
+runs the hardened profile: `bay hardened` (safety on, `std.testing.allocator` on
+shakedown's quarantine, so a use after free faults at the line), `bay hardened-fuzz`
+(the properties under Zig's fuzzer) and `bay hardened-tsan` (the suite under
+ThreadSanitizer, on x86_64 or aarch64 Linux).
 
 `bay dev install` compiles the backend-bearing tests and library. CI uses it for
 `x86_64-linux-gnu`, `aarch64-linux-gnu`, `x86_64-linux-musl`, `x86_64-windows-gnu`,

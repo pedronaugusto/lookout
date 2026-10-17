@@ -69,17 +69,6 @@ pub fn dev(b: *std.Build, tools: type) void {
     // kernel one rather than to a weaker one of its own.
     //=====================================================================
 
-    // A watcher is handed its changes on a thread the platform owns and
-    // reads them on the caller's, and the suite writes to the tree from a
-    // thread of its own while it waits. Whether that crossing is free of
-    // races is a claim a race detector can check and a reader cannot:
-    // `bay test -Dthread-sanitizer`.
-    const thread_sanitizer = b.option(
-        bool,
-        "thread-sanitizer",
-        "Build the tests with ThreadSanitizer",
-    ) orelse false;
-
     const tests = b.addTest(.{
         .name = "lookout-tests",
         .filters = if (b.option([]const u8, "test-filter", "Select tests by name")) |filter| &.{filter} else &.{},
@@ -88,7 +77,6 @@ pub fn dev(b: *std.Build, tools: type) void {
             .target = target,
             .optimize = optimize,
             .link_libc = darwin,
-            .sanitize_thread = if (thread_sanitizer) true else null,
             .imports = imports,
         }),
     });
@@ -162,6 +150,13 @@ pub fn dev(b: *std.Build, tools: type) void {
     // `--smoke`, judging nothing.
     preflight.addCi(b, p, .{
         .tests = test_step,
+        // The release tier fuzzes the readers' properties and runs the suite
+        // under ThreadSanitizer. A watcher is handed its changes on a thread
+        // the platform owns and reads them on the caller's, and the suite
+        // writes to the tree from a thread of its own while it waits: whether
+        // that crossing is free of races is a claim a race detector checks and
+        // a reader cannot (`bay hardened-tsan` on Linux).
+        .hardened = .{ .fuzz_step = "test", .tsan_step = "test" },
         .portable_tests = true,
         .test_log_level = .info,
         .bench = .{
