@@ -144,6 +144,23 @@ that the loop absorbs.
   conservative tick checks entries whose times are not strictly older than their
   snapshot by content until they age, so a change within the timestamp's
   granularity is not missed.
+- **FSEvents subscribes first and seeds after.** Its stream starts before the
+  walk that tells an existing path from a new one, so a change made while the
+  walk runs is in the stream, and `add` returns once the stream runs: the walk is
+  taken by `poll`, a slice of about two milliseconds at a time between
+  deliveries, one directory listing at a time (`walk.Walker`). Seeding is kernel
+  bound, about 58 ms per 50,000 files, which a large tree paid inside `add`
+  before. What the walk has not reached is decided by the file: born at or
+  after the stream started is a creation, changed since is a change, untouched
+  since is history the stream replayed, gone is a removal. An entry the walk
+  itself reads as changed since the stream started is left to that change's
+  record. The times are the filesystem's, against the system's real-time
+  clock, which APFS stamps in nanoseconds and never behind (measured); a volume
+  with coarser stamps widens the window by its grain, so the doubt goes to
+  reporting. A resumed watch is walked inside `add`, since the comparison with
+  its checkpoint's baseline is what it reports first, and a watch still walking
+  has no checkpoint. The other backends walk to subscribe (a registration per
+  directory), so their walk stays inside `add`.
 - **`kqueue` and polling compare listings**; `inotify` and Windows are told the
   name. The comparison is the same one `Baseline` offers the caller, kept by the
   watcher instead.

@@ -51,6 +51,7 @@ const path_cmp = @import("../path.zig");
 const records = @import("fsevents/records.zig");
 const trace = @import("../trace.zig");
 const walk = @import("../walk.zig");
+const filesystem = @import("../filesystem.zig");
 const timing = @import("../timing.zig");
 const Checkpoint = @import("../Checkpoint.zig");
 const Options = @import("../options.zig").Options;
@@ -109,6 +110,27 @@ pairing: records.Pairing,
 /// window as `@import("../options.zig").Options.latency`; `NoDefer` still makes its
 /// first event immediate.
 stream_latency: f64,
+/// The seeding walks still under way, by watch. `add` starts the stream
+/// and returns; what the watch is to know is walked by `wait`, a slice
+/// at a time between deliveries. See `seedSlice`.
+seeding: std.array_hash_map.Auto(WatchId, Seeding) = .empty,
+/// How much of a seeding walk one slice takes: `seed_slice_ns` of time,
+/// or `seed_slice_dirs` directories when set, which tests do to stop a
+/// walk part of the way through.
+seed_slice_dirs: ?usize = null,
+
+/// A slice of a seeding walk takes about this long before `wait` looks
+/// for a delivery again, so a change made while a large tree is walked
+/// waits no longer than this, and the walk costs no more than one listing
+/// call per directory more than it did in one piece.
+const seed_slice_ns = 2 * std.time.ns_per_ms;
+
+/// A watch's seeding walk, while it is under way.
+const Seeding = struct {
+    walker: walk.Walker,
+    /// The walk found a directory on another device. See `seedSlice`.
+    cross_device: bool = false,
+};
 
 /// Fresh streams replay a conservative device boundary. Remember the initial
 /// metadata until the path first changes, so old accumulated flags do not
@@ -298,6 +320,15 @@ const Stream = struct {
     /// already knows what was made while nobody watched, and a record
     /// from the log for such a path is its creation, not a modification.
     before: ?path_cmp.Set(void) = null,
+    /// When the stream started, by the system's real-time clock, which is
+    /// the clock a file's times are stamped from. A path the seeding walk
+    /// has not reached yet is judged by its own times against this. See
+    /// `aheadOfWalk`.
+    started_ns: i128 = 0,
+    /// How coarse the volume's file times are: a time this much before
+    /// `started_ns` may still be a change made after it, and what the
+    /// slack decides errs towards reporting. See `filesystem.stampGrainNs`.
+    stamp_grain_ns: u64 = 0,
     /// Set, with release, once the fields the delivery thread reads are
     /// written, and read with acquire by every delivery. FSEvents orders
     /// its start before its first callback, but inside the framework,
@@ -318,6 +349,12 @@ const Stream = struct {
     /// scope, and not excluded by its filter.
     fn keeps(st: *const Stream, subject: []const u8) bool {
         return st.wants(subject) and !st.filter.excludes(st.root, subject);
+    }
+
+    /// The earliest file time that may stamp a change made after the
+    /// stream started.
+    fn since(st: *const Stream) i128 {
+        return st.started_ns - st.stamp_grain_ns;
     }
 
     fn wants(st: *const Stream, subject: []const u8) bool {
@@ -430,6 +467,8 @@ fn latencySeconds(ms: u32) f64 {
 pub fn deinit(f: *FsEvents, io: Io) void {
     for (f.streams.values()) |stream| f.destroy(stream);
     f.streams.deinit(f.gpa);
+    for (f.seeding.values()) |*seeding| seeding.walker.deinit(f.gpa);
+    f.seeding.deinit(f.gpa);
     f.staging.deinit(f.gpa);
     if (f.restarting) |*checkpoint| checkpoint.deinit();
     f.gpa.free(f.resume_used);
@@ -460,8 +499,12 @@ pub fn fd(f: *const FsEvents) ?posix.fd_t {
 /// Copies only polling-thread state. Callback bytes are still in the log
 /// beyond each stream's cursor and need no snapshot copy. A retained failed
 /// drain has not committed its cursor and must be retried first.
+///
+/// A watch still being seeded has no baseline to hand over yet, so there is
+/// no checkpoint until `poll` has finished walking it.
 pub fn capture(f: *const FsEvents, gpa: Allocator, batch: *const Batch, include_ready: bool, roots: []const contract.WatchInfo) Allocator.Error!?Checkpoint {
     if (f.staging.items.len != 0 or f.staging_overflowed) return null;
+    if (f.seeding.count() != 0) return null;
     var watches: std.ArrayList(checkpoint_format.Watch) = .empty;
     defer watches.deinit(gpa);
     defer for (watches.items) |watch| {
@@ -557,24 +600,45 @@ pub fn add(
 
 /// The caller's root identifies a resume watch even when its registration
 /// is parked on an ancestor while that root is absent.
+///
+/// The stream starts first and the walk that seeds what the watch knows
+/// comes after it, so a change made while the tree is walked is in the
+/// stream. A fresh watch is walked by `wait`, a slice at a time, and `add`
+/// returns once the stream runs; a watch resumed from a checkpoint is
+/// walked here, since what it reports at once is the comparison of that
+/// walk with the checkpoint's baseline.
 pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested: []const u8, options: AddOptions, batch: *Batch) contract.AddError!void {
     try f.streams.ensureUnusedCapacity(f.gpa, 1);
-    var stream = try f.startStream(io, id, abs_path, requested, options, false);
+    try f.seeding.ensureUnusedCapacity(f.gpa, 1);
+    const stream = try f.startStream(io, id, abs_path, requested, options, false);
     // The table owns the started stream and its initial state. If the
     // baseline cannot be built, remove stops delivery before releasing
     // the stream, its names, and counts no other watch needs.
     f.streams.putAssumeCapacity(id, stream);
     errdefer f.remove(io, id);
     errdefer batch.discard(f.gpa, id);
-    const cross_device = f.seedKnown(io, stream) catch |err| switch (err) {
+    // The root itself, before anything below it: FSEvents names the
+    // watched path as readily as it names an entry, and a path the
+    // backend has never heard of is a path it reports as created. This
+    // is the whole of the seeding for a watch on a single file.
+    f.rememberInitial(io, stream, stream.root, null) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.Unexpected,
     };
-    if (cross_device) {
-        if (stream.resume_index != null) return error.InvalidCheckpoint;
-        try batch.deferChange(f.gpa, io, id, stream.root, .overflow, null, stream.rootTarget());
-        try f.useLiveStream(io, id);
-        stream = f.streams.get(id).?;
+    if (stream.scope == .file) return;
+    f.seeding.putAssumeCapacity(id, .{ .walker = try .init(f.gpa, stream.root) });
+    if (stream.resume_index == null) {
+        trace.log("fsevents seeding watch={d} root={s}", .{ id.raw(), stream.root });
+        return;
+    }
+    while (f.seedStep(io, id) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Unexpected,
+    }) {}
+    if (f.seeding.fetchOrderedRemove(id)) |seeding| {
+        var walker = seeding.value.walker;
+        walker.deinit(f.gpa);
+        if (seeding.value.cross_device) return error.InvalidCheckpoint;
     }
     if (stream.resume_index) |index| {
         const saved = f.restarting.?.state.value.watches[index];
@@ -667,6 +731,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
         const identity = volume.identity orelse return error.InvalidCheckpoint;
         if (!Volume.matches(identity, f.restarting.?.state.value.watches[index].identity)) return error.InvalidCheckpoint;
     }
+    const started_ns = realNow();
     const since = if (resumed) |index| f.restarting.?.state.value.watches[index].cursor else if (!force_live and volume.identity != null)
         cs.FSEventsGetLastEventIdForDeviceBeforeTime(volume.device, cs.CFAbsoluteTimeGetCurrent() + 978307200)
     else
@@ -693,6 +758,8 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
         .resume_index = resumed,
         .resumed = resumed != null,
         .replayed = null,
+        .started_ns = started_ns,
+        .stamp_grain_ns = filesystem.stampGrainNs(f.gpa, stream_path),
     };
     stream.published.store(true, .release);
 
@@ -773,6 +840,10 @@ fn useLiveStream(f: *FsEvents, io: Io, id: WatchId) contract.AddError!void {
 pub fn remove(f: *FsEvents, io: Io, id: WatchId) void {
     _ = io; // Every backend takes it; this one closes nothing through it.
     const entry = f.streams.fetchSwapRemove(id) orelse return;
+    if (f.seeding.fetchOrderedRemove(id)) |seeding| {
+        var walker = seeding.value.walker;
+        walker.deinit(f.gpa);
+    }
     f.budget.release(*const FsEvents, stillCounted, entry.value.root, f);
     f.forgetWatch(id);
     f.destroy(entry.value);
@@ -821,10 +892,11 @@ pub fn refilter(f: *FsEvents, io: Io, id: WatchId, next: lookout.Filter, batch: 
         stream.filter.deinit();
         stream.filter = previous;
     }
-    const cross_device = f.seedKnown(io, stream) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.Unexpected,
-    };
+    // What the new filter lets in is walked again, as a fresh watch is:
+    // by `wait`, behind the stream. A walk under way starts over.
+    if (stream.scope != .file) try f.seeding.ensureUnusedCapacity(f.gpa, 1);
+    var walker: ?walk.Walker = if (stream.scope != .file) try .init(f.gpa, stream.root) else null;
+    errdefer if (walker) |*w| w.deinit(f.gpa);
     var i: usize = 0;
     while (i < f.known.count()) {
         const key = f.known.keys()[i];
@@ -845,10 +917,14 @@ pub fn refilter(f: *FsEvents, io: Io, id: WatchId, next: lookout.Filter, batch: 
         }
     };
     f.budget.reread(NewlyReached, NewlyReached.includes, io, .{ .stream = stream, .old = previous });
-    if (cross_device) {
-        try batch.deferChange(f.gpa, io, id, stream.root, .overflow, null, stream.rootTarget());
-        try f.useLiveStream(io, id);
+    if (walker) |fresh| {
+        if (f.seeding.fetchOrderedRemove(id)) |old| {
+            var stale = old.value.walker;
+            stale.deinit(f.gpa);
+        }
+        f.seeding.putAssumeCapacity(id, .{ .walker = fresh });
     }
+    _ = batch;
     previous.deinit();
 }
 
@@ -979,9 +1055,16 @@ fn collect(f: *FsEvents, io: Io, batch: *Batch, wakeup: *reactor.Wake, until: Io
             try f.resolveHeld(io, batch);
             if (woken or batch.revision != before) return;
         }
-        switch (try f.arrival(io, wakeup, until)) {
+        // With nothing to report, a seeding walk takes a slice, and the
+        // look for a delivery after it does not wait while there is more
+        // to walk: a change made meanwhile is reported a slice later at
+        // most, and a `poll` with a deadline walks until it.
+        const walking = try f.seedSlice(io, batch);
+        if (batch.revision != before) return;
+        switch (try f.arrival(io, wakeup, if (walking) timing.within(0) else until)) {
             .delivery => {},
-            .quiet, .woken => return,
+            .woken => return,
+            .quiet => if (!walking or timing.expired(io, until)) return,
         }
     }
 }
@@ -1308,18 +1391,25 @@ fn reportPlain(
     record: Record,
     stream: *const Stream,
 ) contract.PollError!void {
-    // While the log is read back after a resume, a path is new if the
-    // checkpoint's baseline did not hold it, whatever the walk that seeded
-    // the stream found since.
-    const recalled = if (stream.before) |before| before.contains(record.path) else true;
-    const seen = recalled and f.known.contains(.{ .id = record.id, .path = record.path });
+    const seen, const gone = switch (try f.priorOf(record, stream)) {
+        .known => .{ true, false },
+        .unknown => .{ false, false },
+        .gone => .{ true, true },
+        .replayed => {
+            trace.log("fsevents drop ahead-untouched path={s}", .{record.path});
+            return;
+        },
+        .unanswered => return f.incomplete(io, batch, stream),
+    };
     // A known path with no removal or rename flag, and a newly-created
     // path with neither, are present as far as this record can say. A
     // later removal races any `stat` made here in exactly the same way
     // and will carry its own record. Save the filesystem query for the
     // ambiguous cases: accumulated removal flags and an unknown path
     // whose flags do not say it was created.
-    const there = if (needsExistenceCheck(record.flags, seen))
+    const there = if (gone)
+        false
+    else if (needsExistenceCheck(record.flags, seen))
         pathExists(io, record.path) orelse return f.incomplete(io, batch, stream)
     else
         true;
@@ -1405,6 +1495,89 @@ fn reportPlain(
     } else {
         trace.log("fsevents drop dir-metadata path={s}", .{record.path});
     }
+}
+
+/// What lookout knew of a record's path before the record.
+const Prior = enum {
+    known,
+    unknown,
+    /// Not there now, and there before as far as anything says.
+    gone,
+    /// There before and untouched since its stream started: the record
+    /// says nothing new.
+    replayed,
+    /// The file system would not say.
+    unanswered,
+};
+
+fn priorOf(f: *FsEvents, record: Record, stream: *const Stream) Allocator.Error!Prior {
+    // While the log is read back after a resume, a path is new if the
+    // checkpoint's baseline did not hold it, whatever the walk that seeded
+    // the stream found since.
+    const recalled = if (stream.before) |before| before.contains(record.path) else true;
+    if (!recalled) return .unknown;
+    if (f.known.contains(.{ .id = record.id, .path = record.path })) return .known;
+    // A path the seeding walk has not reached is not known yet whether it
+    // was there before the watch or not, and the file says.
+    if (!f.aheadOfWalk(record.id, record.path)) return .unknown;
+    return switch (judgeAhead(f.gpa, stream, record.path)) {
+        .created => .unknown,
+        .existed => {
+            try f.remember(record.id, record.path);
+            return .known;
+        },
+        .gone => .gone,
+        .untouched => .replayed,
+        .unknown => .unanswered,
+    };
+}
+
+/// Whether the seeding walk of watch `id` has yet to list the folder
+/// `subject` is in.
+fn aheadOfWalk(f: *const FsEvents, id: WatchId, subject: []const u8) bool {
+    const seeding = f.seeding.getPtr(id) orelse return false;
+    return seeding.walker.ahead(subject);
+}
+
+/// What a path ahead of the seeding walk was, read from its own times
+/// against the moment its stream started, since nothing remembered says.
+const Ahead = enum {
+    /// Made since the stream started: its creation.
+    created,
+    /// There before, and changed since: a change to a known path.
+    existed,
+    /// There before and untouched since: the record is history the
+    /// stream replayed from before it started.
+    untouched,
+    /// Not there now. Whether it was before is not known, so it is
+    /// reported as a removal, which asks no more of a caller than to
+    /// look again.
+    gone,
+    /// The file system would not say.
+    unknown,
+};
+
+/// A file born a stamp's slack before its stream started or later reads as
+/// made since, and one whose status changed within that slack as changed:
+/// on a volume with coarse stamps, the doubt goes to reporting it.
+fn judgeAhead(gpa: Allocator, stream: *const Stream, subject: []const u8) Ahead {
+    const name = gpa.dupeSentinel(u8, subject, 0) catch return .unknown;
+    defer gpa.free(name);
+    var st: std.c.Stat = undefined;
+    if (std.c.fstatat(std.c.AT.FDCWD, name, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) {
+        return switch (std.c.errno(-1)) {
+            .NOENT, .NOTDIR => .gone,
+            else => .unknown,
+        };
+    }
+    const since = stream.since();
+    if (nanoseconds(st.birthtime()) >= since) return .created;
+    if (nanoseconds(st.ctime()) >= since) return .existed;
+    return .untouched;
+}
+
+fn nanoseconds(t: std.c.timespec) i128 {
+    return @as(i128, t.sec) * std.time.ns_per_s + t.nsec;
 }
 
 fn needsExistenceCheck(flags: u32, seen: bool) bool {
@@ -1494,6 +1667,15 @@ fn joined(
         trace.log("fsevents push renamed path={s} from={s}", .{ to, from });
         try batch.pushRename(f.gpa, io, id, to, from, target);
         try f.rekey(id, from, to);
+        // A name the seeding walk had not reached is known from here on
+        // all the same, and what it was still to list under the old name
+        // it lists under the new one -- or, the old name's folder not
+        // listed yet, it lists the folder where it now is.
+        try f.remember(id, to);
+        if (f.seeding.getPtr(id)) |seeding| {
+            try seeding.walker.rename(f.gpa, from, to);
+            if (target == .directory) try seeding.walker.add(f.gpa, to);
+        }
         return;
     }
     // Whatever was remembered under the old name was remembered under a
@@ -1576,22 +1758,29 @@ fn rememberNew(f: *FsEvents, id: WatchId, subject: []const u8) Allocator.Error!?
 
 /// Seeding on an ordinary add is a baseline, not a change to report.
 /// `listed` is the metadata the walk read with the name, if it could.
+///
+/// The walk runs behind the stream, so what it finds may already carry a
+/// change made since the stream started, whose record is on its way: an
+/// entry the walk reads as changed since then is left to that record,
+/// unknown if it was made since (its record says `created`) and known with
+/// nothing to compare if it was there before (its record says what
+/// changed). The root is the watch's own, there when `add` was asked.
 fn rememberInitial(f: *FsEvents, io: Io, stream: *const Stream, subject: []const u8, listed: ?Initial) !void {
     if (stream.resumed) return f.remember(stream.id, subject);
-    const initial = try f.rememberNew(stream.id, subject) orelse return;
-    if (listed) |meta| {
-        initial.* = meta;
-        return;
-    }
-    const stat = Io.Dir.cwd().statFile(io, subject, .{ .follow_symlinks = false }) catch |err| {
-        // Gone already, or not remembered at all: drop the entry just made.
-        f.paths.remove(f.known.pop().?.key.history.?);
-        switch (err) {
-            error.FileNotFound, error.NotDir => return,
-            else => return err,
-        }
+    const meta: Initial = listed orelse if (Io.Dir.cwd().statFile(io, subject, .{ .follow_symlinks = false })) |stat|
+        .of(stat)
+    else |err| switch (err) {
+        // Gone already: nothing to remember.
+        error.FileNotFound, error.NotDir => return,
+        else => return err,
     };
-    initial.* = .of(stat);
+    const is_root = path_cmp.eql(subject, stream.root);
+    if (!is_root and meta.ctime_ns >= stream.since()) switch (judgeAhead(f.gpa, stream, subject)) {
+        .created, .gone => return,
+        .existed, .untouched, .unknown => return f.remember(stream.id, subject),
+    };
+    const initial = try f.rememberNew(stream.id, subject) orelse return;
+    initial.* = meta;
 }
 
 /// Old replay flags on an unchanged seeded path say nothing new. A missing
@@ -1714,31 +1903,24 @@ fn rekey(f: *FsEvents, id: WatchId, old: []const u8, new: []const u8) Allocator.
     committed = true;
 }
 
-/// Walks a watch once, so that everything already there is known and the
-/// first thing to happen to it is not reported as its creation.
+/// Lists the next folder of watch `id`'s seeding walk, and answers whether
+/// there is more. The walk is what makes everything already there known,
+/// so the first thing to happen to it is not reported as its creation.
 ///
 /// Names and initial metadata only: no descriptor is kept, which is the
 /// difference between this and what the `kqueue` backend has to do.
-fn seedKnown(f: *FsEvents, io: Io, stream: *const Stream) !bool {
-    // The root itself, before anything below it: FSEvents names the
-    // watched path as readily as it names an entry, and a path the
-    // backend has never heard of is a path it reports as created. This
-    // is the whole of the seeding for a watch on a single file.
-    try f.rememberInitial(io, stream, stream.root, null);
-    if (stream.scope == .file) return false;
-    try f.budget.begin(stream.root);
-    defer f.budget.end();
-    trace.log("fsevents seed walk root={s}", .{stream.root});
-
-    const Seeding = struct {
+fn seedStep(f: *FsEvents, io: Io, id: WatchId) !bool {
+    const seeding = f.seeding.getPtr(id).?;
+    const stream = f.streams.get(id).?;
+    const Seeding_ = struct {
         f: *FsEvents,
         io: Io,
         stream: *const Stream,
-        cross_device: bool = false,
+        cross_device: *bool,
 
         const Self = @This();
 
-        fn visit(s: *Self, entry: walk.Entry) anyerror!walk.Step {
+        fn visit(s: *const Self, entry: walk.Entry) anyerror!walk.Step {
             try s.f.budget.found(entry.dir, entry.name);
             if (s.stream.filter.prunes(s.stream.root, entry.path)) {
                 trace.log("fsevents seed filtered {s}", .{entry.path});
@@ -1748,23 +1930,91 @@ fn seedKnown(f: *FsEvents, io: Io, stream: *const Stream) !bool {
                 const name = try s.f.gpa.dupeSentinel(u8, entry.path, 0);
                 defer s.f.gpa.free(name);
                 const device = Volume.deviceOf(name) orelse {
-                    s.cross_device = true;
+                    s.cross_device.* = true;
                     return .over;
                 };
-                if (device != s.stream.volume.device) s.cross_device = true;
+                if (device != s.stream.volume.device) s.cross_device.* = true;
             }
             trace.log("fsevents seed remembered {s}", .{entry.path});
             try s.f.rememberInitial(s.io, s.stream, entry.path, entry.meta);
-            if (s.stream.scope != .tree) return .over;
-            // Only a folder the walk goes into is counted again from it: one
-            // it passes over keeps the count the watches that reach it keep.
-            if (entry.kind == .directory) try s.f.budget.begin(entry.path);
-            return .into;
+            return if (s.stream.scope == .tree) .into else .over;
         }
     };
-    var seeding: Seeding = .{ .f = f, .io = io, .stream = stream };
-    try walk.treeWithMeta(*Seeding, Seeding.visit, f.gpa, io, stream.root, &seeding);
-    return seeding.cross_device;
+    // Counted from this listing: the walk is the truth of what a folder
+    // holds, and only a folder the walk goes into is counted again from
+    // it; one it passes over keeps the count the watches that reach it
+    // keep. See `Budget.begin`.
+    const walker = &seeding.walker;
+    if (walker.done()) return false;
+    try f.budget.begin(walker.frontier.items[walker.next]);
+    defer f.budget.end();
+    const seeder: Seeding_ = .{ .f = f, .io = io, .stream = stream, .cross_device = &seeding.cross_device };
+    return walker.step(*const Seeding_, true, Seeding_.visit, f.gpa, io, &seeder);
+}
+
+/// Walks a slice of every seeding walk under way, and answers whether
+/// any is left. A walk that ends is done with here: one that found a
+/// directory on another device takes the stream that sees across devices,
+/// with an `overflow` for what that stream could not see before it ran.
+///
+/// One walk at a time, the oldest first. A walk that fails for anything
+/// but memory says `overflow` and stops, which is what it is: what it did
+/// not reach is not known, and the caller is told to look again.
+fn seedSlice(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!bool {
+    return f.seed(io, batch, false);
+}
+
+/// Walks every seeding walk under way to its end, as `wait` would over as
+/// many slices as it takes.
+pub fn seedWhole(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!void {
+    const left = try f.seed(io, batch, true);
+    assert(!left);
+}
+
+fn seed(f: *FsEvents, io: Io, batch: *Batch, whole: bool) contract.PollError!bool {
+    if (f.seeding.count() == 0) return false;
+    const until = Io.Timestamp.now(io, .awake).addDuration(.fromNanoseconds(seed_slice_ns));
+    var dirs: usize = 0;
+    while (f.seeding.count() != 0) {
+        const id = f.seeding.keys()[0];
+        const more = f.seedStep(io, id) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => fail: {
+                const stream = f.streams.get(id).?;
+                trace.log("fsevents seed failed root={s} err={s}", .{ stream.root, @errorName(err) });
+                try batch.push(f.gpa, io, id, stream.root, .overflow, stream.rootTarget());
+                break :fail false;
+            },
+        };
+        dirs += 1;
+        if (!more) {
+            var seeding = f.seeding.fetchOrderedRemove(id).?.value;
+            seeding.walker.deinit(f.gpa);
+            const stream = f.streams.get(id).?;
+            trace.log("fsevents seeded watch={d} known={d}", .{ id.raw(), f.known.count() });
+            if (seeding.cross_device) {
+                try batch.push(f.gpa, io, id, stream.root, .overflow, stream.rootTarget());
+                f.useLiveStream(io, id) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.Unexpected,
+                };
+            }
+            continue;
+        }
+        if (whole) continue;
+        if (f.seed_slice_dirs) |limit| {
+            if (dirs >= limit) break;
+        } else if (Io.Timestamp.now(io, .awake).nanoseconds >= until.nanoseconds) break;
+    }
+    return f.seeding.count() != 0;
+}
+
+/// The system's real-time clock, in nanoseconds: the clock a file's times
+/// are stamped from, which a test's `Io` may not keep.
+fn realNow() i128 {
+    var now: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.REALTIME, &now) != 0) return 0;
+    return @as(i128, now.sec) * std.time.ns_per_s + now.nsec;
 }
 
 /// Unknown is distinct from absent: it cannot decide a rename or removal.
@@ -1787,7 +2037,7 @@ test "the arrival wake is closed on exec" {
     try std.testing.expect(std.c.fcntl(f.sink.arrival.handle(), c.f_getfd, @as(c_int, 0)) & c.fd_cloexec != 0);
 }
 
-test "FSEvents refuses a watch whose initial names could not be remembered" {
+test "a seeding walk that runs out of memory leaves no watch behind at add, and finishes when retried" {
     const io = std.testing.io;
     const testing = std.testing;
     const gpa = testing.allocator;
@@ -1807,10 +2057,19 @@ test "FSEvents refuses a watch whose initial names could not be remembered" {
         var batch = Batch.init(.{});
         defer batch.deinit(gpa);
         if (f.add(io, .fromRaw(0), root, .{ .recursive = true }, &batch)) |_| {
-            if (failing.has_induced_failure) std.debug.print("add succeeded after allocation {d} failed, with {d} remembered names\n", .{ fail_index, f.known.count() });
-            try testing.expectEqual(false, failing.has_induced_failure);
+            // The walk behind the stream fails part of the way through, or
+            // not; one that failed goes on from where it was.
+            const seeded = if (f.seedWhole(io, &batch)) |_| true else |err| fail: {
+                try testing.expectEqual(error.OutOfMemory, err);
+                break :fail false;
+            };
+            const induced = failing.has_induced_failure;
+            f.gpa = gpa;
+            f.budget.gpa = gpa;
+            if (!seeded) try f.seedWhole(io, &batch);
             try testing.expectEqual(@as(usize, 4), f.known.count());
-            break;
+            try testing.expectEqual(@as(usize, 0), f.seeding.count());
+            if (!induced) break;
         } else |err| {
             try testing.expectEqual(error.OutOfMemory, err);
             try testing.expectEqual(@as(usize, 0), f.streams.count());
@@ -1818,6 +2077,147 @@ test "FSEvents refuses a watch whose initial names could not be remembered" {
             try testing.expectEqual(@as(usize, 0), f.budget.counts.count());
         }
     }
+}
+
+/// What `batch` holds for `subject`, if anything.
+fn kindAt(batch: *const Batch, subject: []const u8) ?lookout.Kind {
+    for (batch.events.items) |event| {
+        if (path_cmp.eql(event.path, subject)) return event.kind;
+    }
+    return null;
+}
+
+test "add returns before its walk, and a path the walk has not reached is judged by its own times" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "a/b");
+    for ([_][]const u8{ "a/b/old", "a/b/kept", "a/b/gone" }) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    var names: [4][]u8 = undefined;
+    for (&names, [_][]const u8{ "a/b/old", "a/b/kept", "a/b/gone", "a/b/new" }) |*name, sub| name.* = try std.Io.Dir.path.join(gpa, &.{ root, sub });
+    defer for (names) |name| gpa.free(name);
+    const old, const kept, const gone, const new = names;
+
+    var f = try FsEvents.init(gpa, io, .{});
+    defer f.deinit(io);
+    f.seed_slice_dirs = 1;
+    var batch = Batch.init(.{});
+    defer batch.deinit(gpa);
+    const id: WatchId = .fromRaw(0);
+    try f.add(io, id, root, .{ .recursive = true }, &batch);
+    // The stream runs; nothing below the root is known yet.
+    try testing.expectEqual(@as(usize, 1), f.seeding.count());
+    try testing.expect(try f.capture(gpa, &batch, true, &.{}) == null);
+    try testing.expect(try f.seedSlice(io, &batch));
+    try testing.expect(f.aheadOfWalk(id, old));
+    try testing.expect(!f.known.contains(.{ .id = id, .path = old }));
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/b/old", .data = "changed" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/b/new", .data = "made" });
+    try tmp.dir.deleteFile(io, "a/b/gone");
+    try synthesize(gpa, f.streams.get(id).?, &.{
+        .{ .path = old, .flags = flag.item_created | flag.item_modified },
+        .{ .path = kept, .flags = flag.item_created | flag.item_modified },
+        .{ .path = gone, .flags = flag.item_removed },
+        .{ .path = new, .flags = flag.item_created | flag.item_modified },
+    });
+    try f.drain(io, &batch);
+    try testing.expectEqual(lookout.Kind.modified, kindAt(&batch, old).?);
+    try testing.expectEqual(lookout.Kind.removed, kindAt(&batch, gone).?);
+    try testing.expectEqual(lookout.Kind.created, kindAt(&batch, new).?);
+    // Untouched since the stream started: history it replayed.
+    try testing.expectEqual(@as(?lookout.Kind, null), kindAt(&batch, kept));
+
+    // The walk reaches them after, and reports nothing again.
+    const reported = batch.events.items.len;
+    try f.seedWhole(io, &batch);
+    try testing.expectEqual(@as(usize, 0), f.seeding.count());
+    try testing.expectEqual(reported, batch.events.items.len);
+    try testing.expect(f.known.contains(.{ .id = id, .path = kept }));
+    try testing.expect(f.known.contains(.{ .id = id, .path = new }));
+}
+
+test "what the walk finds changed since its stream started is left to the change's record" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "a");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/old", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/kept", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const old = try std.Io.Dir.path.join(gpa, &.{ root, "a/old" });
+    defer gpa.free(old);
+    const new = try std.Io.Dir.path.join(gpa, &.{ root, "a/new" });
+    defer gpa.free(new);
+    const kept = try std.Io.Dir.path.join(gpa, &.{ root, "a/kept" });
+    defer gpa.free(kept);
+
+    var f = try FsEvents.init(gpa, io, .{});
+    defer f.deinit(io);
+    var batch = Batch.init(.{});
+    defer batch.deinit(gpa);
+    const id: WatchId = .fromRaw(0);
+    try f.add(io, id, root, .{ .recursive = true }, &batch);
+    // Written after `add` returned and before the walk listed the folder:
+    // the walk reads the changed file.
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/old", .data = "changed" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/new", .data = "made" });
+    try f.seedWhole(io, &batch);
+    try testing.expect(!f.known.contains(.{ .id = id, .path = new }));
+    try testing.expectEqual(@as(?Initial, null), f.known.get(.{ .id = id, .path = old }).?);
+    try testing.expect(f.known.get(.{ .id = id, .path = kept }).? != null);
+    try synthesize(gpa, f.streams.get(id).?, &.{
+        .{ .path = old, .flags = flag.item_created | flag.item_modified },
+        .{ .path = new, .flags = flag.item_created | flag.item_modified },
+    });
+    try f.drain(io, &batch);
+    try testing.expectEqual(lookout.Kind.modified, kindAt(&batch, old).?);
+    try testing.expectEqual(lookout.Kind.created, kindAt(&batch, new).?);
+}
+
+test "a folder renamed before the walk lists it is listed where it went" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "a/deep");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/deep/file", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const from = try std.Io.Dir.path.join(gpa, &.{ root, "a" });
+    defer gpa.free(from);
+    const to = try std.Io.Dir.path.join(gpa, &.{ root, "z" });
+    defer gpa.free(to);
+    const moved = try std.Io.Dir.path.join(gpa, &.{ root, "z/deep/file" });
+    defer gpa.free(moved);
+
+    var f = try FsEvents.init(gpa, io, .{});
+    defer f.deinit(io);
+    f.seed_slice_dirs = 1;
+    var batch = Batch.init(.{});
+    defer batch.deinit(gpa);
+    const id: WatchId = .fromRaw(0);
+    try f.add(io, id, root, .{ .recursive = true }, &batch);
+    // The root is listed, `a` known and not yet listed.
+    try testing.expect(try f.seedSlice(io, &batch));
+    try tmp.dir.rename("a", tmp.dir, "z", io);
+    try synthesize(gpa, f.streams.get(id).?, &.{
+        .{ .path = from, .flags = flag.item_renamed | flag.item_is_dir },
+        .{ .path = to, .flags = flag.item_renamed | flag.item_is_dir },
+    });
+    try f.drain(io, &batch);
+    try testing.expectEqual(lookout.Kind.renamed, kindAt(&batch, to).?);
+    try f.seedWhole(io, &batch);
+    // Known under its new name, so a write to it is a change, not a creation.
+    try testing.expect(f.known.get(.{ .id = id, .path = moved }).? != null);
 }
 
 test "seeding remembers each entry with the metadata an lstat reads" {
@@ -1837,6 +2237,7 @@ test "seeding remembers each entry with the metadata an lstat reads" {
     var batch = Batch.init(.{});
     defer batch.deinit(gpa);
     try f.add(io, .fromRaw(0), root, .{ .recursive = true }, &batch);
+    try f.seedWhole(io, &batch);
     // A replayed record is compared with a later lstat: the seeded value
     // must be exactly what that lstat reads for an unchanged entry.
     try testing.expectEqual(@as(usize, 6), f.known.count());
@@ -2080,6 +2481,7 @@ test "allocation failure during delivery retains FSEvents bytes and position" {
         defer batch.deinit(failing.allocator());
         const id: WatchId = .fromRaw(0);
         try f.add(io, id, root, .{}, &batch);
+        try f.seedWhole(io, &batch);
         // No disk changes after registration: only this synthetic delivery.
         try synthesize(testing.allocator, f.streams.get(id).?, &.{
             .{ .path = first, .flags = flag.item_created },

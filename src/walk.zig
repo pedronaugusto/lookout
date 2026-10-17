@@ -17,6 +17,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 const Io = std.Io;
 
 /// The metadata `treeWithMeta` reads with each name: what a later `lstat`
@@ -75,7 +76,7 @@ pub fn tree(
     root: []const u8,
     context: Context,
 ) !void {
-    return walk(Context, false, visit, gpa, io, root, context);
+    return whole(Context, false, visit, gpa, io, root, context);
 }
 
 /// `tree`, with each entry's metadata read as the directory is listed.
@@ -92,10 +93,10 @@ pub fn treeWithMeta(
     root: []const u8,
     context: Context,
 ) !void {
-    return walk(Context, true, visit, gpa, io, root, context);
+    return whole(Context, true, visit, gpa, io, root, context);
 }
 
-fn walk(
+fn whole(
     comptime Context: type,
     comptime with_meta: bool,
     comptime visit: fn (Context, Entry) anyerror!Step,
@@ -104,47 +105,168 @@ fn walk(
     root: []const u8,
     context: Context,
 ) !void {
-    var frontier: std.ArrayList([]u8) = .empty;
-    defer {
-        for (frontier.items) |item| gpa.free(item);
-        frontier.deinit(gpa);
-    }
-    {
-        const owned = try gpa.dupe(u8, root);
-        errdefer gpa.free(owned);
-        try frontier.append(gpa, owned);
+    var walker = try Walker.init(gpa, root);
+    defer walker.deinit(gpa);
+    while (try walker.step(Context, with_meta, visit, gpa, io, context)) {}
+}
+
+/// A walk taken one directory at a time, for a caller that spreads it
+/// over time and keeps working while it is under way. `tree` and
+/// `treeWithMeta` are one run to its end.
+///
+/// The order is breadth first, the same as theirs, and a directory the
+/// visitor steps into is listed by a later `step`, not at once. What the
+/// walk has not listed yet can still change before it does, and `ahead`
+/// is how a caller tells a path the walk is still to reach from one it
+/// has passed.
+pub const Walker = struct {
+    /// The directories stepped into, in the order they are listed; those
+    /// before `next` are done and already freed. Owned.
+    frontier: std.ArrayList([]u8) = .empty,
+    next: usize = 0,
+    /// The directories from `next` on, by path, to answer `ahead`. Keys
+    /// borrow `frontier`.
+    unlisted: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// A walk of `root`, which its first `step` lists.
+    pub fn init(gpa: Allocator, root: []const u8) Allocator.Error!Walker {
+        var w: Walker = .{};
+        errdefer w.deinit(gpa);
+        try w.enqueue(gpa, try gpa.dupe(u8, root));
+        return w;
     }
 
-    var i: usize = 0;
-    while (i < frontier.items.len) : (i += 1) {
-        const current = frontier.items[i];
-        var dir = Io.Dir.openDirAbsolute(io, current, .{ .iterate = true }) catch continue;
-        defer dir.close(io);
-        var it = if (with_meta and builtin.target.os.tag.isDarwin()) Bulk.init(dir) else dir.iterate();
-        while (it.next(io) catch null) |listed| {
-            const child = try std.Io.Dir.path.join(gpa, &.{ current, listed.name });
-            var kept = false;
-            defer if (!kept) gpa.free(child);
+    pub fn deinit(w: *Walker, gpa: Allocator) void {
+        for (w.frontier.items[w.next..]) |item| gpa.free(item);
+        w.frontier.deinit(gpa);
+        w.unlisted.deinit(gpa);
+        w.* = undefined;
+    }
 
-            const meta: ?Meta = if (!with_meta)
-                null
-            else if (@TypeOf(listed) == Bulk.Listed)
-                listed.meta
-            else if (dir.statFile(io, listed.name, .{ .follow_symlinks = false })) |stat| .of(stat) else |_| null;
-            const step = try visit(context, .{
-                .dir = current,
-                .name = listed.name,
-                .kind = listed.kind,
-                .path = child,
-                .meta = meta,
-            });
-            if (step == .into and listed.kind == .directory) {
-                try frontier.append(gpa, child);
-                kept = true;
+    /// Whether every directory the walk stepped into has been listed.
+    pub fn done(w: *const Walker) bool {
+        return w.next == w.frontier.items.len;
+    }
+
+    /// Whether the directory `path` is in, or one above it, is still to
+    /// be listed, so that the walk has not yet seen what is there and will
+    /// see it as it is when it does. A path outside the walk is not ahead
+    /// of it, and neither is the root.
+    pub fn ahead(w: *const Walker, path: []const u8) bool {
+        if (w.unlisted.count() == 0) return false;
+        var dir = std.Io.Dir.path.dirname(path);
+        while (dir) |d| : (dir = std.Io.Dir.path.dirname(d)) {
+            if (w.unlisted.contains(d)) return true;
+        }
+        return false;
+    }
+
+    /// After `from` was renamed to `to`: what the walk was still to list
+    /// under the old name it lists under the new one, where it is now, and
+    /// what it was to list under the new name has gone with whatever the
+    /// rename replaced.
+    pub fn rename(w: *Walker, gpa: Allocator, from: []const u8, to: []const u8) Allocator.Error!void {
+        var i = w.next;
+        while (i < w.frontier.items.len) {
+            const item = w.frontier.items[i];
+            if (!under(to, item)) {
+                i += 1;
+                continue;
             }
+            assert(w.unlisted.remove(item));
+            gpa.free(w.frontier.orderedRemove(i));
+        }
+        for (w.frontier.items[w.next..]) |*item| {
+            if (!under(from, item.*)) continue;
+            const moved = try std.mem.concat(gpa, u8, &.{ to, item.*[from.len..] });
+            errdefer gpa.free(moved);
+            try w.unlisted.ensureUnusedCapacity(gpa, 1);
+            assert(w.unlisted.remove(item.*));
+            w.unlisted.putAssumeCapacityNoClobber(moved, {});
+            gpa.free(item.*);
+            item.* = moved;
         }
     }
-}
+
+    /// Lists `dir` too, unless the walk already has it to list.
+    pub fn add(w: *Walker, gpa: Allocator, dir: []const u8) Allocator.Error!void {
+        if (w.unlisted.contains(dir)) return;
+        try w.enqueue(gpa, try gpa.dupe(u8, dir));
+    }
+
+    /// Whether `path` is `dir` or below it.
+    fn under(dir: []const u8, path: []const u8) bool {
+        if (!std.mem.startsWith(u8, path, dir)) return false;
+        return path.len == dir.len or std.Io.Dir.path.isSep(path[dir.len]);
+    }
+
+    /// Lists the next directory, calling `visit` for each entry in it, and
+    /// answers whether there is more to list after it.
+    ///
+    /// An error from `visit` or an allocation leaves the walk where it was
+    /// in the order, with what this directory held partly visited: a
+    /// caller that goes on after one lists it again from the start.
+    pub fn step(
+        w: *Walker,
+        comptime Context: type,
+        comptime with_meta: bool,
+        comptime visit: fn (Context, Entry) anyerror!Step,
+        gpa: Allocator,
+        io: Io,
+        context: Context,
+    ) !bool {
+        if (w.done()) return false;
+        const current = w.frontier.items[w.next];
+        listing: {
+            var dir = Io.Dir.openDirAbsolute(io, current, .{ .iterate = true }) catch break :listing;
+            defer dir.close(io);
+            var it = if (with_meta and builtin.target.os.tag.isDarwin()) Bulk.init(dir) else dir.iterate();
+            while (it.next(io) catch null) |listed| {
+                const child = try std.Io.Dir.path.join(gpa, &.{ current, listed.name });
+                var kept = false;
+                defer if (!kept) gpa.free(child);
+
+                const meta: ?Meta = if (!with_meta)
+                    null
+                else if (@TypeOf(listed) == Bulk.Listed)
+                    listed.meta
+                else if (dir.statFile(io, listed.name, .{ .follow_symlinks = false })) |stat| .of(stat) else |_| null;
+                const step_into = try visit(context, .{
+                    .dir = current,
+                    .name = listed.name,
+                    .kind = listed.kind,
+                    .path = child,
+                    .meta = meta,
+                });
+                if (step_into == .into and listed.kind == .directory and !w.unlisted.contains(child)) {
+                    kept = true;
+                    try w.enqueue(gpa, child);
+                }
+            }
+        }
+        assert(w.unlisted.remove(current));
+        gpa.free(current);
+        w.next += 1;
+        // What is done is dropped from the front once it is most of the
+        // list, so a long walk holds what it has still to list and not
+        // everything it has listed.
+        if (w.next >= 64 and w.next * 2 >= w.frontier.items.len) {
+            const left = w.frontier.items.len - w.next;
+            @memmove(w.frontier.items[0..left], w.frontier.items[w.next..]);
+            w.frontier.shrinkRetainingCapacity(left);
+            w.next = 0;
+        }
+        return !w.done();
+    }
+
+    /// Takes `path`, owned, as the last directory to list.
+    fn enqueue(w: *Walker, gpa: Allocator, path: []u8) Allocator.Error!void {
+        errdefer gpa.free(path);
+        try w.frontier.ensureUnusedCapacity(gpa, 1);
+        try w.unlisted.put(gpa, path, {});
+        w.frontier.appendAssumeCapacity(path);
+    }
+};
 
 /// A directory listed by `getattrlistbulk`, many entries per call.
 const Bulk = struct {
@@ -377,4 +499,63 @@ test "a failed walk frontier allocation releases its root" {
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
     try testing.expectError(error.OutOfMemory, tree(void, Visitor.visit, failing.allocator(), testing.io, "/unused", {}));
     try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "a walker lists one directory a step, and says what it has yet to reach" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "a/b");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/b/c.txt", .data = "x" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const in_b = try std.Io.Dir.path.join(gpa, &.{ root, "a", "b", "c.txt" });
+    defer gpa.free(in_b);
+    const in_a = try std.Io.Dir.path.join(gpa, &.{ root, "a", "b" });
+    defer gpa.free(in_a);
+
+    const Count = struct {
+        seen: usize = 0,
+        fn visit(c: *@This(), _: Entry) anyerror!Step {
+            c.seen += 1;
+            return .into;
+        }
+    };
+    var count: Count = .{};
+    var walker = try Walker.init(gpa, root);
+    defer walker.deinit(gpa);
+    try testing.expect(walker.ahead(in_a));
+    try testing.expect(!walker.ahead(root));
+    try testing.expect(try walker.step(*Count, false, Count.visit, gpa, io, &count));
+    try testing.expectEqual(@as(usize, 1), count.seen);
+    // The root is listed and `a` is not: what is in `a` is ahead.
+    try testing.expect(walker.ahead(in_a));
+    try testing.expect(try walker.step(*Count, false, Count.visit, gpa, io, &count));
+    try testing.expect(!walker.ahead(in_a));
+    try testing.expect(walker.ahead(in_b));
+    try testing.expect(!try walker.step(*Count, false, Count.visit, gpa, io, &count));
+    try testing.expectEqual(@as(usize, 3), count.seen);
+    try testing.expect(walker.done());
+    try testing.expect(!walker.ahead(in_b));
+}
+
+test "a walker follows a rename of what it has yet to list, and drops what the rename replaced" {
+    const gpa = testing.allocator;
+    var walker = try Walker.init(gpa, "/w");
+    defer walker.deinit(gpa);
+    try walker.add(gpa, "/w/a");
+    try walker.add(gpa, "/w/a/b");
+    try walker.add(gpa, "/w/ab");
+    try walker.add(gpa, "/w/z/old");
+    try walker.add(gpa, "/w/a");
+    try testing.expectEqual(@as(usize, 5), walker.frontier.items.len);
+    try walker.rename(gpa, "/w/a", "/w/z");
+    try testing.expectEqual(@as(usize, 4), walker.frontier.items.len);
+    try testing.expectEqualStrings("/w/z", walker.frontier.items[1]);
+    try testing.expectEqualStrings("/w/z/b", walker.frontier.items[2]);
+    // A sibling whose name only starts the same is not moved.
+    try testing.expectEqualStrings("/w/ab", walker.frontier.items[3]);
+    try testing.expect(walker.ahead("/w/z/b/file"));
+    try testing.expect(!walker.ahead("/elsewhere/file"));
 }

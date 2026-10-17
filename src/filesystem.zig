@@ -41,6 +41,24 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
     return .unknown;
 }
 
+/// How coarse the times the filesystem holding `path` stamps on a file
+/// are, in nanoseconds: a change can carry a time up to this much before
+/// the moment it was made. Measured on APFS: its stamps are nanoseconds
+/// and never trail the system's real-time clock. HFS+ keeps seconds and
+/// FAT two of them, so any other or an unknown filesystem is taken at two
+/// seconds. Only Apple targets ask: their FSEvents backend is the one that
+/// compares a file's times with the moment its stream started.
+pub fn stampGrainNs(gpa: std.mem.Allocator, path: []const u8) u64 {
+    const coarse = 2 * std.time.ns_per_s;
+    if (comptime !builtin.target.os.tag.isDarwin()) return coarse;
+    const name = gpa.dupeSentinel(u8, path, 0) catch return coarse;
+    defer gpa.free(name);
+    var stat: mount.Stat = undefined;
+    if (mount.stat(name, &stat) != 0) return coarse;
+    if (std.mem.eql(u8, std.mem.sliceTo(&stat.type_name, 0), "apfs")) return 0;
+    return coarse;
+}
+
 /// The BSD mount query, declared by hand: lookout compiles no C, and std
 /// declares none of it. Each `Stat` is the system header's structure field
 /// for field, under shorter names for the two fields read.

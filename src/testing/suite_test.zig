@@ -224,6 +224,14 @@ test "a fresh watch reports nothing that was already there as new" {
     }
 }
 
+/// Walks what a watcher's new FSEvents watches are to know, as its next
+/// polls would: a checkpoint is taken only once they are.
+fn seeded(watcher: *Watcher, io: std.Io) !void {
+    if (comptime @hasField(@TypeOf(watcher.impl), "fsevents")) {
+        if (watcher.impl == .fsevents) try watcher.impl.fsevents.seedWhole(io, &watcher.batch);
+    }
+}
+
 test "a file appearing in a watched directory is created" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
@@ -3272,6 +3280,7 @@ test "a watcher offers checkpoints exactly where it can resume" {
     for (backends) |backend| {
         var f = try Fixture.init(backend);
         defer f.deinit();
+        try seeded(&f.watcher, f.io);
         var saved = try f.watcher.checkpoint(std.testing.allocator);
         defer if (saved) |*checkpoint| checkpoint.deinit();
         try std.testing.expectEqual(lookout.tracksCheckpoint(backend), saved != null);
@@ -3297,6 +3306,7 @@ test "what changed while nothing was watching is reported on resuming" {
         defer watcher.deinit(io);
         _ = try watcher.add(io, root, .{ .recursive = true });
         while ((try watcher.poll(io, ms(200))).len != 0) {}
+        try seeded(&watcher, io);
         var where = (try watcher.checkpoint(gpa)).?;
         defer where.deinit();
         token = try where.token(gpa);
@@ -3401,6 +3411,7 @@ test "resuming retains a debounced change that poll has not handed out" {
             try io.sleep(.fromMilliseconds(1), .awake);
         }
         try std.testing.expect(watcher.batch.held.count() != 0);
+        try seeded(&watcher, io);
         saved = (try watcher.checkpoint(gpa)).?;
     }
     var resumed = try Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = saved, .latency = .fromMilliseconds(0) });
@@ -3459,6 +3470,7 @@ test "checkpoints keep settling and rename changes beside handed deliveries" {
                 .event = stream.cursor,
             };
         }
+        try seeded(&f.watcher, f.io);
         var checkpoint = (try f.watcher.checkpoint(gpa)).?;
         defer checkpoint.deinit();
         const text = try checkpoint.token(gpa);
@@ -3505,6 +3517,7 @@ test "a crash before checkpoint persistence replays the uncommitted delivery" {
     defer f.deinit();
     _ = try f.watcher.add(f.io, f.root, .{});
     try f.settle();
+    try seeded(&f.watcher, f.io);
     var before = (try f.watcher.checkpoint(gpa)).?;
     defer before.deinit();
     try f.write("delivered.txt", "one");
@@ -3513,6 +3526,7 @@ test "a crash before checkpoint persistence replays the uncommitted delivery" {
     // then its content): the checkpoint is taken once all of it is delivered,
     // as a program takes it after handling what it was given.
     try f.settle();
+    try seeded(&f.watcher, f.io);
     var after = (try f.watcher.checkpoint(gpa)).?;
     defer after.deinit();
     const wanted = try f.path("delivered.txt");
@@ -3543,6 +3557,7 @@ test "checkpoint allocation failures leave the delivery and snapshot owned" {
     var f = try Fixture.init(.fsevents);
     defer f.deinit();
     const id = try f.watcher.add(f.io, f.root, .{});
+    try seeded(&f.watcher, f.io);
     try f.watcher.batch.deferChange(gpa, f.io, id, f.root, .renamed, f.root, .directory);
     var failures: usize = 0;
     while (true) : (failures += 1) {
@@ -3559,6 +3574,7 @@ test "checkpoint allocation failures leave the delivery and snapshot owned" {
         }
     }
     try std.testing.expect(failures > 0);
+    try seeded(&f.watcher, f.io);
     var saved = (try f.watcher.checkpoint(gpa)).?;
     defer saved.deinit();
     // init copies all resume state. Sweeping its allocator also checks
@@ -3597,6 +3613,7 @@ test "checkpoint restoration rolls back a failed add and preserves prior slices"
     const moved_from = try f.path("later/old");
     defer gpa.free(moved_from);
     try f.watcher.batch.deferChange(gpa, f.io, id, moved_to, .renamed, moved_from, .file);
+    try seeded(&f.watcher, f.io);
     var saved = (try f.watcher.checkpoint(gpa)).?;
     defer saved.deinit();
     var failures: usize = 0;

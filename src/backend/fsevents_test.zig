@@ -23,6 +23,18 @@ const Checkpoint = @import("../Checkpoint.zig");
 const c = access.c;
 const synthesize = access.synthesize;
 
+/// Walks what the watcher's new watches are to know, as its next polls
+/// would, so a test can take what follows `add` from there.
+fn seeded(watcher: *lookout.Watcher, io: Io) !void {
+    try watcher.impl.fsevents.seedWhole(io, &watcher.batch);
+}
+
+/// A checkpoint, once the watches are seeded: none is taken before.
+fn seededCheckpoint(watcher: *lookout.Watcher, io: Io, gpa: std.mem.Allocator) !?Checkpoint {
+    try seeded(watcher, io);
+    return watcher.checkpoint(gpa);
+}
+
 test "FSEvents access failures preserve known paths and report an incomplete answer" {
     const testing = std.testing;
     const gpa = testing.allocator;
@@ -38,6 +50,7 @@ test "FSEvents access failures preserve known paths and report an incomplete ans
     var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
+    try seeded(&watcher, io);
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
     inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
@@ -401,7 +414,7 @@ test "a poll that expires before the replay begins is not the end of it" {
         const first = try watcher.add(io, root, .{ .recursive = true });
         // Taken before the deletion, and holding nothing unread.
         stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(first).?);
-        var checkpoint = (try watcher.checkpoint(gpa)).?;
+        var checkpoint = (try seededCheckpoint(&watcher, io, gpa)).?;
         defer checkpoint.deinit();
         token = try checkpoint.token(gpa);
     }
@@ -464,7 +477,7 @@ test "a deletion numbered after the checkpoint marker is reported exactly once h
         const first = try watcher.add(io, root, .{ .recursive = true });
         // Taken before the deletion, and holding nothing unread.
         stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(first).?);
-        var checkpoint = (try watcher.checkpoint(gpa)).?;
+        var checkpoint = (try seededCheckpoint(&watcher, io, gpa)).?;
         defer checkpoint.deinit();
         token = try checkpoint.token(gpa);
     }
@@ -535,7 +548,7 @@ test "checkpoints preserve independent cursors and unread stream records" {
         defer held.deinit();
         access.append(held.value(), a, flag.item_modified, 303, first);
     }
-    var checkpoint = (try watcher.checkpoint(gpa)).?;
+    var checkpoint = (try seededCheckpoint(&watcher, io, gpa)).?;
     defer checkpoint.deinit();
     try std.testing.expectEqual(@as(u64, 101), checkpoint.state.value.watches[0].cursor);
     try std.testing.expectEqual(@as(u64, 202), checkpoint.state.value.watches[1].cursor);
@@ -561,7 +574,7 @@ test "a checkpoint refuses a different volume or FSEvents log before restoring c
     const id = try watcher.add(io, root, .{});
     try testing.expectEqual(watcher.impl.fsevents.streams.get(id).?.volume.device, watcher.impl.fsevents.core_services.FSEventStreamGetDeviceBeingWatched(watcher.impl.fsevents.streams.get(id).?.ref));
     try watcher.batch.deferChange(gpa, io, id, root, .modified, null, .directory);
-    var saved = (try watcher.checkpoint(gpa)).?;
+    var saved = (try seededCheckpoint(&watcher, io, gpa)).?;
     defer saved.deinit();
     for ([_]bool{ true, false }) |volume| {
         var changed = try checkpoint_format.copy(gpa, saved.state.value);
@@ -645,7 +658,7 @@ test "an absent pending root refuses a checkpoint from another volume" {
     var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     _ = try watcher.add(io, absent, .{ .pending = true });
-    var saved = (try watcher.checkpoint(gpa)).?;
+    var saved = (try seededCheckpoint(&watcher, io, gpa)).?;
     defer saved.deinit();
     @constCast(saved.state.value.watches)[0].identity.volume[0] ^= 1;
     var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = saved });
@@ -669,7 +682,7 @@ test "a pending promotion rescans when its saved log identity is refused" {
     var first = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer first.deinit(io);
     _ = try first.add(io, absent, .{ .pending = true });
-    var saved = (try first.checkpoint(gpa)).?;
+    var saved = (try seededCheckpoint(&first, io, gpa)).?;
     defer saved.deinit();
     var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = saved });
     defer resumed.deinit(io);
@@ -832,7 +845,7 @@ test "a recursive pending checkpoint resumes on its nonrecursive ancestor" {
     var first = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer first.deinit(io);
     _ = try first.add(io, absent, .{ .pending = true, .recursive = true });
-    var checkpoint = (try first.checkpoint(gpa)).?;
+    var checkpoint = (try seededCheckpoint(&first, io, gpa)).?;
     defer checkpoint.deinit();
     var resumed = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents, .checkpoint = checkpoint });
     defer resumed.deinit(io);
@@ -862,7 +875,7 @@ test "checkpoint capture allocation does not grow with the remembered tree" {
         defer watcher.deinit(io);
         _ = try watcher.add(io, root, .{ .recursive = true });
         var counting: std.testing.FailingAllocator = .init(gpa, .{});
-        var saved = (try watcher.checkpoint(counting.allocator())).?;
+        var saved = (try seededCheckpoint(&watcher, io, counting.allocator())).?;
         defer saved.deinit();
         bytes[round] = counting.allocated_bytes;
     }
@@ -882,7 +895,7 @@ test "a shared checkpoint token keeps its revision after the watch is removed" {
         var watcher = try lookout.Watcher.init(gpa, std.testing.io, .{ .backend = .fsevents });
         defer watcher.deinit(io);
         const id = try watcher.add(io, root, .{});
-        saved = (try watcher.checkpoint(gpa)).?;
+        saved = (try seededCheckpoint(&watcher, io, gpa)).?;
         watcher.remove(io, id);
         try tmp.dir.deleteFile(io, "kept");
     }
@@ -909,7 +922,7 @@ fn tokenWith(gpa: std.mem.Allocator, io: Io, root: []const u8, filter: lookout.F
     const id = try watcher.add(io, root, .{ .recursive = true, .filter = filter });
     stopDeliveries(&watcher.impl.fsevents, watcher.impl.fsevents.streams.get(id).?);
     for (changes) |change| try watcher.batch.deferChange(gpa, io, id, change.path, change.kind, change.from, change.target);
-    var checkpoint = (try watcher.checkpoint(gpa)).?;
+    var checkpoint = (try seededCheckpoint(&watcher, io, gpa)).?;
     defer checkpoint.deinit();
     return checkpoint.token(gpa);
 }

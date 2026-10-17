@@ -1628,6 +1628,7 @@ test "a pending promotion refused its checkpoint releases its path once under al
         var first = try Watcher.init(testing.allocator, std.testing.io, .{ .backend = .fsevents });
         defer first.deinit(io);
         _ = try first.add(io, target, .{ .pending = true });
+        try first.impl.fsevents.seedWhole(io, &first.batch);
         var saved = (try first.checkpoint(testing.allocator)).?;
         defer saved.deinit();
         // Freed storage stays mapped, so a second release of the mirror

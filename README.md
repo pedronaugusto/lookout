@@ -69,6 +69,13 @@ pass over it, compared as the file system compares names. Excluded directories a
 pruned where the backend supports it; other backends discard their events.
 
 Every change within a watch's scope and filters made after `add` returns is reported, subject to coalescing.
+With FSEvents, `add` returns once the stream runs, without walking the tree: the walk that
+tells an existing path from a new one runs behind the stream, inside `poll`, a couple of
+milliseconds at a time between deliveries. A change to a path the walk has not reached yet
+is judged by the file's own birth and change times against the moment the stream started
+(exact on APFS; on a volume with coarse times the doubt goes to reporting), and a removal
+there is `removed`. A watch resumed from a checkpoint is walked by `add`, which reports
+what changed while nothing watched.
 
 Recursive watches do not follow symbolic links unless `follow_symlinks` is set. With it,
 a link to a directory is watched as if the directory were there, wherever it leads,
@@ -131,7 +138,8 @@ token records its ignore and include patterns and is refused under others, while
 filter cannot be recorded and is the caller's to keep the same. Saved changes a resumed watch
 would not report live are dropped. A changed
 volume or log yields `InvalidCheckpoint`; watches spanning mounted volumes keep live
-coverage but cannot produce a checkpoint. Other backends return null.
+coverage but cannot produce a checkpoint. A watch whose walk is still under way has no
+checkpoint until `poll` finishes it. Other backends return null.
 [examples/since.zig](examples/since.zig) exercises checkpoint tokens and resuming.
 
 Filesystem name capabilities and caller policy are separate: `Watcher.capabilities(id)`
