@@ -320,8 +320,9 @@ test "racy content checks stop reading at the cap and after timestamps age" {
     try testing.expect(unreadable.content_hash == null);
     try testing.expect(before.contentChanged(unreadable));
 
-    // Equality, ctime alone and future times all stay conservative; a
-    // strictly older tick permits the metadata-only comparison.
+    // Equality, ctime alone, the tick before and future times all stay
+    // conservative; a tick older than the one before the scan's permits the
+    // metadata-only comparison.
     stat.mtime.nanoseconds = 0;
     stat.ctime.nanoseconds = 2 * std.time.ns_per_s;
     try testing.expect(capture(io, tmp.dir, "file", stat, taken_ns, true, false).racy);
@@ -329,7 +330,8 @@ test "racy content checks stop reading at the cap and after timestamps age" {
     try testing.expect(capture(io, tmp.dir, "file", stat, taken_ns, true, false).racy);
     stat.ctime.nanoseconds = 0;
     try testing.expect(capture(io, tmp.dir, "file", stat, 0, true, false).racy);
-    try testing.expect(!capture(io, tmp.dir, "file", stat, taken_ns, true, false).racy);
+    try testing.expect(capture(io, tmp.dir, "file", stat, taken_ns, true, false).racy);
+    try testing.expect(!capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s, true, false).racy);
 }
 
 test "first refresh reports every entry, second reports the difference" {
