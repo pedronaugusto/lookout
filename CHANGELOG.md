@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-17
+
 ### Fixed
 
 - The poll backend missed, now and then, a write that kept a file's size right after the file was written: a filesystem stamps times from a coarser clock than the one a scan reads, so the write before the scan could be stamped in the two-second tick before the scan's, which the scan took as old enough to trust, and the write after it with the same stamp. That tick is compared by content too.
@@ -714,7 +716,8 @@ First release.
   `inotify` backend is executed rather than merely compiled from a machine that
   is not Linux.
 
-[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/pedronaugusto/lookout/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/pedronaugusto/lookout/compare/v0.5.1...v0.5.3
 [0.5.1]: https://github.com/pedronaugusto/lookout/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/pedronaugusto/lookout/compare/v0.4.2...v0.5.0
