@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `Watcher.port` is gone: the Windows backend has no completion port.
+
+### Changed
+
+- The Windows backend holds each watch's read through reactor (`kernel.Overlapped`, `NtNotifyChangeDirectoryFile`), every read signaling one wake, and a poll waits on that wake and the watcher's own at once, whatever the number of watches: a cancel ends the wait (it ended only when the port's wait returned, on a thread of reactor's `wait` lane), on a runtime it holds no thread, and nothing is canceled at a poll's timeout, so no read's records are lost to one. `wake` sets the `Wake` alone.
+- Pins reactor 0.6.0, aegis 0.1.12 and shakedown 0.4.11, and preflight 0.9.0 for development.
+
 ## [0.6.0] - 2026-10-17
 
 ### Breaking

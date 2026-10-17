@@ -280,10 +280,6 @@ pub const Watcher = struct {
     /// `wake` never touches `impl`, which is the polling thread's to
     /// write.
     wakeup: reactor.Wake,
-    /// Windows' completion port, which `wake` posts to as well: a port is
-    /// not an object a wait can include `wakeup` with. Fixed at `init` and
-    /// only read after, like `wakeup`. Null for a watcher on polling.
-    port: Port,
     /// Whether the events in `batch` were handed to the caller by the last
     /// `poll`, and so are the caller's until the next one begins. A `poll`
     /// that returned an error handed nothing out, and what it had gathered
@@ -378,18 +374,6 @@ pub const Watcher = struct {
     /// chose. See `backend.zig`.
     const Impl = backends.Impl;
 
-    /// The completion port a Windows backend waits on, which `wake` also
-    /// posts to. Nothing elsewhere has one.
-    const Port = if (builtin.target.os.tag == .windows) ?std.os.windows.HANDLE else void;
-
-    fn portOf(impl: *const Impl) Port {
-        if (comptime builtin.target.os.tag != .windows) return {};
-        return switch (impl.*) {
-            .windows => |*backend_impl| backend_impl.port,
-            else => null,
-        };
-    }
-
     /// Errors `init` can return when creating the backend's resources.
     /// FSEvents also allocates its delivery sink and `Options.buffer_bytes`
     /// buffer here, even with no watches. Allocator failures are
@@ -457,7 +441,6 @@ pub const Watcher = struct {
             .following = .empty,
             .woken = .init(false),
             .wakeup = wakeup,
-            .port = portOf(&impl),
             .handed_out = false,
         };
     }
@@ -1295,9 +1278,6 @@ pub const Watcher = struct {
     pub fn wake(w: *Watcher) void {
         w.woken.store(true, .release);
         w.wakeup.signal();
-        if (comptime builtin.target.os.tag == .windows) {
-            if (w.port) |port| backends.Windows.post(port);
-        }
     }
 
     /// Copies the boundary of what poll has handed out. The snapshot owns

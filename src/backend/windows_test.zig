@@ -5,22 +5,16 @@ const lookout = @import("../lookout.zig");
 const ms = @import("../testing/timeout.zig").ms;
 const Target = lookout.Target;
 
-const access = @import("Windows.zig").test_access;
 const builtin = @import("builtin");
-const c = access.c;
 
 test "a read that completes with nothing is an overflow, and the watch reads on" {
     if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     // ReadDirectoryChangesW: "If the number of changes exceeds the
     // buffer size, the entire contents of the buffer are discarded, the
-    // lpBytesReturned parameter contains zero". Through a completion
-    // port that is a packet that transferred nothing, and
-    // PostQueuedCompletionStatus can post one in the kernel's place --
-    // "Posts an I/O completion packet to an I/O completion port", with
-    // the byte count and the OVERLAPPED the caller gives it, dequeued by
-    // GetQueuedCompletionStatus like any other. It is the one overflow
-    // signal a test can make: a burst the kernel cannot hold between
-    // two reads is not something a test can order.
+    // lpBytesReturned parameter contains zero": a read that ends having
+    // transferred nothing. `overflowForTest` holds one in the kernel's
+    // place, the one overflow signal a test can make: a burst the kernel
+    // cannot hold between two reads is not something a test can order.
     const testing = std.testing;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -35,25 +29,12 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     const id = try watcher.add(io, root, .{});
     while ((try watcher.poll(io, ms(200))).len != 0) {}
     const w = &watcher.impl.windows;
-    const watch = w.watches.get(id).?;
 
-    // The read that is outstanding is taken back first -- cancelled,
-    // and its completion taken off the port -- so that the packet
-    // posted below stands in for it rather than beside it: a watch
+    // The read that is outstanding is taken back first, so that the
+    // completion held stands in for it rather than beside it: a watch
     // re-armed while a read is still pending would have two reads on
     // one buffer, which is not a state the kernel ever puts it in.
-    _ = c.CancelIoEx(watch.handle, &watch.overlapped);
-    {
-        var transferred: u32 = 0;
-        var key: usize = 0;
-        var overlapped: ?*c.Overlapped = null;
-        while (true) {
-            const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, 10_000);
-            if (ok == 0 and overlapped == null) return error.TestUnexpectedResult;
-            if (overlapped == &watch.overlapped) break;
-        }
-    }
-    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, id.raw(), &watch.overlapped) != 0);
+    try w.overflowForTest(io, id);
 
     var overflows: usize = 0;
     var waited: u32 = 0;
@@ -105,7 +86,6 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     const id = try watcher.add(io, root, .{});
     while ((try watcher.poll(io, ms(200))).len != 0) {}
     const w = &watcher.impl.windows;
-    const watch = w.watches.get(id).?;
 
     for ([_][]const u8{ "a", "b", "c" }) |name| {
         try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
@@ -120,18 +100,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     try testing.expectEqual(@as(usize, 3), created);
     try w.budget.misread(root, true, 0);
 
-    _ = c.CancelIoEx(watch.handle, &watch.overlapped);
-    {
-        var transferred: u32 = 0;
-        var key: usize = 0;
-        var overlapped: ?*c.Overlapped = null;
-        while (true) {
-            const ok = c.GetQueuedCompletionStatus(w.port, &transferred, &key, &overlapped, 10_000);
-            if (ok == 0 and overlapped == null) return error.TestUnexpectedResult;
-            if (overlapped == &watch.overlapped) break;
-        }
-    }
-    try testing.expect(c.PostQueuedCompletionStatus(w.port, 0, id.raw(), &watch.overlapped) != 0);
+    try w.overflowForTest(io, id);
 
     var overflowed = false;
     waited = 0;

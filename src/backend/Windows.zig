@@ -1,18 +1,21 @@
-//! The Windows backend: `ReadDirectoryChangesW`, read through an I/O
-//! completion port.
+//! The Windows backend: `NtNotifyChangeDirectoryFile` (what
+//! `ReadDirectoryChangesW` calls), held through reactor.
 //!
-//! One directory handle per watch, opened for overlapped I/O and
-//! associated with a port the watcher owns. Each watch keeps one read
-//! outstanding; when it completes, the buffer holds a chain of
-//! `FILE_NOTIFY_INFORMATION` records naming what changed, and the read is
-//! posted again. Recursion is a flag on the call, so a tree costs one
-//! handle rather than one per directory.
+//! One directory handle per watch, opened for overlapped I/O. Each watch
+//! keeps one read outstanding, a `reactor.kernel.Overlapped` that signals
+//! the watcher's `changes` wake when it ends; when it completes, the buffer
+//! holds a chain of `FILE_NOTIFY_INFORMATION` records naming what changed,
+//! and the read is posted again. Recursion is a flag on the call, so a tree
+//! costs one handle rather than one per directory. A poll waits on two
+//! wakes, `changes` and the watcher's own, whatever the number of watches,
+//! so it is a cancelation point and holds no thread on a runtime; nothing
+//! is canceled at its timeout, so no read's records are lost to one.
 //!
 //! Three things follow from that shape:
 //!
-//! * `lookout.Watcher.fd` is `null` here. A completion port is not a
-//!   waitable object another loop can fold in, so a program on Windows
-//!   drives the watcher by calling `poll`.
+//! * `lookout.Watcher.fd` is `null` here: the reads' end is an event, not
+//!   a descriptor, so a program on Windows drives the watcher by calling
+//!   `poll`.
 //! * The kernel buffers changes between reads, and says so by completing
 //!   a read with zero bytes when it could not. That becomes
 //!   `lookout.Kind.overflow`.
@@ -39,20 +42,18 @@ const CompiledFilter = @import("../CompiledFilter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("windows/records.zig");
-const timing = @import("../timing.zig");
 const trace = @import("../trace.zig");
 const Options = @import("../options.zig").Options;
 const contract = @import("../watch_contract.zig");
 const AddOptions = @import("../options.zig").AddOptions;
-const builtin = @import("builtin");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
 const Windows = @This();
 
 gpa: Allocator,
-/// The completion port every watch's reads land on.
-port: windows.HANDLE,
+/// Signaled by every watch's read when it ends; a poll waits on it.
+changes: reactor.Wake,
 watches: std.array_hash_map.Auto(WatchId, *Watch),
 /// Watches whose handle is closed but whose buffer the kernel may not
 /// have finished with. An intrusive list so retiring a watch cannot fail
@@ -87,14 +88,10 @@ const bounds: buffer.Bounds = .{
 /// died without an event and without an error.
 const share_buffer_len = 64 * 1024;
 
-/// The completion key `wake` posts under. No watch can have it: ids are
-/// handed out from zero upwards.
-const wake_key: usize = std.math.maxInt(usize);
-
 /// One watch: one directory handle with one read outstanding.
 ///
 /// Heap-allocated and never moved, because the kernel writes into
-/// `buffer` and `overlapped` for as long as a read is pending.
+/// `buffer` and `request` for as long as a read is pending.
 const Watch = struct {
     id: WatchId,
     /// The path the caller named, absolute and canonical, in WTF-8.
@@ -121,7 +118,8 @@ const Watch = struct {
     /// rather than saving the work -- see `lookout.prunesIgnored`.
     filter: CompiledFilter,
     identity_override: ?identity.Policy = null,
-    overlapped: c.Overlapped,
+    /// The read outstanding, which signals `changes` when it ends.
+    request: reactor.kernel.Overlapped,
     /// Where the kernel writes the change records. Owned by the watch,
     /// and not released until its outstanding read has completed, which
     /// is why `remove` retires a watch rather than freeing it.
@@ -148,8 +146,8 @@ const Watch = struct {
     /// once, to `share_buffer_len`, if the size asked for is refused.
     accepted_len: usize,
     retiring_next: ?*Watch,
-    /// Taking a packet off the port does not release its buffer. Keep it
-    /// until reporting and posting the next read have both succeeded.
+    /// Taking a read that ended does not release its buffer. Keep it until
+    /// reporting and posting the next read have both succeeded.
     completion: ?Completion = null,
     reported: bool = false,
     cursor: ?records.Iterator = null,
@@ -190,13 +188,12 @@ const Watch = struct {
     }
 };
 
-/// Creates the completion port.
-pub fn init(gpa: Allocator, _: Io, options: Options) contract.InitError!Windows {
-    const port = c.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 0) orelse
-        return error.SystemResources;
+/// Makes the wake the reads signal.
+pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!Windows {
+    const changes = reactor.Wake.init(io) catch return error.SystemResources;
     return .{
         .gpa = gpa,
-        .port = port,
+        .changes = changes,
         .watches = .empty,
         .retiring = null,
         .budget = .init(gpa, options.max_dir_entries),
@@ -204,41 +201,36 @@ pub fn init(gpa: Allocator, _: Io, options: Options) contract.InitError!Windows 
     };
 }
 
-/// Closes every directory handle and the port.
+/// Ends every read, waits for the kernel to let go of each buffer, and
+/// closes every directory handle.
 pub fn deinit(w: *Windows, io: Io) void {
-    _ = io; // Every backend takes it; this one closes nothing through it.
     for (w.watches.values()) |watch| {
-        _ = c.CancelIoEx(watch.handle, &watch.overlapped);
-        _ = c.CloseHandle(watch.handle);
-        w.free(watch);
+        if (watch.request.outstanding) watch.request.cancel();
+        watch.retiring_next = w.retiring;
+        w.retiring = watch;
     }
     w.watches.deinit(w.gpa);
     w.budget.deinit();
-    // The port is closed before the retiring buffers are freed: after
-    // that no completion can reference them.
-    _ = c.CloseHandle(w.port);
-    while (w.retiring) |watch| {
-        w.retiring = watch.retiring_next;
-        w.free(watch);
+    // A canceled read ends at once; its buffer is the kernel's until then.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    while (w.retiring != null) {
+        w.retireEnded();
+        if (w.retiring == null) break;
+        w.changes.wait(io, .none) catch |err| switch (err) {
+            error.Timeout, error.Canceled => {}, // Blocked: neither comes.
+        };
     }
+    w.changes.deinit(io);
     w.* = undefined;
 }
 
-/// No descriptor: a completion port is not something another wait loop
-/// can take, so a Windows program drives the watcher by calling
-/// `lookout.Watcher.poll`.
+/// No descriptor: the reads' end is an event, which is not something a
+/// `poll` loop can take, so a Windows program drives the watcher by
+/// calling `lookout.Watcher.poll`.
 pub fn fd(w: *const Windows) ?std.posix.fd_t {
     _ = w;
     return null;
-}
-
-/// Makes a blocked `wait` on `port` come back: a completion posted under
-/// a key no watch has, which `wait` takes as its cue. A completion port is
-/// not an object `reactor.Wake` can be waited on beside, so this is what
-/// `lookout.Watcher.wake` does on this backend besides setting the `Wake`.
-/// Called from any thread; the port is fixed for the life of the watcher.
-pub fn post(port: windows.HANDLE) void {
-    _ = c.PostQueuedCompletionStatus(port, 0, wake_key, null);
 }
 
 /// How many directory handles this backend holds: one per watch, because
@@ -287,11 +279,11 @@ pub fn add(
         .identity_override = options.identity,
         .root_inode = stat.inode,
         .handle = handle,
+        .request = .signaling(w.changes.handle()),
         .only = only,
         .root_target = .of(stat.kind),
         .recursive = options.recursive and is_dir,
         .filter = filter,
-        .overlapped = std.mem.zeroes(c.Overlapped),
         .buffer = bytes,
         .pending_rename = null,
         .held_removal = null,
@@ -300,11 +292,20 @@ pub fn add(
     };
     if (is_dir) try w.budget.seed(io, dir_path);
 
-    if (c.CreateIoCompletionPort(handle, w.port, id.raw(), 0) == null)
-        return error.WatchLimitReached;
     try w.watches.put(w.gpa, id, watch);
     errdefer _ = w.watches.swapRemove(id);
     try w.arm(watch);
+}
+
+/// Takes back a watch's outstanding read and holds a completion that read
+/// nothing in its place, as the kernel's is when its buffer overflowed:
+/// the one overflow a test can order. Tests only.
+pub fn overflowForTest(w: *Windows, io: Io, id: WatchId) !void {
+    const watch = w.watches.get(id).?;
+    watch.request.cancel();
+    while (!watch.request.ended()) try w.changes.wait(io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
+    _ = watch.request.take();
+    watch.completion = .{ .transferred = 0, .failure = null };
 }
 
 /// Opens a directory for overlapped change notification.
@@ -338,36 +339,57 @@ fn open(gpa: Allocator, path: []const u8) contract.AddError!windows.HANDLE {
 
 /// Posts the outstanding read for a watch. Every completion re-posts,
 /// because a change that arrives while no read is outstanding is a change
-/// the kernel has to buffer.
+/// the kernel has to buffer. A read that ends at once is kept as the
+/// watch's completion, which the next `take` reports.
 fn arm(w: *Windows, watch: *Watch) contract.AddError!void {
     // The kernel is offered at most the buffer it writes into.
     assert(watch.accepted_len <= watch.buffer.len);
-    watch.overlapped = std.mem.zeroes(c.Overlapped);
+    const ended = watch.request.start(notify, watch.handle, watch) orelse return;
+    switch (severity(ended.u.Status)) {
+        .success, .warning => watch.completion = .of(ended),
+        .failure => return switch (ended.u.Status) {
+            .NO_MEMORY, .INSUFFICIENT_RESOURCES => error.SystemResources,
+            // A remote directory refuses a buffer over 64 KiB outright
+            // rather than clamping it. Coming down to what a share takes is
+            // the difference between a smaller buffer and a dead watch.
+            .INVALID_PARAMETER => {
+                if (watch.accepted_len <= share_buffer_len) return error.Unexpected;
+                watch.accepted_len = share_buffer_len;
+                return w.arm(watch);
+            },
+            else => error.Unexpected,
+        },
+    }
+}
+
+/// The read `arm` posts, as reactor starts it.
+fn notify(watch: *Watch, iosb: *windows.IO_STATUS_BLOCK, completion: reactor.kernel.Completion) windows.NTSTATUS {
     const filter: u32 = c.file_notify_change_file_name | c.file_notify_change_dir_name |
         c.file_notify_change_attributes | c.file_notify_change_size |
         c.file_notify_change_last_write | c.file_notify_change_creation |
         c.file_notify_change_security;
-    if (c.ReadDirectoryChangesW(
+    return c.NtNotifyChangeDirectoryFile(
         watch.handle,
+        completion.event,
+        null,
+        completion.context,
+        iosb,
         watch.buffer.ptr,
         @intCast(watch.accepted_len),
-        @intFromBool(watch.recursive),
         filter,
-        null,
-        &watch.overlapped,
-        null,
-    ) == 0) return switch (c.GetLastError()) {
-        c.error_io_pending => {},
-        c.error_not_enough_memory, c.error_outofmemory => error.SystemResources,
-        // A remote directory refuses a buffer over 64 KiB outright
-        // rather than clamping it. Coming down to what a share takes is
-        // the difference between a smaller buffer and a dead watch.
-        c.error_invalid_parameter => {
-            if (watch.accepted_len <= share_buffer_len) return error.Unexpected;
-            watch.accepted_len = share_buffer_len;
-            return w.arm(watch);
-        },
-        else => error.Unexpected,
+        if (watch.recursive) .TRUE else .FALSE,
+    );
+}
+
+const Severity = enum { success, warning, failure };
+
+/// An `NTSTATUS`'s severity, its top two bits; an informational status is
+/// a success.
+fn severity(status: windows.NTSTATUS) Severity {
+    return switch (@backingInt(status) >> 30) {
+        0b00, 0b01 => .success,
+        0b10 => .warning,
+        else => .failure,
     };
 }
 
@@ -377,16 +399,15 @@ pub fn remove(w: *Windows, io: Io, id: WatchId) void {
     const entry = w.watches.fetchSwapRemove(id) orelse return;
     const watch = entry.value;
     w.budget.release(*const Windows, stillCounted, watch.root, w);
-    _ = c.CancelIoEx(watch.handle, &watch.overlapped);
-    _ = c.CloseHandle(watch.handle);
     // A retained completion has already ended the kernel's ownership.
-    // No packet remains to retire this watch on a later wait.
-    if (watch.completion != null) {
+    if (!watch.request.outstanding) {
+        _ = c.CloseHandle(watch.handle);
         w.free(watch);
         return;
     }
-    // The buffer outlives the handle until the cancelled read's
-    // completion has been taken off the port.
+    // The buffer outlives the read until the canceled read has ended,
+    // which a later wait sees.
+    watch.request.cancel();
     watch.retiring_next = w.retiring;
     w.retiring = watch;
 }
@@ -412,6 +433,21 @@ fn stillCounted(w: *const Windows, dir: []const u8) bool {
     return false;
 }
 
+/// Frees every retiring watch whose canceled read has ended.
+fn retireEnded(w: *Windows) void {
+    var link = &w.retiring;
+    while (link.*) |watch| {
+        if (watch.request.outstanding and !watch.request.ended()) {
+            link = &watch.retiring_next;
+            continue;
+        }
+        if (watch.request.outstanding) _ = watch.request.take();
+        link.* = watch.retiring_next;
+        _ = c.CloseHandle(watch.handle);
+        w.free(watch);
+    }
+}
+
 fn free(w: *Windows, watch: *Watch) void {
     w.gpa.free(watch.buffer);
     w.gpa.free(watch.root);
@@ -422,21 +458,16 @@ fn free(w: *Windows, watch: *Watch) void {
     w.gpa.destroy(watch);
 }
 
-/// Waits on the completion port until a read produces something `batch`
-/// did not already hold, or `timeout` runs out.
-///
-/// `wakeup` is not waited on: this backend is woken through the port,
-/// which `post` does, and the object stays set.
+/// Waits until a read produces something `batch` did not already hold,
+/// `wakeup` is signaled, or `timeout` runs out.
 pub fn wait(w: *Windows, io: Io, batch: *Batch, wakeup: *reactor.Wake, timeout: Io.Timeout) contract.PollError!void {
-    _ = wakeup;
-    // A completion is taken off the port by the call that waits for it,
-    // and the read it completes is re-armed before the next, so nothing
-    // in here is a place to stop: see `Watcher.poll`. The call that waits
-    // cannot be interrupted either, so a cancellation lands when it comes
-    // back.
+    // A read that ended is reported and re-armed before the next is
+    // looked at, so nothing in here is a place to stop (see
+    // `Watcher.poll`) but the wait itself, which loses nothing to a
+    // cancel: the reads stay outstanding, and what ended stays ended.
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
-    try w.collect(io, batch, timeout.toDeadline(io));
+    try w.collect(io, batch, wakeup, timeout.toDeadline(io), protection);
     // Whatever is still held when the wait is over never found its other
     // half: the path moved somewhere this watch cannot see it. A removal
     // is resolved first, being the older of the two.
@@ -457,18 +488,14 @@ fn flushRenames(w: *Windows, io: Io, batch: *Batch) contract.PollError!void {
     }
 }
 
-fn collect(w: *Windows, io: Io, batch: *Batch, until: Io.Timeout) contract.PollError!void {
+fn collect(w: *Windows, io: Io, batch: *Batch, wakeup: *reactor.Wake, until: Io.Timeout, protection: Io.CancelProtection) contract.PollError!void {
     const before = batch.revision;
 
     while (true) {
-        // A timeout already run out still takes one look at the port.
-        // A finite timeout is never the value that means none.
-        const timeout: u32 = if (timing.remainingMs(io, until)) |ms| @min(ms, c.infinite - 1) else c.infinite;
-        switch (try w.take(io, batch, timeout)) {
+        // A timeout already run out still takes one look at the reads.
+        switch (try w.take(io, batch, wakeup, until, protection)) {
             .woken => return,
-            // A finite timeout may have been clamped to what this API
-            // can represent, so only the original deadline ends it.
-            .quiet => if (timing.expired(io, until)) return else continue,
+            .quiet => return,
             .taken => {},
         }
         // A removal that ended its read is worth waiting a moment for:
@@ -477,7 +504,8 @@ fn collect(w: *Windows, io: Io, batch: *Batch, until: Io.Timeout) contract.PollE
         // stands there. See `Watch.held_removal`.
         var round: usize = 0;
         while (w.holdsRemoval() and round < grace_rounds) : (round += 1) {
-            switch (try w.take(io, batch, grace_ms)) {
+            const grace: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(grace_ms), .clock = .awake } };
+            switch (try w.take(io, batch, wakeup, grace.toDeadline(io), protection)) {
                 .taken => {},
                 .quiet, .woken => break,
             }
@@ -510,68 +538,46 @@ const Taken = enum {
     woken,
 };
 
-/// Takes one completion off the port, waiting up to `timeout`, and turns
-/// it into events.
+/// What a read ended with, kept from when it was taken until the watch
+/// has reported it and posted the next.
 const Completion = struct {
     transferred: u32,
-    failure: ?u32,
+    /// The status, when the read failed.
+    failure: ?windows.NTSTATUS,
+
+    fn of(ended: windows.IO_STATUS_BLOCK) Completion {
+        return .{
+            .transferred = @intCast(ended.Information),
+            .failure = if (severity(ended.u.Status) == .success) null else ended.u.Status,
+        };
+    }
 };
 
-/// What one call on the port returned.
-const Packet = struct {
-    transferred: u32,
-    key: usize,
-    overlapped: ?*c.Overlapped,
-    /// The error code when the call failed or the packet is a failed read.
-    failure: ?u32,
-};
-
-/// One wait on the completion port for up to `timeout` milliseconds, which
-/// is all `take` asks of the system: a plain call that can take as long as
-/// the timeout, so it is made through `reactor.blocking`.
-fn dequeue(port: windows.HANDLE, timeout: u32) Packet {
-    var transferred: u32 = 0;
-    var key: usize = 0;
-    var overlapped: ?*c.Overlapped = null;
-    const ok = c.GetQueuedCompletionStatus(port, &transferred, &key, &overlapped, timeout);
-    return .{
-        .transferred = transferred,
-        .key = key,
-        .overlapped = overlapped,
-        .failure = if (ok == 0) c.GetLastError() else null,
-    };
-}
-
-fn take(w: *Windows, io: Io, batch: *Batch, timeout: u32) contract.PollError!Taken {
-    // A completion already taken is ready even if the port is quiet.
-    for (w.watches.values()) |watch| {
-        if (watch.completion != null) {
-            try w.complete(io, watch, batch);
-            return .taken;
+/// Takes one read that ended, waiting until `until` for one, and turns it
+/// into events. The wait is on `changes`, which every read signals, and
+/// on `wakeup`; only the wait is a cancelation point, as `protection`, the
+/// caller's, says.
+fn take(w: *Windows, io: Io, batch: *Batch, wakeup: *reactor.Wake, until: Io.Timeout, protection: Io.CancelProtection) contract.PollError!Taken {
+    while (true) {
+        w.retireEnded();
+        // A completion already taken is ready whether or not one ended since.
+        for (w.watches.values()) |watch| {
+            if (watch.completion == null and watch.request.ended()) watch.completion = .of(watch.request.take());
+            if (watch.completion != null) {
+                try w.complete(io, watch, batch);
+                return .taken;
+            }
         }
+        const blocked = io.swapCancelProtection(protection);
+        defer _ = io.swapCancelProtection(blocked);
+        const ready = reactor.waitAny(io, &.{ .{ .wake = &w.changes }, .{ .wake = wakeup } }, until) catch |err| return switch (err) {
+            error.Timeout => .quiet,
+            error.Canceled => error.Canceled,
+            error.Unsupported => unreachable, // unreachable: reactor waits on a wake on every `Io`
+            error.Unexpected => error.Unexpected,
+        };
+        if (ready == 1) return .woken;
     }
-    // Where it holds up no worker: under a reactor runtime the call runs
-    // on a lane with this task parked, under any other `Io` on this
-    // thread. A refusal never runs it here.
-    const packet = reactor.blocking(io, .wait, dequeue, .{ w.port, timeout }) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        error.ConcurrencyUnavailable => return error.SystemResources,
-    };
-    if (packet.overlapped == null and packet.failure != null) {
-        if (packet.failure.? != c.wait_timeout) return error.Unexpected;
-        return .quiet;
-    }
-    if (packet.key == wake_key) return .woken;
-    // A C/OS boundary: the key is the id this port was given at
-    // registration, widened by the OS.
-    const id: WatchId = .fromRaw(@truncate(packet.key));
-    const watch = w.live(id, packet.overlapped) orelse {
-        w.retire(packet.overlapped);
-        return .taken;
-    };
-    watch.completion = .{ .transferred = packet.transferred, .failure = packet.failure };
-    try w.complete(io, watch, batch);
-    return .taken;
 }
 
 /// Finishes a retained completion before its buffer can be overwritten.
@@ -579,15 +585,11 @@ fn complete(w: *Windows, io: Io, watch: *Watch, batch: *Batch) contract.PollErro
     const completion = watch.completion.?;
     const id = watch.id;
     if (!watch.reported) {
-        if (completion.failure) |err| {
+        if (completion.failure) |_| {
             try w.resolveRemoval(io, watch, batch);
-            if (err != c.error_notify_enum_dir) {
-                try batch.push(w.gpa, io, id, watch.root, .removed, .directory);
-                w.discard(id);
-                return;
-            }
-            try batch.push(w.gpa, io, id, watch.root, .overflow, .directory);
-            w.lost(io, watch);
+            try batch.push(w.gpa, io, id, watch.root, .removed, .directory);
+            w.discard(id);
+            return;
         } else {
             if (watch.only == null) switch (rootState(io, watch)) {
                 .stands => {},
@@ -709,39 +711,6 @@ fn discard(w: *Windows, id: WatchId) void {
     const entry = w.watches.fetchSwapRemove(id) orelse return;
     _ = c.CloseHandle(entry.value.handle);
     w.free(entry.value);
-}
-
-/// The watch a completion belongs to, or `null` when it belongs to a read
-/// `remove` cancelled.
-///
-/// Matched on the overlapped pointer and not on the completion key alone.
-/// The key is the `lookout.WatchId`, and an id can be registered a second
-/// time: a watch on a path that does not exist yet is put on an ancestor
-/// and then re-registered on the path itself under the same id the caller
-/// holds. The cancelled read of the first registration completes after
-/// the second one is armed, and keyed by id alone that completion reads
-/// as the new watch's own read failing -- which closed a handle that had
-/// just been opened and reported the path the caller was waiting for as
-/// removed. Each `Watch` is heap-allocated and never moved, so the
-/// address of its `overlapped` tells the two apart.
-fn live(w: *Windows, id: WatchId, overlapped: ?*c.Overlapped) ?*Watch {
-    const watch = w.watches.get(id) orelse return null;
-    if (overlapped != &watch.overlapped) return null;
-    return watch;
-}
-
-/// Frees a retiring watch once its cancelled read has been accounted for.
-fn retire(w: *Windows, overlapped: ?*c.Overlapped) void {
-    const completed = overlapped orelse return;
-    var link = &w.retiring;
-    while (link.*) |watch| {
-        if (&watch.overlapped == completed) {
-            link.* = watch.retiring_next;
-            w.free(watch);
-            return;
-        }
-        link = &watch.retiring_next;
-    }
 }
 
 /// Turns one completed read into events.
@@ -1013,30 +982,19 @@ const Change = struct {
 /// The Win32 surface lookout uses, declared against `std.os.windows`'
 /// types.
 ///
-/// `std.os.windows` in Zig 0.17.0 declares neither
-/// `ReadDirectoryChangesW` nor the completion-port calls, so they are
-/// written out here. Hand-written rather than `@cImport`ed, for the same
+/// `std.os.windows` in Zig 0.17.0 declares neither `CreateFileW` nor
+/// `NtNotifyChangeDirectoryFile`, so they are written out here. Hand-written rather than `@cImport`ed, for the same
 /// reason as everywhere else in this package: no C compilation step.
 const c = struct {
-    // Win32's names, in Zig's casing: `ERROR_IO_PENDING` is
-    // `error_io_pending` and `OVERLAPPED` is `Overlapped`. Functions keep
+    // Win32's names, in Zig's casing: `ERROR_ACCESS_DENIED` is
+    // `error_access_denied`. Functions keep
     // their symbol names and parameters their documented ones.
     const Bool = c_int;
-
-    const infinite: windows.DWORD = 0xFFFF_FFFF;
-    const wait_timeout: windows.DWORD = 258;
 
     const error_file_not_found: windows.DWORD = 2;
     const error_path_not_found: windows.DWORD = 3;
     const error_access_denied: windows.DWORD = 5;
-    const error_not_enough_memory: windows.DWORD = 8;
-    const error_outofmemory: windows.DWORD = 14;
     const error_too_many_open_files: windows.DWORD = 4;
-    const error_invalid_parameter: windows.DWORD = 87;
-    const error_io_pending: windows.DWORD = 997;
-    /// The kernel could not hold everything that changed between two
-    /// reads: the buffer overflowed and the tree must be re-read.
-    const error_notify_enum_dir: windows.DWORD = 1022;
 
     const file_list_directory: windows.DWORD = 0x0001;
     const file_share_read: windows.DWORD = 0x0001;
@@ -1060,21 +1018,11 @@ const c = struct {
     const file_action_renamed_old_name: windows.DWORD = records.Action.renamed_old_name;
     const file_action_renamed_new_name: windows.DWORD = records.Action.renamed_new_name;
 
-    const Overlapped = extern struct {
-        Internal: usize,
-        InternalHigh: usize,
-        Offset: windows.DWORD,
-        OffsetHigh: windows.DWORD,
-        hEvent: ?windows.HANDLE,
-    };
-
     const SecurityAttributes = extern struct {
         nLength: windows.DWORD,
         lpSecurityDescriptor: ?*anyopaque,
         bInheritHandle: Bool,
     };
-
-    const OverlappedCompletionRoutine = *const fn (windows.DWORD, windows.DWORD, *Overlapped) callconv(.winapi) void;
 
     extern "kernel32" fn CreateFileW(
         lpFileName: [*:0]const windows.WCHAR,
@@ -1086,37 +1034,20 @@ const c = struct {
         hTemplateFile: ?windows.HANDLE,
     ) callconv(.winapi) windows.HANDLE;
     extern "kernel32" fn CloseHandle(hObject: windows.HANDLE) callconv(.winapi) Bool;
-    extern "kernel32" fn CancelIoEx(hFile: windows.HANDLE, lpOverlapped: ?*Overlapped) callconv(.winapi) Bool;
     extern "kernel32" fn GetLastError() callconv(.winapi) windows.DWORD;
-    extern "kernel32" fn CreateIoCompletionPort(
+    /// What `ReadDirectoryChangesW` calls, which takes the event a
+    /// reactor call signals and its status block as they are.
+    extern "ntdll" fn NtNotifyChangeDirectoryFile(
         FileHandle: windows.HANDLE,
-        ExistingCompletionPort: ?windows.HANDLE,
-        CompletionKey: usize,
-        NumberOfConcurrentThreads: windows.DWORD,
-    ) callconv(.winapi) ?windows.HANDLE;
-    extern "kernel32" fn PostQueuedCompletionStatus(
-        CompletionPort: windows.HANDLE,
-        dwNumberOfBytesTransferred: windows.DWORD,
-        dwCompletionKey: usize,
-        lpOverlapped: ?*Overlapped,
-    ) callconv(.winapi) Bool;
-    extern "kernel32" fn GetQueuedCompletionStatus(
-        CompletionPort: windows.HANDLE,
-        lpNumberOfBytesTransferred: *windows.DWORD,
-        lpCompletionKey: *usize,
-        lpOverlapped: *?*Overlapped,
-        dwMilliseconds: windows.DWORD,
-    ) callconv(.winapi) Bool;
-    extern "kernel32" fn ReadDirectoryChangesW(
-        hDirectory: windows.HANDLE,
-        lpBuffer: *anyopaque,
-        nBufferLength: windows.DWORD,
-        bWatchSubtree: Bool,
-        dwNotifyFilter: windows.DWORD,
-        lpBytesReturned: ?*windows.DWORD,
-        lpOverlapped: ?*Overlapped,
-        lpCompletionRoutine: ?OverlappedCompletionRoutine,
-    ) callconv(.winapi) Bool;
+        Event: ?windows.HANDLE,
+        ApcRoutine: ?*const anyopaque,
+        ApcContext: ?*anyopaque,
+        IoStatusBlock: *windows.IO_STATUS_BLOCK,
+        Buffer: *anyopaque,
+        Length: windows.ULONG,
+        CompletionFilter: windows.ULONG,
+        WatchTree: windows.BOOLEAN,
+    ) callconv(.winapi) windows.NTSTATUS;
 };
 
 test "a failed Windows removal transfer keeps its held path" {
@@ -1187,15 +1118,3 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     try testing.expectEqual(if (transfer == .pair) lookout.Kind.renamed else .removed, batch.events.items[0].kind);
     try testing.expect(watch.held_removal == null and watch.pending_rename == null);
 }
-
-// Integration fixtures use the adapter’s own callback and native declarations.
-pub const test_access = if (builtin.is_test) struct {
-    pub const c = cAccess;
-} else struct {};
-
-const cAccess = struct {
-    pub const CancelIoEx = c.CancelIoEx;
-    pub const GetQueuedCompletionStatus = c.GetQueuedCompletionStatus;
-    pub const Overlapped = c.Overlapped;
-    pub const PostQueuedCompletionStatus = c.PostQueuedCompletionStatus;
-};
