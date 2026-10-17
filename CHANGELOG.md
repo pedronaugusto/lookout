@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-17
+
 ### Breaking
 
 - With FSEvents, `add` returns once the stream runs and the walk that seeds what a watch knows runs inside `poll`, a slice of about two milliseconds at a time, so `add` on a large tree no longer waits for it (about 58 ms per 50,000 files). `checkpoint` returns null for a watch whose walk is still under way. A resumed watch is still walked by `add`. A path the walk has not reached yet is judged by its own birth and change times against the moment the stream started, and an entry the walk reads as changed since then is left to that change's record.
