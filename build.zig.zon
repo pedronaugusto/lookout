@@ -1,6 +1,6 @@
 .{
     .name = .lookout,
-    .version = "0.6.0",
+    .version = "0.7.0",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x99366075fff4b411,
     .paths = .{
@@ -28,8 +28,8 @@
         },
 
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.5.0#4dd84e415f76efcffbbecd2312175edbb1d869da",
-            .hash = "reactor-0.5.0-MjQ-WLngEgA0wgXZBHNM7Isxt810irQATZFa9X0STt_7",
+            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.6.0#d3c159fedcb238c50c3101908a3e2d5056ef167f",
+            .hash = "reactor-0.6.0-MjQ-WMswEwDU4n4kYdsjd4qCMFf_dOUqZoA43MSRWUsg",
         },
     },
     .dev_dependencies = .{

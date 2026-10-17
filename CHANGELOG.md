@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-17
+
 ### Breaking
 
 - `Watcher.port` is gone: the Windows backend has no completion port.
@@ -731,7 +733,8 @@ First release.
   `inotify` backend is executed rather than merely compiled from a machine that
   is not Linux.
 
-[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/pedronaugusto/lookout/compare/v0.5.4...v0.7.0
 [0.5.4]: https://github.com/pedronaugusto/lookout/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/pedronaugusto/lookout/compare/v0.5.1...v0.5.3
 [0.5.1]: https://github.com/pedronaugusto/lookout/compare/v0.5.0...v0.5.1
