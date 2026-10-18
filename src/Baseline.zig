@@ -297,6 +297,12 @@ const Scan = struct {
         s.* = undefined;
     }
 
+    /// A directory no scan has listed yet. Its entries are checked by
+    /// content while their timestamps are racy, as polling checks them: a
+    /// rewrite to the same size within the timestamp's granularity (a
+    /// kernel tick on Linux) leaves size and times as they were.
+    const unseen: Snapshot = .{ .entries = .empty, .truncated = false, .check_contents = true };
+
     fn run(s: *Scan, gpa: Allocator, io: Io, report: bool) DiffError!void {
         const b = s.baseline;
         var frontier: std.ArrayList([]u8) = .empty;
@@ -332,7 +338,7 @@ const Scan = struct {
             const policy = identity.read(io, path).policy(b.identity_override);
             s.dirs.values()[index].policy = policy;
             Snapshot.freeChanges(gpa, &s.scratch);
-            const before = if (b.dirs.getPtr(path)) |remembered| &remembered.snapshot else &Snapshot.empty;
+            const before = if (b.dirs.getPtr(path)) |remembered| &remembered.snapshot else &unseen;
             s.dirs.values()[index].snapshot = try before.read(gpa, io, dir, b.max_dir_entries);
 
             if (report) {
@@ -493,6 +499,31 @@ test "a diff names what was created, changed and removed" {
     // The baseline is now what it found, so the same diff twice says
     // nothing the second time.
     try testing.expectEqual(@as(usize, 0), (try base.diff(io)).len);
+}
+
+test "a rewrite that keeps the size and the modification time is a modification" {
+    // As a rewrite within one tick of the file system's clock leaves them:
+    // the timestamps are racy, so the contents decide.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
+    const was = try tmp.dir.statFile(io, "a.txt", .{});
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    var base = try Baseline.seed(gpa, io, root, .{});
+    defer base.deinit();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "two" });
+    const file = try tmp.dir.openFile(io, "a.txt", .{ .mode = .read_write });
+    defer file.close(io);
+    try file.setTimestamps(io, .{ .modify_timestamp = .{ .new = was.mtime } });
+
+    const changes = try base.diff(io);
+    try testing.expectEqual(@as(usize, 1), changes.len);
+    try testing.expect(try holds(changes, root, "a.txt", .modified));
 }
 
 test "a recursive baseline follows subdirectories" {

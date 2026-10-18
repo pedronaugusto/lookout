@@ -204,6 +204,9 @@ differences that affect event handling.
 | --- | --- |
 | Polling | Entries whose mtime or ctime is not strictly older than their snapshot in a conservative two-second tick are checked by content until they age; hashes cover files up to 1 MiB, and larger or unreadable racy entries report modification. |
 
+A `Baseline` compares its listings the same way, so a rewrite that keeps a
+file's size within one tick of the file system's clock is a modification.
+
 On Apple targets the FSEvents backend opens CoreServices from the system when
 the first watcher is made, so the build links only libSystem, from what Zig
 ships, and a named Apple target builds on any host with no SDK. A system

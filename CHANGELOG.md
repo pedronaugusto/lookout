@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A `Baseline` missed a file rewritten to the same size within one tick of the file system's clock (a kernel tick on Linux), which leaves its size and times as they were: its listings now check entries whose times are racy by content, as polling does. Found by fuzzing the baseline property.
 - Development: a fuzzing campaign ran to its end and then hung. The baseline property set `std.testing.io` up again around each input and tore it down after, but Zig 0.17's fuzzing runner already holds one around the whole test; the runner then tore down what the property had left undefined and waited on a lock in it for good.
 
 ## [0.7.0] - 2026-10-17
