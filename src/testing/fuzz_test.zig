@@ -785,17 +785,6 @@ fn applyModel(dir: std.Io.Dir, model: *const Model) !void {
     }
 }
 
-/// `std.testing.io` around one input of `zig build test --fuzz`: the test
-/// runner sets it up around each test of an ordinary run, and leaves it
-/// uninitialised around the inputs a fuzzing run feeds one target.
-fn fuzzingIo() void {
-    if (builtin.fuzz) testing.io_instance = .init(testing.allocator, .{});
-}
-
-fn fuzzedIo() void {
-    if (builtin.fuzz) testing.io_instance.deinit();
-}
-
 /// Names that stay distinct on a volume that folds case and composition,
 /// so the model and the disk agree on what is there.
 const model_names = [_][]const u8{ "a", "b", "c d", "\u{65e5}", "e.txt" };
@@ -805,8 +794,6 @@ const Expected = struct { kind: lookout.Kind, target: lookout.Target };
 
 fn fuzzBaseline(_: void, c: *Case) !void {
     const s = c.source;
-    fuzzingIo();
-    defer fuzzedIo();
     const gpa = testing.allocator;
     const io = testing.io;
     var arena: std.heap.ArenaAllocator = .init(gpa);

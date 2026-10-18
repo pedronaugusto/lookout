@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Development: the suite runs under the release tier's hardened profile (`bay hardened`, `bay hardened-fuzz`, `bay hardened-tsan`), which takes the place of the `thread-sanitizer` build option and its declared ThreadSanitizer job.
 
+### Fixed
+
+- Development: a fuzzing campaign ran to its end and then hung. The baseline property set `std.testing.io` up again around each input and tore it down after, but Zig 0.17's fuzzing runner already holds one around the whole test; the runner then tore down what the property had left undefined and waited on a lock in it for good.
+
 ## [0.7.0] - 2026-10-17
 
 ### Breaking
