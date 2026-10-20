@@ -13,9 +13,27 @@ const Alignment = std.mem.Alignment;
 const LockProbe = @This();
 
 child: Allocator,
-lock: *const std.atomic.Value(bool),
+/// The lock looked at, asked through `held`.
+lock: *const anyopaque,
+held: *const fn (*const anyopaque) bool,
 calls: usize = 0,
 under_lock: usize = 0,
+
+/// A probe over `child` that looks at `lock`, anything with an `isHeld`
+/// (aegis's guarded types): the lock is asked, never read around.
+pub fn init(child: Allocator, lock: anytype) LockProbe {
+    const Lock = @TypeOf(lock.*);
+    return .{
+        .child = child,
+        .lock = lock,
+        .held = struct {
+            fn held(ptr: *const anyopaque) bool {
+                const l: *const Lock = @ptrCast(@alignCast(ptr)); // safe: `init` pairs this function with a pointer to its own lock
+                return l.isHeld();
+            }
+        }.held,
+    };
+}
 
 pub fn allocator(p: *LockProbe) Allocator {
     return .{ .ptr = p, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
@@ -27,7 +45,7 @@ fn of(ptr: *anyopaque) *LockProbe {
 
 fn note(p: *LockProbe) void {
     p.calls += 1;
-    if (p.lock.load(.acquire)) p.under_lock += 1;
+    if (p.held(p.lock)) p.under_lock += 1;
 }
 
 fn alloc(ptr: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*]u8 {

@@ -1087,7 +1087,7 @@ test "the polling thread never allocates while the delivery thread's lock is hel
     var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const f = &watcher.impl.fsevents;
-    var probe: LockProbe = .{ .child = gpa, .lock = &f.sink.delivery.lock };
+    var probe: LockProbe = .init(gpa, &f.sink.delivery);
     f.gpa = probe.allocator();
     defer f.gpa = gpa;
     const id: WatchId = .fromRaw(7);

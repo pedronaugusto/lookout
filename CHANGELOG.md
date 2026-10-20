@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Development: the test's lock probe asks the delivery buffer's guard whether it is held (`isHeld`) instead of reading the guarded lock's word, which aegis's A001 names as a bypass of the guard.
+
 ## [0.7.1] - 2026-10-18
 
 ### Changed
