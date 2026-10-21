@@ -11,6 +11,8 @@ test {
     _ = @import("testing/gaps_test.zig");
     _ = @import("testing/fuzz_test.zig");
     _ = @import("links_test.zig");
+    _ = @import("ChangeLog.zig");
+    _ = @import("testing/clock_test.zig");
     _ = @import("Checkpoint/History.zig");
     if (comptime lookout.supported(.kqueue)) _ = @import("backend/Kqueue.zig");
     _ = @import("backend/windows/records.zig");

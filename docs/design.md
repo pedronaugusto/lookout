@@ -290,6 +290,25 @@ that the loop absorbs.
   taken after the events were processed, so a crash replays rather than loses.
 - **Neither a baseline nor a checkpoint recovers transient changes** absent from
   both snapshots. lookout does not turn overflow recovery into a history.
+- **A history answers git's file-monitor question, in memory.** With
+  `Options.history` the watcher keeps each path `poll` handed out, once, with
+  the tick it last did, so `since(clock)` is a lookup and not a walk; a clock is
+  the watcher's random epoch and a tick, so another watcher's, or one from an
+  earlier run, is refused rather than misread. It answers only for what a watch
+  saw whole and says null otherwise: the clock before the watch was added or
+  refiltered, before an overflow or a failed allocation, before the history
+  forgot its paths at the `history` bound; never once the watch stopped or has
+  an `unwatched` hole. A history over a watcher's lifetime is what this is; one
+  across restarts is a checkpoint's or a baseline's.
+- **`sync` is git's cookie.** An answer covers what `poll` has handed out, and
+  a write made just before the question may still be in the kernel or the
+  coalescing window. `sync` writes a file of the watcher's own where the watch
+  reports and waits, on a condition another thread signals, until `poll` has
+  handed out its creation and then its removal: the kernel backends deliver in
+  order, and a polling registration scans whole after the creation was seen.
+  The files are recognized by the epoch in their names and never handed out,
+  even after a wait gave up. The history is read and written under a blocking
+  lock, because the question comes from a thread that is not the poller's.
 
 ### Tests
 

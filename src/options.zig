@@ -119,6 +119,12 @@ pub const Options = struct {
     /// checkpoint's baseline did not hold being `created`. Backends without
     /// a persistent log ignore this.
     checkpoint: ?Checkpoint = null,
+    /// Keep, in memory, what `poll` hands out, for `Watcher.clock`,
+    /// `Watcher.since` and `Watcher.sync`: at most this many paths across
+    /// every watch, past which the history forgets them all and a clock
+    /// taken before is answered with null. Null keeps no history, and
+    /// `Watcher.clock` is then null.
+    history: ?usize = null,
     /// The most events one `poll` will hold, past which it stops
     /// collecting names and says `Kind.overflow` against the watch roots
     /// that lost them. Zero means no ceiling at all.

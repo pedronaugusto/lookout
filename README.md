@@ -113,6 +113,20 @@ sync after it is `PublishedNotDurable`, with the new file in place; a filesystem
 refuses the syncs is `LevelUnavailable`. A crash during a save can leave a temporary
 file named after `Baseline.temp_prefix`, which `airlock.pruneTemps` removes. Neither in-memory nor persisted baselines
 recover transient changes absent from both snapshots.
+
+With `Options.history`, the watcher keeps in memory what `poll` has handed out, so it
+can answer git's file-monitor question: what changed since a moment of its own.
+`clock(io)` names the moment (`Clock.format` writes it as a token to keep);
+`since(io, arena, id, clock)` lists each path of the watch that changed after it, with
+the clock the answer reaches, or null where the watcher cannot say: another watcher's
+or an earlier run's clock, one from before the watch was added, refiltered, lost
+changes to an overflow or ran out of the room `history` gives, and any once the watch
+stopped or has an unwatched hole. Null means look at everything. `sync(io, dir,
+timeout)` makes the answer reach a change made just before the question: it writes a
+file of the watcher's own in `dir`, a directory the watch reports, and waits for
+`poll` to hand out its creation and removal, as git's daemon does with its cookies;
+the file is never handed out. These three, like `wake`, may be called from any thread;
+`sync` needs another thread polling.
 Each change carries its `target`, file or directory, from the listing that saw it, so a
 removed directory is known for one without a `stat`.
 

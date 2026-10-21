@@ -40,6 +40,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "batching", .patterns = &.{
         "src/Batch.zig",
     } },
+    .{ .name = "history", .patterns = &.{
+        "src/ChangeLog.zig",
+    } },
     .{ .name = "watch trees", .patterns = &.{
         "src/Links.zig",
         "src/Tree.zig",
@@ -101,6 +104,7 @@ pub const required = [_][]const u8{
     "src/backend/fsevents/Volume.zig",
     "src/options.zig",
     "src/Batch.zig",
+    "src/ChangeLog.zig",
     "src/Links.zig",
     "src/Tree.zig",
     "src/watch_contract.zig",

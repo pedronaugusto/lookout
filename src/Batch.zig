@@ -582,6 +582,24 @@ fn discardEvents(b: *Batch, gpa: Allocator, id: WatchId) void {
     }
 }
 
+/// Takes out of the window every event `context.discards` names, before
+/// it is handed out: the history's own files (`ChangeLog.sync`).
+pub fn discardWhere(b: *Batch, gpa: Allocator, context: anytype) void {
+    var removed = false;
+    var i: usize = 0;
+    while (i < b.events.items.len) {
+        if (!context.discards(b.events.items[i])) {
+            i += 1;
+            continue;
+        }
+        const event = b.events.orderedRemove(i);
+        gpa.free(event.path);
+        if (event.from) |from| gpa.free(from);
+        removed = true;
+    }
+    if (removed) b.rebuildIndex();
+}
+
 fn rebuildIndex(b: *Batch) void {
     b.index.clearRetainingCapacity();
     for (b.events.items, 0..) |event, at| {

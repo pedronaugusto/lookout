@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The watcher's history (`Options.history`, in memory): `Watcher.clock` names a moment in what `poll` has handed out (`Clock`, written and read back as a `lookout:` token), `Watcher.since` answers which paths of a watch changed after one, or null where it cannot say (another watcher's clock, a watch added, refiltered or overflowed since, the history out of room, a watch stopped or with an unwatched hole), and `Watcher.sync` writes a file of the watcher's own in a watched directory and waits until `poll` has handed out its creation and removal, so the answer reaches a change made just before the question, as git's fsmonitor daemon does with its cookies. The three may be called from any thread. It is the question git asks a file monitor and relic's `fsmonitor.ChangeSource` asks a program.
+
 ## [0.7.2] - 2026-10-21
 
 ### Changed

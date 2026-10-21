@@ -27,6 +27,7 @@ const assert = std.debug.assert;
 const Io = std.Io;
 
 const Batch = @import("Batch.zig");
+const ChangeLog = @import("ChangeLog.zig");
 const Links = @import("Links.zig");
 const Tree = @import("Tree.zig");
 const walk = @import("walk.zig");
@@ -240,10 +241,18 @@ pub const Target = @import("types.zig").Target;
 /// One thing that happened to one path during one `Watcher.poll` window.
 pub const Event = @import("types.zig").Event;
 
+/// A moment in a watcher's history: see `Watcher.clock`.
+pub const Clock = ChangeLog.Clock;
+/// One path `Watcher.since` says changed.
+pub const Change = ChangeLog.Change;
+/// `Watcher.since`'s answer.
+pub const Changes = ChangeLog.Changes;
+
 /// A set of watches and the events they have produced.
 ///
-/// Not thread-safe: one `Watcher` belongs to one thread. Several may exist
-/// in one process.
+/// Not thread-safe: one `Watcher` belongs to one thread, save `wake`,
+/// `clock`, `since` and `sync`, which any thread may call. Several may
+/// exist in one process.
 pub const Watcher = struct {
     /// How a `Watcher` behaves, fixed for its lifetime.
     pub const Options = options_mod.Options;
@@ -285,6 +294,10 @@ pub const Watcher = struct {
     /// that returned an error handed nothing out, and what it had gathered
     /// is still the next one's to return.
     handed_out: bool,
+    /// What `poll` has handed out, with `Options.history`. Heap-allocated
+    /// and set once, by `init`: the threads that read it hold this
+    /// pointer, not the watcher.
+    history: ?*ChangeLog,
 
     /// What the watcher remembers about one watch.
     const Held = struct {
@@ -429,6 +442,7 @@ pub const Watcher = struct {
         };
         var kept_options = options;
         kept_options.checkpoint = null; // Only the resuming backend owns the copy.
+        const history: ?*ChangeLog = if (options.history) |limit| try ChangeLog.create(gpa, io, limit) else null;
         return .{
             .gpa = gpa,
             .options = kept_options,
@@ -442,6 +456,7 @@ pub const Watcher = struct {
             .woken = .init(false),
             .wakeup = wakeup,
             .handed_out = false,
+            .history = history,
         };
     }
 
@@ -460,6 +475,7 @@ pub const Watcher = struct {
         for (w.table.values()) |*held| w.release(held);
         w.table.deinit(w.gpa);
         w.batch.deinit(w.gpa);
+        if (w.history) |h| h.destroy();
         w.* = undefined;
     }
 
@@ -493,6 +509,10 @@ pub const Watcher = struct {
         const spelling = try w.gpa.dupe(u8, requested);
         errdefer w.gpa.free(spelling);
         const id = try w.addResolved(io, requested, options);
+        if (w.history) |h| h.added(io, id, w.table.getPtr(id).?.path) catch |err| {
+            w.remove(io, id);
+            return err;
+        };
         w.table.getPtr(id).?.requested = spelling;
         w.table.getPtr(id).?.identity_override = options.identity;
         return id;
@@ -982,6 +1002,7 @@ pub const Watcher = struct {
     /// Removing an id that is not currently watched — one already
     /// removed — does nothing.
     pub fn remove(w: *Watcher, io: Io, id: WatchId) void {
+        if (w.history) |h| h.removed(io, id);
         w.stopFollowing(io, id);
         w.removeBackend(io, id);
         // Ordered, so that `watches` lists what is left in the order it
@@ -1023,6 +1044,9 @@ pub const Watcher = struct {
     pub fn refilter(w: *Watcher, io: Io, id: WatchId, filter: Filter) RefilterError!void {
         if (!w.table.contains(id)) return error.UnknownWatch;
         try io.checkCancel();
+        // What the new filter admits had no changes kept; forgetting before
+        // a refusal too only asks the caller to look again.
+        if (w.history) |h| h.refiltered(io, id);
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         // A pattern refused is refused before anything changes.
@@ -1122,6 +1146,11 @@ pub const Watcher = struct {
         };
         for (w.table.values()) |*held| held.incomplete = false;
         w.handed_out = true;
+        if (w.history) |h| {
+            h.record(io, events);
+            w.batch.discardWhere(w.gpa, h);
+            return w.batch.events.items;
+        }
         return events;
     }
 
@@ -1278,6 +1307,60 @@ pub const Watcher = struct {
     pub fn wake(w: *Watcher) void {
         w.woken.store(true, .release);
         w.wakeup.signal();
+    }
+
+    /// Where the watcher's history stands: everything `poll` has handed out
+    /// so far, as a clock `since` answers for later. Null without
+    /// `Options.history`. Any thread may ask.
+    ///
+    /// It is what a program that answers git's file-monitor question
+    /// keeps as its token (`Clock.format`): relic's `ChangeSource`, or a
+    /// `core.fsmonitor` hook. The history is in memory: a clock outlives
+    /// neither the watcher nor the process, and another watcher's is
+    /// answered with null.
+    pub fn clock(w: *const Watcher, io: Io) ?Clock {
+        const h = w.history orelse return null;
+        return h.clock(io);
+    }
+
+    /// What the watch `id` saw change after `since`, in `arena`, with the
+    /// clock the answer reaches; or null where the history cannot say,
+    /// which tells the caller to look at everything: no `Options.history`,
+    /// another watcher's clock, a clock from before the watch was added or
+    /// its filter changed, from before it lost changes (`Kind.overflow`,
+    /// an allocation failure) or the history forgot them for want of room,
+    /// and every clock once the watch has stopped (its root removed or
+    /// moved) or has a hole (`Kind.unwatched`). Any thread may ask.
+    ///
+    /// It answers for what `poll` has handed out. A change the kernel has
+    /// not delivered yet, or `poll` is still coalescing, is not in it:
+    /// `sync` first, for an answer that reaches the question.
+    pub fn since(w: *const Watcher, io: Io, arena: Allocator, id: WatchId, from: Clock) Allocator.Error!?Changes {
+        const h = w.history orelse return null;
+        return h.changes(io, arena, id, from);
+    }
+
+    pub const SyncError = ChangeLog.SyncError || error{
+        /// `sync` on a watcher made without `Options.history`.
+        NoHistory,
+    };
+
+    /// Makes `since` reach now: writes a file of the watcher's own in
+    /// `dir` (absolute, in a watch, not excluded by its filter: a git
+    /// directory inside the working tree does, as git's daemon writes its
+    /// cookies there) and waits until `poll` has handed out its creation
+    /// and then its removal. By then everything the watch reported before
+    /// the file was written has been handed out: on a kernel backend,
+    /// which delivers in order, and on a polling registration, by a scan
+    /// begun after the file was seen. It vouches for the watch `dir` is in.
+    ///
+    /// Called from any thread but the polling one, which must be polling
+    /// meanwhile; `error.SyncTimeout` when nothing was handed out by
+    /// `timeout`. The file is never handed out, and one a timed-out wait
+    /// leaves is taken out of every later batch.
+    pub fn sync(w: *const Watcher, io: Io, dir: []const u8, timeout: Io.Timeout) SyncError!void {
+        const h = w.history orelse return error.NoHistory;
+        return h.sync(io, dir, timeout);
     }
 
     /// Copies the boundary of what poll has handed out. The snapshot owns
