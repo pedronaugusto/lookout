@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-21
+
 ### Changed
 
 - aegis 0.1.14 (from 0.1.12) and sweep 0.2.3 (from 0.2.2), which preflight 0.12.1 selects.
@@ -753,7 +755,8 @@ First release.
   `inotify` backend is executed rather than merely compiled from a machine that
   is not Linux.
 
-[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/pedronaugusto/lookout/compare/v0.7.0...v0.7.2
 [0.7.0]: https://github.com/pedronaugusto/lookout/compare/v0.5.4...v0.7.0
 [0.5.4]: https://github.com/pedronaugusto/lookout/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/pedronaugusto/lookout/compare/v0.5.1...v0.5.3
