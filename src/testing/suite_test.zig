@@ -1951,6 +1951,9 @@ const Ledger = struct {
                 });
             }
         }
+        // What was seen instead says why: a red on a host this suite runs
+        // on rarely is read from it.
+        for (l.seen.items) |key| std.debug.print("  seen: watch {d} {s} {s}\n", .{ key.id.raw(), @tagName(key.kind), key.path });
         return error.EventNotObserved;
     }
 
