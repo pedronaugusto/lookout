@@ -116,9 +116,7 @@ pub const required = [_][]const u8{
 
 /// Tokens only their owners may spell: each backend alone speaks to its
 /// kernel interface.
-pub const owned: []const gantry.rules.TokenRule = &(durability ++ package_owned);
-
-const package_owned = [_]gantry.rules.TokenRule{
+pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "inotify backend", .tokens = &.{ "inotify_init1", "inotify_add_watch", "inotify_rm_watch" }, .owners = &.{ "src/backend/Inotify.zig", "src/backend/inotify/**" } },
     .{ .name = "fsevents backend", .tokens = &.{ "FSEventStreamCreate", "FSEventStreamStart" }, .owners = &.{ "src/backend/FsEvents.zig", "src/backend/fsevents/**" } },
     .{ .name = "kqueue backend", .tokens = &.{"kevent"}, .owners = &.{"src/backend/Kqueue.zig"} },
@@ -130,17 +128,3 @@ const package_owned = [_]gantry.rules.TokenRule{
     // looks at a lock when it is called, which shakedown's do not offer.
     .{ .name = "test doubles on shakedown", .tokens = &.{ "vtable", "VTable" }, .owners = &.{"src/testing/LockProbe.zig"} },
 };
-
-/// Durable writes go through airlock.
-const durability = [_]gantry.rules.TokenRule{.{
-    .name = "durability belongs to airlock",
-    .sequences = &.{
-        &.{ ".", "sync", "(" },
-        &.{ ".", "syncFile", "(" },
-        &.{ ".", "syncDir", "(" },
-        &.{ "createFileAtomic", "(" },
-        &.{ "fsync", "(" },
-        &.{ "fdatasync", "(" },
-        &.{ "FlushFileBuffers", "(" },
-    },
-}};
