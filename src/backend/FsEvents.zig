@@ -2417,11 +2417,7 @@ const c = struct {
 
     /// Darwin's `fcntl` commands and flags, for the delivery pipe.
     const f_getfd: c_int = 1;
-    const f_setfd: c_int = 2;
-    const f_getfl: c_int = 3;
-    const f_setfl: c_int = 4;
     const fd_cloexec: c_int = 1;
-    const o_nonblock: c_int = 0x0004;
 
     extern "c" fn dispatch_queue_create(label: ?[*:0]const u8, attr: ?*anyopaque) ?dispatch_queue_t;
     extern "c" fn dispatch_release(object: *anyopaque) void;
