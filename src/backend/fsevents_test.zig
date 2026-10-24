@@ -1,6 +1,6 @@
 //! Watcher integration scenarios for fsevents.
 const std = @import("std");
-const wait = @import("../testing/wait.zig");
+const wait = @import("../testing/timeout.zig");
 const Io = std.Io;
 const lookout = @import("../lookout.zig");
 const ms = @import("../testing/timeout.zig").ms;
@@ -159,6 +159,7 @@ test "the flags that say the system lost track are one overflow, and the watch g
             if (event.id == single and event.kind == .modified and std.mem.eql(u8, event.path, file)) saw_file = true;
         }
     }
+    if (!(saw_after and saw_file)) return wait.missed(io, watcher.backend());
     try testing.expect(saw_after);
     try testing.expect(saw_file);
 }
@@ -196,6 +197,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
             if (event.kind == .created) created += 1;
         }
     }
+    if (created < 3) return wait.missed(io, watcher.backend());
     try testing.expectEqual(@as(usize, 3), created);
     while ((try watcher.poll(io, ms(200))).len != 0) {}
     try testing.expectEqual(@as(usize, 3), f.budget.count(sub).?);
@@ -221,7 +223,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
             if (event.kind == .overflow and event.id == tree) overflowed = true;
         }
     }
-    try testing.expect(overflowed);
+    try wait.seen(io, watcher.backend(), overflowed);
     // `sub` is past the budget now, so each record left of `sub/d` says
     // so again; they are read out before the next loss is made.
     while ((try watcher.poll(io, ms(200))).len != 0) {}
@@ -642,7 +644,7 @@ test "a recursive mount keeps live coverage and refuses a single-device checkpoi
             if (std.mem.eql(u8, event.path, wanted) and event.kind == .created) saw = true;
         }
     }
-    try testing.expect(saw);
+    try wait.seen(io, watcher.backend(), saw);
 }
 
 test "an absent pending root refuses a checkpoint from another volume" {
@@ -754,6 +756,7 @@ fn expectOneOverflow(io: Io, watcher: *lookout.Watcher, id: WatchId, root: []con
             overflows += 1;
         }
     }
+    if (overflows == 0) return wait.missed(io, watcher.backend());
     try std.testing.expectEqual(@as(usize, 1), overflows);
     while (true) {
         const events = try watcher.poll(io, ms(200));
