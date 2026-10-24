@@ -1,7 +1,5 @@
 {
-  "land": true,
   "attest": true,
-  "release": true,
   "compile_step": "install",
   "targets": [
     "x86_64-linux-gnu",

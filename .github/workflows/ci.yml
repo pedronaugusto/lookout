@@ -12,10 +12,6 @@ on:
         type: choice
         options: [fast, merge, release]
         default: fast
-      land:
-        description: Fast-forward main to this commit when the merge tier passes
-        type: boolean
-        default: true
       status-only:
         description: Verify the recorded merge or release tier for this exact commit
         type: boolean
@@ -54,14 +50,3 @@ jobs:
         {"include":[{"os":"windows-latest","name":"test (windows-latest, Debug)","step":"ci-run","args":"-Doptimize=debug -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"8504875e0509bae1","artifact":"preflight-8504875e0509bae1","operation":"replay","targets":"","directory":"","prepare":"","declared":false,"qemu":false},{"os":"windows-latest","name":"test (windows-latest, ReleaseSafe)","step":"ci-run","args":"-Doptimize=safe -Dci-lint=false -Dci-timings=true","shard":"","setup":true,"job_timeout":20,"cache_key":"075f774c882e73f3","artifact":"preflight-075f774c882e73f3","operation":"replay","targets":"","directory":"","prepare":"","declared":false,"qemu":false}]}
       windows-git-latest: false
       compile-once: true
-  land:
-    needs: gate
-    if: github.event_name == 'workflow_dispatch' && inputs.land && inputs.tier == 'merge' && needs.gate.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - uses: pedronaugusto/preflight/.github/actions/land@ca6342eb24d5f9b17dc5ba61cec15b4c7bf4d5e0
-        with:
-          version: ${{ needs.gate.outputs.version }}
