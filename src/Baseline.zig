@@ -1112,3 +1112,23 @@ test "baseline storage retains explicit name policy and normalized filter prefer
     try testing.expectEqual(@as(usize, 1), changes.len);
     try testing.expect(std.mem.endsWith(u8, changes[0].path, std.Io.Dir.path.sep_str ++ "e"));
 }
+
+test "a baseline reads and writes the bytes std.json wrote, names that are not UTF-8 among them" {
+    const gpa = std.testing.allocator;
+    const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
+    const meta: Snapshot.Meta = .{ .size = 3, .mtime_ns = 1_761_300_000_123_456_789, .ctime_ns = -1, .file_kind = .file, .racy = true, .content_hash = 7 };
+    const entries = [_]format.Entry{ .{ .name = "caf\u{e9}", .meta = meta }, .{ .name = "a\xffb", .meta = meta } };
+    const dirs = [_]format.Directory{.{ .path = root, .truncated = false, .check_contents = true, .entries = &entries }};
+    const state: format.State = .{ .platform = format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{ "*.o", "\xfe" }, .only = &.{}, .dirs = &dirs, .case = .ascii };
+    // The payload as baselines before strand were written.
+    const standard = try std.json.Stringify.valueAlloc(gpa, state, .{});
+    defer gpa.free(standard);
+    const bytes = try format.encode(gpa, state);
+    defer gpa.free(bytes);
+    try std.testing.expect(std.mem.endsWith(u8, bytes, standard));
+    var parsed = try format.parse(gpa, bytes);
+    defer parsed.deinit();
+    try std.testing.expectEqualSlices(u8, "a\xffb", parsed.value.dirs[0].entries[1].name);
+    try std.testing.expectEqualSlices(u8, "\xfe", parsed.value.ignore[1]);
+    try std.testing.expectEqual(meta, parsed.value.dirs[0].entries[1].meta);
+}

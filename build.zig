@@ -31,10 +31,12 @@ pub fn build(b: *std.Build) void {
     const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const reactor_dependency = b.dependency("reactor", .{ .target = target, .optimize = optimize });
     const reactor = reactor_dependency.module("reactor");
+    const strand = b.dependency("strand", .{ .target = target, .optimize = optimize }).module("strand");
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "aegis", .module = aegis },
         .{ .name = "airlock", .module = airlock },
         .{ .name = "reactor", .module = reactor },
+        .{ .name = "strand", .module = strand },
         .{ .name = "sweep", .module = sweep },
     };
 
@@ -170,7 +172,7 @@ pub fn dev(b: *std.Build, tools: type) void {
             .link_libc = darwin,
         },
     });
-    // The build a consumer gets: aegis, airlock, reactor and sweep, and
+    // The build a consumer gets: aegis, airlock, reactor, strand and sweep, and
     // nothing lookout fetches for itself.
     preflight.addConsumerCheck(b, p, .{
         .package = "lookout",
@@ -181,6 +183,7 @@ pub fn dev(b: *std.Build, tools: type) void {
             reactor_dependency,
             // The aegis reactor was built with is its own to pin.
             reactor_dependency.builder.dependency("aegis", .{}),
+            p.dependency("strand", .{}),
             p.dependency("sweep", .{}),
         },
     });
@@ -197,6 +200,7 @@ fn lookoutImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         .{ .name = "aegis", .module = p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis") },
         .{ .name = "airlock", .module = p.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock") },
         .{ .name = "reactor", .module = p.dependency("reactor", .{ .target = target, .optimize = optimize }).module("reactor") },
+        .{ .name = "strand", .module = p.dependency("strand", .{ .target = target, .optimize = optimize }).module("strand") },
         .{ .name = "sweep", .module = p.dependency("sweep", .{ .target = target, .optimize = optimize }).module("sweep") },
     }) catch @panic("OOM");
 }

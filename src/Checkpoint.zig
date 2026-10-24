@@ -18,7 +18,7 @@ pub fn deinit(p: *Checkpoint) void {
 
 /// Writes an owned text token. The caller frees it with gpa.
 pub fn token(p: Checkpoint, gpa: Allocator) Allocator.Error![]u8 {
-    return std.json.Stringify.valueAlloc(gpa, p.state.value, .{});
+    return format.write(gpa, p.state.value);
 }
 
 pub const ParseError = error{ OutOfMemory, InvalidCheckpoint };
@@ -72,7 +72,7 @@ test "checkpoint paths cannot omit their baseline or escape the root" {
     const escaped = try std.Io.Dir.path.join(gpa, &.{ root, "..", "outside" });
     defer gpa.free(escaped);
     const identity: format.Identity = .{ .volume = @splat('1'), .log = @splat('2') };
-    const text = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 3, .backend = .fsevents, .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true, .baseline = .{ .flat = &.{escaped} } }} }, .{});
+    const text = try std.json.Stringify.valueAlloc(gpa, format.Wire.State{ .version = 3, .backend = .fsevents, .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true, .baseline = &.{escaped} }} }, .{});
     defer gpa.free(text);
     try std.testing.expectError(error.InvalidCheckpoint, parse(gpa, text));
     const missing = try std.json.Stringify.valueAlloc(gpa, .{ .version = 3, .backend = "fsevents", .watches = &.{.{ .root = root, .cursor = 1, .identity = identity, .recursive = true }} }, .{});
@@ -84,12 +84,12 @@ test "a checkpoint token naming one root twice is refused" {
     const gpa = std.testing.allocator;
     const root = if (builtin.target.os.tag == .windows) "C:\\watch" else "/watch";
     const identity: format.Identity = .{ .volume = @splat('1'), .log = @splat('2') };
-    const watch: format.Watch = .{ .root = root, .cursor = 1, .identity = identity, .recursive = true, .baseline = .{ .flat = &.{root} } };
-    const once = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 3, .backend = .fsevents, .watches = &.{watch} }, .{});
+    const watch: format.Wire.Watch = .{ .root = root, .cursor = 1, .identity = identity, .recursive = true, .baseline = &.{root} };
+    const once = try std.json.Stringify.valueAlloc(gpa, format.Wire.State{ .version = 3, .backend = .fsevents, .watches = &.{watch} }, .{});
     defer gpa.free(once);
     var parsed = try parse(gpa, once);
     parsed.deinit();
-    const twice = try std.json.Stringify.valueAlloc(gpa, format.State{ .version = 3, .backend = .fsevents, .watches = &.{ watch, watch } }, .{});
+    const twice = try std.json.Stringify.valueAlloc(gpa, format.Wire.State{ .version = 3, .backend = .fsevents, .watches = &.{ watch, watch } }, .{});
     defer gpa.free(twice);
     try std.testing.expectError(error.InvalidCheckpoint, parse(gpa, twice));
 }

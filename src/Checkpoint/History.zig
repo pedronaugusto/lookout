@@ -267,18 +267,6 @@ pub const Paths = union(enum) {
         if (p == .flat) return .{ .flat = p.flat };
         return .{ .lease = p.shared };
     }
-
-    pub fn jsonStringify(p: Paths, writer: anytype) !void {
-        try writer.beginArray();
-        var it = p.iterator();
-        defer it.deinit();
-        while (it.next()) |name| try writer.write(name);
-        try writer.endArray();
-    }
-
-    pub fn jsonParse(gpa: Allocator, source: anytype, options: std.json.ParseOptions) !Paths {
-        return .{ .flat = try std.json.innerParse([]const []const u8, gpa, source, options) };
-    }
 };
 
 pub const Iterator = struct {

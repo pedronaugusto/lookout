@@ -8,39 +8,67 @@ const lookout = @import("../types.zig");
 /// independently of the package.
 pub const version = 3;
 
-/// The serialized format is versioned independently of the package.
-pub const State = struct {
-    version: u8,
-    backend: lookout.Backend,
-    watches: []const Watch,
+/// A checkpoint as a watcher holds it: its baselines may be revisions of
+/// the history it shares (`Paths`).
+pub const State = StateOf(Watch);
+pub const Watch = WatchOf(Paths);
+
+/// A checkpoint as its token spells it: every baseline a list of names.
+pub const Wire = struct {
+    pub const State = StateOf(Wire.Watch);
+    pub const Watch = WatchOf([]const []const u8);
 };
+
+/// The serialized format is versioned independently of the package.
+fn StateOf(comptime W: type) type {
+    return struct {
+        version: u8,
+        backend: lookout.Backend,
+        watches: []const W,
+    };
+}
 
 /// Internal watch state. Requested roots are canonical watch identities.
 /// Recreate the same scopes and filters.
-pub const Watch = struct {
-    root: []const u8,
-    cursor: u64,
-    identity: Identity,
-    recursive: bool,
-    /// The path baseline at this cursor, persisted with the checkpoint.
-    baseline: Paths,
-    changes: []const Change = &.{},
-    half: ?Half = null,
-    /// `Filter.ignore` and `Filter.only` as the watch had them. A resume
-    /// under other patterns would read the baseline and the changes as
-    /// though they covered paths they never did, so it is refused.
-    ignore: []const []const u8 = &.{},
-    only: []const []const u8 = &.{},
-    case: ?sweep.Case = null,
-    normalization: ?name_policy.Policy.Normalization = null,
-    policy: name_policy.Policy = .{},
-    identity_override: ?name_policy.Policy = null,
-};
+fn WatchOf(comptime Baseline: type) type {
+    return struct {
+        root: []const u8,
+        cursor: u64,
+        identity: Identity,
+        recursive: bool,
+        /// The path baseline at this cursor, persisted with the checkpoint.
+        baseline: Baseline,
+        changes: []const Change = &.{},
+        half: ?Half = null,
+        /// `Filter.ignore` and `Filter.only` as the watch had them. A resume
+        /// under other patterns would read the baseline and the changes as
+        /// though they covered paths they never did, so it is refused.
+        ignore: []const []const u8 = &.{},
+        only: []const []const u8 = &.{},
+        case: ?sweep.Case = null,
+        normalization: ?name_policy.Policy.Normalization = null,
+        policy: name_policy.Policy = .{},
+        identity_override: ?name_policy.Policy = null,
+        /// The patterns are the bytes a filter was given: text when they are UTF-8.
+        pub const strand = .{ .fields = .{ .ignore = .{ .as = .text_or_bytes }, .only = .{ .as = .text_or_bytes } } };
+    };
+}
+
+/// The same watch with another baseline.
+fn rebased(comptime To: type, from: anytype, baseline: @FieldType(To, "baseline")) To {
+    var to: To = undefined;
+    inline for (@typeInfo(To).@"struct".field_names) |name| {
+        if (comptime std.mem.eql(u8, name, "baseline")) to.baseline = baseline else @field(to, name) = @field(from, name);
+    }
+    return to;
+}
 
 /// Stable volume identity and the identity of its current FSEvents log.
 pub const Identity = struct {
     volume: [32]u8,
     log: [32]u8,
+    /// Each a UUID's lowercase hex, written as text.
+    pub const strand = .{ .fields = .{ .volume = .{ .as = .text }, .log = .{ .as = .text } } };
 };
 
 pub const Change = struct {
@@ -57,6 +85,7 @@ pub const Half = struct {
 };
 
 const std = @import("std");
+const strand = @import("strand");
 const Allocator = std.mem.Allocator;
 const path_cmp = @import("../path.zig");
 const Paths = @import("History.zig").Paths;
@@ -75,11 +104,23 @@ pub const Owned = struct {
 };
 
 pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {
-    var state = std.json.parseFromSlice(State, gpa, text, .{ .allocate = .alloc_always }) catch |err| return switch (err) {
+    const arena = try gpa.create(std.heap.ArenaAllocator);
+    arena.* = .init(gpa);
+    var state: Owned = .{ .arena = arena, .value = undefined };
+    errdefer {
+        arena.deinit();
+        gpa.destroy(arena);
+    }
+    // The names read borrow from the token's copy in the arena. A token is
+    // bounded by its own length: every name in it is spelled there.
+    const held = try arena.allocator().dupe(u8, text);
+    const wire = strand.json.parseLeaky(Wire.State, arena.allocator(), held, .{ .limits = .sized(text.len) }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidCheckpoint,
     };
-    errdefer state.deinit();
+    const watches = try arena.allocator().alloc(Watch, wire.watches.len);
+    for (wire.watches, watches) |from, *to| to.* = rebased(Watch, from, .{ .flat = from.baseline });
+    state.value = .{ .version = wire.version, .backend = wire.backend, .watches = watches };
     if (state.value.version != version or state.value.backend != .fsevents) return error.InvalidCheckpoint;
     var halves: usize = 0;
     for (state.value.watches, 0..) |watch, index| {
@@ -113,7 +154,7 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!Owned {
             if (halves > 1 or !sound(half.path) or half.flags & 0x800 == 0) return error.InvalidCheckpoint;
         }
     }
-    return .{ .value = state.value, .arena = state.arena };
+    return state;
 }
 
 /// Whether a path in a token is one a watcher could have written: absolute,
@@ -126,6 +167,32 @@ fn sound(subject: []const u8) bool {
         if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return false;
     }
     return true;
+}
+
+/// The token of `state`, which the caller frees with `gpa`. A shared
+/// baseline's names are listed first, borrowed from the revision it holds.
+pub fn write(gpa: Allocator, state: State) Allocator.Error![]u8 {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const watches = try a.alloc(Wire.Watch, state.watches.len);
+    for (state.watches, watches) |from, *to| {
+        var names: std.ArrayList([]const u8) = .empty;
+        var it = from.baseline.iterator();
+        defer it.deinit();
+        while (it.next()) |name| try names.append(a, name);
+        to.* = rebased(Wire.Watch, from, names.items);
+    }
+    var text: std.Io.Writer.Allocating = .init(gpa);
+    defer text.deinit();
+    const wire: Wire.State = .{ .version = state.version, .backend = state.backend, .watches = watches };
+    strand.json.write(&text.writer, wire, .{ .limits = .sized(std.math.maxInt(usize)) }) catch |err| return switch (err) {
+        error.WriteFailed, error.OutOfMemory => error.OutOfMemory,
+        // unreachable: a watcher's state is JSON within limits as large as memory: its names are
+        // UTF-8, the only names FSEvents gives, and its patterns text or bytes
+        else => unreachable,
+    };
+    return text.toOwnedSlice();
 }
 
 /// Copies borrowed internal state into an owned snapshot.
