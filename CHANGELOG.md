@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Checkpoint tokens and baseline files are read and written through strand (a new dependency), the family's one JSON, in place of `std.json`: bounded by their own size, with the same bytes as before, so a token or a baseline already written reads as it did. A name or a filter pattern that is not UTF-8 is written as its byte values, as `std.json` wrote it.
+
 ## [0.7.3] - 2026-10-21
 
 ### Added
