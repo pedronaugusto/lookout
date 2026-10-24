@@ -6,6 +6,7 @@
 //! one backend, or one shared rule, was wrong.
 
 const std = @import("std");
+const wait = @import("wait.zig");
 const builtin = @import("builtin");
 
 const lookout = @import("../lookout.zig");
@@ -15,7 +16,7 @@ const records = @import("../backend/fsevents/records.zig");
 const Kind = lookout.Kind;
 const Watcher = lookout.Watcher;
 
-const timeout_ms = 10_000;
+const timeout_ms = wait.event_ms;
 
 /// Every backend this target was built with.
 const backends: []const lookout.Backend = all: {
@@ -110,8 +111,8 @@ test "a change inside a renamed directory is not a creation" {
         // reports is a race and not a rule.
         var lost = false;
         var settled = false;
-        var waited: u32 = 0;
-        while (waited < timeout_ms and !settled) : (waited += 200) {
+        var deadline: wait.Deadline = .after(io, timeout_ms);
+        while (deadline.running(io) and !settled) {
             for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow) lost = true;
                 if (std.mem.startsWith(u8, event.path, moved)) settled = true;
@@ -137,8 +138,8 @@ test "a change inside a renamed directory is not a creation" {
 
         var saw_created = false;
         var saw_modified = false;
-        waited = 0;
-        while (waited < timeout_ms and !saw_modified) : (waited += 200) {
+        deadline = .after(io, timeout_ms);
+        while (deadline.running(io) and !saw_modified) {
             for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow) lost = true;
                 if (!std.mem.eql(u8, event.path, wanted)) continue;
@@ -195,8 +196,8 @@ test "a watch spelled in another case than the disk still reports" {
 
         // Promotion adopts the actual kernel spelling and keeps the request.
         var promoted = false;
-        var waited: u32 = 0;
-        while (waited < timeout_ms and !promoted) : (waited += 200) {
+        var deadline: wait.Deadline = .after(io, timeout_ms);
+        while (deadline.running(io) and !promoted) {
             for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .created and std.mem.endsWith(u8, event.path, "target")) promoted = true;
             }
@@ -208,8 +209,8 @@ test "a watch spelled in another case than the disk still reports" {
         // reported, though the kernel spells the path the other way.
         try tmp.dir.writeFile(io, .{ .sub_path = "target/a.txt", .data = "one" });
         var found = false;
-        waited = 0;
-        while (waited < timeout_ms and !found) : (waited += 200) {
+        deadline = .after(io, timeout_ms);
+        while (deadline.running(io) and !found) {
             for (try watcher.poll(io, ms(200))) |event| {
                 if (std.mem.endsWith(u8, event.path, "a.txt")) found = true;
             }
@@ -251,8 +252,8 @@ test "explicit case insensitive filtering excludes across filesystem policies" {
         try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "two" });
 
         var found = false;
-        var waited: u32 = 0;
-        while (waited < timeout_ms and !found) : (waited += 200) {
+        const deadline: wait.Deadline = .after(io, timeout_ms);
+        while (deadline.running(io) and !found) {
             for (try watcher.poll(io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, ignored));
                 if (std.mem.eql(u8, event.path, wanted)) found = true;
@@ -317,8 +318,8 @@ test "a slow write is one event, and it arrives after the writing stops" {
     defer thread.join();
 
     var seen: usize = 0;
-    var waited: u32 = 0;
-    while (waited < timeout_ms and seen == 0) : (waited += 100) {
+    const deadline: wait.Deadline = .after(io, timeout_ms);
+    while (deadline.running(io) and seen == 0) {
         for (try watcher.poll(io, ms(100))) |event| {
             if (!std.mem.eql(u8, event.path, wanted)) continue;
             try std.testing.expectEqual(Kind.modified, event.kind);
@@ -532,8 +533,8 @@ test "a root deleted and recreated inside one window is not a move" {
         try tmp.dir.deleteDir(io, "target");
         try tmp.dir.createDirPath(io, "target");
 
-        var waited: u32 = 0;
-        while (waited < 2_000) : (waited += 200) {
+        const deadline: wait.Deadline = .after(io, wait.quiet_ms);
+        while (deadline.running(io)) {
             for (try watcher.poll(io, ms(200))) |event| {
                 if (!std.mem.eql(u8, event.path, target)) continue;
                 if (event.kind != .renamed) continue;
@@ -598,8 +599,8 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
     const after = try std.Io.Dir.path.join(gpa, &.{ root, "after.txt" });
     defer gpa.free(after);
     var found = false;
-    var waited: u32 = 0;
-    while (waited < timeout_ms and !found) : (waited += 200) {
+    const deadline: wait.Deadline = .after(io, timeout_ms);
+    while (deadline.running(io) and !found) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
@@ -726,8 +727,8 @@ const Held = struct {
         var seen = try std.bit_set.Dynamic.initEmpty(gpa, burst);
         defer seen.deinit(gpa);
 
-        var waited: u32 = 0;
-        while (true) : (waited += 20) {
+        const deadline: wait.Deadline = .after(io, budget_ms);
+        while (true) {
             const copy = try watcher.impl.fsevents.copyHeld(gpa);
             defer gpa.free(copy.bytes);
             var held: Held = .{ .created = 0, .lost_track = false, .overflowed = copy.overflowed };
@@ -751,8 +752,8 @@ const Held = struct {
                 .delivered => held.overflowed or held.lost_track or held.created == burst,
             };
             if (done) return held;
-            if (waited >= budget_ms) {
-                std.debug.print("fsevents: {d}/{d} delivered in {d} ms, and no loss reported\n", .{ held.created, burst, waited });
+            if (!deadline.running(io)) {
+                std.debug.print("fsevents: {d}/{d} delivered in {d} ms, and no loss reported\n", .{ held.created, burst, budget_ms });
                 return error.TestBurstNotDelivered;
             }
             try std.Io.sleep(io, .fromMilliseconds(20), .awake);
@@ -857,8 +858,8 @@ fn deliveryFailure(io: std.Io, backend: lookout.Backend) !void {
             // Finishing the retained delivery must also rearm the backend.
             try tmp.dir.writeFile(testing.io, .{ .sub_path = "after", .data = "three" });
             var saw_after = false;
-            var waited: u32 = 0;
-            while (!saw_after and waited < timeout_ms) : (waited += 200) {
+            const deadline: wait.Deadline = .after(io, timeout_ms);
+            while (!saw_after and deadline.running(io)) {
                 for (try watcher.poll(io, ms(200))) |event| {
                     if (event.kind == .created and std.mem.endsWith(u8, event.path, "after")) saw_after = true;
                 }
@@ -964,8 +965,8 @@ test "filesystem identity reports two native case-distinct entries on sensitive 
         try tmp.dir.writeFile(io, .{ .sub_path = "case", .data = "two" });
         var upper = false;
         var lower = false;
-        var waited: u32 = 0;
-        while (waited < timeout_ms and !(upper and lower)) : (waited += 100) {
+        const deadline: wait.Deadline = .after(io, timeout_ms);
+        while (deadline.running(io) and !(upper and lower)) {
             for (try watcher.poll(io, ms(100))) |event| {
                 if (event.id != id or event.kind != .created) continue;
                 upper = upper or std.mem.endsWith(u8, event.path, "Case");
@@ -991,9 +992,12 @@ test "normalized filtering composes native names and keeps plain e and kernel sp
         try tmp.dir.writeFile(io, .{ .sub_path = "e\u{301}", .data = "two" });
         try tmp.dir.writeFile(io, .{ .sub_path = "e", .data = "plain" });
         var plain = false;
-        var waited: u32 = 0;
-        while (waited < 1_000 or !plain) : (waited += 100) {
-            if (waited >= timeout_ms) break;
+        // A second at least, for an excluded name reported late to show; then
+        // until the plain name is, or the deadline.
+        const window: wait.Deadline = .after(io, 1_000);
+        const deadline: wait.Deadline = .after(io, timeout_ms);
+        while (window.running(io) or !plain) {
+            if (!deadline.running(io)) break;
             for (try watcher.poll(io, ms(100))) |event| {
                 if (event.id != id) continue;
                 try std.testing.expect(!std.mem.endsWith(u8, event.path, "é"));
