@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A tree walk (FSEvents' seeding, inotify's registration and adoption) returns a cancel and every other failure to open or list a directory, where it skipped the directory or ended its listing and reported the walk complete: only a directory that is gone again or is not ours to read is skipped, as the walk promises. Its metadata read the same way: what is gone or not ours to read has none, anything else is returned.
+- A snapshot's content hash returns a cancel instead of reporting the file modified; a file that cannot be read is still taken as modified, as documented.
+
 ## [0.7.3] - 2026-10-21
 
 ### Added

@@ -68,7 +68,7 @@ const timestamp_tick_ns = 2 * std.time.ns_per_s;
 /// read from (a kernel tick of milliseconds behind it), so a write after
 /// the scan can be stamped in the tick before taken_ns's: that tick counts
 /// as racy too.
-pub fn capture(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat, taken_ns: i96, check_contents: bool, was_racy: bool) Meta {
+pub fn capture(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat, taken_ns: i96, check_contents: bool, was_racy: bool) Io.Cancelable!Meta {
     const tick = @divFloor(taken_ns, timestamp_tick_ns) - 1;
     const racy = check_contents and stat.kind != .directory and
         (@divFloor(stat.mtime.nanoseconds, timestamp_tick_ns) >= tick or
@@ -79,21 +79,29 @@ pub fn capture(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat, taken_
         .ctime_ns = stat.ctime.nanoseconds,
         .file_kind = stat.kind,
         .racy = racy,
-        .content_hash = if (racy or was_racy) hashContent(io, dir, path, stat) else null,
+        .content_hash = if (racy or was_racy) try hashContent(io, dir, path, stat) else null,
     };
 }
 
-fn hashContent(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat) ?u64 {
+/// The content's hash, or null where it cannot be had, which the snapshot
+/// takes as modified. A cancel is the caller's, not an answer about the file.
+fn hashContent(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat) Io.Cancelable!?u64 {
     // Never open a special file or follow a symlink to hash its target.
     if (stat.kind != .file or stat.size > content_hash_cap) return null;
-    var file = dir.openFile(io, path, .{ .follow_symlinks = false, .allow_directory = false }) catch return null;
+    var file = dir.openFile(io, path, .{ .follow_symlinks = false, .allow_directory = false }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
     defer file.close(io);
     var hash = std.hash.Wyhash.init(0);
     var buffer: [8192]u8 = undefined;
     var offset: u64 = 0;
     while (offset < stat.size) {
         const count: usize = @intCast(@min(buffer.len, stat.size - offset));
-        const n = file.readPositionalAll(io, buffer[0..count], offset) catch return null;
+        const n = file.readPositionalAll(io, buffer[0..count], offset) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
         if (n != count) return null;
         hash.update(buffer[0..n]);
         offset += n;
@@ -214,7 +222,7 @@ fn readListing(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max
         const name = try gpa.dupe(u8, entry.name);
         errdefer gpa.free(name);
         const was_racy = if (before.entries.get(entry.name)) |old| old.racy else false;
-        try next.entries.put(gpa, name, capture(io, dir, entry.name, stat, taken_ns, next.check_contents, was_racy));
+        try next.entries.put(gpa, name, try capture(io, dir, entry.name, stat, taken_ns, next.check_contents, was_racy));
     }
     // A listing holds at most its budget, and is cut short only there.
     assert(next.entries.count() <= max_entries);
@@ -285,7 +293,7 @@ test "racy content checks stop reading at the cap and after timestamps age" {
     stat.mtime.nanoseconds = 2 * std.time.ns_per_s;
     stat.ctime.nanoseconds = 0;
     const taken_ns = 3 * std.time.ns_per_s + 500 * std.time.ns_per_ms;
-    const before = capture(io, tmp.dir, "file", stat, taken_ns, true, false);
+    const before = try capture(io, tmp.dir, "file", stat, taken_ns, true, false);
     try testing.expect(before.racy);
     try testing.expect(before.content_hash != null);
     try testing.expect(fio.count(.fileReadPositional) > 0);
@@ -293,21 +301,21 @@ test "racy content checks stop reading at the cap and after timestamps age" {
     // A scan in the next tick still finds it racy: the filesystem's clock
     // trails the one the scan reads, and stamps a write after the scan in
     // the tick before.
-    const next_tick = capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s + 5 * std.time.ns_per_ms, true, before.racy);
+    const next_tick = try capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s + 5 * std.time.ns_per_ms, true, before.racy);
     try testing.expect(next_tick.racy);
 
     // Even an entry aging on this scan needs its final content comparison.
-    const aged = capture(io, tmp.dir, "file", stat, 6 * std.time.ns_per_s, true, next_tick.racy);
+    const aged = try capture(io, tmp.dir, "file", stat, 6 * std.time.ns_per_s, true, next_tick.racy);
     try testing.expect(!aged.racy);
     try testing.expect(!before.contentChanged(aged));
     const reads = fio.count(.fileReadPositional);
-    const quiet = capture(io, tmp.dir, "file", stat, 6 * std.time.ns_per_s, true, aged.racy);
+    const quiet = try capture(io, tmp.dir, "file", stat, 6 * std.time.ns_per_s, true, aged.racy);
     try testing.expect(!quiet.racy);
     try testing.expectEqual(reads, fio.count(.fileReadPositional));
 
     try file.setLength(io, content_hash_cap + 1);
     stat.size = content_hash_cap + 1;
-    const large = capture(io, tmp.dir, "file", stat, taken_ns, true, false);
+    const large = try capture(io, tmp.dir, "file", stat, taken_ns, true, false);
     try testing.expect(large.racy);
     try testing.expect(large.content_hash == null);
     try testing.expect(large.contentChanged(large));
@@ -315,23 +323,27 @@ test "racy content checks stop reading at the cap and after timestamps age" {
 
     stat.size = content_hash_cap;
     try fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .fileReadPositional, .n = 1 } }, .fault = .{ .fail = error.AccessDenied }, .times = 0 }});
-    const unreadable = capture(io, tmp.dir, "file", stat, taken_ns, true, false);
+    const unreadable = try capture(io, tmp.dir, "file", stat, taken_ns, true, false);
     try testing.expect(unreadable.racy);
     try testing.expect(unreadable.content_hash == null);
     try testing.expect(before.contentChanged(unreadable));
+    // A cancel is the caller's, not a modification: before, it read as one.
+    try fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .fileReadPositional, .n = 1 } }, .fault = .{ .fail = error.Canceled } }});
+    try testing.expectError(error.Canceled, capture(io, tmp.dir, "file", stat, taken_ns, true, false));
+    try fio.setPlan(&.{});
 
     // Equality, ctime alone, the tick before and future times all stay
     // conservative; a tick older than the one before the scan's permits the
     // metadata-only comparison.
     stat.mtime.nanoseconds = 0;
     stat.ctime.nanoseconds = 2 * std.time.ns_per_s;
-    try testing.expect(capture(io, tmp.dir, "file", stat, taken_ns, true, false).racy);
+    try testing.expect((try capture(io, tmp.dir, "file", stat, taken_ns, true, false)).racy);
     stat.ctime.nanoseconds = 8 * std.time.ns_per_s;
-    try testing.expect(capture(io, tmp.dir, "file", stat, taken_ns, true, false).racy);
+    try testing.expect((try capture(io, tmp.dir, "file", stat, taken_ns, true, false)).racy);
     stat.ctime.nanoseconds = 0;
-    try testing.expect(capture(io, tmp.dir, "file", stat, 0, true, false).racy);
-    try testing.expect(capture(io, tmp.dir, "file", stat, taken_ns, true, false).racy);
-    try testing.expect(!capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s, true, false).racy);
+    try testing.expect((try capture(io, tmp.dir, "file", stat, 0, true, false)).racy);
+    try testing.expect((try capture(io, tmp.dir, "file", stat, taken_ns, true, false)).racy);
+    try testing.expect(!(try capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s, true, false)).racy);
 }
 
 test "first refresh reports every entry, second reports the difference" {

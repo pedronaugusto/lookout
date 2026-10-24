@@ -212,7 +212,7 @@ pub fn addWatch(
         // frees it on failure, without the two ever both happening.
         errdefer t.gpa.free(node_path);
         if (stat.kind != .directory) {
-            _ = try t.createFile(io, id, null, node_path, Snapshot.capture(io, .cwd(), abs_path, stat, taken_ns, t.check_contents, false), added);
+            _ = try t.createFile(io, id, null, node_path, try Snapshot.capture(io, .cwd(), abs_path, stat, taken_ns, t.check_contents, false), added);
             return;
         }
         _ = try t.createDirectory(io, id, null, node_path, added);
@@ -823,7 +823,7 @@ pub fn rescanFile(t: *Tree, io: Io, id: NodeId, batch: *Batch) Tree.ScanError!vo
         else => return err,
     };
     const before = node.meta;
-    const next = Snapshot.capture(io, .cwd(), node.path, stat, taken_ns, t.check_contents, before.racy);
+    const next = try Snapshot.capture(io, .cwd(), node.path, stat, taken_ns, t.check_contents, before.racy);
     if (before.size != stat.size or before.mtime_ns != stat.mtime.nanoseconds or before.contentChanged(next)) {
         try batch.push(t.gpa, io, node.watch, node.path, .modified, .of(stat.kind));
     } else if (before.ctime_ns != stat.ctime.nanoseconds) {

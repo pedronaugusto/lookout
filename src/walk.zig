@@ -19,6 +19,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
+const shakedown = @import("shakedown");
 
 /// The metadata `treeWithMeta` reads with each name: what a later `lstat`
 /// of the same unchanged entry returns.
@@ -218,10 +219,14 @@ pub const Walker = struct {
         if (w.done()) return false;
         const current = w.frontier.items[w.next];
         listing: {
-            var dir = Io.Dir.openDirAbsolute(io, current, .{ .iterate = true }) catch break :listing;
+            var dir = Io.Dir.openDirAbsolute(io, current, .{ .iterate = true }) catch |err| switch (err) {
+                // Gone again, or not ours to read: skipped, as the header says.
+                error.FileNotFound, error.NotDir, error.AccessDenied => break :listing,
+                else => |e| return e,
+            };
             defer dir.close(io);
             var it = if (with_meta and builtin.target.os.tag.isDarwin()) Bulk.init(dir) else dir.iterate();
-            while (it.next(io) catch null) |listed| {
+            while (try it.next(io)) |listed| {
                 const child = try std.Io.Dir.path.join(gpa, &.{ current, listed.name });
                 var kept = false;
                 defer if (!kept) gpa.free(child);
@@ -230,7 +235,11 @@ pub const Walker = struct {
                     null
                 else if (@TypeOf(listed) == Bulk.Listed)
                     listed.meta
-                else if (dir.statFile(io, listed.name, .{ .follow_symlinks = false })) |stat| .of(stat) else |_| null;
+                else if (dir.statFile(io, listed.name, .{ .follow_symlinks = false })) |stat| .of(stat) else |err| switch (err) {
+                    // Gone since the listing, or not ours to read: no metadata.
+                    error.FileNotFound, error.AccessDenied => null,
+                    else => |e| return e,
+                };
                 const step_into = try visit(context, .{
                     .dir = current,
                     .name = listed.name,
@@ -538,6 +547,39 @@ test "a walker lists one directory a step, and says what it has yet to reach" {
     try testing.expectEqual(@as(usize, 3), count.seen);
     try testing.expect(walker.done());
     try testing.expect(!walker.ahead(in_b));
+}
+
+test "a directory not ours to read is skipped; a cancel, or a listing that fails, ends the walk with it" {
+    const gpa = testing.allocator;
+    const fio = try shakedown.FaultIo.init(gpa, testing.io, .{});
+    defer fio.deinit();
+    const io = fio.io();
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "a/b");
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+
+    const Count = struct {
+        seen: usize = 0,
+        fn visit(c: *@This(), _: Entry) anyerror!Step {
+            c.seen += 1;
+            return .into;
+        }
+    };
+    // `a` refused: skipped, and `b` in it never reached.
+    var count: Count = .{};
+    try fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .dirOpenDir, .n = 2 } }, .fault = .{ .fail = error.AccessDenied } }});
+    try tree(*Count, Count.visit, gpa, io, root, &count);
+    try testing.expectEqual(@as(usize, 1), count.seen);
+    // Before, a cancel there was a walk that ended early and said nothing.
+    count = .{};
+    try fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .dirOpenDir, .n = 2 } }, .fault = .{ .fail = error.Canceled } }});
+    try testing.expectError(error.Canceled, tree(*Count, Count.visit, gpa, io, root, &count));
+    count = .{};
+    try fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .dirRead, .n = 1 } }, .fault = .{ .fail = error.Canceled } }});
+    try testing.expectError(error.Canceled, tree(*Count, Count.visit, gpa, io, root, &count));
+    try testing.expectEqual(@as(usize, 0), count.seen);
 }
 
 test "a walker follows a rename of what it has yet to list, and drops what the rename replaced" {
