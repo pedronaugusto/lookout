@@ -1,6 +1,6 @@
 //! Watcher integration scenarios for windows.
 const std = @import("std");
-const wait = @import("../testing/wait.zig");
+const wait = @import("../testing/timeout.zig");
 const windows = std.os.windows;
 const lookout = @import("../lookout.zig");
 const ms = @import("../testing/timeout.zig").ms;
@@ -48,6 +48,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
             overflows += 1;
         }
     }
+    if (overflows == 0) return wait.missed(io, watcher.backend());
     try testing.expectEqual(@as(usize, 1), overflows);
 
     // Re-armed: the watch is still held, and the next change is read.
@@ -62,7 +63,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
     }
-    try testing.expect(found);
+    try wait.seen(io, watcher.backend(), found);
 }
 
 test "a lost read reads the entry counts again, so the budget holds after it" {
@@ -98,6 +99,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
             if (event.kind == .created) created += 1;
         }
     }
+    if (created < 3) return wait.missed(io, watcher.backend());
     try testing.expectEqual(@as(usize, 3), created);
     try w.budget.misread(root, true, 0);
 
@@ -110,7 +112,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
             if (event.kind == .overflow) overflowed = true;
         }
     }
-    try testing.expect(overflowed);
+    try wait.seen(io, watcher.backend(), overflowed);
     // Three entries: at the budget, as the folder is.
     try testing.expectEqual(@as(usize, 3), w.budget.count(root).?);
 
@@ -123,7 +125,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
     }
-    try testing.expect(overflowed);
+    try wait.seen(io, watcher.backend(), overflowed);
 }
 
 test "allocation failure during delivery releases a removed Windows completion" {

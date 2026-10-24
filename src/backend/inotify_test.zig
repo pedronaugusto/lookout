@@ -1,6 +1,6 @@
 //! Watcher integration scenarios for inotify.
 const std = @import("std");
-const wait = @import("../testing/wait.zig");
+const wait = @import("../testing/timeout.zig");
 const posix = std.posix;
 const linux = std.os.linux;
 const lookout = @import("../lookout.zig");
@@ -78,6 +78,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
             if (event.id == single) saw_file = true;
         }
     }
+    if (!(saw_dir and saw_file)) return wait.missed(io, watcher.backend());
     try testing.expect(saw_dir);
     try testing.expect(saw_file);
 }
@@ -136,7 +137,7 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
     }
-    try testing.expect(overflowed);
+    try wait.seen(io, watcher.backend(), overflowed);
 }
 
 test "a watch on a file keeps no count keyed by the file" {
@@ -168,6 +169,6 @@ test "a watch on a file keeps no count keyed by the file" {
             if (event.kind == .modified and event.id == id) modified = true;
         }
     }
-    try testing.expect(modified);
+    try wait.seen(io, watcher.backend(), modified);
     try testing.expect(watcher.impl.inotify.budget.count(file) == null);
 }

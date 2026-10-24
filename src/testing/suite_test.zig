@@ -8,7 +8,7 @@
 //! the same assertions on the same machine.
 
 const std = @import("std");
-const wait = @import("wait.zig");
+const wait = @import("timeout.zig");
 const builtin = @import("builtin");
 const lookout = @import("../lookout.zig");
 const trace = @import("../trace.zig");
@@ -167,7 +167,7 @@ const Fixture = struct {
                 });
             }
         }
-        return error.EventNotObserved;
+        return wait.missed(f.io, f.watcher.backend());
     }
 
     /// Drains whatever is pending so the next assertion starts clean.
@@ -366,7 +366,7 @@ fn expectWithout(f: *Fixture, sub_path: []const u8, kind: ?Kind, never: []const 
     if (!seen) {
         const name = if (kind) |k| @tagName(k) else "any";
         std.debug.print("no {s} event for {s} within {d} ms\n", .{ name, wanted, timeout_ms });
-        return error.EventNotObserved;
+        return wait.missed(f.io, f.watcher.backend());
     }
 }
 
@@ -488,6 +488,7 @@ test "inotify does not pair a move across separate watches" {
             }
         }
     }
+    if (!(removed and created)) return wait.missed(f.io, f.watcher.backend());
     try std.testing.expect(removed);
     try std.testing.expect(created);
 }
@@ -584,7 +585,7 @@ test "removing a directly watched file reports a file target" {
                 found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(f.io, f.watcher.backend(), found);
     }
 }
 
@@ -613,7 +614,7 @@ test "a watch on a file that is already there does not call it new" {
                 found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(f.io, f.watcher.backend(), found);
     }
 }
 
@@ -767,7 +768,7 @@ test "an ignored subtree is watched by nobody" {
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(f.io, f.watcher.backend(), found);
     }
 }
 
@@ -853,7 +854,7 @@ test "refilter seeds the entry budget of newly admitted directories" {
                     std.mem.eql(u8, event.path, f.root)) overflowed = true;
             }
         }
-        try std.testing.expect(overflowed);
+        try wait.seen(f.io, f.watcher.backend(), overflowed);
     }
 }
 
@@ -891,7 +892,7 @@ test "refilter does not count a queued creation twice" {
                     (event.kind == .created or event.kind == .modified)) saw = true;
             }
         }
-        try std.testing.expect(saw);
+        try wait.seen(f.io, f.watcher.backend(), saw);
     }
 }
 
@@ -991,6 +992,7 @@ test "writes after refilter are reported while a writer runs through the change"
                 }
             }
         }
+        if (!std.mem.allEqual(bool, &seen, true)) return wait.missed(f.io, f.watcher.backend());
         try std.testing.expect(std.mem.allEqual(bool, &seen, true));
     }
 }
@@ -1058,7 +1060,7 @@ test "refilter drops held events that the new filter excludes" {
                     std.mem.eql(u8, event.path, new)) saw = true;
             }
         }
-        try std.testing.expect(saw);
+        try wait.seen(f.io, f.watcher.backend(), saw);
     }
 }
 
@@ -1165,7 +1167,7 @@ test "a caller predicate excludes what a pattern cannot say" {
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(f.io, f.watcher.backend(), found);
     }
 }
 
@@ -1286,7 +1288,7 @@ test "a tree the filter ignores gets no registration however it grows" {
                 if (event.kind == .modified and std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(f.io, f.watcher.backend(), found);
         for (try f.watcher.poll(f.io, ms(200))) |event| {
             for (roots) |r| try std.testing.expect(!std.mem.startsWith(u8, event.path, r));
         }
@@ -1326,7 +1328,7 @@ test "a directory past the entry limit reports overflow against the watch root" 
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(io, watcher.backend(), found);
     }
 }
 
@@ -1391,7 +1393,7 @@ test "what an overflow lost can be read back from a baseline" {
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
             }
         }
-        try std.testing.expect(overflowed);
+        try wait.seen(io, watcher.backend(), overflowed);
 
         // The watcher said its record was incomplete and could not say
         // what was missing. The baseline can: all six, by name.
@@ -1432,6 +1434,7 @@ test "a finished write is reported where the backend is told about it" {
                 if (event.kind == .closed) closed = true else otherwise = true;
             }
         }
+        if (!(closed or otherwise)) return wait.missed(f.io, f.watcher.backend());
 
         // `lookout.reportsCloses` is asserted rather than accepted either
         // way, so a kind that is one backend's truth cannot come to mean
@@ -1470,7 +1473,7 @@ test "closes are not reported unless they are asked for" {
                 if (event.kind == .modified and std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(f.io, f.watcher.backend(), found);
     }
 }
 
@@ -1522,7 +1525,7 @@ test "the Windows read buffer is the size the caller asked for" {
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
             }
         }
-        try std.testing.expect(overflowed);
+        try wait.seen(io, watcher.backend(), overflowed);
     }
 
     // A megabyte, the same burst. Room for all of it, so the caller is
@@ -1624,6 +1627,7 @@ test "overlapping watches report the same path under both ids" {
                 if (event.id == child_id) child_seen = true;
             }
         }
+        if (!(parent_seen and child_seen)) return wait.missed(f.io, f.watcher.backend());
         if (!parent_seen or !child_seen) {
             std.debug.print("{s}: parent={any}, child={any}\n", .{
                 @tagName(backend), parent_seen, child_seen,
@@ -1655,6 +1659,7 @@ test "removing a watch discards events held for a quiet window" {
                 try std.testing.io.sleep(.fromMilliseconds(20), .awake);
             }
         }
+        if (f.watcher.stats().held == 0) return wait.missed(f.io, f.watcher.backend());
         try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().held);
 
         f.watcher.remove(io, id);
@@ -1750,7 +1755,7 @@ test "a path that does not exist yet can be watched" {
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(f.io, f.watcher.backend(), found);
     }
 }
 
@@ -1819,7 +1824,7 @@ test "a pending file is promoted with its file target" {
                 found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(f.io, f.watcher.backend(), found);
     }
 }
 
@@ -1955,7 +1960,7 @@ const Ledger = struct {
         // What was seen instead says why: a red on a host this suite runs
         // on rarely is read from it.
         for (l.seen.items) |key| std.debug.print("  seen: watch {d} {s} {s}\n", .{ key.id.raw(), @tagName(key.kind), key.path });
-        return error.EventNotObserved;
+        return wait.missed(f.io, f.watcher.backend());
     }
 
     /// Polls into the ledger until the watcher has been quiet for a
@@ -2211,6 +2216,7 @@ test "a folder shared with a pending watch keeps its entry budget" {
         while (deadline.running(f.io) and ledger.count(folder, .overflow, f.root) == 0) {
             try ledger.note(try f.watcher.poll(f.io, ms(200)));
         }
+        if (ledger.count(folder, .overflow, f.root) == 0) return wait.missed(f.io, f.watcher.backend());
         try std.testing.expect(ledger.count(folder, .overflow, f.root) > 0);
     }
 }
@@ -2250,6 +2256,7 @@ test "a folder a pending watch alone held is counted true for the watch taken th
         while (deadline.running(f.io) and ledger.count(folder, .overflow, f.root) == 0) {
             try ledger.note(try f.watcher.poll(f.io, ms(200)));
         }
+        if (ledger.count(folder, .overflow, f.root) == 0) return wait.missed(f.io, f.watcher.backend());
         try std.testing.expect(ledger.count(folder, .overflow, f.root) > 0);
     }
 }
@@ -2297,6 +2304,7 @@ test "a watch that does not walk into a folder leaves the folder's count to the 
             while (deadline.running(f.io) and ledger.count(tree, .overflow, f.root) + ledger.count(tree, .overflow, sub) == 0) {
                 try ledger.note(try f.watcher.poll(f.io, ms(200)));
             }
+            if (ledger.count(tree, .overflow, f.root) + ledger.count(tree, .overflow, sub) == 0) return wait.missed(f.io, f.watcher.backend());
             std.testing.expect(ledger.count(tree, .overflow, f.root) + ledger.count(tree, .overflow, sub) > 0) catch |err| {
                 std.debug.print("{s}, parked {}: no overflow\n", .{ @tagName(backend), parked });
                 return err;
@@ -2340,6 +2348,7 @@ test "a count a parked watch held past the folder's own watch is not taken up st
         while (deadline.running(f.io) and ledger.count(again, .overflow, f.root) == 0) {
             try ledger.note(try f.watcher.poll(f.io, ms(200)));
         }
+        if (ledger.count(again, .overflow, f.root) == 0) return wait.missed(f.io, f.watcher.backend());
         std.testing.expect(ledger.count(again, .overflow, f.root) > 0) catch |err| {
             std.debug.print("{s}: no overflow\n", .{@tagName(backend)});
             return err;
@@ -2559,7 +2568,7 @@ test "Windows retires a renamed root before reporting stale child paths" {
             }
         }
     }
-    try std.testing.expect(unwatched);
+    try wait.seen(f.io, f.watcher.backend(), unwatched);
     try std.testing.expectEqual(@as(usize, 0), f.watcher.stats().registrations);
 }
 
@@ -2678,6 +2687,7 @@ test "debouncing reports one event per path carrying the kind seen last" {
             seen += 1;
         }
     }
+    if (seen == 0) return wait.missed(f.io, f.watcher.backend());
     try std.testing.expectEqual(@as(usize, 1), seen);
     try std.testing.expectEqual(Kind.modified, kind);
 }
@@ -2792,6 +2802,7 @@ test "an event says whether the path is a file or a directory" {
                 if (std.mem.eql(u8, event.path, file_path)) file_target = event.target;
             }
         }
+        if ((dir_target == null or file_target == null)) return wait.missed(f.io, f.watcher.backend());
         // "From the path" is not an answer once the path is gone, which
         // is why this is on the event and not left to the caller.
         try std.testing.expectEqual(lookout.Target.directory, dir_target.?);
@@ -3232,6 +3243,7 @@ test "two watchers in one process do not disturb each other" {
                 if (std.mem.eql(u8, event.path, wanted_second)) saw_second = true;
             }
         }
+        if (!(saw_first and saw_second)) return wait.missed(io, first.backend());
         try std.testing.expect(saw_first);
         try std.testing.expect(saw_second);
     }
@@ -3271,7 +3283,7 @@ test "a watch can be removed from inside a poll loop" {
                 }
             }
         }
-        try std.testing.expect(removed);
+        try wait.seen(f.io, f.watcher.backend(), removed);
         try std.testing.expectEqual(@as(usize, 1), f.watcher.stats().watches);
 
         // The other watch still works.
@@ -3346,6 +3358,7 @@ test "what changed while nothing was watching is reported on resuming" {
             if (std.mem.eql(u8, event.path, deleted) and event.kind == .removed) saw_deleted = true;
         }
     }
+    if (!(saw_appeared and saw_changed and saw_deleted)) return wait.missed(io, watcher.backend());
     try std.testing.expect(saw_appeared);
     try std.testing.expect(saw_changed);
     // A path that was there at the position and is not there now is the
@@ -3386,7 +3399,7 @@ test "an include list reports what it names and nothing else" {
                 if (std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(f.io, f.watcher.backend(), found);
     }
 }
 

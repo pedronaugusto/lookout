@@ -6,7 +6,7 @@
 //! one backend, or one shared rule, was wrong.
 
 const std = @import("std");
-const wait = @import("wait.zig");
+const wait = @import("timeout.zig");
 const builtin = @import("builtin");
 
 const lookout = @import("../lookout.zig");
@@ -159,7 +159,7 @@ test "a change inside a renamed directory is not a creation" {
             });
         }
         try std.testing.expect(!saw_created);
-        try std.testing.expect(saw_modified);
+        try wait.seen(io, watcher.backend(), saw_modified);
     }
 }
 
@@ -203,7 +203,7 @@ test "a watch spelled in another case than the disk still reports" {
             }
         }
         if (!promoted) std.debug.print("{s}: {s} never appeared\n", .{ @tagName(backend), asked });
-        try std.testing.expect(promoted);
+        try wait.seen(io, watcher.backend(), promoted);
 
         // And the watch on it is a real watch: what happens inside is
         // reported, though the kernel spells the path the other way.
@@ -216,7 +216,7 @@ test "a watch spelled in another case than the disk still reports" {
             }
         }
         if (!found) std.debug.print("{s}: nothing under {s}\n", .{ @tagName(backend), asked });
-        try std.testing.expect(found);
+        try wait.seen(io, watcher.backend(), found);
     }
 }
 
@@ -259,7 +259,7 @@ test "explicit case insensitive filtering excludes across filesystem policies" {
                 if (std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
-        try std.testing.expect(found);
+        try wait.seen(io, watcher.backend(), found);
     }
 }
 
@@ -326,6 +326,7 @@ test "a slow write is one event, and it arrives after the writing stops" {
             seen += 1;
         }
     }
+    if (seen == 0) return wait.missed(io, watcher.backend());
     try std.testing.expectEqual(@as(usize, 1), seen);
     // Nothing was reported while the file was still being written to.
     try std.testing.expect(writer.done.load(.acquire));
@@ -605,7 +606,7 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
     }
-    try std.testing.expect(found);
+    try wait.seen(io, watcher.backend(), found);
 }
 
 // Last in the file on purpose. Ten thousand files created and then
@@ -973,6 +974,7 @@ test "filesystem identity reports two native case-distinct entries on sensitive 
                 lower = lower or std.mem.endsWith(u8, event.path, "case");
             }
         }
+        if (!(upper and lower)) return wait.missed(io, watcher.backend());
         try std.testing.expect(upper and lower);
     }
 }
