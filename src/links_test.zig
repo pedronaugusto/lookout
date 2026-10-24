@@ -6,10 +6,10 @@
 //! reported under the link can only have come through the link.
 
 const std = @import("std");
+const wait = @import("testing/wait.zig");
 const builtin = @import("builtin");
 const lookout = @import("lookout.zig");
 const ms = @import("testing/timeout.zig").ms;
-const timing = @import("timing.zig");
 const path_cmp = @import("path.zig");
 
 const Kind = lookout.Kind;
@@ -31,7 +31,7 @@ const backends: []const lookout.Backend = all: {
     break :all &final;
 };
 
-const timeout_ms = 5_000;
+const timeout_ms = wait.event_ms;
 /// How long a scenario listens for something that must not arrive.
 const quiet_ms = 600;
 
@@ -118,8 +118,8 @@ const Fixture = struct {
     fn expect(f: *Fixture, sub_path: []const u8, kind: ?Kind, forbidden: []const []const u8) !void {
         const want = try f.path(sub_path);
         defer gpa.free(want);
-        const deadline = timing.within(timeout_ms).toDeadline(io);
-        while (!timing.expired(io, deadline)) {
+        const deadline: wait.Deadline = .after(io, timeout_ms);
+        while (deadline.running(io)) {
             for (try f.watcher.poll(f.io, ms(100))) |event| {
                 try f.allowed(event, forbidden);
                 if (!path_cmp.eql(event.path, want)) continue;
@@ -135,8 +135,8 @@ const Fixture = struct {
     /// events in two polls, and what is written below it is only seen
     /// once it is followed again.
     fn await(f: *Fixture, wanted: usize, above: bool) !void {
-        const deadline = timing.within(timeout_ms).toDeadline(io);
-        while (!timing.expired(io, deadline)) {
+        const deadline: wait.Deadline = .after(io, timeout_ms);
+        while (deadline.running(io)) {
             const held = f.watcher.stats().registrations;
             if (if (above) held > wanted else held == wanted) return;
             _ = try f.watcher.poll(f.io, ms(100));
@@ -147,8 +147,8 @@ const Fixture = struct {
 
     /// Listens for a while, failing on any event at or below `forbidden`.
     fn quiet(f: *Fixture, forbidden: []const []const u8) !void {
-        const deadline = timing.within(quiet_ms).toDeadline(io);
-        while (!timing.expired(io, deadline)) {
+        const deadline: wait.Deadline = .after(io, quiet_ms);
+        while (deadline.running(io)) {
             for (try f.watcher.poll(f.io, ms(100))) |event| try f.allowed(event, forbidden);
         }
     }
@@ -394,10 +394,10 @@ test "a link past the most a watch follows is reported unwatched" {
         defer gpa.free(root);
         _ = try f.watcher.add(f.io, root, .{ .recursive = true, .follow_symlinks = true, .max_followed_links = 1 });
 
-        const deadline = timing.within(timeout_ms).toDeadline(io);
+        const deadline: wait.Deadline = .after(io, timeout_ms);
         var unwatched: ?[]u8 = null;
         defer if (unwatched) |p| gpa.free(p);
-        while (unwatched == null and !timing.expired(io, deadline)) {
+        while (unwatched == null and deadline.running(io)) {
             for (try f.watcher.poll(f.io, ms(100))) |event| {
                 if (event.kind == .unwatched) unwatched = try gpa.dupe(u8, event.path);
             }

@@ -1,5 +1,6 @@
 //! Watcher integration scenarios for inotify.
 const std = @import("std");
+const wait = @import("../testing/wait.zig");
 const posix = std.posix;
 const linux = std.os.linux;
 const lookout = @import("../lookout.zig");
@@ -69,8 +70,8 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one and two" });
     var saw_dir = false;
     var saw_file = false;
-    var waited: u32 = 0;
-    while (waited < 10_000 and !(saw_dir and saw_file)) : (waited += 200) {
+    const deadline: wait.Deadline = .after(io, wait.event_ms);
+    while (deadline.running(io) and !(saw_dir and saw_file)) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind != .modified or !std.mem.eql(u8, event.path, file)) continue;
             if (event.id == dir) saw_dir = true;
@@ -129,8 +130,8 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
     _ = try watcher.poll(io, ms(0));
     try tmp.dir.writeFile(io, .{ .sub_path = "d", .data = "x" });
     var overflowed = false;
-    var waited: u32 = 0;
-    while (waited < 10_000 and !overflowed) : (waited += 200) {
+    const deadline: wait.Deadline = .after(io, wait.event_ms);
+    while (deadline.running(io) and !overflowed) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
@@ -161,8 +162,8 @@ test "a watch on a file keeps no count keyed by the file" {
     while ((try watcher.poll(io, ms(200))).len != 0) {}
     try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "y" });
     var modified = false;
-    var waited: u32 = 0;
-    while (waited < 10_000 and !modified) : (waited += 200) {
+    const deadline: wait.Deadline = .after(io, wait.event_ms);
+    while (deadline.running(io) and !modified) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .modified and event.id == id) modified = true;
         }

@@ -1,5 +1,6 @@
 //! Watcher integration scenarios for windows.
 const std = @import("std");
+const wait = @import("../testing/wait.zig");
 const windows = std.os.windows;
 const lookout = @import("../lookout.zig");
 const ms = @import("../testing/timeout.zig").ms;
@@ -37,8 +38,8 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     try w.overflowForTest(io, id);
 
     var overflows: usize = 0;
-    var waited: u32 = 0;
-    while (waited < 10_000 and overflows == 0) : (waited += 200) {
+    const deadline: wait.Deadline = .after(io, wait.event_ms);
+    while (deadline.running(io) and overflows == 0) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind != .overflow) continue;
             try testing.expectEqual(id, event.id);
@@ -55,8 +56,8 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     const after = try std.Io.Dir.path.join(gpa, &.{ root, "after.txt" });
     defer gpa.free(after);
     var found = false;
-    waited = 0;
-    while (waited < 10_000 and !found) : (waited += 200) {
+    deadline = .after(io, wait.event_ms);
+    while (deadline.running(io) and !found) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
@@ -91,8 +92,8 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
         try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
     }
     var created: usize = 0;
-    var waited: u32 = 0;
-    while (waited < 10_000 and created < 3) : (waited += 200) {
+    const deadline: wait.Deadline = .after(io, wait.event_ms);
+    while (deadline.running(io) and created < 3) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created) created += 1;
         }
@@ -103,8 +104,8 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     try w.overflowForTest(io, id);
 
     var overflowed = false;
-    waited = 0;
-    while (waited < 10_000 and !overflowed) : (waited += 200) {
+    deadline = .after(io, wait.event_ms);
+    while (deadline.running(io) and !overflowed) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow) overflowed = true;
         }
@@ -116,8 +117,8 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     // So the fourth is past it, and the watch is told.
     try tmp.dir.writeFile(io, .{ .sub_path = "d", .data = "x" });
     overflowed = false;
-    waited = 0;
-    while (waited < 10_000 and !overflowed) : (waited += 200) {
+    deadline = .after(io, wait.event_ms);
+    while (deadline.running(io) and !overflowed) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
