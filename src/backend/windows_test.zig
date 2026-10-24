@@ -38,7 +38,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     try w.overflowForTest(io, id);
 
     var overflows: usize = 0;
-    const deadline: wait.Deadline = .after(io, wait.event_ms);
+    var deadline: wait.Deadline = .after(io, wait.event_ms);
     while (deadline.running(io) and overflows == 0) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind != .overflow) continue;
@@ -92,7 +92,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
         try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
     }
     var created: usize = 0;
-    const deadline: wait.Deadline = .after(io, wait.event_ms);
+    var deadline: wait.Deadline = .after(io, wait.event_ms);
     while (deadline.running(io) and created < 3) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created) created += 1;
