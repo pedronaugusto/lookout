@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-25
+
 ### Fixed
 
 - A tree walk (FSEvents' seeding, inotify's registration and adoption) returns a cancel and every other failure to open or list a directory, where it skipped the directory or ended its listing and reported the walk complete: only a directory that is gone again or is not ours to read is skipped, as the walk promises. Its metadata read the same way: what is gone or not ours to read has none, anything else is returned.
@@ -766,7 +768,8 @@ First release.
   `inotify` backend is executed rather than merely compiled from a machine that
   is not Linux.
 
-[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/pedronaugusto/lookout/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/pedronaugusto/lookout/compare/v0.7.2...v0.7.4
 [0.7.2]: https://github.com/pedronaugusto/lookout/compare/v0.7.0...v0.7.2
 [0.7.0]: https://github.com/pedronaugusto/lookout/compare/v0.5.4...v0.7.0
 [0.5.4]: https://github.com/pedronaugusto/lookout/compare/v0.5.3...v0.5.4
