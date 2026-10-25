@@ -308,6 +308,7 @@ const Bulk = struct {
     const file_datalength = 0x0000_0200;
     const meta_common = objtype | modtime | chgtime | fileid;
 
+    // aegis: boundary: libc's getattrlistbulk, declared as the system documents it, called only from this file
     extern "c" fn getattrlistbulk(c_int, *AttrList, *anyopaque, usize, u64) c_int;
 
     fn init(dir: Io.Dir) Bulk {

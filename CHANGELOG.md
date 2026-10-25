@@ -6,15 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Checkpoint tokens and baseline files are read and written through strand (a new dependency), the family's one JSON, in place of `std.json`: bounded by their own size, with the same bytes as before, so a token or a baseline already written reads as it did. A name or a filter pattern that is not UTF-8 is written as its byte values, as `std.json` wrote it. On strand 0.14.0, airlock 0.5.5 and aegis 0.1.18.
+
 ## [0.7.4] - 2026-10-25
 
 ### Fixed
 
 - A tree walk (FSEvents' seeding, inotify's registration and adoption) returns a cancel and every other failure to open or list a directory, where it skipped the directory or ended its listing and reported the walk complete: only a directory that is gone again or is not ours to read is skipped, as the walk promises. Its metadata read the same way: what is gone or not ours to read has none, anything else is returned.
 - A snapshot's content hash returns a cancel instead of reporting the file modified; a file that cannot be read is still taken as modified, as documented.
-### Changed
-
-- Checkpoint tokens and baseline files are read and written through strand (a new dependency), the family's one JSON, in place of `std.json`: bounded by their own size, with the same bytes as before, so a token or a baseline already written reads as it did. A name or a filter pattern that is not UTF-8 is written as its byte values, as `std.json` wrote it.
 
 ## [0.7.3] - 2026-10-21
 
