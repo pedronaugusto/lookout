@@ -72,4 +72,5 @@ const Mount = extern struct {
     path_len: u32,
     storage: [1024]u8,
 };
+// aegis: boundary: libc's getattrlist, declared as the system documents it, called only from this file
 extern "c" fn getattrlist([*:0]const u8, *AttrList, *anyopaque, usize, c_ulong) c_int;

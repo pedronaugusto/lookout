@@ -2419,8 +2419,11 @@ const c = struct {
     const f_getfd: c_int = 1;
     const fd_cloexec: c_int = 1;
 
+    // aegis: boundary: libc's dispatch_queue_create, declared as the system documents it, called only from this file
     extern "c" fn dispatch_queue_create(label: ?[*:0]const u8, attr: ?*anyopaque) ?dispatch_queue_t;
+    // aegis: boundary: libc's dispatch_release, declared as the system documents it, called only from this file
     extern "c" fn dispatch_release(object: *anyopaque) void;
+    // aegis: boundary: libc's dispatch_sync_f, declared as the system documents it, called only from this file
     pub extern "c" fn dispatch_sync_f(
         queue: dispatch_queue_t,
         context: ?*anyopaque,
