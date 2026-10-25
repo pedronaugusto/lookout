@@ -42,14 +42,23 @@ pub const Deadline = struct {
 pub const control_ms = 10_000;
 
 /// What a wait for an event that ran out fails with: the event was not
-/// reported, or the system's FSEvents delivered nothing at all (`control`).
-pub const Missed = error{ EventNotObserved, FsEventsBackedUp };
+/// reported; the system said it lost track first (`Stats.overflows`); or,
+/// on FSEvents, the system's journal delivered nothing at all, or refused
+/// a stream, a control watcher's own as well (`control`).
+pub const Missed = error{ EventNotObserved, EventsDropped, FsEventsBackedUp, FsEventsRefused };
 
-/// The failure of a wait for an event that ran out. On FSEvents it first
-/// asks the system's journal itself (`control`): when that delivers nothing
-/// either, the red names the machine, not the watcher. Never a pass.
-pub fn missed(io: Io, backend: lookout.Backend) Missed {
-    if (backend != .fsevents) return error.EventNotObserved;
+/// The failure of a wait for an event that ran out. A watcher that handed
+/// out an overflow notice first was told the system lost track, and says
+/// so. On FSEvents it then asks the system's journal itself (`control`):
+/// when that delivers nothing either, the red names the machine, not the
+/// watcher. Never a pass.
+pub fn missed(io: Io, w: *const lookout.Watcher) Missed {
+    const overflows = w.stats().overflows;
+    if (overflows != 0) {
+        std.debug.print("the system lost track before the wait ran out: the watcher handed out {d} overflow notice(s); the event was not reported\n", .{overflows});
+        return error.EventsDropped;
+    }
+    if (w.backend() != .fsevents) return error.EventNotObserved;
     switch (control(io)) {
         .delivered => |delivered_ms| std.debug.print("the system's FSEvents delivered a control sentinel in {d} ms; the event was not reported\n", .{delivered_ms}),
         .unavailable => |err| std.debug.print("the system's FSEvents could not be measured ({t}); the event was not reported\n", .{err}),
@@ -57,23 +66,43 @@ pub fn missed(io: Io, backend: lookout.Backend) Missed {
             std.debug.print("the system's FSEvents delivered nothing for {d} s (fseventsd backed up): a control watcher's own sentinel write was not reported\n", .{control_ms / 1000});
             return error.FsEventsBackedUp;
         },
+        .refused => return refused(),
     }
     return error.EventNotObserved;
 }
 
 /// `found`, or the failure of the wait that looked for it (`missed`).
-pub fn seen(io: Io, backend: lookout.Backend, found: bool) Missed!void {
-    if (!found) return missed(io, backend);
+pub fn seen(io: Io, w: *const lookout.Watcher, found: bool) Missed!void {
+    if (!found) return missed(io, w);
+}
+
+/// `Watcher.add`, whose `WatchLimitReached` on FSEvents asks the system
+/// first (`control`): fseventsd refusing a control watcher's stream as well
+/// is `FsEventsRefused`, the machine's red, not the watcher's.
+pub fn add(w: *lookout.Watcher, io: Io, path: []const u8, options: lookout.Watcher.AddOptions) (lookout.Watcher.AddError || Missed)!lookout.WatchId {
+    return w.add(io, path, options) catch |err| switch (err) {
+        error.WatchLimitReached => if (w.backend() == .fsevents and control(io) == .refused) refused() else err,
+        else => err,
+    };
+}
+
+fn refused() Missed {
+    std.debug.print("the system's FSEvents refused a new stream (fseventsd unavailable, restarting or at its client limit): a control watcher's own stream would not start\n", .{});
+    return error.FsEventsRefused;
 }
 
 /// What the control measured: its sentinel reported after so many
-/// milliseconds, nothing within `control_ms`, or no control to be had.
-const Control = union(enum) { delivered: i64, silent, unavailable: anyerror };
+/// milliseconds, nothing within `control_ms`, its stream refused, or no
+/// control to be had.
+const Control = union(enum) { delivered: i64, silent, refused, unavailable: anyerror };
 
 /// The system's FSEvents measured: a watcher of its own on a directory of
 /// its own writes a sentinel there and waits for its creation.
 fn control(io: Io) Control {
-    return measure(io) catch |err| .{ .unavailable = err };
+    return measure(io) catch |err| switch (err) {
+        error.WatchLimitReached => .refused,
+        else => .{ .unavailable = err },
+    };
 }
 
 fn measure(io: Io) !Control {

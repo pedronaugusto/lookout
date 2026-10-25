@@ -80,7 +80,7 @@ const Fixture = struct {
         var with = options;
         with.recursive = true;
         with.follow_symlinks = true;
-        const id = try f.watcher.add(f.io, root, with);
+        const id = try wait.add(&f.watcher, f.io, root, with);
         try f.settle();
         return id;
     }
@@ -127,7 +127,7 @@ const Fixture = struct {
             }
         }
         std.debug.print("{s}: no {s} event for {s}\n", .{ @tagName(f.watcher.backend()), if (kind) |k| @tagName(k) else "", want });
-        return wait.missed(f.io, f.watcher.backend());
+        return wait.missed(f.io, &f.watcher);
     }
 
     /// Polls until the watcher holds `wanted` registrations, or more than
@@ -142,7 +142,7 @@ const Fixture = struct {
             _ = try f.watcher.poll(f.io, ms(100));
         }
         std.debug.print("{s}: {d} registrations, wanted {s}{d}\n", .{ @tagName(f.watcher.backend()), f.watcher.stats().registrations, if (above) "more than " else "", wanted });
-        return wait.missed(f.io, f.watcher.backend());
+        return wait.missed(f.io, &f.watcher);
     }
 
     /// Listens for a while, failing on any event at or below `forbidden`.
@@ -170,7 +170,7 @@ const Fixture = struct {
         defer plain.deinit(io);
         const root = try f.path("watched");
         defer gpa.free(root);
-        _ = try plain.add(io, root, .{ .recursive = true, .filter = filter });
+        _ = try wait.add(&plain, io, root, .{ .recursive = true, .filter = filter });
         return plain.stats().registrations;
     }
 };
@@ -392,7 +392,7 @@ test "a link past the most a watch follows is reported unwatched" {
         try f.link("outside/two", "watched/second");
         const root = try f.path("watched");
         defer gpa.free(root);
-        _ = try f.watcher.add(f.io, root, .{ .recursive = true, .follow_symlinks = true, .max_followed_links = 1 });
+        _ = try wait.add(&f.watcher, f.io, root, .{ .recursive = true, .follow_symlinks = true, .max_followed_links = 1 });
 
         const deadline: wait.Deadline = .after(io, timeout_ms);
         var unwatched: ?[]u8 = null;
@@ -402,7 +402,7 @@ test "a link past the most a watch follows is reported unwatched" {
                 if (event.kind == .unwatched) unwatched = try gpa.dupe(u8, event.path);
             }
         }
-        const hole = unwatched orelse return wait.missed(f.io, f.watcher.backend());
+        const hole = unwatched orelse return wait.missed(f.io, &f.watcher);
         // Which of the two is listed first is the file system's to say;
         // the other one is followed.
         const first = try f.path("watched/first");
@@ -448,7 +448,7 @@ test "a pending watch follows the links of the directory it becomes" {
         try f.tmp.dir.createDirPath(io, "outside/target");
         const later = try f.path("later");
         defer gpa.free(later);
-        _ = try f.watcher.add(f.io, later, .{ .pending = true, .recursive = true, .follow_symlinks = true });
+        _ = try wait.add(&f.watcher, f.io, later, .{ .pending = true, .recursive = true, .follow_symlinks = true });
         try f.tmp.dir.createDirPath(io, "later");
         try f.link("outside/target", "later/link");
         try f.expect("later", .created, &.{});

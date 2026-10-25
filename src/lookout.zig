@@ -300,6 +300,8 @@ pub const Watcher = struct {
     /// that returned an error handed nothing out, and what it had gathered
     /// is still the next one's to return.
     handed_out: bool,
+    /// Overflow notices `poll` has handed out. See `Stats.overflows`.
+    overflows: u64 = 0,
     /// What `poll` has handed out, with `Options.history`. Heap-allocated
     /// and set once, by `init`: the threads that read it hold this
     /// pointer, not the watcher.
@@ -1154,12 +1156,15 @@ pub const Watcher = struct {
         };
         for (w.table.values()) |*held| held.incomplete = false;
         w.handed_out = true;
-        if (w.history) |h| {
+        const handed = if (w.history) |h| handed: {
             h.record(io, events);
             w.batch.discardWhere(w.gpa, h);
-            return w.batch.events.items;
+            break :handed w.batch.events.items;
+        } else events;
+        for (handed) |event| {
+            if (event.kind == .overflow) w.overflows += 1;
         }
-        return events;
+        return handed;
     }
 
     /// `poll`, less the bookkeeping of what has been handed out.
@@ -1552,6 +1557,13 @@ pub const Watcher = struct {
         held: usize,
         /// Events the last `poll` returned, which the next one drops.
         events: usize,
+        /// Overflow notices `poll` has handed out since `init`: each says
+        /// the system lost track of a tree (a kernel queue that
+        /// overflowed, FSEvents' dropped or must-rescan flags, a delivery
+        /// lost to allocation failure) and that the tree was to be read
+        /// again. A program that logs losses, or a test asking why an
+        /// event it waited for never came, reads it here.
+        overflows: u64,
     };
 
     /// What this watcher currently holds, for a program that wants to log
@@ -1567,6 +1579,7 @@ pub const Watcher = struct {
             },
             .held = w.batch.held.count(),
             .events = w.batch.events.items.len,
+            .overflows = w.overflows,
         };
     }
 

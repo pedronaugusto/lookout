@@ -98,7 +98,7 @@ test "a change inside a renamed directory is not a creation" {
             .poll_interval = .fromMilliseconds(20),
         });
         defer watcher.deinit(io);
-        _ = try watcher.add(io, root, .{ .recursive = true });
+        _ = try wait.add(&watcher, io, root, .{ .recursive = true });
         while ((try watcher.poll(io, ms(200))).len != 0) {}
 
         const moved = try std.Io.Dir.path.join(gpa, &.{ root, "sub2" });
@@ -159,7 +159,7 @@ test "a change inside a renamed directory is not a creation" {
             });
         }
         try std.testing.expect(!saw_created);
-        try wait.seen(io, watcher.backend(), saw_modified);
+        try wait.seen(io, &watcher, saw_modified);
     }
 }
 
@@ -190,7 +190,7 @@ test "a watch spelled in another case than the disk still reports" {
         // Asked for in upper case; created in lower case.
         const asked = try std.Io.Dir.path.join(gpa, &.{ root, "TARGET" });
         defer gpa.free(asked);
-        _ = try watcher.add(io, asked, .{ .pending = true, .recursive = true });
+        _ = try wait.add(&watcher, io, asked, .{ .pending = true, .recursive = true });
 
         try tmp.dir.createDirPath(io, "target");
 
@@ -203,7 +203,7 @@ test "a watch spelled in another case than the disk still reports" {
             }
         }
         if (!promoted) std.debug.print("{s}: {s} never appeared\n", .{ @tagName(backend), asked });
-        try wait.seen(io, watcher.backend(), promoted);
+        try wait.seen(io, &watcher, promoted);
 
         // And the watch on it is a real watch: what happens inside is
         // reported, though the kernel spells the path the other way.
@@ -216,7 +216,7 @@ test "a watch spelled in another case than the disk still reports" {
             }
         }
         if (!found) std.debug.print("{s}: nothing under {s}\n", .{ @tagName(backend), asked });
-        try wait.seen(io, watcher.backend(), found);
+        try wait.seen(io, &watcher, found);
     }
 }
 
@@ -237,7 +237,7 @@ test "explicit case insensitive filtering excludes across filesystem policies" {
             .poll_interval = .fromMilliseconds(20),
         });
         defer watcher.deinit(io);
-        _ = try watcher.add(io, root, .{
+        _ = try wait.add(&watcher, io, root, .{
             .recursive = true,
             .filter = .{ .ignore = &.{"SKIP"}, .case = .unicode },
         });
@@ -259,7 +259,7 @@ test "explicit case insensitive filtering excludes across filesystem policies" {
                 if (std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
-        try wait.seen(io, watcher.backend(), found);
+        try wait.seen(io, &watcher, found);
     }
 }
 
@@ -286,7 +286,7 @@ test "a slow write is one event, and it arrives after the writing stops" {
     });
     defer watcher.deinit(io);
     try tmp.dir.writeFile(io, .{ .sub_path = "big.bin", .data = "" });
-    _ = try watcher.add(io, root, .{});
+    _ = try wait.add(&watcher, io, root, .{});
     while ((try watcher.poll(io, ms(200))).len != 0) {}
 
     const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "big.bin" });
@@ -326,7 +326,7 @@ test "a slow write is one event, and it arrives after the writing stops" {
             seen += 1;
         }
     }
-    if (seen == 0) return wait.missed(io, watcher.backend());
+    if (seen == 0) return wait.missed(io, &watcher);
     try std.testing.expectEqual(@as(usize, 1), seen);
     // Nothing was reported while the file was still being written to.
     try std.testing.expect(writer.done.load(.acquire));
@@ -380,7 +380,7 @@ test "a burst of renames is paired across the reads it is split over" {
         .max_dir_entries = 1_000_000,
     });
     defer watcher.deinit(io);
-    _ = try watcher.add(io, root, .{});
+    _ = try wait.add(&watcher, io, root, .{});
     while ((try watcher.poll(io, ms(200))).len != 0) {}
 
     for (0..pairs) |i| {
@@ -470,7 +470,7 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
             .max_dir_entries = 512,
         });
         defer watcher.deinit(io);
-        _ = try watcher.add(io, root, .{ .recursive = true });
+        _ = try wait.add(&watcher, io, root, .{ .recursive = true });
         while ((try watcher.poll(io, ms(200))).len != 0) {}
 
         // Drained as it goes, so that what is being measured is the
@@ -528,7 +528,7 @@ test "a root deleted and recreated inside one window is not a move" {
             .poll_interval = .fromMilliseconds(20),
         });
         defer watcher.deinit(io);
-        _ = try watcher.add(io, target, .{});
+        _ = try wait.add(&watcher, io, target, .{});
         while ((try watcher.poll(io, ms(200))).len != 0) {}
 
         try tmp.dir.deleteDir(io, "target");
@@ -583,7 +583,7 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
         .max_events = 0,
     });
     defer watcher.deinit(io);
-    _ = try watcher.add(io, root, .{});
+    _ = try wait.add(&watcher, io, root, .{});
     while ((try watcher.poll(io, ms(200))).len != 0) {}
 
     try writeBurst(tmp.dir, limit + 1);
@@ -606,7 +606,7 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
     }
-    try wait.seen(io, watcher.backend(), found);
+    try wait.seen(io, &watcher, found);
 }
 
 // Last in the file on purpose. Ten thousand files created and then
@@ -648,7 +648,7 @@ test "the delivery buffer is the size the caller asked for" {
             .max_dir_entries = 1_000_000,
         });
         defer watcher.deinit(io);
-        _ = try watcher.add(io, root, .{});
+        _ = try wait.add(&watcher, io, root, .{});
         try writeBurst(tmp.dir, burst);
 
         const held = try Held.await(&watcher, burst, .overflowed);
@@ -677,7 +677,7 @@ test "the delivery buffer is the size the caller asked for" {
             .max_dir_entries = 1_000_000,
         });
         defer watcher.deinit(io);
-        _ = try watcher.add(io, root, .{});
+        _ = try wait.add(&watcher, io, root, .{});
         try writeBurst(tmp.dir, burst);
 
         const held = try Held.await(&watcher, burst, .delivered);
@@ -810,7 +810,7 @@ fn deliveryFailure(io: std.Io, backend: lookout.Backend) !void {
                 .poll_interval = .fromMilliseconds(1),
             });
             defer watcher.deinit(io);
-            const id = try watcher.add(io, root, .{ .recursive = true });
+            const id = try wait.add(&watcher, io, root, .{ .recursive = true });
             while ((try watcher.poll(io, ms(0))).len != 0) {}
             switch (scenario) {
                 .create, .modify => {
@@ -891,8 +891,8 @@ test "allocation failure during delivery keeps every root pending through failed
             .latency = .fromMilliseconds(0),
         });
         defer watcher.deinit(io);
-        const first = try watcher.add(io, a, .{});
-        const last = try watcher.add(io, b, .{});
+        const first = try wait.add(&watcher, io, a, .{});
+        const last = try wait.add(&watcher, io, b, .{});
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "a/change", .data = "x" });
         failing.fail_index = failing.alloc_index;
         try testing.expectError(error.OutOfMemory, watcher.poll(io, ms(0)));
@@ -939,7 +939,7 @@ test "recovery remains visible while a watch is waiting for its path" {
         .poll_interval = .fromMilliseconds(1),
     });
     defer watcher.deinit(io);
-    const id = try watcher.add(io, waiting, .{ .pending = true });
+    const id = try wait.add(&watcher, io, waiting, .{ .pending = true });
     failing.fail_index = failing.alloc_index;
     try testing.expectError(error.OutOfMemory, watcher.poll(io, ms(0)));
     failing.fail_index = std.math.maxInt(usize);
@@ -961,7 +961,7 @@ test "filesystem identity reports two native case-distinct entries on sensitive 
         if (!(identity.read(io, root).case_sensitive orelse false)) continue;
         var watcher = try Watcher.init(gpa, std.testing.io, .{ .backend = backend, .poll_interval = .fromMilliseconds(1), .latency = .fromMilliseconds(0) });
         defer watcher.deinit(io);
-        const id = try watcher.add(io, root, .{});
+        const id = try wait.add(&watcher, io, root, .{});
         try tmp.dir.writeFile(io, .{ .sub_path = "Case", .data = "one" });
         try tmp.dir.writeFile(io, .{ .sub_path = "case", .data = "two" });
         var upper = false;
@@ -974,7 +974,7 @@ test "filesystem identity reports two native case-distinct entries on sensitive 
                 lower = lower or std.mem.endsWith(u8, event.path, "case");
             }
         }
-        if (!(upper and lower)) return wait.missed(io, watcher.backend());
+        if (!(upper and lower)) return wait.missed(io, &watcher);
         try std.testing.expect(upper and lower);
     }
 }
@@ -989,7 +989,7 @@ test "normalized filtering composes native names and keeps plain e and kernel sp
         defer gpa.free(root);
         var watcher = try Watcher.init(gpa, std.testing.io, .{ .backend = backend, .poll_interval = .fromMilliseconds(1), .latency = .fromMilliseconds(0) });
         defer watcher.deinit(io);
-        const id = try watcher.add(io, root, .{ .filter = .{ .ignore = &.{"[é]"}, .case = .sensitive, .normalization = .nfc } });
+        const id = try wait.add(&watcher, io, root, .{ .filter = .{ .ignore = &.{"[é]"}, .case = .sensitive, .normalization = .nfc } });
         try tmp.dir.writeFile(io, .{ .sub_path = "é", .data = "one" });
         try tmp.dir.writeFile(io, .{ .sub_path = "e\u{301}", .data = "two" });
         try tmp.dir.writeFile(io, .{ .sub_path = "e", .data = "plain" });
@@ -1027,6 +1027,6 @@ test "filesystem identity canonicalizes existing Unicode root aliases before cla
     _ = std.Io.Dir.cwd().statFile(io, alias, .{}) catch return error.SkipZigTest;
     var watcher = try Watcher.init(gpa, std.testing.io, .{ .backend = .poll });
     defer watcher.deinit(io);
-    _ = try watcher.add(io, stored, .{});
-    try std.testing.expectError(error.PathAlreadyWatched, watcher.add(io, alias, .{}));
+    _ = try wait.add(&watcher, io, stored, .{});
+    try std.testing.expectError(error.PathAlreadyWatched, wait.add(&watcher, io, alias, .{}));
 }

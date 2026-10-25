@@ -25,6 +25,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A tree walk (FSEvents' seeding, inotify's registration and adoption) returns a cancel and every other failure to open or list a directory, where it skipped the directory or ended its listing and reported the walk complete: only a directory that is gone again or is not ours to read is skipped, as the walk promises. Its metadata read the same way: what is gone or not ours to read has none, anything else is returned.
 - A snapshot's content hash returns a cancel instead of reporting the file modified; a file that cannot be read is still taken as modified, as documented.
+### Added
+
+- `Watcher.Stats.overflows`: the overflow notices `poll` has handed out since `init`, each one the system saying it lost track of a tree (a kernel queue that overflowed, FSEvents' dropped or must-rescan flags, a delivery lost to allocation failure). A program that logs losses reads it there, as does a test asking why an event it waited for never came.
+
+### Changed
+
+- Development: the tests wait for events on the clock, never by counting polls (one `Deadline`: a long wait for an event a test caused, a short window for one that must not come). A wait that runs out on FSEvents first measures the system's own delivery with a control watcher of its own, and fails as `FsEventsBackedUp`, "the system's FSEvents delivered nothing for 10 s (fseventsd backed up)", when that is silent too. A wait after an overflow notice fails as `EventsDropped` on every backend, and an `add` that FSEvents refuses (`WatchLimitReached`) while a control's own stream is refused too fails as `FsEventsRefused`. A red names the machine, not the watcher, and is never a pass.
 
 ## [0.7.3] - 2026-10-21
 
