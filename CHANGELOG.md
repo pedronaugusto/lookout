@@ -6,9 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `Filter.allow` is a `*const Filter.Allow`, an interface the caller embeds in whatever answers: its `allowFn` is given the `Allow` it was asked through and finds its owner from it with `@fieldParentPtr`. `Filter.context` is gone. Before: `.filter = .{ .allow = rule, .context = &state }` with `fn rule(context: ?*anyopaque, path: []const u8) bool`. After: a struct holding `allowing: Filter.Allow = .{ .allowFn = rule }` beside its state, `.filter = .{ .allow = &owner.allowing }`, with `fn rule(allow: *const Filter.Allow, path: []const u8) bool`.
+
+### Fixed
+
+- A cancel that lands on the length of a baseline file is `Baseline.load`'s `Canceled`. std's whole-file read took a length it could not learn for none and read on; the file is read through aegis's `own.readFile`, with the same limit.
+
 ### Changed
 
 - Checkpoint tokens and baseline files are read and written through strand (a new dependency), the family's one JSON, in place of `std.json`: bounded by their own size, with the same bytes as before, so a token or a baseline already written reads as it did. A name or a filter pattern that is not UTF-8 is written as its byte values, as `std.json` wrote it. On strand 0.14.0, airlock 0.5.5 and aegis 0.1.18.
+- On preflight 0.18, under the aegis pack: a polled tree's nodes live in a pool, each directory handle with one owner (`own.OwnedIo`) at an address that holds while the table grows; the watcher's flags are aegis atomic cells; a file's times and the clock they are compared with are aegis instants on the real clock, written to a baseline as the integers they were; the hold a debounce or settle window measures is an aegis span; FSEvents' C callback arguments carry their contract where they are cast.
 
 ## [0.7.4] - 2026-10-25
 

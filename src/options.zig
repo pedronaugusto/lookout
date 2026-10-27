@@ -6,7 +6,6 @@ const Checkpoint = @import("Checkpoint.zig");
 const types = @import("types.zig");
 const Backend = types.Backend;
 const std = @import("std");
-const aegis = @import("aegis");
 const Io = std.Io;
 
 /// How a `Watcher` behaves, fixed for its lifetime.
