@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `Filter.allow` is a `*const Filter.Allow`, an interface the caller embeds in whatever answers: its `allowFn` is given the `Allow` it was asked through and finds its owner from it with `@fieldParentPtr`. `Filter.context` is gone. Before: `.filter = .{ .allow = rule, .context = &state }` with `fn rule(context: ?*anyopaque, path: []const u8) bool`. After: a struct holding `allowing: Filter.Allow = .{ .allowFn = rule }` beside its state, `.filter = .{ .allow = &owner.allowing }`, with `fn rule(allow: *const Filter.Allow, path: []const u8) bool`.
 
+### Added
+
+- `Watcher.Stats.overflows`: the overflow notices `poll` has handed out since `init`, each one the system saying it lost track of a tree (a kernel queue that overflowed, FSEvents' dropped or must-rescan flags, a delivery lost to allocation failure). A program that logs losses reads it there, as does a test asking why an event it waited for never came.
+
 ### Fixed
 
 - A cancel that lands on the length of a baseline file is `Baseline.load`'s `Canceled`. std's whole-file read took a length it could not learn for none and read on; the file is read through aegis's `own.readFile`, with the same limit.
@@ -18,6 +22,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Checkpoint tokens and baseline files are read and written through strand (a new dependency), the family's one JSON, in place of `std.json`: bounded by their own size, with the same bytes as before, so a token or a baseline already written reads as it did. A name or a filter pattern that is not UTF-8 is written as its byte values, as `std.json` wrote it. On strand 0.14.0, airlock 0.5.5 and aegis 0.1.18.
 - On preflight 0.18, under the aegis pack: a polled tree's nodes live in a pool, each directory handle with one owner (`own.OwnedIo`) at an address that holds while the table grows; the watcher's flags are aegis atomic cells; a file's times and the clock they are compared with are aegis instants on the real clock, written to a baseline as the integers they were; the hold a debounce or settle window measures is an aegis span; FSEvents' C callback arguments carry their contract where they are cast.
+- Development: the tests wait for events on the clock, never by counting polls (one `Deadline`: a long wait for an event a test caused, a short window for one that must not come). A wait that runs out on FSEvents first measures the system's own delivery with a control watcher of its own, and fails as `FsEventsBackedUp`, "the system's FSEvents delivered nothing for 10 s (fseventsd backed up)", when that is silent too. A wait after an overflow notice fails as `EventsDropped` on every backend, and an `add` that FSEvents refuses (`WatchLimitReached`) while a control's own stream is refused too fails as `FsEventsRefused`. A red names the machine, not the watcher, and is never a pass.
 
 ## [0.7.4] - 2026-10-25
 
@@ -25,13 +30,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A tree walk (FSEvents' seeding, inotify's registration and adoption) returns a cancel and every other failure to open or list a directory, where it skipped the directory or ended its listing and reported the walk complete: only a directory that is gone again or is not ours to read is skipped, as the walk promises. Its metadata read the same way: what is gone or not ours to read has none, anything else is returned.
 - A snapshot's content hash returns a cancel instead of reporting the file modified; a file that cannot be read is still taken as modified, as documented.
-### Added
-
-- `Watcher.Stats.overflows`: the overflow notices `poll` has handed out since `init`, each one the system saying it lost track of a tree (a kernel queue that overflowed, FSEvents' dropped or must-rescan flags, a delivery lost to allocation failure). A program that logs losses reads it there, as does a test asking why an event it waited for never came.
-
-### Changed
-
-- Development: the tests wait for events on the clock, never by counting polls (one `Deadline`: a long wait for an event a test caused, a short window for one that must not come). A wait that runs out on FSEvents first measures the system's own delivery with a control watcher of its own, and fails as `FsEventsBackedUp`, "the system's FSEvents delivered nothing for 10 s (fseventsd backed up)", when that is silent too. A wait after an overflow notice fails as `EventsDropped` on every backend, and an `add` that FSEvents refuses (`WatchLimitReached`) while a control's own stream is refused too fails as `FsEventsRefused`. A red names the machine, not the watcher, and is never a pass.
 
 ## [0.7.3] - 2026-10-21
 
