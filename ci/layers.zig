@@ -5,6 +5,7 @@ const gantry = @import("gantry");
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "primitives", .patterns = &.{
         "src/timing.zig",
+        "src/stamp.zig",
         "src/filesystem.zig",
         "src/identity.zig",
         "src/backend/fsevents/CoreServices.zig",
@@ -83,6 +84,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
 
 pub const required = [_][]const u8{
     "src/timing.zig",
+    "src/stamp.zig",
     "src/filesystem.zig",
     "src/identity.zig",
     "src/backend/inotify/records.zig",

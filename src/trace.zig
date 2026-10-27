@@ -18,22 +18,22 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const aegis = @import("aegis");
 
 const scoped = std.log.scoped(.lookout);
 
-const unknown: u8 = 0;
-const off: u8 = 1;
-const on: u8 = 2;
+/// Whether tracing was asked for, once it has been read.
+const Resolution = enum(u8) { unknown, off, on };
 
-var resolved: std.atomic.Value(u8) = .init(unknown);
+var resolved: aegis.Atomic(Resolution) = .init(.unknown);
 
 /// Whether tracing was asked for. Read from the environment once and
 /// remembered, because a watcher asks per event.
 pub fn enabled() bool {
     switch (resolved.load(.monotonic)) {
-        on => return true,
-        off => return false,
-        else => {},
+        .on => return true,
+        .off => return false,
+        .unknown => {},
     }
     const asked = if (builtin.link_libc)
         std.c.getenv("LOOKOUT_TRACE") != null
@@ -41,7 +41,7 @@ pub fn enabled() bool {
         windowsHas("LOOKOUT_TRACE")
     else
         false;
-    resolved.store(if (asked) on else off, .monotonic);
+    resolved.store(if (asked) .on else .off, .monotonic);
     return asked;
 }
 
@@ -100,9 +100,9 @@ test "an environment block names a variable in any case, by its whole name, and 
 test "tracing is read once and remembered" {
     const was = resolved.load(.monotonic);
     defer resolved.store(was, .monotonic);
-    resolved.store(on, .monotonic);
+    resolved.store(.on, .monotonic);
     try std.testing.expect(enabled());
-    resolved.store(off, .monotonic);
+    resolved.store(.off, .monotonic);
     try std.testing.expect(!enabled());
     log("never printed {d}", .{1});
 }

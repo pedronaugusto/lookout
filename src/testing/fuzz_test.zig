@@ -1005,8 +1005,8 @@ fn fuzzBaselineStorage(_: void, c: *Case) !void {
     // find a cryptographic checksum or the whole JSON schema.
     if (gen.boolean(s)) {
         const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
-        const meta: Snapshot.Meta = .{ .size = gen.int(s, u64), .mtime_ns = gen.int(s, i96), .ctime_ns = gen.int(s, i96), .file_kind = .file };
-        const wrapped = try baseline_format.encode(gpa, .{ .platform = baseline_format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{.{ .path = root, .truncated = false, .check_contents = false, .entries = &.{.{ .name = bytes, .meta = meta }} }} });
+        const meta: Snapshot.Meta = .{ .size = gen.int(s, u64), .mtime = .fromRaw(gen.int(s, i96)), .ctime = .fromRaw(gen.int(s, i96)), .file_kind = .file };
+        const wrapped = try baseline_format.encode(gpa, .{ .platform = baseline_format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{}, .only = &.{}, .dirs = &.{.{ .path = root, .truncated = false, .check_contents = false, .entries = &.{.{ .name = bytes, .meta = .of(meta) }} }} });
         defer gpa.free(wrapped);
         var structured = baseline_format.parse(gpa, wrapped) catch |err| {
             try testing.expectEqual(error.InvalidBaseline, err);

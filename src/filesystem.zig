@@ -1,6 +1,8 @@
 //! The filesystem fact behind automatic per-watch backend selection.
 const std = @import("std");
 const builtin = @import("builtin");
+const aegis = @import("aegis");
+const stamp = @import("stamp.zig");
 
 /// Native notifications on network and FUSE mounts may miss external writes.
 /// Unknown means the OS query failed or this target has no type query.
@@ -42,20 +44,20 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
 }
 
 /// How coarse the times the filesystem holding `path` stamps on a file
-/// are, in nanoseconds: a change can carry a time up to this much before
+/// are: a change can carry a time up to this much before
 /// the moment it was made. Measured on APFS: its stamps are nanoseconds
 /// and never trail the system's real-time clock. HFS+ keeps seconds and
 /// FAT two of them, so any other or an unknown filesystem is taken at two
 /// seconds. Only Apple targets ask: their FSEvents backend is the one that
 /// compares a file's times with the moment its stream started.
-pub fn stampGrainNs(gpa: std.mem.Allocator, path: []const u8) u64 {
-    const coarse = 2 * std.time.ns_per_s;
+pub fn stampGrain(gpa: std.mem.Allocator, path: []const u8) stamp.Span {
+    const coarse = aegis.units.Duration(.second, i64).fromRaw(2).convert(.nanosecond, i96, .exact);
     if (comptime !builtin.target.os.tag.isDarwin()) return coarse;
     const name = gpa.dupeSentinel(u8, path, 0) catch return coarse;
     defer gpa.free(name);
     var stat: mount.Stat = undefined;
     if (mount.stat(name, &stat) != 0) return coarse;
-    if (std.mem.eql(u8, std.mem.sliceTo(&stat.type_name, 0), "apfs")) return 0;
+    if (std.mem.eql(u8, std.mem.sliceTo(&stat.type_name, 0), "apfs")) return .fromRaw(0);
     return coarse;
 }
 
@@ -188,9 +190,11 @@ fn readWindows(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
     const w = std.os.windows;
     const wide = std.unicode.wtf8ToWtf16LeAllocZ(gpa, path) catch return .unknown;
     defer gpa.free(wide);
-    var volume: [32768]u16 = undefined;
+    // One unit past what GetVolumePathNameW may fill stays a terminator, so
+    // the buffer is a terminated string whatever it wrote.
+    var volume: [32767:0]u16 = undefined;
     if (GetVolumePathNameW(wide, &volume, volume.len) == .FALSE) return .unknown;
-    const drive = GetDriveTypeW(@ptrCast(&volume)); // safe: GetVolumePathNameW returns a terminated WCHAR volume path
+    const drive = GetDriveTypeW(&volume);
     if (drive == 0 or drive == 1) return .unknown;
     if (drive == 4 or std.mem.startsWith(u8, path, "\\\\")) return .network;
     // A redirector or mounted remote device need not have a UNC spelling.

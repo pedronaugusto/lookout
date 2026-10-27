@@ -9,6 +9,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
+const Stamp = stamp.Stamp;
+const stamp = @import("stamp.zig");
 
 const lookout = @import("types.zig");
 const Kind = lookout.Kind;
@@ -29,12 +31,11 @@ check_contents: bool = false,
 pub const Meta = struct {
     /// Size in bytes. Compared for `Kind.modified`.
     size: u64,
-    /// Modification time in nanoseconds since the Unix epoch. Compared for
-    /// `Kind.modified`.
-    mtime_ns: i96,
-    /// Status-change time in nanoseconds since the Unix epoch. Compared
-    /// for `Kind.attributes` when the contents look unchanged.
-    ctime_ns: i96,
+    /// Modification time. Compared for `Kind.modified`.
+    mtime: Stamp,
+    /// Status-change time. Compared for `Kind.attributes` when the
+    /// contents look unchanged.
+    ctime: Stamp,
     /// What kind of file-system object the entry is. A name that changes
     /// kind is reported as `Kind.created`: the object at that path is a
     /// different one.
@@ -63,20 +64,20 @@ pub const content_hash_cap = 1024 * 1024;
 const timestamp_tick_ns = 2 * std.time.ns_per_s;
 
 /// Captures metadata and, for polling, content while its timestamp is racy.
-/// taken_ns is sampled before stat so a scan crossing a tick stays racy.
-/// A filesystem stamps times from a coarser clock than the one taken_ns is
+/// `taken` is sampled before stat so a scan crossing a tick stays racy.
+/// A filesystem stamps times from a coarser clock than the one `taken` is
 /// read from (a kernel tick of milliseconds behind it), so a write after
-/// the scan can be stamped in the tick before taken_ns's: that tick counts
+/// the scan can be stamped in the tick before `taken`'s: that tick counts
 /// as racy too.
-pub fn capture(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat, taken_ns: i96, check_contents: bool, was_racy: bool) Io.Cancelable!Meta {
-    const tick = @divFloor(taken_ns, timestamp_tick_ns) - 1;
+pub fn capture(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat, taken: Stamp, check_contents: bool, was_racy: bool) Io.Cancelable!Meta {
+    const tick = @divFloor(taken.raw(), timestamp_tick_ns) - 1;
     const racy = check_contents and stat.kind != .directory and
         (@divFloor(stat.mtime.nanoseconds, timestamp_tick_ns) >= tick or
             @divFloor(stat.ctime.nanoseconds, timestamp_tick_ns) >= tick);
     return .{
         .size = stat.size,
-        .mtime_ns = stat.mtime.nanoseconds,
-        .ctime_ns = stat.ctime.nanoseconds,
+        .mtime = stamp.of(stat.mtime),
+        .ctime = stamp.of(stat.ctime),
         .file_kind = stat.kind,
         .racy = racy,
         .content_hash = if (racy or was_racy) try hashContent(io, dir, path, stat) else null,
@@ -205,7 +206,7 @@ fn readListing(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max
     var next: Snapshot = .empty;
     next.check_contents = before.check_contents;
     errdefer next.deinit(gpa);
-    const taken_ns = Io.Clock.real.now(io).nanoseconds;
+    const taken = stamp.now(io);
 
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
@@ -222,7 +223,7 @@ fn readListing(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max
         const name = try gpa.dupe(u8, entry.name);
         errdefer gpa.free(name);
         const was_racy = if (before.entries.get(entry.name)) |old| old.racy else false;
-        try next.entries.put(gpa, name, try capture(io, dir, entry.name, stat, taken_ns, next.check_contents, was_racy));
+        try next.entries.put(gpa, name, try capture(io, dir, entry.name, stat, taken, next.check_contents, was_racy));
     }
     // A listing holds at most its budget, and is cut short only there.
     assert(next.entries.count() <= max_entries);
@@ -246,9 +247,9 @@ pub fn compare(s: *const Snapshot, gpa: Allocator, before: *const Snapshot, chan
         };
         if (old.file_kind != meta.file_kind) {
             try append(gpa, changes, name, .created, meta.file_kind);
-        } else if (old.size != meta.size or old.mtime_ns != meta.mtime_ns or old.contentChanged(meta)) {
+        } else if (old.size != meta.size or !old.mtime.eql(meta.mtime) or old.contentChanged(meta)) {
             try append(gpa, changes, name, .modified, meta.file_kind);
-        } else if (old.ctime_ns != meta.ctime_ns) {
+        } else if (!old.ctime.eql(meta.ctime)) {
             try append(gpa, changes, name, .attributes, meta.file_kind);
         }
     }
@@ -292,8 +293,8 @@ test "racy content checks stop reading at the cap and after timestamps age" {
     var stat = try file.stat(io);
     stat.mtime.nanoseconds = 2 * std.time.ns_per_s;
     stat.ctime.nanoseconds = 0;
-    const taken_ns = 3 * std.time.ns_per_s + 500 * std.time.ns_per_ms;
-    const before = try capture(io, tmp.dir, "file", stat, taken_ns, true, false);
+    const taken: Stamp = .fromRaw(3 * std.time.ns_per_s + 500 * std.time.ns_per_ms);
+    const before = try capture(io, tmp.dir, "file", stat, taken, true, false);
     try testing.expect(before.racy);
     try testing.expect(before.content_hash != null);
     try testing.expect(fio.count(.fileReadPositional) > 0);
@@ -301,21 +302,21 @@ test "racy content checks stop reading at the cap and after timestamps age" {
     // A scan in the next tick still finds it racy: the filesystem's clock
     // trails the one the scan reads, and stamps a write after the scan in
     // the tick before.
-    const next_tick = try capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s + 5 * std.time.ns_per_ms, true, before.racy);
+    const next_tick = try capture(io, tmp.dir, "file", stat, .fromRaw(4 * std.time.ns_per_s + 5 * std.time.ns_per_ms), true, before.racy);
     try testing.expect(next_tick.racy);
 
     // Even an entry aging on this scan needs its final content comparison.
-    const aged = try capture(io, tmp.dir, "file", stat, 6 * std.time.ns_per_s, true, next_tick.racy);
+    const aged = try capture(io, tmp.dir, "file", stat, .fromRaw(6 * std.time.ns_per_s), true, next_tick.racy);
     try testing.expect(!aged.racy);
     try testing.expect(!before.contentChanged(aged));
     const reads = fio.count(.fileReadPositional);
-    const quiet = try capture(io, tmp.dir, "file", stat, 6 * std.time.ns_per_s, true, aged.racy);
+    const quiet = try capture(io, tmp.dir, "file", stat, .fromRaw(6 * std.time.ns_per_s), true, aged.racy);
     try testing.expect(!quiet.racy);
     try testing.expectEqual(reads, fio.count(.fileReadPositional));
 
     try file.setLength(io, content_hash_cap + 1);
     stat.size = content_hash_cap + 1;
-    const large = try capture(io, tmp.dir, "file", stat, taken_ns, true, false);
+    const large = try capture(io, tmp.dir, "file", stat, taken, true, false);
     try testing.expect(large.racy);
     try testing.expect(large.content_hash == null);
     try testing.expect(large.contentChanged(large));
@@ -323,13 +324,13 @@ test "racy content checks stop reading at the cap and after timestamps age" {
 
     stat.size = content_hash_cap;
     try fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .fileReadPositional, .n = 1 } }, .fault = .{ .fail = error.AccessDenied }, .times = 0 }});
-    const unreadable = try capture(io, tmp.dir, "file", stat, taken_ns, true, false);
+    const unreadable = try capture(io, tmp.dir, "file", stat, taken, true, false);
     try testing.expect(unreadable.racy);
     try testing.expect(unreadable.content_hash == null);
     try testing.expect(before.contentChanged(unreadable));
     // A cancel is the caller's, not a modification: before, it read as one.
     try fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .fileReadPositional, .n = 1 } }, .fault = .{ .fail = error.Canceled } }});
-    try testing.expectError(error.Canceled, capture(io, tmp.dir, "file", stat, taken_ns, true, false));
+    try testing.expectError(error.Canceled, capture(io, tmp.dir, "file", stat, taken, true, false));
     try fio.setPlan(&.{});
 
     // Equality, ctime alone, the tick before and future times all stay
@@ -337,13 +338,13 @@ test "racy content checks stop reading at the cap and after timestamps age" {
     // metadata-only comparison.
     stat.mtime.nanoseconds = 0;
     stat.ctime.nanoseconds = 2 * std.time.ns_per_s;
-    try testing.expect((try capture(io, tmp.dir, "file", stat, taken_ns, true, false)).racy);
+    try testing.expect((try capture(io, tmp.dir, "file", stat, taken, true, false)).racy);
     stat.ctime.nanoseconds = 8 * std.time.ns_per_s;
-    try testing.expect((try capture(io, tmp.dir, "file", stat, taken_ns, true, false)).racy);
+    try testing.expect((try capture(io, tmp.dir, "file", stat, taken, true, false)).racy);
     stat.ctime.nanoseconds = 0;
-    try testing.expect((try capture(io, tmp.dir, "file", stat, 0, true, false)).racy);
-    try testing.expect((try capture(io, tmp.dir, "file", stat, taken_ns, true, false)).racy);
-    try testing.expect(!(try capture(io, tmp.dir, "file", stat, 4 * std.time.ns_per_s, true, false)).racy);
+    try testing.expect((try capture(io, tmp.dir, "file", stat, .fromRaw(0), true, false)).racy);
+    try testing.expect((try capture(io, tmp.dir, "file", stat, taken, true, false)).racy);
+    try testing.expect(!(try capture(io, tmp.dir, "file", stat, .fromRaw(4 * std.time.ns_per_s), true, false)).racy);
 }
 
 test "first refresh reports every entry, second reports the difference" {

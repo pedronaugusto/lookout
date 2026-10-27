@@ -23,9 +23,7 @@ ignore: []const []const u8 = &.{},
 /// `Filter.only`, copied as the caller wrote it.
 only: []const []const u8 = &.{},
 /// `Filter.allow`.
-allow: ?*const fn (context: ?*anyopaque, path: []const u8) bool = null,
-/// `Filter.context`.
-context: ?*anyopaque = null,
+allow: ?*const Filter.Allow = null,
 /// Private: the compiled patterns, or null when there are none.
 matcher: [2]?*Matcher = @splat(null),
 /// Measured directory policy; caller preferences are retained separately.
@@ -63,7 +61,7 @@ pub fn compilePolicy(gpa: Allocator, filter: Filter, policy: identity.Policy) Er
         opts.normalization = if ((filter.normalization orelse policy.normalization) == .nfc) .nfc else .exact;
         slot.* = try Matcher.create(gpa, ignore, only, opts);
     }
-    return .{ .ignore = ignore, .only = only, .allow = filter.allow, .context = filter.context, .matcher = matchers, .gpa = gpa, .case = filter.case, .normalization = filter.normalization, .policy = policy };
+    return .{ .ignore = ignore, .only = only, .allow = filter.allow, .matcher = matchers, .gpa = gpa, .case = filter.case, .normalization = filter.normalization, .policy = policy };
 }
 
 /// `compile`, for a filter whose patterns have compiled once already: a
@@ -79,7 +77,7 @@ pub fn recompile(gpa: Allocator, filter: Filter, policy: identity.Policy) Alloca
 
 /// The filter this was compiled from, borrowing this copy's patterns.
 pub fn spec(c: *const CompiledFilter) Filter {
-    return .{ .ignore = c.ignore, .only = c.only, .allow = c.allow, .context = c.context, .case = c.case, .normalization = c.normalization };
+    return .{ .ignore = c.ignore, .only = c.only, .allow = c.allow, .case = c.case, .normalization = c.normalization };
 }
 
 /// Releases a compiled filter. `none` owns nothing.
@@ -146,7 +144,7 @@ fn outside(c: *const CompiledFilter, policy: identity.Policy, root: []const u8, 
     var end: usize = 0;
     while (end < rest.len) {
         end = std.mem.findAnyPos(u8, rest, end + 1, path.separators) orelse rest.len;
-        if (!allow(c.context, subject[0 .. base + end])) return true;
+        if (!allow.admits(subject[0 .. base + end])) return true;
     }
     return false;
 }
@@ -499,15 +497,19 @@ test "an include list and an ignore list together, with the ignore winning" {
 }
 
 test "the predicate is asked about every ancestor" {
-    const rule = struct {
-        fn allow(context: ?*anyopaque, p: []const u8) bool {
-            const calls: *usize = @ptrCast(@alignCast(context.?)); // safe: the test's context is a usize counter
-            calls.* += 1;
+    const Rule = struct {
+        allowing: Filter.Allow = .{ .allowFn = allow },
+        calls: *usize,
+
+        fn allow(a: *const Filter.Allow, p: []const u8) bool {
+            const rule: *const @This() = @alignCast(@fieldParentPtr("allowing", a));
+            rule.calls.* += 1;
             return std.mem.find(u8, p, "private") == null;
         }
     };
     var calls: usize = 0;
-    var f = try expectCompiled(.{ .allow = rule.allow, .context = &calls });
+    const rule: Rule = .{ .calls = &calls };
+    var f = try expectCompiled(.{ .allow = &rule.allowing });
     defer f.deinit();
     for (f.matcher) |m| try testing.expect(m == null);
 

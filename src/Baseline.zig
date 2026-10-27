@@ -17,6 +17,7 @@
 //! directory, which is the price of the question.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const airlock = @import("airlock");
@@ -170,7 +171,7 @@ pub fn diff(b: *Baseline, io: Io) Baseline.DiffError![]const Change {
 /// Errors `save` can return.
 pub const SaveError = Allocator.Error || airlock.WriteFileOrRefuseError || error{UnsupportedBaselineFilter};
 /// Errors `load` can return.
-pub const LoadError = format.ParseError || Io.Dir.ReadFileAllocError || Io.Dir.RealPathFileAllocError ||
+pub const LoadError = format.ParseError || aegis.own.ReadFileError || Io.Dir.RealPathFileAllocError ||
     CompiledFilter.Error || error{UnsupportedBaselineFilter};
 
 /// How `save` writes the file.
@@ -203,7 +204,7 @@ pub fn save(b: *const Baseline, io: Io, filename: []const u8, options: SaveOptio
     const dirs = try a.alloc(format.Directory, b.dirs.count());
     for (b.dirs.keys(), b.dirs.values(), dirs) |path, remembered, *dir| {
         const entries = try a.alloc(format.Entry, remembered.snapshot.entries.count());
-        for (remembered.snapshot.entries.keys(), remembered.snapshot.entries.values(), entries) |name, meta, *entry| entry.* = .{ .name = name, .meta = meta };
+        for (remembered.snapshot.entries.keys(), remembered.snapshot.entries.values(), entries) |name, meta, *entry| entry.* = .{ .name = name, .meta = .of(meta) };
         dir.* = .{ .path = path, .truncated = remembered.snapshot.truncated, .check_contents = remembered.snapshot.check_contents, .entries = entries, .policy = remembered.policy };
     }
     const bytes = try format.encode(a, .{ .platform = format.platform, .root = b.root, .recursive = b.recursive, .max_dir_entries = b.max_dir_entries, .ignore = b.filter.ignore, .only = b.filter.only, .case = b.filter.case, .normalization = b.filter.normalization, .policy = b.filter.policy, .identity_override = b.identity_override, .dirs = dirs });
@@ -220,7 +221,7 @@ pub fn save(b: *const Baseline, io: Io, filename: []const u8, options: SaveOptio
 /// `gpa` is kept until `deinit`, as by `seed`.
 pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, options: Options) Baseline.LoadError!Baseline {
     if (options.filter.allow != null) return error.UnsupportedBaselineFilter;
-    const bytes = Io.Dir.cwd().readFileAlloc(io, filename, gpa, .limited(format.file_limit)) catch |err| switch (err) {
+    const bytes = aegis.own.readFile(io, .cwd(), filename, gpa, .fromRaw(format.file_limit)) catch |err| switch (err) {
         error.StreamTooLong => return error.InvalidBaseline,
         else => return err,
     };
@@ -247,7 +248,7 @@ pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, opti
         for (dir.entries) |entry| {
             const name = try gpa.dupe(u8, entry.name);
             errdefer gpa.free(name);
-            try snapshot.entries.put(gpa, name, entry.meta);
+            try snapshot.entries.put(gpa, name, entry.meta.snapshot());
         }
         try b.dirs.put(gpa, owned, .{ .snapshot = snapshot, .policy = dir.policy });
     }
@@ -922,6 +923,32 @@ test "a saved baseline reports changes since last run and replaces its file" {
     try testing.expectEqual(@as(usize, 0), (try missing.diff(io)).len);
 }
 
+test "a cancel that lands on a saved baseline's length is load's Canceled" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "kept", .data = "one" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    const file = try std.Io.Dir.path.join(gpa, &.{ root, "baseline" });
+    defer gpa.free(file);
+    {
+        var base = try seed(gpa, testing.io, root, .{});
+        defer base.deinit();
+        try base.save(testing.io, file, .{});
+    }
+    // The file's length is the one stat the read makes. std's whole-file
+    // read took a cancel there for a length it could not learn, and read on.
+    const fio = try shakedown.FaultIo.init(gpa, testing.io, .{ .plan = &.{.{
+        .at = .{ .nth = .{ .call = .fileStat, .n = 1 } },
+        .fault = .cancel,
+    }} });
+    defer fio.deinit();
+    try testing.expectError(error.Canceled, load(gpa, fio.io(), file, root, .{}));
+    var loaded = try load(gpa, testing.io, file, root, .{});
+    defer loaded.deinit();
+}
+
 test "baseline storage refuses corrupt foreign and old files by name" {
     const gpa = testing.allocator;
     const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
@@ -1116,8 +1143,8 @@ test "baseline storage retains explicit name policy and normalized filter prefer
 test "a baseline reads and writes the bytes std.json wrote, names that are not UTF-8 among them" {
     const gpa = std.testing.allocator;
     const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";
-    const meta: Snapshot.Meta = .{ .size = 3, .mtime_ns = 1_761_300_000_123_456_789, .ctime_ns = -1, .file_kind = .file, .racy = true, .content_hash = 7 };
-    const entries = [_]format.Entry{ .{ .name = "caf\u{e9}", .meta = meta }, .{ .name = "a\xffb", .meta = meta } };
+    const meta: Snapshot.Meta = .{ .size = 3, .mtime = .fromRaw(1_761_300_000_123_456_789), .ctime = .fromRaw(-1), .file_kind = .file, .racy = true, .content_hash = 7 };
+    const entries = [_]format.Entry{ .{ .name = "caf\u{e9}", .meta = .of(meta) }, .{ .name = "a\xffb", .meta = .of(meta) } };
     const dirs = [_]format.Directory{.{ .path = root, .truncated = false, .check_contents = true, .entries = &entries }};
     const state: format.State = .{ .platform = format.platform, .root = root, .recursive = true, .max_dir_entries = 4096, .ignore = &.{ "*.o", "\xfe" }, .only = &.{}, .dirs = &dirs, .case = .ascii };
     // The payload as baselines before strand were written.
@@ -1126,9 +1153,11 @@ test "a baseline reads and writes the bytes std.json wrote, names that are not U
     const bytes = try format.encode(gpa, state);
     defer gpa.free(bytes);
     try std.testing.expect(std.mem.endsWith(u8, bytes, standard));
+    // An entry's times are written as the integers of nanoseconds they were.
+    try std.testing.expect(std.mem.find(u8, bytes, "{\"size\":3,\"mtime_ns\":1761300000123456789,\"ctime_ns\":-1,\"file_kind\":\"file\",\"racy\":true,\"content_hash\":7}") != null);
     var parsed = try format.parse(gpa, bytes);
     defer parsed.deinit();
     try std.testing.expectEqualSlices(u8, "a\xffb", parsed.value.dirs[0].entries[1].name);
     try std.testing.expectEqualSlices(u8, "\xfe", parsed.value.ignore[1]);
-    try std.testing.expectEqual(meta, parsed.value.dirs[0].entries[1].meta);
+    try std.testing.expectEqual(meta, parsed.value.dirs[0].entries[1].meta.snapshot());
 }

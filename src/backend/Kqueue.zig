@@ -265,10 +265,12 @@ fn register(k: *Kqueue, io: Io, ids: []const Tree.NodeId, batch: *Batch) contrac
     for (ids) |id| {
         if (k.registrations.contains(id)) continue;
         const node = k.tree.nodes.get(id) orelse continue;
+        // Read now: a failure below can drop the node.
+        const role = node.role;
         // Reserve the ownership handoff before asking the kernel.
         try k.registrations.ensureUnusedCapacity(k.gpa, 1);
-        const target: posix.fd_t = switch (node.role) {
-            .directory => node.dir.handle,
+        const target: posix.fd_t = switch (role) {
+            .directory => node.dir.borrow().handle,
             .file => file: {
                 const opened = posix.openat(posix.AT.FDCWD, node.path, file_open_flags, 0) catch |err| {
                     // Failing to watch the path the caller named is an
@@ -287,7 +289,7 @@ fn register(k: *Kqueue, io: Io, ids: []const Tree.NodeId, batch: *Batch) contrac
             },
         };
         var installed = false;
-        defer if (node.role == .file and !installed) {
+        defer if (role == .file and !installed) {
             _ = std.c.close(target);
         };
         const change: posix.Kevent = .{
@@ -315,7 +317,7 @@ fn register(k: *Kqueue, io: Io, ids: []const Tree.NodeId, batch: *Batch) contrac
                 else => return error.Unexpected,
             }
         }
-        k.registrations.putAssumeCapacity(id, .{ .fd = target, .owns_file = node.role == .file });
+        k.registrations.putAssumeCapacity(id, .{ .fd = target, .owns_file = role == .file });
         installed = true;
     }
 }

@@ -91,13 +91,22 @@ only: []const []const u8 = &.{},
 /// the path is a directory; a rule that applies only to directories
 /// has to look.
 ///
-/// `path` is absolute, and is the path as lookout spells it. `context` is
-/// whatever was put in `context`, which lookout only passes back.
-allow: ?*const fn (context: ?*anyopaque, path: []const u8) bool = null,
+/// `path` is absolute, and is the path as lookout spells it. The `Allow`
+/// is the caller's, embedded in whatever answers; keeping it alive for the
+/// life of the watch is the caller's too.
+allow: ?*const Allow = null,
 
-/// Passed to `allow` untouched. lookout never dereferences it; keeping
-/// whatever it points at alive for the life of the watch is the caller's.
-context: ?*anyopaque = null,
+/// A predicate on paths, embedded in what answers it: `allowFn` is given
+/// the `Allow` it was asked through, and finds its owner from it with
+/// `@fieldParentPtr`.
+pub const Allow = struct {
+    allowFn: *const fn (allow: *const Allow, path: []const u8) bool,
+
+    /// Whether `path` is allowed.
+    pub fn admits(a: *const Allow, path: []const u8) bool {
+        return a.allowFn(a, path);
+    }
+};
 
 /// A filter that excludes nothing, which is what a watch has unless the
 /// caller says otherwise.

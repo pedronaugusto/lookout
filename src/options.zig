@@ -6,6 +6,7 @@ const Checkpoint = @import("Checkpoint.zig");
 const types = @import("types.zig");
 const Backend = types.Backend;
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 
 /// How a `Watcher` behaves, fixed for its lifetime.
@@ -282,10 +283,7 @@ pub const AddOptions = struct {
 /// short, a negative span being zero and a span past the range the
 /// backends take being the largest they do.
 pub fn milliseconds(span: Io.Duration) u32 {
-    if (span.nanoseconds <= 0) return 0;
-    const ns_per_ms = 1_000_000;
-    const whole = @divFloor(span.nanoseconds - 1, ns_per_ms) + 1;
-    return @intCast(@min(whole, @as(i96, std.math.maxInt(u32))));
+    return @import("timing.zig").milliseconds(span);
 }
 
 test "spans round up to whole milliseconds and clamp at both ends" {

@@ -253,6 +253,9 @@ pub const Changes = ChangeLog.Changes;
 /// Not thread-safe: one `Watcher` belongs to one thread, save `wake`,
 /// `clock`, `since` and `sync`, which any thread may call. Several may
 /// exist in one process.
+/// Whether `wake` was called since the last `poll` answered it.
+const Wakened = enum(u8) { quiet, woken };
+
 pub const Watcher = struct {
     /// How a `Watcher` behaves, fixed for its lifetime.
     pub const Options = options_mod.Options;
@@ -279,9 +282,12 @@ pub const Watcher = struct {
     /// Heap-allocated: the registrations on the links' targets point
     /// into them.
     following: std.ArrayList(*Links),
+    /// What each `Links` asks of the watcher, embedded so its functions
+    /// find the watcher from it. See `linkHost`.
+    link_host: Links.Host = LinkHost.answers,
     /// Set by `wake` and cleared by the `poll` that answers it. One of
     /// the fields of a `Watcher` another thread may touch.
-    woken: std.atomic.Value(bool),
+    woken: aegis.Atomic(Wakened),
     /// What `wake` sets to end the backend's wait, and what every
     /// backend's wait includes beside its own descriptor. It only ends a
     /// sleep: `woken` is the fact. Another field a thread that is not the
@@ -374,11 +380,13 @@ pub const Watcher = struct {
         /// `AddOptions.filter`, copied: the patterns it borrowed are long
         /// gone by the time the watch is promoted.
         filter: CompiledFilter,
+        /// The ancestor watch's filter, answered by `onlyNext`.
+        allowing: Filter.Allow = .{ .allowFn = onlyNext },
 
         /// The ancestor watch's filter. Everything but the next step down
         /// is somebody else's business.
-        fn onlyNext(context: ?*anyopaque, subject: []const u8) bool {
-            const p: *const Pending = @ptrCast(@alignCast(context.?)); // safe: the filter's context is the Pending it was made with
+        fn onlyNext(allow: *const Filter.Allow, subject: []const u8) bool {
+            const p: *const Pending = @alignCast(@fieldParentPtr("allowing", allow));
             return path_cmp.eql(subject, p.next);
         }
     };
@@ -453,7 +461,7 @@ pub const Watcher = struct {
             .table = .empty,
             .pending = .empty,
             .following = .empty,
-            .woken = .init(false),
+            .woken = .init(.quiet),
             .wakeup = wakeup,
             .handed_out = false,
             .history = history,
@@ -742,7 +750,7 @@ pub const Watcher = struct {
         assert(p.next.len > present.len);
         const mirror = try w.gpa.dupe(u8, present);
         w.addBackend(io, p.id, present, p.target, .{
-            .filter = .{ .allow = Pending.onlyNext, .context = p },
+            .filter = .{ .allow = &p.allowing },
         }) catch |err| {
             w.gpa.free(mirror);
             switch (err) {
@@ -1179,7 +1187,7 @@ pub const Watcher = struct {
         // happens to change.
         try w.batch.flush(w.gpa, io);
         const immediate = timing.expired(io, until);
-        if (w.woken.swap(false, .acquire)) return w.batch.events.items;
+        if (w.woken.swap(.quiet, .acquire) == .woken) return w.batch.events.items;
 
         while (w.batch.events.items.len == 0) {
             // A path that is settling has a deadline of its own, so the
@@ -1190,7 +1198,7 @@ pub const Watcher = struct {
 
             try w.wait(io, bound);
             try w.collect(io);
-            if (w.woken.swap(false, .acquire)) return w.batch.events.items;
+            if (w.woken.swap(.quiet, .acquire) == .woken) return w.batch.events.items;
             if (w.batch.events.items.len == 0 and timing.expired(io, until)) return &.{};
         }
         // Debouncing has already waited for the path to be quiet, so
@@ -1208,7 +1216,7 @@ pub const Watcher = struct {
             try w.collect(io);
             // A wake that arrives now is answered by this poll, which
             // returns what it has rather than waiting out the tail.
-            if (w.woken.swap(false, .acquire)) break;
+            if (w.woken.swap(.quiet, .acquire) == .woken) break;
         }
         return w.batch.events.items;
     }
@@ -1305,7 +1313,7 @@ pub const Watcher = struct {
     /// between two polls is kept for the next one, so the flag is always
     /// read.
     pub fn wake(w: *Watcher) void {
-        w.woken.store(true, .release);
+        w.woken.store(.woken, .release);
         w.wakeup.signal();
     }
 
@@ -1454,29 +1462,26 @@ pub const Watcher = struct {
 
     /// What `Links` asks of the watcher: ids for, and registrations on,
     /// the directories followed links lead to. See `Links.Host`.
-    fn linkHost(w: *Watcher) Links.Host {
-        return .{
-            .context = w,
-            .issue_fn = LinkHost.issue,
-            .register_fn = LinkHost.register,
-            .unregister_fn = LinkHost.unregister,
-        };
+    fn linkHost(w: *Watcher) *Links.Host {
+        return &w.link_host;
     }
 
-    /// The functions behind `linkHost`, private to the watcher.
+    /// The functions behind `link_host`, private to the watcher.
     const LinkHost = struct {
-        fn of(context: *anyopaque) *Watcher {
-            return @ptrCast(@alignCast(context)); // safe: linkHost passes the watcher itself as the context
+        const answers: Links.Host = .{ .issue_fn = LinkHost.issue, .register_fn = LinkHost.register, .unregister_fn = LinkHost.unregister };
+
+        fn of(h: *Links.Host) *Watcher {
+            return @alignCast(@fieldParentPtr("link_host", h));
         }
 
-        fn issue(context: *anyopaque) Links.Host.IssueError!WatchId {
-            return of(context).ids.next();
+        fn issue(h: *Links.Host) Links.Host.IssueError!WatchId {
+            return of(h).ids.next();
         }
 
         /// The alias goes in first: a backend may report while it
         /// registers, and what it reports is the link's watch's.
-        fn register(io: Io, context: *anyopaque, link: *Links.Link) Links.Host.RegisterError!void {
-            const w = of(context);
+        fn register(io: Io, h: *Links.Host, link: *Links.Link) Links.Host.RegisterError!void {
+            const w = of(h);
             try w.batch.aliases.put(w.gpa, link.id, &link.alias);
             errdefer _ = w.batch.aliases.swapRemove(link.id);
             w.addBackend(io, link.id, link.target, link.target, .{ .recursive = true, .filter = link.filter() }) catch |err| return switch (err) {
@@ -1485,8 +1490,8 @@ pub const Watcher = struct {
             };
         }
 
-        fn unregister(io: Io, context: *anyopaque, id: WatchId) void {
-            const w = of(context);
+        fn unregister(io: Io, h: *Links.Host, id: WatchId) void {
+            const w = of(h);
             w.removeBackend(io, id);
             _ = w.batch.aliases.swapRemove(id);
         }

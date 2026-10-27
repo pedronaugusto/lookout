@@ -1009,7 +1009,7 @@ fn dumpDelivery(f: *const Fixture, phase: []const u8) void {
     }
     for (f.watcher.batch.held.keys(), f.watcher.batch.held.values()) |key, held| {
         std.debug.print("held id={d} kind={s} path={s} from={?s} last_ns={d} size={?d}\n", .{
-            key.id.raw(), @tagName(held.kind), key.path, held.from, held.last_ns, held.size,
+            key.id.raw(), @tagName(held.kind), key.path, held.from, held.last.raw(), held.size,
         });
     }
 }
@@ -1044,7 +1044,7 @@ test "refilter drops held events that the new filter excludes" {
         phase = "stage old hold";
         try f.watcher.batch.push(std.testing.allocator, io, id, old, .modified, .file);
         const held = f.watcher.batch.held.getPtr(.{ .id = id, .path = old }).?;
-        held.last_ns -= 201 * std.time.ns_per_ms;
+        held.last = held.last.saturatingSub(.fromRaw(201 * std.time.ns_per_ms));
         phase = "refilter";
         try f.watcher.refilter(f.io, id, .{ .ignore = &.{"old"} });
         for (f.watcher.batch.held.keys()) |key|
@@ -1072,8 +1072,14 @@ test "a folder appearing under a newly admitted path during refilter is reached"
 
         const Self = @This();
 
-        fn allow(context: ?*anyopaque, subject: []const u8) bool {
-            const gate: *Self = @ptrCast(@alignCast(context.?));
+        /// The predicate, asking through the gate it holds.
+        const Asking = struct {
+            allowing: lookout.Filter.Allow = .{ .allowFn = allow },
+            gate: *Self,
+        };
+
+        fn allow(a: *const lookout.Filter.Allow, subject: []const u8) bool {
+            const gate = @as(*const Asking, @alignCast(@fieldParentPtr("allowing", a))).gate;
             if (std.mem.eql(u8, std.Io.Dir.path.basename(subject), "new") and
                 !gate.go.swap(true, .acq_rel))
             {
@@ -1119,7 +1125,8 @@ test "a folder appearing under a newly admitted path during refilter is reached"
                 // refilter does not invoke the caller's predicate itself.
                 gate.go.store(true, .release);
             }
-            try f.watcher.refilter(f.io, id, .{ .allow = Gate.allow, .context = &gate });
+            const asking: Gate.Asking = .{ .gate = &gate };
+            try f.watcher.refilter(f.io, id, .{ .allow = &asking.allowing });
             gate.go.store(true, .release);
             thread.join();
         }
@@ -1133,8 +1140,9 @@ test "a folder appearing under a newly admitted path during refilter is reached"
 
 /// Excludes anything whose name starts with a dot, which is the kind of
 /// rule a pattern list cannot state and a caller can.
-fn notHidden(context: ?*anyopaque, path: []const u8) bool {
-    _ = context;
+const not_hidden: lookout.Filter.Allow = .{ .allowFn = notHidden };
+
+fn notHidden(_: *const lookout.Filter.Allow, path: []const u8) bool {
     return !std.mem.startsWith(u8, std.Io.Dir.path.basename(path), ".");
 }
 
@@ -1146,7 +1154,7 @@ test "a caller predicate excludes what a pattern cannot say" {
 
         _ = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
-            .filter = .{ .allow = notHidden },
+            .filter = .{ .allow = &not_hidden },
         });
         try f.settle();
 
@@ -1215,12 +1223,15 @@ test "a tree the filter ignores gets no registration however it grows" {
     // one that names the usual build trees by glob, both expect those
     // trees to cost nothing where lookout does the recursion -- not to be
     // watched and then filtered.
-    const rules = struct {
+    const Rules = struct {
         /// What a repository's ignore file might say: two names, at any
         /// depth. Asked about every path under the watch, directories
         /// included.
-        fn allow(context: ?*anyopaque, path: []const u8) bool {
-            const asked: *usize = @ptrCast(@alignCast(context.?));
+        allowing: lookout.Filter.Allow = .{ .allowFn = allow },
+        asked: *usize,
+
+        fn allow(a: *const lookout.Filter.Allow, path: []const u8) bool {
+            const asked = @as(*const @This(), @alignCast(@fieldParentPtr("allowing", a))).asked;
             asked.* += 1;
             const name = std.Io.Dir.path.basename(path);
             return !std.mem.eql(u8, name, "build") and !std.mem.eql(u8, name, "generated");
@@ -1240,12 +1251,12 @@ test "a tree the filter ignores gets no registration however it grows" {
         try f.write("src/wanted.txt", "one");
 
         var asked: usize = 0;
+        const asking: Rules = .{ .asked = &asked };
         _ = try f.watcher.add(f.io, f.root, .{
             .recursive = true,
             .filter = .{
                 .ignore = &.{ "node_modules", "zig-*" },
-                .allow = rules.allow,
-                .context = &asked,
+                .allow = &asking.allowing,
             },
         });
         try f.settle();

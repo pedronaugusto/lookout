@@ -19,6 +19,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
+const stamp = @import("stamp.zig");
 const shakedown = @import("shakedown");
 
 /// The metadata `treeWithMeta` reads with each name: what a later `lstat`
@@ -26,12 +27,12 @@ const shakedown = @import("shakedown");
 pub const Meta = struct {
     inode: Io.File.INode,
     size: u64,
-    mtime_ns: i96,
-    ctime_ns: i96,
+    mtime: stamp.Stamp,
+    ctime: stamp.Stamp,
     kind: Io.File.Kind,
 
     pub fn of(stat: Io.File.Stat) Meta {
-        return .{ .inode = stat.inode, .size = stat.size, .mtime_ns = stat.mtime.nanoseconds, .ctime_ns = stat.ctime.nanoseconds, .kind = stat.kind };
+        return .{ .inode = stat.inode, .size = stat.size, .mtime = stamp.of(stat.mtime), .ctime = stamp.of(stat.ctime), .kind = stat.kind };
     }
 };
 
@@ -362,8 +363,8 @@ const Bulk = struct {
         return .{ .name = entry_name, .kind = kind, .meta = .{
             .inode = inode,
             .size = @bitCast(size),
-            .mtime_ns = mtime,
-            .ctime_ns = ctime,
+            .mtime = mtime,
+            .ctime = ctime,
             .kind = kind,
         } };
     }
@@ -373,8 +374,8 @@ const Bulk = struct {
         return std.mem.readInt(T, b.buffer[at..][0..@sizeOf(T)], builtin.target.cpu.arch.endian());
     }
 
-    fn time(b: *const Bulk, at: usize) i96 {
-        return @as(i96, b.read(i64, at)) * std.time.ns_per_s + b.read(i64, at + 8);
+    fn time(b: *const Bulk, at: usize) stamp.Stamp {
+        return stamp.ofTimespec(b.read(i64, at), b.read(i64, at + 8));
     }
 
     fn kindOf(vtype: u32) Io.File.Kind {

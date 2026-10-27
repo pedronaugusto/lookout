@@ -31,9 +31,30 @@ pub const Directory = struct {
     policy: identity.Policy = .{},
     pub const strand = .{ .fields = .{ .path = .{ .as = .text_or_bytes } } };
 };
+/// An entry's metadata as the file holds it: `Snapshot.Meta`, with its
+/// times the integers of nanoseconds since the epoch they are.
+pub const Meta = struct {
+    size: u64,
+    mtime_ns: i96,
+    ctime_ns: i96,
+    file_kind: std.Io.File.Kind,
+    racy: bool = false,
+    content_hash: ?u64 = null,
+
+    /// `meta` as the file holds it.
+    pub fn of(meta: Snapshot.Meta) Meta {
+        return .{ .size = meta.size, .mtime_ns = meta.mtime.raw(), .ctime_ns = meta.ctime.raw(), .file_kind = meta.file_kind, .racy = meta.racy, .content_hash = meta.content_hash };
+    }
+
+    /// The metadata the file holds, as a snapshot keeps it.
+    pub fn snapshot(m: Meta) Snapshot.Meta {
+        return .{ .size = m.size, .mtime = .fromRaw(m.mtime_ns), .ctime = .fromRaw(m.ctime_ns), .file_kind = m.file_kind, .racy = m.racy, .content_hash = m.content_hash };
+    }
+};
+
 pub const Entry = struct {
     name: []const u8,
-    meta: Snapshot.Meta,
+    meta: Meta,
     pub const strand = .{ .fields = .{ .name = .{ .as = .text_or_bytes } } };
 };
 pub const ParseError = error{ OutOfMemory, InvalidBaseline, UnsupportedBaselineVersion, ForeignBaseline };

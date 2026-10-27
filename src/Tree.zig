@@ -21,6 +21,7 @@ const Filter = @import("Filter.zig");
 const identity = @import("identity.zig");
 const CompiledFilter = @import("CompiledFilter.zig");
 const Snapshot = @import("Snapshot.zig");
+const stamp = @import("stamp.zig");
 const path_cmp = @import("path.zig");
 const AddOptions = @import("options.zig").AddOptions;
 const Target = lookout.Target;
@@ -41,8 +42,12 @@ max_dir_entries: usize,
 track_entries: bool,
 /// Polling enables content checks for timestamps within the snapshot tick.
 check_contents: bool = false,
-/// Every registered path, keyed by an id that is never reused.
-nodes: std.array_hash_map.Auto(NodeId, Node),
+/// Every registered path, keyed by an id that is never reused. The nodes
+/// live in `pool`, so a node stays where it is while the table grows and
+/// shrinks: its directory handle has one owner, at one address.
+nodes: std.array_hash_map.Auto(NodeId, *Node),
+/// Where the nodes live. A node's slot goes back when the node is dropped.
+pool: std.heap.MemoryPool(Node) = .empty,
 /// The node of each watch at each path, so that asking whether a path
 /// is registered, or finding its node, costs one lookup rather than a
 /// pass over every node: a tree of fifty thousand files once took
@@ -113,9 +118,10 @@ pub const Node = struct {
     path: []u8,
     /// Whether `dir` and `snapshot` or `meta` are the live fields.
     role: Role,
-    /// Open directory handle. Only meaningful when `role` is `directory`;
-    /// on POSIX its `handle` is the descriptor a backend registers.
-    dir: Io.Dir,
+    /// Open directory handle, the node its one owner. Only meaningful
+    /// when `role` is `directory`; on POSIX its `handle` is the descriptor
+    /// a backend registers.
+    dir: OwnedDir,
     /// The directory's remembered listing. Only meaningful when `role` is
     /// `directory`.
     snapshot: Snapshot,
@@ -134,6 +140,13 @@ pub const Node = struct {
     /// What a node stands for.
     pub const Role = enum { file, directory };
 };
+
+/// A directory handle with one owner, closed once.
+pub const OwnedDir = aegis.own.OwnedIo(Io.Dir, closeDir);
+
+fn closeDir(handle: *Io.Dir, io: Io) void {
+    handle.close(io);
+}
 
 /// Errors adding a watch can return.
 pub const AddError = Allocator.Error || Io.Dir.OpenError || Io.Dir.StatFileError ||
@@ -158,8 +171,9 @@ pub fn init(gpa: Allocator, max_dir_entries: usize, track_entries: bool) Tree {
 
 /// Closes every directory handle and frees every path.
 pub fn deinit(t: *Tree, io: Io) void {
-    for (t.nodes.values()) |*node| t.destroy(io, node);
+    for (t.nodes.values()) |node| t.destroy(io, node);
     t.nodes.deinit(t.gpa);
+    t.pool.deinit(t.gpa);
     t.index.deinit(t.gpa);
     t.dropped.deinit(t.gpa);
     for (t.watches.values()) |*watch| {
@@ -186,7 +200,7 @@ pub fn addWatch(
     added: *std.ArrayList(NodeId),
     batch: *Batch,
 ) Tree.AddError!void {
-    const taken_ns = Io.Clock.real.now(io).nanoseconds;
+    const taken = stamp.now(io);
     const stat = try Io.Dir.cwd().statFile(io, abs_path, .{});
     const recursive = options.recursive;
 
@@ -212,7 +226,7 @@ pub fn addWatch(
         // frees it on failure, without the two ever both happening.
         errdefer t.gpa.free(node_path);
         if (stat.kind != .directory) {
-            _ = try t.createFile(io, id, null, node_path, try Snapshot.capture(io, .cwd(), abs_path, stat, taken_ns, t.check_contents, false), added);
+            _ = try t.createFile(io, id, null, node_path, try Snapshot.capture(io, .cwd(), abs_path, stat, taken, t.check_contents, false), added);
             return;
         }
         _ = try t.createDirectory(io, id, null, node_path, added);
@@ -242,7 +256,7 @@ fn rollback(t: *Tree, io: Io, added: *std.ArrayList(NodeId), start: usize) void 
 /// Creates a node for every subdirectory already listed in `parent`'s
 /// snapshot.
 fn descend(t: *Tree, io: Io, parent_id: NodeId, added: *std.ArrayList(NodeId), batch: *Batch) AddError!void {
-    const parent = t.nodes.getPtr(parent_id) orelse return;
+    const parent = t.nodes.get(parent_id) orelse return;
     if (parent.role != .directory) return;
     const watch = parent.watch;
     const parent_path = parent.path;
@@ -250,7 +264,7 @@ fn descend(t: *Tree, io: Io, parent_id: NodeId, added: *std.ArrayList(NodeId), b
     var i: usize = 0;
     while (true) : (i += 1) {
         // Re-resolved each round: `createDirectory` can rehash `nodes`.
-        const node = t.nodes.getPtr(parent_id) orelse return;
+        const node = t.nodes.get(parent_id) orelse return;
         if (i >= node.snapshot.entries.count()) break;
         if (node.snapshot.entries.values()[i].file_kind != .directory) continue;
         const name = node.snapshot.entries.keys()[i];
@@ -286,30 +300,28 @@ fn descend(t: *Tree, io: Io, parent_id: NodeId, added: *std.ArrayList(NodeId), b
 }
 
 fn createDirectory(t: *Tree, io: Io, watch: WatchId, parent: ?NodeId, path: []u8, added: *std.ArrayList(NodeId)) AddError!NodeId {
-    var dir = try Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
-    errdefer dir.close(io);
-
+    const opened = try Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
     const names = identity.read(io, path);
     const id: NodeId = .fromRaw(t.next_node);
+    // The node owns the handle from here, and `insert` closes it if it fails.
     try t.insert(io, id, .{
         .watch = watch,
         .path = path,
         .role = .directory,
         .names = names,
         .policy = names.policy(t.watches.get(watch).?.identity_override),
-        .dir = dir,
+        .dir = .init(opened),
         .snapshot = .{ .entries = .empty, .truncated = false, .check_contents = t.check_contents },
         .meta = undefined,
         .parent = parent,
     });
     errdefer {
-        // The handle and the path are still this call's and its
-        // caller's; the children, if any, have been rolled back.
-        const node = t.nodes.getPtr(id).?;
-        node.snapshot.deinit(t.gpa);
-        node.children.deinit(t.gpa);
-        t.unlink(id, node.*);
+        // The path is still the caller's; the children, if any, have been
+        // rolled back.
+        const node = t.nodes.get(id).?;
+        t.unlink(id, node);
         _ = t.nodes.swapRemove(id);
+        t.release(io, node);
     }
     t.next_node += 1;
 
@@ -322,8 +334,8 @@ fn createDirectory(t: *Tree, io: Io, watch: WatchId, parent: ?NodeId, path: []u8
         Snapshot.freeChanges(t.gpa, &baseline);
         baseline.deinit(t.gpa);
     }
-    const node = t.nodes.getPtr(id).?;
-    try node.snapshot.refresh(t.gpa, io, dir, t.max_dir_entries, &baseline);
+    const node = t.nodes.get(id).?;
+    try node.snapshot.refresh(t.gpa, io, node.dir.borrow().*, t.max_dir_entries, &baseline);
 
     const start = added.items.len;
     try added.append(t.gpa, id);
@@ -344,7 +356,7 @@ fn trackEntries(t: *Tree, io: Io, dir_id: NodeId, added: *std.ArrayList(NodeId))
     var i: usize = 0;
     while (true) : (i += 1) {
         // Re-resolved each round: creating a node can rehash `nodes`.
-        const dir_node = t.nodes.getPtr(dir_id) orelse return;
+        const dir_node = t.nodes.get(dir_id) orelse return;
         if (i >= dir_node.snapshot.entries.count()) return;
         const meta = dir_node.snapshot.entries.values()[i];
         if (meta.file_kind != .file) continue;
@@ -375,8 +387,10 @@ fn createFile(t: *Tree, io: Io, watch: WatchId, parent: ?NodeId, path: []u8, met
         .parent = parent,
     });
     errdefer {
-        t.unlink(id, t.nodes.get(id).?);
+        const node = t.nodes.get(id).?;
+        t.unlink(id, node);
         _ = t.nodes.swapRemove(id);
+        t.release(io, node);
     }
     t.next_node += 1;
     try added.append(t.gpa, id);
@@ -390,12 +404,19 @@ fn createFile(t: *Tree, io: Io, watch: WatchId, parent: ?NodeId, path: []u8, met
 fn insert(t: *Tree, io: Io, id: NodeId, node: Node) Allocator.Error!void {
     // Node ids are never reused.
     assert(!t.nodes.contains(id));
+    // A directory node arrives owning its handle, unused yet: it is closed
+    // here if the node cannot be put anywhere.
+    var unplaced = node;
+    errdefer if (unplaced.role == .directory) unplaced.dir.deinit(io);
     const key: Key = .{ .watch = node.watch, .path = node.path };
     if (t.index.get(key)) |stale| t.dropSubtree(io, stale);
     try t.nodes.ensureUnusedCapacity(t.gpa, 1);
     try t.index.ensureUnusedCapacity(t.gpa, 1);
-    if (node.parent) |parent| try t.nodes.getPtr(parent).?.children.put(t.gpa, id, {});
-    t.nodes.putAssumeCapacity(id, node);
+    const slot = try t.pool.create(t.gpa);
+    errdefer t.pool.destroy(slot);
+    if (node.parent) |parent| try t.nodes.get(parent).?.children.put(t.gpa, id, {});
+    slot.* = unplaced;
+    t.nodes.putAssumeCapacity(id, slot);
     t.index.putAssumeCapacity(key, id);
     // One index entry per node: a node made where another was replaced it.
     assert(t.index.count() == t.nodes.count());
@@ -403,13 +424,13 @@ fn insert(t: *Tree, io: Io, id: NodeId, node: Node) Allocator.Error!void {
 
 /// Takes the node `id` out of the index and out of its parent's
 /// children, leaving it in the table.
-fn unlink(t: *Tree, id: NodeId, node: Node) void {
+fn unlink(t: *Tree, id: NodeId, node: *const Node) void {
     const key: Key = .{ .watch = node.watch, .path = node.path };
     if (t.index.getIndex(key)) |at| {
         if (t.index.values()[at] == id) t.index.swapRemoveAt(at);
     }
     if (node.parent) |parent| {
-        if (t.nodes.getPtr(parent)) |above| _ = above.children.swapRemove(id);
+        if (t.nodes.get(parent)) |above| _ = above.children.swapRemove(id);
     }
 }
 
@@ -419,10 +440,10 @@ fn unlink(t: *Tree, id: NodeId, node: Node) void {
 /// changes as `swapRemoveAt` changes it.
 fn dropAt(t: *Tree, io: Io, at: usize) void {
     const id = t.nodes.keys()[at];
-    const node = &t.nodes.values()[at];
-    t.unlink(id, node.*);
+    const node = t.nodes.values()[at];
+    t.unlink(id, node);
     for (node.children.keys()) |child| {
-        if (t.nodes.getPtr(child)) |below| below.parent = null;
+        if (t.nodes.get(child)) |below| below.parent = null;
     }
     t.destroy(io, node);
     t.nodes.swapRemoveAt(at);
@@ -435,7 +456,7 @@ fn dropAt(t: *Tree, io: Io, at: usize) void {
 fn dropSubtree(t: *Tree, io: Io, top: NodeId) void {
     var current = top;
     while (true) {
-        const node = t.nodes.getPtr(current) orelse return;
+        const node = t.nodes.get(current) orelse return;
         if (node.children.count() != 0) {
             current = node.children.keys()[node.children.count() - 1];
             continue;
@@ -488,7 +509,7 @@ pub fn removeWatch(t: *Tree, io: Io, id: WatchId) void {
     while (i < t.nodes.count()) {
         if (t.nodes.values()[i].watch == id) {
             const node_id = t.nodes.keys()[i];
-            t.destroy(io, &t.nodes.values()[i]);
+            t.destroy(io, t.nodes.values()[i]);
             t.nodes.swapRemoveAt(i);
             t.noteDropped(node_id);
         } else {
@@ -576,13 +597,22 @@ pub fn removeSubtree(t: *Tree, io: Io, watch: WatchId, root: []const u8) void {
     t.dropSubtree(io, id);
 }
 
+/// Frees everything `node` holds, its path included, and gives its slot
+/// back. It is out of the table already, or about to be.
 fn destroy(t: *Tree, io: Io, node: *Node) void {
+    t.gpa.free(node.path);
+    t.release(io, node);
+}
+
+/// Closes `node`'s directory and frees what it holds but its path, then
+/// gives its slot back.
+fn release(t: *Tree, io: Io, node: *Node) void {
     if (node.role == .directory) {
-        node.dir.close(io);
+        node.dir.deinit(io);
         node.snapshot.deinit(t.gpa);
     }
     node.children.deinit(t.gpa);
-    t.gpa.free(node.path);
+    t.pool.destroy(node);
 }
 
 /// The absolute path of the watch a node belongs to, for reporting
@@ -643,7 +673,7 @@ pub fn rescanDirectory(
     batch: *Batch,
     added: *std.ArrayList(NodeId),
 ) Tree.ScanError!void {
-    const node = t.nodes.getPtr(id) orelse return;
+    const node = t.nodes.get(id) orelse return;
     if (node.role != .directory) return;
     const watch = node.watch;
     const recursive = t.isRecursive(watch);
@@ -655,7 +685,7 @@ pub fn rescanDirectory(
 
     Snapshot.freeChanges(t.gpa, &t.changes);
     defer Snapshot.freeChanges(t.gpa, &t.changes);
-    var next = node.snapshot.prepare(t.gpa, io, node.dir, t.max_dir_entries, &t.changes) catch |err| switch (err) {
+    var next = node.snapshot.prepare(t.gpa, io, node.dir.borrow().*, t.max_dir_entries, &t.changes) catch |err| switch (err) {
         // The directory is gone, or is no longer a directory. Report it and
         // stop watching what is below it.
         error.FileNotFound, error.NotDir => {
@@ -678,7 +708,7 @@ pub fn rescanDirectory(
         try batch.push(t.gpa, io, watch, t.watchRoot(watch), .overflow, t.watchRootTarget(watch));
     }
 
-    const dir_path = t.nodes.getPtr(id).?.path;
+    const dir_path = t.nodes.get(id).?.path;
     for (t.changes.items) |change| {
         // A subdirectory's own modification time moves whenever anything
         // inside it moves. Reporting that would make every ancestor of a
@@ -719,7 +749,7 @@ pub fn rescanDirectory(
             else => {},
         }
     }
-    t.nodes.getPtr(id).?.snapshot.accept(t.gpa, &next);
+    t.nodes.get(id).?.snapshot.accept(t.gpa, &next);
 }
 
 /// Registers a directory that has appeared under a recursive watch, and
@@ -782,7 +812,7 @@ fn adopt(
         while (true) : (j += 1) {
             // Re-resolved each round: the node table is rehashed by the
             // next directory this loop creates.
-            const node = t.nodes.getPtr(id) orelse break;
+            const node = t.nodes.get(id) orelse break;
             if (j >= node.snapshot.entries.count()) break;
             const name = node.snapshot.entries.keys()[j];
             const file_kind = node.snapshot.entries.values()[j].file_kind;
@@ -808,10 +838,10 @@ fn adopt(
 /// Re-stats the file node `id` and pushes what changed into `batch`. Used
 /// by the `poll` backend, which is told nothing by the kernel.
 pub fn rescanFile(t: *Tree, io: Io, id: NodeId, batch: *Batch) Tree.ScanError!void {
-    const node = t.nodes.getPtr(id) orelse return;
+    const node = t.nodes.get(id) orelse return;
     if (node.role != .file) return;
 
-    const taken_ns = Io.Clock.real.now(io).nanoseconds;
+    const taken = stamp.now(io);
     const stat = Io.Dir.cwd().statFile(io, node.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {
             const gone = try t.gpa.dupe(u8, node.path);
@@ -823,10 +853,10 @@ pub fn rescanFile(t: *Tree, io: Io, id: NodeId, batch: *Batch) Tree.ScanError!vo
         else => return err,
     };
     const before = node.meta;
-    const next = try Snapshot.capture(io, .cwd(), node.path, stat, taken_ns, t.check_contents, before.racy);
-    if (before.size != stat.size or before.mtime_ns != stat.mtime.nanoseconds or before.contentChanged(next)) {
+    const next = try Snapshot.capture(io, .cwd(), node.path, stat, taken, t.check_contents, before.racy);
+    if (before.size != stat.size or !before.mtime.eql(stamp.of(stat.mtime)) or before.contentChanged(next)) {
         try batch.push(t.gpa, io, node.watch, node.path, .modified, .of(stat.kind));
-    } else if (before.ctime_ns != stat.ctime.nanoseconds) {
+    } else if (!before.ctime.eql(stamp.of(stat.ctime))) {
         try batch.push(t.gpa, io, node.watch, node.path, .attributes, .of(stat.kind));
     }
     node.meta = next;
@@ -1198,8 +1228,7 @@ test "filesystem identity keys preserve mixed directory policies and spellings" 
     for (cases, 0..) |c, i| {
         const id: NodeId = .fromRaw(i);
         const spelling = try tree.gpa.dupe(u8, c[0]);
-        try tree.nodes.put(tree.gpa, id, .{ .watch = watch, .path = spelling, .role = .file, .dir = undefined, .snapshot = undefined, .meta = undefined, .parent = null, .policy = .{ .case_sensitive = c[1] } });
-        try tree.index.put(tree.gpa, .{ .watch = watch, .path = spelling }, id);
+        try tree.insert(std.testing.io, id, .{ .watch = watch, .path = spelling, .role = .file, .dir = undefined, .snapshot = undefined, .meta = undefined, .parent = null, .policy = .{ .case_sensitive = c[1] } });
     }
     try std.testing.expectEqual(@as(usize, 2), tree.index.count());
     try std.testing.expect(!path_cmp.eql(tree.nodes.values()[0].path, tree.nodes.values()[1].path));
@@ -1229,8 +1258,8 @@ test "filesystem identity chooses each parent directory policy across mixed root
         // possible values on actual directory nodes, without changing names.
         const root_node = t.index.get(.{ .watch = id, .path = root }).?;
         const sub_node = t.index.get(.{ .watch = id, .path = sub }).?;
-        t.nodes.getPtr(root_node).?.policy = .{ .case_sensitive = i != 0 };
-        t.nodes.getPtr(sub_node).?.policy = .{ .case_sensitive = i == 0 };
+        t.nodes.get(root_node).?.policy = .{ .case_sensitive = i != 0 };
+        t.nodes.get(sub_node).?.policy = .{ .case_sensitive = i == 0 };
         const direct = try std.Io.Dir.path.join(gpa, &.{ root, "foo" });
         defer gpa.free(direct);
         const nested = try std.Io.Dir.path.join(gpa, &.{ sub, "foo" });
@@ -1238,4 +1267,44 @@ test "filesystem identity chooses each parent directory policy across mixed root
         try std.testing.expectEqual(i == 0, t.excluded(id, direct));
         try std.testing.expectEqual(i != 0, t.excluded(id, nested));
     }
+}
+
+test "a directory's handle stays its node's while the table grows past a resize" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "first");
+    var t = init(gpa, 4096, true);
+    defer t.deinit(io);
+    var added: std.ArrayList(NodeId) = .empty;
+    defer added.deinit(gpa);
+    var batch: Batch = .init(.{});
+    defer batch.deinit(gpa);
+    const first = try tmp.dir.realPathFileAlloc(io, "first", gpa);
+    defer gpa.free(first);
+    try t.addWatch(io, .fromRaw(0), first, .{}, &added, &batch);
+    const node = t.nodes.get(t.index.get(.{ .watch = .fromRaw(0), .path = first }).?).?;
+    // Borrowed, the owner is bound to where it is.
+    const handle = node.dir.borrow().handle;
+    const capacity = t.nodes.capacity();
+
+    // A second watch with more files than the table has room for makes it
+    // grow, and move every entry it holds.
+    try tmp.dir.createDirPath(io, "second");
+    for (0..capacity + 8) |i| {
+        var name: [32]u8 = undefined;
+        try tmp.dir.writeFile(io, .{ .sub_path = try std.mem.print(&name, "second/file{d}", .{i}), .data = "x" });
+    }
+    const second = try tmp.dir.realPathFileAlloc(io, "second", gpa);
+    defer gpa.free(second);
+    try t.addWatch(io, .fromRaw(1), second, .{}, &added, &batch);
+    try std.testing.expect(t.nodes.capacity() > capacity);
+
+    // The node did not move: its owner borrows from where it was bound, and
+    // holds the handle it held.
+    try std.testing.expectEqual(node, t.nodes.get(t.index.get(.{ .watch = .fromRaw(0), .path = first }).?).?);
+    try std.testing.expectEqual(handle, node.dir.borrow().handle);
+    var it = node.dir.borrow().iterate();
+    try std.testing.expect(try it.next(io) == null);
 }

@@ -14,6 +14,7 @@
 //! every mode: `overflow` < `unwatched`. See `promote`.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -31,11 +32,16 @@ const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
 const Batch = @This();
+
+/// A reading of the awake clock, which holds are measured on.
+const Awake = aegis.units.Instant(.awake, .nanosecond, i96);
+/// A span on it.
+const Span = aegis.units.Duration(.nanosecond, i96);
 const checkpoint_format = @import("Checkpoint/format.zig");
 
-/// How long a held path must be quiet before it is reported, in
-/// nanoseconds. Zero means nothing is ever held.
-hold_ns: i96,
+/// How long a held path must be quiet before it is reported. Zero means
+/// nothing is ever held.
+hold: Span,
 /// Whether every ordinary kind is held (`@import("options.zig").Options.debounce`) or only
 /// `modified` (`@import("options.zig").Options.settle`).
 hold_all: bool,
@@ -186,10 +192,10 @@ const Held = struct {
     /// What the path is. Becomes `Event.target`.
     target: Target,
     /// When this path first changed in this window. Becomes `Event.time`.
-    first_ns: i96,
+    first: Awake,
     /// When it last changed, which is what the quiet window is measured
     /// from.
-    last_ns: i96,
+    last: Awake,
     /// How large the file was when it was last looked at, or `null` for
     /// a path `settle` does not measure this way. See `promote`.
     size: ?u64,
@@ -228,7 +234,7 @@ pub fn init(options: Options) Batch {
     const debouncing = milliseconds(options.debounce) > 0;
     const hold_ms: u32 = milliseconds(if (debouncing) options.debounce else options.settle);
     return .{
-        .hold_ns = @as(i96, hold_ms) * std.time.ns_per_ms,
+        .hold = aegis.units.Duration(.millisecond, u32).fromRaw(hold_ms).convert(.nanosecond, i96, .exact),
         .hold_all = debouncing,
         .events = .empty,
         .index = .empty,
@@ -390,6 +396,7 @@ pub fn takeNotes(b: *Batch) Notes {
 fn pushAtPath(b: *Batch, gpa: Allocator, io: Io, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target, replaced_hold: usize) Allocator.Error!void {
     b.revision += 1;
     const now = Io.Timestamp.now(io, .awake);
+    const at: Awake = .fromTimestamp(now, .exact);
 
     // A loss notice ends the hold for this path. Later changes in the
     // same delivery merge into that notice rather than starting a new
@@ -398,9 +405,9 @@ fn pushAtPath(b: *Batch, gpa: Allocator, io: Io, id: WatchId, subject: []const u
         isLoss(b.events.items[i].kind)
     else
         false;
-    if (!isLoss(kind) and !recorded_loss and b.hold_ns > 0 and (b.hold_all or kind == .modified)) {
+    if (!isLoss(kind) and !recorded_loss and b.hold.compare(.fromRaw(0)) == .gt and (b.hold_all or kind == .modified)) {
         if (b.held.getPtr(.{ .id = id, .path = subject })) |entry| {
-            entry.last_ns = now.nanoseconds;
+            entry.last = at;
             if (kind == .modified) entry.size = sizeOf(io, subject);
             entry.target = target;
             // Under `debounce` the window reports what happened last,
@@ -427,8 +434,8 @@ fn pushAtPath(b: *Batch, gpa: Allocator, io: Io, id: WatchId, subject: []const u
             .kind = kind,
             .from = owned_from,
             .target = target,
-            .first_ns = now.nanoseconds,
-            .last_ns = now.nanoseconds,
+            .first = at,
+            .last = at,
             .size = if (kind == .modified) sizeOf(io, subject) else null,
         });
         return;
@@ -687,12 +694,12 @@ pub fn capture(b: *const Batch, gpa: Allocator, id: WatchId, include_ready: bool
 /// only answer to that one, and only one backend is told it.
 pub fn promote(b: *Batch, gpa: Allocator, io: Io) Allocator.Error!void {
     if (b.held.count() == 0) return;
-    const now = Io.Timestamp.now(io, .awake).nanoseconds;
+    const now: Awake = .fromTimestamp(Io.Timestamp.now(io, .awake), .exact);
 
     var i: usize = 0;
     while (i < b.held.count()) {
         const entry = b.held.values()[i];
-        if (now - entry.last_ns < b.hold_ns) {
+        if (entry.last.saturatingDurationTo(now).compare(b.hold) == .lt) {
             i += 1;
             continue;
         }
@@ -701,7 +708,7 @@ pub fn promote(b: *Batch, gpa: Allocator, io: Io) Allocator.Error!void {
             if (sizeOf(io, subject)) |after| {
                 if (after != before) {
                     b.held.values()[i].size = after;
-                    b.held.values()[i].last_ns = now;
+                    b.held.values()[i].last = now;
                     i += 1;
                     continue;
                 }
@@ -718,7 +725,7 @@ pub fn promote(b: *Batch, gpa: Allocator, io: Io) Allocator.Error!void {
             entry.kind,
             entry.from,
             entry.target,
-            .{ .nanoseconds = entry.first_ns },
+            entry.first.toTimestamp(),
         );
         b.held.swapRemoveAt(i);
         gpa.free(subject);
@@ -731,14 +738,17 @@ pub fn promote(b: *Batch, gpa: Allocator, io: Io) Allocator.Error!void {
 /// through a deadline it set itself.
 pub fn nextDueMs(b: *const Batch, io: Io) ?u32 {
     if (b.held.count() == 0) return null;
-    const now = Io.Timestamp.now(io, .awake).nanoseconds;
-    var soonest: i96 = std.math.maxInt(i96);
+    const now: Awake = .fromTimestamp(Io.Timestamp.now(io, .awake), .exact);
+    var soonest: Span = .fromRaw(std.math.maxInt(i96));
     for (b.held.values()) |entry| {
-        const remaining = b.hold_ns - (now - entry.last_ns);
-        if (remaining < soonest) soonest = remaining;
+        const remaining = b.hold.saturatingSub(entry.last.saturatingDurationTo(now));
+        if (remaining.compare(soonest) == .lt) soonest = remaining;
     }
-    if (soonest <= 0) return 0;
-    return @intCast(@divTrunc(soonest, std.time.ns_per_ms) + 1);
+    if (soonest.compare(.fromRaw(0)) != .gt) return 0;
+    // A millisecond past the whole ones left, as a wait that ends on the
+    // due time cannot end before it.
+    const ms = soonest.convert(.millisecond, i96, .down).saturatingAdd(.fromRaw(1));
+    return @intCast(ms.raw());
 }
 
 /// Drops whatever is held for `path`, because something has happened to
@@ -1102,12 +1112,12 @@ test "debouncing stamps an event with when the path first changed" {
     defer b.deinit(gpa);
 
     try b.push(gpa, io, .fromRaw(0), "/tmp/a", .created, .file);
-    const first = b.held.values()[0].first_ns;
+    const first = b.held.values()[0].first.toTimestamp();
     try b.push(gpa, io, .fromRaw(0), "/tmp/a", .modified, .file);
     clock.advance(.fromMilliseconds(100));
     try b.promote(gpa, io);
 
-    try testing.expectEqual(first, b.events.items[0].time.nanoseconds);
+    try testing.expectEqual(first, b.events.items[0].time);
 }
 
 test "a push that is held still moves the revision" {

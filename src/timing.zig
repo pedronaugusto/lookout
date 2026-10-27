@@ -13,6 +13,7 @@
 //! wait with the batch intact and the kernel's events still queued.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const reactor = @import("reactor");
 
@@ -41,9 +42,16 @@ pub fn soonest(io: Io, a: Io.Timeout, b: Io.Timeout) Io.Timeout {
 /// that are not reactor's: a completion port takes milliseconds.
 pub fn remainingMs(io: Io, timeout: Io.Timeout) ?u32 {
     const left = timeout.toDurationFromNow(io) orelse return null;
-    if (left.raw.nanoseconds <= 0) return 0;
-    const ms = @divFloor(left.raw.nanoseconds - 1, std.time.ns_per_ms) + 1;
-    return @intCast(@min(ms, std.math.maxInt(u32)));
+    return milliseconds(left.raw);
+}
+
+/// `span` in whole milliseconds, rounded up so that a wait is never cut
+/// short, a negative span being zero and a span past the range the
+/// backends take being the largest they do.
+pub fn milliseconds(span: Io.Duration) u32 {
+    const whole = aegis.units.Duration(.millisecond, i96).fromIoDuration(span, .up);
+    if (whole.compare(.fromRaw(0)) != .gt) return 0;
+    return @intCast(@min(whole.raw(), std.math.maxInt(u32)));
 }
 
 /// What a wait can end in besides a member being ready.

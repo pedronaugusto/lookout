@@ -38,6 +38,7 @@ const reactor = @import("reactor");
 
 const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
+const stamp = @import("../stamp.zig");
 const Volume = @import("fsevents/Volume.zig");
 const CoreServices = @import("fsevents/CoreServices.zig");
 const CheckpointPaths = @import("../Checkpoint/History.zig");
@@ -324,16 +325,19 @@ const Stream = struct {
     /// the clock a file's times are stamped from. A path the seeding walk
     /// has not reached yet is judged by its own times against this. See
     /// `aheadOfWalk`.
-    started_ns: i128 = 0,
+    started: stamp.Stamp = .fromRaw(0),
     /// How coarse the volume's file times are: a time this much before
-    /// `started_ns` may still be a change made after it, and what the
-    /// slack decides errs towards reporting. See `filesystem.stampGrainNs`.
-    stamp_grain_ns: u64 = 0,
+    /// `started` may still be a change made after it, and what the slack
+    /// decides errs towards reporting. See `filesystem.stampGrain`.
+    stamp_grain: stamp.Span = .fromRaw(0),
     /// Set, with release, once the fields the delivery thread reads are
     /// written, and read with acquire by every delivery. FSEvents orders
     /// its start before its first callback, but inside the framework,
     /// where a race detector cannot see it; this says it where it can.
-    published: std.atomic.Value(bool) = .init(false),
+    published: aegis.Atomic(Publication) = .init(.unpublished),
+
+    /// Whether the fields a delivery reads are written. See `published`.
+    const Publication = enum(u8) { unpublished, published };
 
     const Scope = enum {
         /// Everything under `root`.
@@ -353,8 +357,8 @@ const Stream = struct {
 
     /// The earliest file time that may stamp a change made after the
     /// stream started.
-    fn since(st: *const Stream) i128 {
-        return st.started_ns - st.stamp_grain_ns;
+    fn since(st: *const Stream) stamp.Stamp {
+        return st.started.saturatingSub(st.stamp_grain);
     }
 
     fn wants(st: *const Stream, subject: []const u8) bool {
@@ -459,6 +463,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!FsEvent
 }
 
 fn latencySeconds(ms: u32) f64 {
+    // aegis: boundary: FSEventStreamCreate takes its latency as a CFTimeInterval, seconds in a double
     return @as(f64, @floatFromInt(ms)) / std.time.ms_per_s;
 }
 
@@ -731,7 +736,7 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
         const identity = volume.identity orelse return error.InvalidCheckpoint;
         if (!Volume.matches(identity, f.restarting.?.state.value.watches[index].identity)) return error.InvalidCheckpoint;
     }
-    const started_ns = realNow();
+    const started = realNow();
     const since = if (resumed) |index| f.restarting.?.state.value.watches[index].cursor else if (!force_live and volume.identity != null)
         cs.FSEventsGetLastEventIdForDeviceBeforeTime(volume.device, cs.CFAbsoluteTimeGetCurrent() + 978307200)
     else
@@ -758,10 +763,10 @@ fn startStream(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requeste
         .resume_index = resumed,
         .resumed = resumed != null,
         .replayed = null,
-        .started_ns = started_ns,
-        .stamp_grain_ns = filesystem.stampGrainNs(f.gpa, stream_path),
+        .started = started,
+        .stamp_grain = filesystem.stampGrain(f.gpa, stream_path),
     };
-    stream.published.store(true, .release);
+    stream.published.store(.published, .release);
 
     trace.log("fsevents add watch={d} scope={s} root={s} stream_path={s}", .{
         id.raw(), @tagName(scope), abs_path, stream_path,
@@ -981,11 +986,13 @@ fn deliver(
     ids: [*]const u64,
 ) callconv(.c) void {
     _ = ref;
-    const stream: *Stream = @ptrCast(@alignCast(info.?)); // safe: info is the Stream the stream was created with, alive until it is invalidated
-    const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?)); // safe: without kFSEventStreamCreateFlagUseCFTypes, paths is a C array of C strings, count long
+    // aegis: boundary: FSEvents' callback context, the `info` FSEventStreamCreate took: the Stream, alive until the stream is invalidated
+    const stream: *Stream = @ptrCast(@alignCast(info.?));
+    // aegis: boundary: FSEvents' callback paths: without kFSEventStreamCreateFlagUseCFTypes, a C array of C strings, count long
+    const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?));
     // the handoff from `add`, made visible (`Stream.published`); a stream
     // is published before it is started, so this never drops a delivery
-    if (!stream.published.load(.acquire)) return;
+    if (stream.published.load(.acquire) == .unpublished) return;
 
     {
         var held = stream.sink.delivery.acquire();
@@ -1571,13 +1578,13 @@ fn judgeAhead(gpa: Allocator, stream: *const Stream, subject: []const u8) Ahead 
         };
     }
     const since = stream.since();
-    if (nanoseconds(st.birthtime()) >= since) return .created;
-    if (nanoseconds(st.ctime()) >= since) return .existed;
+    if (stampOf(st.birthtime()).compare(since) != .lt) return .created;
+    if (stampOf(st.ctime()).compare(since) != .lt) return .existed;
     return .untouched;
 }
 
-fn nanoseconds(t: std.c.timespec) i128 {
-    return @as(i128, t.sec) * std.time.ns_per_s + t.nsec;
+fn stampOf(t: std.c.timespec) stamp.Stamp {
+    return stamp.ofTimespec(t.sec, t.nsec);
 }
 
 fn needsExistenceCheck(flags: u32, seen: bool) bool {
@@ -1775,7 +1782,7 @@ fn rememberInitial(f: *FsEvents, io: Io, stream: *const Stream, subject: []const
         else => return err,
     };
     const is_root = path_cmp.eql(subject, stream.root);
-    if (!is_root and meta.ctime_ns >= stream.since()) switch (judgeAhead(f.gpa, stream, subject)) {
+    if (!is_root and meta.ctime.compare(stream.since()) != .lt) switch (judgeAhead(f.gpa, stream, subject)) {
         .created, .gone => return,
         .existed, .untouched, .unknown => return f.remember(stream.id, subject),
     };
@@ -2009,12 +2016,12 @@ fn seed(f: *FsEvents, io: Io, batch: *Batch, whole: bool) contract.PollError!boo
     return f.seeding.count() != 0;
 }
 
-/// The system's real-time clock, in nanoseconds: the clock a file's times
-/// are stamped from, which a test's `Io` may not keep.
-fn realNow() i128 {
+/// The system's real-time clock: the clock a file's times are stamped
+/// from, which a test's `Io` may not keep.
+fn realNow() stamp.Stamp {
     var now: std.c.timespec = undefined;
-    if (std.c.clock_gettime(.REALTIME, &now) != 0) return 0;
-    return @as(i128, now.sec) * std.time.ns_per_s + now.nsec;
+    if (std.c.clock_gettime(.REALTIME, &now) != 0) return .fromRaw(0);
+    return stampOf(now);
 }
 
 /// Unknown is distinct from absent: it cannot decide a rename or removal.
@@ -2393,7 +2400,8 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
         ids[filled] = item.event orelse cs.FSEventsGetCurrentEventId();
         filled += 1;
     }
-    deliver(stream.ref, stream, filled, @ptrCast(&paths), &flags, &ids); // safe: the same C array of C strings FSEvents hands deliver
+    // aegis: boundary: FSEvents' callback takes its paths as `void *`: the same C array of C strings FSEvents hands it
+    deliver(stream.ref, stream, filled, @ptrCast(&paths), &flags, &ids);
 }
 
 /// The libdispatch surface lookout uses, which is libSystem's and so linked
