@@ -92,7 +92,7 @@ const share_buffer_len = 64 * 1024;
 ///
 /// Heap-allocated and never moved, because the kernel writes into
 /// `buffer` and `request` for as long as a read is pending.
-const Watch = struct {
+pub const Watch = struct {
     id: WatchId,
     /// The path the caller named, absolute and canonical, in WTF-8.
     root: []u8,

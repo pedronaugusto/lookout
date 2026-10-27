@@ -747,8 +747,9 @@ pub fn nextDueMs(b: *const Batch, io: Io) ?u32 {
     if (soonest.compare(.fromRaw(0)) != .gt) return 0;
     // A millisecond past the whole ones left, as a wait that ends on the
     // due time cannot end before it.
-    const ms = soonest.convert(.millisecond, i96, .down).saturatingAdd(.fromRaw(1));
-    return @intCast(ms.raw());
+    const ms: aegis.units.Duration(.millisecond, i96) = soonest.convert(.millisecond, i96, .down).saturatingAdd(.fromRaw(1));
+    const whole = ms.convert(.millisecond, u32, .exact) catch return std.math.maxInt(u32);
+    return whole.raw();
 }
 
 /// Drops whatever is held for `path`, because something has happened to

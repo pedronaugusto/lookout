@@ -7,8 +7,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
+const aegis = @import("aegis");
 const Stamp = stamp.Stamp;
 const stamp = @import("stamp.zig");
 
@@ -226,8 +226,8 @@ fn readListing(before: *const Snapshot, gpa: Allocator, io: Io, dir: Io.Dir, max
         try next.entries.put(gpa, name, try capture(io, dir, entry.name, stat, taken, next.check_contents, was_racy));
     }
     // A listing holds at most its budget, and is cut short only there.
-    assert(next.entries.count() <= max_entries);
-    assert(!next.truncated or next.entries.count() == max_entries);
+    aegis.assert.post(next.entries.count() <= max_entries, "a listing holds at most its budget");
+    aegis.assert.post(!next.truncated or next.entries.count() == max_entries, "a listing is cut short only at its budget");
     return next;
 }
 

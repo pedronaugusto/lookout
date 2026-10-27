@@ -288,7 +288,7 @@ const Sink = struct {
 };
 
 /// One watch: one FSEvents stream, and what the caller asked it to mean.
-const Stream = struct {
+pub const Stream = struct {
     id: WatchId,
     sink: *Sink,
     ref: CoreServices.FsEventStreamRef,
@@ -1134,14 +1134,13 @@ fn drain(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!void {
     var delivered: std.ArrayList(Record) = .empty;
     defer delivered.deinit(f.gpa);
     var it = records.iterate(f.staging.items);
-    while (true) {
-        // The delivery thread writes a whole record under the lock and
-        // the drain copies under the same lock, so a tail this cannot
-        // decode is not one either of them wrote. What has been decoded
-        // is reported; the rest says nothing that can be acted on.
-        const record = it.next() catch |err| switch (err) {
-            error.TruncatedRecord => break,
-        } orelse break;
+    // The delivery thread writes a whole record under the lock and the
+    // drain copies under the same lock, so a tail this cannot decode is not
+    // one either of them wrote. What has been decoded is reported; the rest
+    // says nothing that can be acted on.
+    while (it.next() catch |err| switch (err) {
+        error.TruncatedRecord => null,
+    }) |record| {
         trace.log("fsevents record watch={d} event={d} flags=0x{x} path={s}", .{
             record.id.raw(), record.event, record.flags, record.path,
         });
