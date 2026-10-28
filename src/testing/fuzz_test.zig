@@ -94,9 +94,9 @@ fn fuzzInotify(_: void, c: *Case) !void {
     var it = inotify_records.iterate(bytes);
     var seen: usize = 0;
     while (true) {
-        const record = it.next() catch |err| switch (err) {
+        const record = (it.next() catch |err| switch (err) {
             error.TruncatedRecord => break,
-        } orelse break;
+        }) orelse break;
         seen += 1;
         // A record costs at least a header, so a read cannot hold more
         // of them than its own length allows. Asserted inside the loop
@@ -139,9 +139,9 @@ fn fuzzWindows(_: void, c: *Case) !void {
     var it = windows_records.iterate(bytes);
     var seen: usize = 0;
     while (true) {
-        const record = it.next() catch |err| switch (err) {
+        const record = (it.next() catch |err| switch (err) {
             error.TruncatedRecord, error.OddNameLength, error.OverlappingRecords => break,
-        } orelse break;
+        }) orelse break;
         seen += 1;
         try testing.expect(seen <= bytes.len / windows_records.header_len);
         try testing.expect(inside(bytes, record.name));
@@ -199,9 +199,9 @@ fn fuzzDelivery(_: void, c: *Case) !void {
     defer delivered.deinit(gpa);
     var it = fsevents_records.iterate(bytes);
     while (true) {
-        const record = it.next() catch |err| switch (err) {
+        const record = (it.next() catch |err| switch (err) {
             error.TruncatedRecord => break,
-        } orelse break;
+        }) orelse break;
         try testing.expect(delivered.items.len <= bytes.len / fsevents_records.header_len);
         try testing.expect(inside(bytes, record.path));
         // Every flag combination has an answer to both of these, and
@@ -263,9 +263,9 @@ fn fuzzCarry(_: void, c: *Case) !void {
         defer delivered.deinit(gpa);
         var it = fsevents_records.iterate(bytes);
         while (true) {
-            const record = it.next() catch |err| switch (err) {
+            const record = (it.next() catch |err| switch (err) {
                 error.TruncatedRecord => break,
-            } orelse break;
+            }) orelse break;
             try delivered.append(gpa, record);
         }
 

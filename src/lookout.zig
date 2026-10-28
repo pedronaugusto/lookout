@@ -1622,6 +1622,7 @@ test {
     _ = timing;
     _ = fs_type;
     _ = @import("Snapshot.zig");
+    _ = @import("stamp.zig");
     _ = @import("Budget.zig");
     _ = @import("buffer.zig");
     _ = @import("path.zig");

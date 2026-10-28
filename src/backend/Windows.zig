@@ -744,11 +744,11 @@ fn report(w: *Windows, io: Io, watch: *Watch, transferred: u32, batch: *Batch) c
         // for: what is left of it is lost, and `lookout.Kind.overflow`
         // is what lookout says when it has lost something and cannot
         // say what. The caller already handles it.
-        const record = it.next() catch {
+        const record = (it.next() catch {
             try batch.push(w.gpa, io, watch.id, watch.root, .overflow, .directory);
             w.lost(io, watch);
             return;
-        } orelse return;
+        }) orelse return;
 
         const relative = try record.wtf8Alloc(w.gpa);
         defer w.gpa.free(relative);

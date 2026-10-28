@@ -459,9 +459,9 @@ fn consume(n: *Inotify, io: Io, bytes: []const u8, offset: *usize, batch: *Batch
         // not something it produced. What has been decoded is already
         // reported; the rest of the buffer says nothing that can be
         // acted on.
-        const event = it.next() catch |err| switch (err) {
+        const event = (it.next() catch |err| switch (err) {
             error.TruncatedRecord => return,
-        } orelse return;
+        }) orelse return;
         if (event.mask & linux.IN.Q_OVERFLOW != 0) lost = true;
         try n.handle(io, event, batch);
         offset.* = it.offset;

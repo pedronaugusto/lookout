@@ -28,11 +28,11 @@ permissions:
   actions: read
 jobs:
   gate:
-    uses: pedronaugusto/preflight/.github/workflows/zig.yml@30011caf79609517f0f08073ca01b470e91e126d
+    uses: pedronaugusto/preflight/.github/workflows/zig.yml@97f57ab595ee3377407f4d964082f75777a66075
     with:
       tier: ${{ github.event_name == 'workflow_dispatch' && inputs.tier || github.event_name == 'schedule' && 'release' || 'merge' }}
       working-directory: "."
-      preflight-ref: 30011caf79609517f0f08073ca01b470e91e126d
+      preflight-ref: 97f57ab595ee3377407f4d964082f75777a66075
       attest: ${{ github.event_name == 'push' || inputs.status-only == true }}
       fast-matrix: >-
         {"include":[{"os":"ubuntu-latest","name":"source checks and documented snippets","step":"lint","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"lint","artifact":"","operation":"execute","targets":"","directory":"","prepare":"","declared":false,"qemu":false},{"os":"ubuntu-latest","name":"Linux Debug","step":"ci","args":"-Doptimize=debug -Dci-lint=false","shard":"","setup":true,"job_timeout":20,"cache_key":"fast-linux-debug-0","artifact":"","operation":"execute","targets":"","directory":"","prepare":"","declared":false,"qemu":false},{"os":"ubuntu-latest","name":"Cross compile 1/5","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-0","artifact":"","operation":"objects","targets":"x86_64-linux-gnu aarch64-windows-gnu","directory":"","prepare":"","declared":false,"qemu":false},{"os":"ubuntu-latest","name":"Cross compile 2/5","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-1","artifact":"","operation":"objects","targets":"aarch64-linux-gnu x86_64-freebsd","directory":"","prepare":"","declared":false,"qemu":false},{"os":"ubuntu-latest","name":"Cross compile 3/5","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-2","artifact":"","operation":"objects","targets":"x86_64-linux-musl x86_64-netbsd","directory":"","prepare":"","declared":false,"qemu":false},{"os":"ubuntu-latest","name":"Cross compile 4/5","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-3","artifact":"","operation":"objects","targets":"x86_64-windows-gnu aarch64-macos","directory":"","prepare":"","declared":false,"qemu":false},{"os":"ubuntu-latest","name":"Cross compile 5/5","step":"preflight-cross","args":"","shard":"","setup":false,"job_timeout":20,"cache_key":"cross-objects-4","artifact":"","operation":"objects","targets":"x86_64-windows-msvc","directory":"","prepare":"","declared":false,"qemu":false}]}

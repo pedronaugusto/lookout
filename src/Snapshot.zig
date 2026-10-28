@@ -61,7 +61,7 @@ pub const content_hash_cap = 1024 * 1024;
 // Use a conservative two-second tick on every platform: FAT modification
 // times have that resolution, and the stat API exposes no filesystem tick.
 // Finer filesystems may need extra hashes, but never miss a same-tick write.
-const timestamp_tick_ns = 2 * std.time.ns_per_s;
+const timestamp_tick: stamp.Span = aegis.units.Duration(.second, i64).fromRaw(2).convert(.nanosecond, i96, .exact);
 
 /// Captures metadata and, for polling, content while its timestamp is racy.
 /// `taken` is sampled before stat so a scan crossing a tick stays racy.
@@ -70,10 +70,10 @@ const timestamp_tick_ns = 2 * std.time.ns_per_s;
 /// the scan can be stamped in the tick before `taken`'s: that tick counts
 /// as racy too.
 pub fn capture(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat, taken: Stamp, check_contents: bool, was_racy: bool) Io.Cancelable!Meta {
-    const tick = @divFloor(taken.raw(), timestamp_tick_ns) - 1;
+    const tick = taken.floor(timestamp_tick).saturatingSub(timestamp_tick);
     const racy = check_contents and stat.kind != .directory and
-        (@divFloor(stat.mtime.nanoseconds, timestamp_tick_ns) >= tick or
-            @divFloor(stat.ctime.nanoseconds, timestamp_tick_ns) >= tick);
+        (stamp.of(stat.mtime).floor(timestamp_tick).compare(tick) != .lt or
+            stamp.of(stat.ctime).floor(timestamp_tick).compare(tick) != .lt);
     return .{
         .size = stat.size,
         .mtime = stamp.of(stat.mtime),
