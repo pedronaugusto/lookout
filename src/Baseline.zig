@@ -949,6 +949,32 @@ test "a cancel that lands on a saved baseline's length is load's Canceled" {
     defer loaded.deinit();
 }
 
+test "a cancel while the root's names are measured is returned, not taken for names that say nothing" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    // The kernel's spelling of the root (Darwin), whether it is a
+    // directory, and the directory opened to read its naming flags
+    // (Linux on ext4 or f2fs, Windows). Where the system makes no such
+    // call, the plan never fires and the seed stands.
+    const looks = [_]shakedown.IoPlan.At{
+        .{ .nth = .{ .call = .dirOpenFile, .n = 1, .path = .{ .exact = root } } },
+        .{ .nth = .{ .call = .dirStatFile, .n = 1, .path = .{ .exact = root } } },
+        .{ .nth = .{ .call = .dirOpenDir, .n = 1, .path = .{ .exact = root } } },
+    };
+    for (looks) |at| {
+        const fio = try shakedown.FaultIo.init(gpa, testing.io, .{ .plan = &.{.{ .at = at, .fault = .cancel, .times = 1 }} });
+        defer fio.deinit();
+        if (seed(gpa, fio.io(), root, .{})) |seeded| {
+            var base = seeded;
+            defer base.deinit();
+            try testing.expectEqual(@as(usize, 0), fio.fired().len);
+        } else |err| try testing.expectEqual(error.Canceled, err);
+    }
+}
+
 test "baseline storage refuses corrupt foreign and old files by name" {
     const gpa = testing.allocator;
     const root = if (builtin.target.os.tag == .windows) "C:\\tree" else "/tree";

@@ -17,6 +17,10 @@ pub const Capabilities = struct {
     }
 };
 
+/// What `path`'s filesystem says about its names; unknown where it says
+/// nothing or cannot be asked. A cancel that lands in the asking is put
+/// back for the caller's next cancellation point: nothing is established,
+/// and the cancel is not lost.
 pub fn read(io: std.Io, path: []const u8) Capabilities {
     if (builtin.target.os.tag.isDarwin()) {
         var name_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
@@ -30,7 +34,7 @@ pub fn read(io: std.Io, path: []const u8) Capabilities {
     }
     if (builtin.target.os.tag == .windows) {
         const measured = directoryPath(io, path);
-        const directory = std.Io.Dir.cwd().openDir(io, measured, .{}) catch return .{};
+        const directory = std.Io.Dir.cwd().openDir(io, measured, .{}) catch |err| return unmeasured(io, err);
         defer directory.close(io);
         var flags: u32 = undefined;
         if (GetFileInformationByHandleEx(directory.handle, 23, &flags, @sizeOf(u32)) == .FALSE) return .{};
@@ -45,7 +49,7 @@ pub fn read(io: std.Io, path: []const u8) Capabilities {
         if (std.os.linux.errno(rc) != .SUCCESS) return .{};
         switch (storage[0]) {
             0xef53, 0xf2f52010 => {
-                const dir = std.Io.Dir.cwd().openDir(io, directoryPath(io, path), .{}) catch return .{};
+                const dir = std.Io.Dir.cwd().openDir(io, directoryPath(io, path), .{}) catch |err| return unmeasured(io, err);
                 defer dir.close(io);
                 var flags: c_long = 0;
                 const request: usize = if (@sizeOf(c_long) == 8) 0x80086601 else 0x80046601;
@@ -84,7 +88,10 @@ pub fn canonical(gpa: std.mem.Allocator, io: std.Io, requested: []const u8) Cano
     const real = try std.Io.Dir.cwd().realPathFileAlloc(io, requested, gpa);
     defer gpa.free(real);
     if (builtin.target.os.tag.isDarwin()) {
-        const file = std.Io.Dir.cwd().openFile(io, real, .{}) catch return gpa.dupe(u8, real);
+        const file = std.Io.Dir.cwd().openFile(io, real, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return gpa.dupe(u8, real),
+        };
         defer file.close(io);
         var buffer: [std.Io.Dir.max_path_bytes]u8 = @splat(0);
         if (fcntl(file.handle, 50, &buffer) != 0) return gpa.dupe(u8, real); // F_GETPATH
@@ -96,7 +103,16 @@ pub fn canonical(gpa: std.mem.Allocator, io: std.Io, requested: []const u8) Cano
 // aegis: boundary: libc's fcntl, declared as the system documents it, called only from this file
 extern "c" fn fcntl(c_int, c_int, ...) c_int;
 
+/// Nothing established by a look that failed with `err`.
+fn unmeasured(io: std.Io, err: std.Io.Dir.OpenError) Capabilities {
+    if (err == error.Canceled) io.recancel();
+    return .{};
+}
+
 fn directoryPath(io: std.Io, path: []const u8) []const u8 {
-    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return path;
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| {
+        if (err == error.Canceled) io.recancel();
+        return path;
+    };
     return if (stat.kind == .directory) path else std.Io.Dir.path.dirname(path) orelse path;
 }

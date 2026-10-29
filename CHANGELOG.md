@@ -17,6 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - A cancel that lands on the length of a baseline file is `Baseline.load`'s `Canceled`. std's whole-file read took a length it could not learn for none and read on; the file is read through aegis's `own.readFile`, with the same limit.
+- A cancel that lands while a baseline measures its root's names is the baseline's `Canceled`, where `Baseline.seed`, `load` and `diff` took it for a filesystem that says nothing and went on with exact-spelling rules: the kernel's spelling of the root (macOS) returns it, and a look at a directory's naming flags (Linux on ext4 or f2fs, Windows) puts it back for the next cancellation point, the facts left unknown.
 
 ### Changed
 
