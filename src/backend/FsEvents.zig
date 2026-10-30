@@ -115,7 +115,7 @@ stream_latency: f64,
 /// and returns; what the watch is to know is walked by `wait`, a slice
 /// at a time between deliveries. See `seedSlice`.
 seeding: std.array_hash_map.Auto(WatchId, Seeding) = .empty,
-/// How much of a seeding walk one slice takes: `seed_slice_ns` of time,
+/// How much of a seeding walk one slice takes: `seed_slice` of time,
 /// or `seed_slice_dirs` directories when set, which tests do to stop a
 /// walk part of the way through.
 seed_slice_dirs: ?usize = null,
@@ -124,7 +124,7 @@ seed_slice_dirs: ?usize = null,
 /// for a delivery again, so a change made while a large tree is walked
 /// waits no longer than this, and the walk costs no more than one listing
 /// call per directory more than it did in one piece.
-const seed_slice_ns = 2 * std.time.ns_per_ms;
+const seed_slice: Io.Duration = .fromMilliseconds(2);
 
 /// A watch's seeding walk, while it is under way.
 const Seeding = struct {
@@ -1979,7 +1979,7 @@ pub fn seedWhole(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!void {
 
 fn seed(f: *FsEvents, io: Io, batch: *Batch, whole: bool) contract.PollError!bool {
     if (f.seeding.count() == 0) return false;
-    const until = Io.Timestamp.now(io, .awake).addDuration(.fromNanoseconds(seed_slice_ns));
+    const until = Io.Timestamp.now(io, .awake).addDuration(seed_slice);
     var dirs: usize = 0;
     while (f.seeding.count() != 0) {
         const id = f.seeding.keys()[0];
