@@ -2475,10 +2475,11 @@ test "a watch on a file holds no entry budget for its folder" {
         // it is for is told by the same change, so the file's watch
         // would be in what has been read by now. (A listing backend says
         // it again on every look while the folder stays too big, so this
-        // does not wait for quiet.)
+        // does not wait for quiet. It lists the budget's worth in the
+        // order the filesystem gives, so the fifth's own creation is not
+        // promised: ext4's hash order can leave "d" past the cut.)
         try f.write("dir/d", "x");
         try ledger.await(&f, &.{
-            .{ .id = again, .sub_path = "dir/d", .kind = .created },
             .{ .id = again, .sub_path = "dir", .kind = .overflow },
         });
         try std.testing.expectEqual(@as(usize, 0), ledger.count(single, .overflow, file));
