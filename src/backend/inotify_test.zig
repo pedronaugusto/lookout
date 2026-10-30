@@ -78,7 +78,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
             if (event.id == single) saw_file = true;
         }
     }
-    if (!(saw_dir and saw_file)) return wait.missed(io, watcher.backend());
+    if (!(saw_dir and saw_file)) return wait.missed(io, &watcher);
     try testing.expect(saw_dir);
     try testing.expect(saw_file);
 }
@@ -137,7 +137,7 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
     }
-    try wait.seen(io, watcher.backend(), overflowed);
+    try wait.seen(io, &watcher, overflowed);
 }
 
 test "a watch on a file keeps no count keyed by the file" {
@@ -169,6 +169,6 @@ test "a watch on a file keeps no count keyed by the file" {
             if (event.kind == .modified and event.id == id) modified = true;
         }
     }
-    try wait.seen(io, watcher.backend(), modified);
+    try wait.seen(io, &watcher, modified);
     try testing.expect(watcher.impl.inotify.budget.count(file) == null);
 }
