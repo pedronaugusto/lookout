@@ -15,6 +15,7 @@
 //! their own snapshots have already paid for.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -175,7 +176,7 @@ pub const Walker = struct {
                 i += 1;
                 continue;
             }
-            assert(w.unlisted.remove(item));
+            aegis.assert.invariant(w.unlisted.remove(item), "w.unlisted.remove(item)");
             gpa.free(w.frontier.orderedRemove(i));
         }
         for (w.frontier.items[w.next..]) |*item| {
@@ -183,7 +184,7 @@ pub const Walker = struct {
             const moved = try std.mem.concat(gpa, u8, &.{ to, item.*[from.len..] });
             errdefer gpa.free(moved);
             try w.unlisted.ensureUnusedCapacity(gpa, 1);
-            assert(w.unlisted.remove(item.*));
+            aegis.assert.invariant(w.unlisted.remove(item.*), "w.unlisted.remove(item.*)");
             w.unlisted.putAssumeCapacityNoClobber(moved, {});
             gpa.free(item.*);
             item.* = moved;
@@ -254,7 +255,7 @@ pub const Walker = struct {
                 }
             }
         }
-        assert(w.unlisted.remove(current));
+        aegis.assert.invariant(w.unlisted.remove(current), "w.unlisted.remove(current)");
         gpa.free(current);
         w.next += 1;
         // What is done is dropped from the front once it is most of the
@@ -309,7 +310,7 @@ const Bulk = struct {
     const file_datalength = 0x0000_0200;
     const meta_common = objtype | modtime | chgtime | fileid;
 
-    // aegis: boundary: libc's getattrlistbulk, declared as the system documents it, called only from this file
+    // aegis: boundary(A019): libc's getattrlistbulk, declared as the system documents it, called only from this file
     extern "c" fn getattrlistbulk(c_int, *AttrList, *anyopaque, usize, u64) c_int;
 
     fn init(dir: Io.Dir) Bulk {

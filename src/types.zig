@@ -336,7 +336,7 @@ pub const Event = struct {
     /// For `Kind.renamed` this is where the path is now.
     path: []const u8,
     /// What happened.
-    // aegis: design: what was reported, not a lifecycle: coalescing replaces it whole with a later report, and a refilter restates a rename it cannot pair as a creation
+    // aegis: design(A017): what was reported, not a lifecycle: coalescing replaces it whole with a later report, and a refilter restates a rename it cannot pair as a creation
     kind: Kind,
     /// Where a renamed path was before, when the operating system paired
     /// the two halves of the rename. `null` for every other kind, and for

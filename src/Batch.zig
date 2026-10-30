@@ -320,7 +320,7 @@ pub fn pushDetail(
     target: Target,
 ) Allocator.Error!void {
     // Only a paired rename says where it came from.
-    assert(from == null or kind == .renamed);
+    aegis.assert.invariant(from == null or kind == .renamed, "from == null or kind == .renamed");
     if (b.aliases.get(id)) |alias| return b.pushAliased(gpa, io, alias, subject, kind, from, target);
     if (b.noting.contains(id)) b.note(gpa, id, subject, kind, from);
     const source = if (kind == .renamed and from != null and !path_cmp.eql(subject, from.?)) from else null;
@@ -631,7 +631,7 @@ pub fn trouble(
 /// Queues a change produced while add runs. It cannot join a slice the
 /// previous poll already handed out; flush transfers it after poll resets.
 pub fn deferChange(b: *Batch, gpa: Allocator, io: Io, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) Allocator.Error!void {
-    assert(from == null or kind == .renamed);
+    aegis.assert.invariant(from == null or kind == .renamed, "from == null or kind == .renamed");
     if (b.aliases.get(id)) |alias| {
         if (kind == .overflow) return b.deferChange(gpa, io, alias.owner, alias.root, .overflow, null, .directory);
         const here = try alias.spellAlloc(gpa, subject) orelse return;

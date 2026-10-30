@@ -1024,7 +1024,7 @@ const c = struct {
         bInheritHandle: Bool,
     };
 
-    // aegis: boundary: kernel32's CreateFileW, declared as the system documents it, called only from this file
+    // aegis: boundary(A019): kernel32's CreateFileW, declared as the system documents it, called only from this file
     extern "kernel32" fn CreateFileW(
         lpFileName: [*:0]const windows.WCHAR,
         dwDesiredAccess: windows.DWORD,
@@ -1034,13 +1034,13 @@ const c = struct {
         dwFlagsAndAttributes: windows.DWORD,
         hTemplateFile: ?windows.HANDLE,
     ) callconv(.winapi) windows.HANDLE;
-    // aegis: boundary: kernel32's CloseHandle, declared as the system documents it, called only from this file
+    // aegis: boundary(A019): kernel32's CloseHandle, declared as the system documents it, called only from this file
     extern "kernel32" fn CloseHandle(hObject: windows.HANDLE) callconv(.winapi) Bool;
-    // aegis: boundary: kernel32's GetLastError, declared as the system documents it, called only from this file
+    // aegis: boundary(A019): kernel32's GetLastError, declared as the system documents it, called only from this file
     extern "kernel32" fn GetLastError() callconv(.winapi) windows.DWORD;
     /// What `ReadDirectoryChangesW` calls, which takes the event a
     /// reactor call signals and its status block as they are.
-    // aegis: boundary: ntdll's NtNotifyChangeDirectoryFile, declared as the system documents it, called only from this file
+    // aegis: boundary(A019): ntdll's NtNotifyChangeDirectoryFile, declared as the system documents it, called only from this file
     extern "ntdll" fn NtNotifyChangeDirectoryFile(
         FileHandle: windows.HANDLE,
         Event: ?windows.HANDLE,

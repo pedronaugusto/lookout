@@ -70,9 +70,9 @@ fn nativeName(path: []const u8, buffer: *[std.Io.Dir.max_path_bytes + 1]u8) ?[:0
     return buffer[0..path.len :0];
 }
 
-// aegis: boundary: libc's getattrlist, declared as the system documents it, called only from this file
+// aegis: boundary(A019): libc's getattrlist, declared as the system documents it, called only from this file
 extern "c" fn getattrlist([*:0]const u8, *const anyopaque, *anyopaque, usize, c_ulong) c_int;
-// aegis: boundary: kernel32's GetFileInformationByHandleEx, declared as the system documents it, called only from this file
+// aegis: boundary(A019): kernel32's GetFileInformationByHandleEx, declared as the system documents it, called only from this file
 extern "kernel32" fn GetFileInformationByHandleEx(std.os.windows.HANDLE, c_int, *anyopaque, u32) callconv(.winapi) std.os.windows.BOOL;
 
 test "unknown filesystem facts keep exact policy and explicit override independent" {
@@ -100,7 +100,7 @@ pub fn canonical(gpa: std.mem.Allocator, io: std.Io, requested: []const u8) Cano
     }
     return gpa.dupe(u8, real);
 }
-// aegis: boundary: libc's fcntl, declared as the system documents it, called only from this file
+// aegis: boundary(A019): libc's fcntl, declared as the system documents it, called only from this file
 extern "c" fn fcntl(c_int, c_int, ...) c_int;
 
 /// Nothing established by a look that failed with `err`.

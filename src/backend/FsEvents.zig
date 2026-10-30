@@ -463,7 +463,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!FsEvent
 }
 
 fn latencySeconds(ms: u32) f64 {
-    // aegis: boundary: FSEventStreamCreate takes its latency as a CFTimeInterval, seconds in a double
+    // aegis: boundary(A011): FSEventStreamCreate takes its latency as a CFTimeInterval, seconds in a double
     return @as(f64, @floatFromInt(ms)) / std.time.ms_per_s;
 }
 
@@ -986,9 +986,9 @@ fn deliver(
     ids: [*]const u64,
 ) callconv(.c) void {
     _ = ref;
-    // aegis: boundary: FSEvents' callback context, the `info` FSEventStreamCreate took: the Stream, alive until the stream is invalidated
+    // aegis: boundary(A019): FSEvents' callback context, the `info` FSEventStreamCreate took: the Stream, alive until the stream is invalidated
     const stream: *Stream = @ptrCast(@alignCast(info.?));
-    // aegis: boundary: FSEvents' callback paths: without kFSEventStreamCreateFlagUseCFTypes, a C array of C strings, count long
+    // aegis: boundary(A019): FSEvents' callback paths: without kFSEventStreamCreateFlagUseCFTypes, a C array of C strings, count long
     const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?));
     // the handoff from `add`, made visible (`Stream.published`); a stream
     // is published before it is started, so this never drops a delivery
@@ -2399,7 +2399,7 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
         ids[filled] = item.event orelse cs.FSEventsGetCurrentEventId();
         filled += 1;
     }
-    // aegis: boundary: FSEvents' callback takes its paths as `void *`: the same C array of C strings FSEvents hands it
+    // aegis: boundary(A019): FSEvents' callback takes its paths as `void *`: the same C array of C strings FSEvents hands it
     deliver(stream.ref, stream, filled, @ptrCast(&paths), &flags, &ids);
 }
 
@@ -2426,11 +2426,11 @@ const c = struct {
     const f_getfd: c_int = 1;
     const fd_cloexec: c_int = 1;
 
-    // aegis: boundary: libc's dispatch_queue_create, declared as the system documents it, called only from this file
+    // aegis: boundary(A019): libc's dispatch_queue_create, declared as the system documents it, called only from this file
     extern "c" fn dispatch_queue_create(label: ?[*:0]const u8, attr: ?*anyopaque) ?dispatch_queue_t;
-    // aegis: boundary: libc's dispatch_release, declared as the system documents it, called only from this file
+    // aegis: boundary(A019): libc's dispatch_release, declared as the system documents it, called only from this file
     extern "c" fn dispatch_release(object: *anyopaque) void;
-    // aegis: boundary: libc's dispatch_sync_f, declared as the system documents it, called only from this file
+    // aegis: boundary(A019): libc's dispatch_sync_f, declared as the system documents it, called only from this file
     pub extern "c" fn dispatch_sync_f(
         queue: dispatch_queue_t,
         context: ?*anyopaque,
