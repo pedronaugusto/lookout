@@ -1085,15 +1085,23 @@ fn expectHeldTransferFailure(comptime transfer: enum { removal, flush, pair }) !
     defer backend.watches.deinit(testing.allocator);
     backend.budget = .init(testing.allocator, 8);
     defer backend.budget.deinit();
-    var watch: Watch = undefined;
-    watch.id = .fromRaw(0);
-    watch.root = root;
-    watch.only = null;
-    watch.filter = .none;
-    watch.root_target = .directory;
-    watch.recursive = false;
-    watch.held_removal = null;
-    watch.pending_rename = null;
+    // Whole: the backend reads the watch through its map, past these transfers' fields.
+    var watch: Watch = .{
+        .id = .fromRaw(0),
+        .root = root,
+        .root_inode = 0,
+        .handle = windows.INVALID_HANDLE_VALUE,
+        .request = .{ .event = windows.INVALID_HANDLE_VALUE, .owns_event = false },
+        .only = null,
+        .root_target = .directory,
+        .recursive = false,
+        .filter = .none,
+        .buffer = &.{},
+        .pending_rename = null,
+        .held_removal = null,
+        .accepted_len = 0,
+        .retiring_next = null,
+    };
     defer if (watch.held_removal) |held| testing.allocator.free(held);
     defer if (watch.pending_rename) |held| testing.allocator.free(held);
     try backend.watches.put(testing.allocator, watch.id, &watch);
