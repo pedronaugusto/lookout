@@ -2454,12 +2454,18 @@ test "a watch on a file holds no entry budget for its folder" {
         // it is for is told by the same change, so the file's watch
         // would be in what has been read by now. (A listing backend says
         // it again on every look while the folder stays too big, so this
-        // does not wait for quiet.)
+        // does not wait for quiet.) A listing backend reads the folder
+        // only as far as the budget, in the order the file system lists
+        // it, so whether `d` is among what it read is that order's
+        // (ext4's hash order, APFS's sorted one): it is promised the
+        // overflow alone, as `Options.max_dir_entries` says.
         try f.write("dir/d", "x");
-        try ledger.await(&f, &.{
-            .{ .id = again, .sub_path = "dir/d", .kind = .created },
+        const told: []const Ledger.Want = &.{
             .{ .id = again, .sub_path = "dir", .kind = .overflow },
-        });
+            .{ .id = again, .sub_path = "dir/d", .kind = .created },
+        };
+        const listing = backend == .kqueue or backend == .poll;
+        try ledger.await(&f, if (listing) told[0..1] else told);
         try std.testing.expectEqual(@as(usize, 0), ledger.count(single, .overflow, file));
     }
 }
