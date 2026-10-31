@@ -16,6 +16,7 @@ pub fn read(cs: *const CoreServices, gpa: std.mem.Allocator, root: []const u8) !
     defer gpa.free(name);
     var attrs: AttrList = .{ .common = 0x2, .volume = 0x80001000 }; // DEVID, VOL_INFO | MOUNTPOINT
     var mount: Mount = undefined;
+    // aegis: boundary(A019): getattrlist(2) writes the attribute buffer where it answers 0
     if (getattrlist(name, &attrs, &mount, @sizeOf(Mount), 0) != 0) return error.Unexpected;
     const start: usize = @intCast(@as(i64, @offsetOf(Mount, "offset")) + mount.offset);
     if (mount.path_len == 0 or start + mount.path_len > @sizeOf(Mount)) return error.Unexpected;
@@ -39,6 +40,7 @@ pub fn relative(v: Volume, absolute: []const u8) []const u8 {
 pub fn readIdentity(cs: *const CoreServices, name: [*:0]const u8, device: i32) ?format.Identity {
     var attrs: AttrList = .{ .volume = 0x80040000 }; // VOL_INFO | UUID
     var volume: extern struct { len: u32, uuid: [16]u8 } = undefined;
+    // aegis: boundary(A019): getattrlist(2) writes the attribute buffer where it answers 0
     if (getattrlist(name, &attrs, &volume, @sizeOf(@TypeOf(volume)), 0) != 0) return null;
     const log = cs.FSEventsCopyUUIDForDevice(device) orelse return null;
     defer cs.CFRelease(log);
@@ -48,6 +50,7 @@ pub fn readIdentity(cs: *const CoreServices, name: [*:0]const u8, device: i32) ?
 pub fn deviceOf(name: [*:0]const u8) ?i32 {
     var attrs: AttrList = .{ .common = 0x2 }; // DEVID
     var result: extern struct { len: u32, device: i32 } = undefined;
+    // aegis: boundary(A019): getattrlist(2) writes the attribute buffer where it answers 0
     if (getattrlist(name, &attrs, &result, @sizeOf(@TypeOf(result)), 0) != 0) return null;
     return result.device;
 }

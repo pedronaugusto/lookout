@@ -29,6 +29,7 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
         // statfs writes a native-word structure; its first word is f_type.
         // This storage exceeds every Linux ABI's statfs structure.
         var storage: [64]usize = undefined;
+        // aegis: boundary(A019): statfs(2) writes its structure, the first word f_type, where it succeeds
         const rc = std.os.linux.syscall2(.statfs, @intFromPtr(name.ptr), @intFromPtr(&storage)); // safe: the syscall borrows the terminated name and writable aligned statfs storage
         if (std.os.linux.errno(rc) != .SUCCESS) return .unknown;
         return linuxType(storage[0]);
@@ -37,6 +38,7 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
         const name = gpa.dupeSentinel(u8, path, 0) catch return .unknown;
         defer gpa.free(name);
         var stat: mount.Stat = undefined;
+        // aegis: boundary(A019): libc's statfs writes the structure where it answers 0
         if (mount.stat(name, &stat) != 0) return .unknown;
         return named(std.mem.sliceTo(&stat.type_name, 0), stat.flags & mount.local != 0);
     }
@@ -56,6 +58,7 @@ pub fn stampGrain(gpa: std.mem.Allocator, path: []const u8) stamp.Span {
     const name = gpa.dupeSentinel(u8, path, 0) catch return coarse;
     defer gpa.free(name);
     var stat: mount.Stat = undefined;
+    // aegis: boundary(A019): libc's statfs writes the structure where it answers 0
     if (mount.stat(name, &stat) != 0) return coarse;
     if (std.mem.eql(u8, std.mem.sliceTo(&stat.type_name, 0), "apfs")) return .fromRaw(0);
     return coarse;
@@ -193,6 +196,7 @@ fn readWindows(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
     // One unit past what GetVolumePathNameW may fill stays a terminator, so
     // the buffer is a terminated string whatever it wrote.
     var volume: [32767:0]u16 = undefined;
+    // aegis: boundary(A019): GetVolumePathNameW writes the volume's path, NUL-terminated, where it answers TRUE
     if (GetVolumePathNameW(wide, &volume, volume.len) == .FALSE) return .unknown;
     const drive = GetDriveTypeW(&volume);
     if (drive == 0 or drive == 1) return .unknown;
@@ -202,10 +206,12 @@ fn readWindows(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
     defer file.close(io);
     var status: w.IO_STATUS_BLOCK = undefined;
     var device: w.FILE.FS_DEVICE_INFORMATION = undefined;
+    // aegis: boundary(A019): NtQueryVolumeInformationFile writes the status block and the device information where it answers SUCCESS
     const result = w.ntdll.NtQueryVolumeInformationFile(file.handle, &status, &device, @sizeOf(@TypeOf(device)), .Device);
     if (result != .SUCCESS) return .unknown;
     if (device.Characteristics & 0x10 != 0) return .network; // FILE_REMOTE_DEVICE
     var attributes: extern struct { flags: u32, max_component: i32, name_bytes: u32, name: [128]u16 } = undefined;
+    // aegis: boundary(A019): NtQueryVolumeInformationFile writes the status block and the attributes where it answers SUCCESS
     if (w.ntdll.NtQueryVolumeInformationFile(file.handle, &status, &attributes, @sizeOf(@TypeOf(attributes)), .Attribute) == .SUCCESS) {
         if (attributes.name_bytes <= @sizeOf(@TypeOf(attributes.name)) and attributes.name_bytes % 2 == 0) {
             var utf8: [512]u8 = undefined;

@@ -29,6 +29,7 @@ pub fn read(io: std.Io, path: []const u8) Capabilities {
         var attrs: Attr = .{};
         const Result = extern struct { len: u32, capabilities: [4]u32, valid: [4]u32 };
         var result: Result = undefined;
+        // aegis: boundary(A019): getattrlist(2) writes the attribute buffer where it answers 0; its length is checked too
         if (getattrlist(name, &attrs, &result, @sizeOf(Result), 0) != 0 or result.len != @sizeOf(Result)) return .{};
         return .{ .case_sensitive = if (result.valid[0] & 0x100 != 0) result.capabilities[0] & 0x100 != 0 else null };
     }
@@ -45,6 +46,7 @@ pub fn read(io: std.Io, path: []const u8) Capabilities {
         var name_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
         const name = nativeName(path, &name_buffer) orelse return .{};
         var storage: [256]usize = undefined;
+        // aegis: boundary(A019): statfs(2) writes its structure where it succeeds
         const rc = std.os.linux.syscall2(.statfs, @intFromPtr(name.ptr), @intFromPtr(&storage)); // safe: the syscall borrows the terminated name and aligned writable statfs buffer
         if (std.os.linux.errno(rc) != .SUCCESS) return .{};
         switch (storage[0]) {
