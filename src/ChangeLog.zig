@@ -346,7 +346,7 @@ fn waitFor(h: *ChangeLog, io: Io, path: []const u8, sightings: u8, deadline: Io.
     var guard = try h.state.acquire(io);
     defer guard.deinit(io);
     while (guard.value().cookies.get(path).? < sightings) {
-        h.seen.wait(io, &guard, deadline) catch |err| switch (err) {
+        guard.wait(&h.seen, io, deadline) catch |err| switch (err) {
             error.Timeout => return error.SyncTimeout,
             else => |e| return e,
         };
