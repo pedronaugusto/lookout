@@ -1764,6 +1764,7 @@ test "a pending watch whose way down cannot be watched says so" {
     // Searchable, so the path resolves as absent rather than refused,
     // and not readable, so the folder cannot be listed or opened for
     // events. A user the permissions do not stop has nothing to show.
+    // glint-ignore: Z026 -- a folder that cannot be opened is the refusal the test needs: it goes on
     if (tmp.dir.openDir(io, "locked", .{ .iterate = true })) |opened| {
         opened.close(io);
         return error.SkipZigTest;

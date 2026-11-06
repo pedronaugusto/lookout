@@ -19,7 +19,7 @@ const reactor = @import("reactor");
 
 /// A timeout of `ms` milliseconds on the monotonic clock.
 pub fn within(ms: u32) Io.Timeout {
-    return .{ .duration = .{ .raw = .fromMilliseconds(ms), .clock = .awake } };
+    return .{ .duration = .{ .raw = aegis.units.Duration(.millisecond, u32).fromRaw(ms).toIoDuration(), .clock = .awake } };
 }
 
 /// Whether `timeout` has run out. One that never does has not. A timeout

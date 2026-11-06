@@ -30,6 +30,7 @@ const timeout_ms = wait.event_ms;
 /// cancellation cuts a sleep short, and nothing cancels these threads; a
 /// nap cut short would only make its loop look at its condition sooner.
 fn nap(millis: i64) void {
+    // glint-ignore: Z026 -- a nap cut short only makes its loop look at its condition sooner
     std.testing.io.sleep(.fromMilliseconds(millis), .awake) catch |err| switch (err) {
         error.Canceled => {},
     };

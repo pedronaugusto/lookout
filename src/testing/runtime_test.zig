@@ -39,6 +39,7 @@ fn start(runtime: *reactor.Runtime) !void {
 /// Sleeps `millis` on the test I/O from a thread the test started, which
 /// nothing cancels.
 fn nap(millis: i64) void {
+    // glint-ignore: Z026 -- a nap cut short only makes its loop look at its condition sooner
     std.testing.io.sleep(.fromMilliseconds(millis), .awake) catch |err| switch (err) {
         error.Canceled => {},
     };

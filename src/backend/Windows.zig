@@ -42,6 +42,7 @@ const CompiledFilter = @import("../CompiledFilter.zig");
 const buffer = @import("../buffer.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("windows/records.zig");
+const timing = @import("../timing.zig");
 const trace = @import("../trace.zig");
 const Options = @import("../options.zig").Options;
 const contract = @import("../watch_contract.zig");
@@ -217,8 +218,9 @@ pub fn deinit(w: *Windows, io: Io) void {
     while (w.retiring != null) {
         w.retireEnded();
         if (w.retiring == null) break;
+        // glint-ignore: Z026 -- blocked: neither a timeout nor a cancel comes to an unbounded wait here
         w.changes.wait(io, .none) catch |err| switch (err) {
-            error.Timeout, error.Canceled => {}, // Blocked: neither comes.
+            error.Timeout, error.Canceled => {},
         };
     }
     w.changes.deinit(io);
@@ -504,7 +506,7 @@ fn collect(w: *Windows, io: Io, batch: *Batch, wakeup: *reactor.Wake, until: Io.
         // stands there. See `Watch.held_removal`.
         var round: usize = 0;
         while (w.holdsRemoval() and round < grace_rounds) : (round += 1) {
-            const grace: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(grace_ms), .clock = .awake } };
+            const grace = timing.within(grace_ms);
             switch (try w.take(io, batch, wakeup, grace.toDeadline(io), protection)) {
                 .taken => {},
                 .quiet, .woken => break,
