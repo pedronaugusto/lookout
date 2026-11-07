@@ -23,8 +23,8 @@
         },
 
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#05a5788ff10eb892d5d8b64af04c1ef0df70ef76",
-            .hash = "aegis-0.2.4-rsxoupjOCwCeCnkEV9Ph53DJH9_olRWaeza00YYTLnZl",
+            .url = "git+https://github.com/pedronaugusto/aegis#3c0b13e5fc25797b5fbcc25fec48b0a8411cc668",
+            .hash = "aegis-0.2.4-rsxoug3uCwBiVYRBbQolOSbqdOEzmmUeaj19tWOo2rmc",
         },
 
         .reactor = .{
