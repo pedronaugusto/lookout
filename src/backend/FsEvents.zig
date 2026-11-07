@@ -462,9 +462,9 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!FsEvent
     };
 }
 
+/// FSEventStreamCreate takes its latency as a CFTimeInterval: seconds in a double.
 fn latencySeconds(ms: u32) f64 {
-    // aegis: boundary(A011): FSEventStreamCreate takes its latency as a CFTimeInterval, seconds in a double
-    return @as(f64, @floatFromInt(ms)) / std.time.ms_per_s;
+    return aegis.units.Duration(.millisecond, u32).fromRaw(ms).toSeconds(f64);
 }
 
 /// Stops every stream, waits for the delivery thread to be done with
