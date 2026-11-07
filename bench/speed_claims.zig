@@ -89,6 +89,8 @@ const Claims = struct {
             dir: Io.Dir,
             round: usize = 0,
             stamped: Io.Timestamp = .zero,
+            /// The write's failure, which the round returns after the join.
+            failed: ?Io.Dir.WriteFileError = null,
 
             fn run(self: *@This()) void {
                 // Long enough that the main thread is certainly blocked
@@ -100,8 +102,9 @@ const Claims = struct {
                     // unreachable: "w" and a usize's digits fit in 32 bytes
                     .sub_path = std.mem.print(&name, "w{d}.txt", .{self.round}) catch unreachable,
                     .data = "x",
-                    // glint-ignore: Z026 -- a write that fails leaves no change to observe, which the round reports as EventNotObserved
-                }) catch {};
+                }) catch |err| {
+                    self.failed = err;
+                };
             }
         };
 
@@ -118,6 +121,7 @@ const Claims = struct {
                 }
             }
             thread.join();
+            if (toucher.failed) |err| return err;
             const arrived = seen orelse return error.EventNotObserved;
             worst = @max(worst, toucher.stamped.durationTo(arrived).toMilliseconds());
         }
@@ -183,8 +187,10 @@ const Claims = struct {
 
             /// Lets the task go from another thread, after 50 ms.
             fn release(self: *@This()) void {
-                // glint-ignore: Z026 -- a cancelled sleep only shortens the delay; the release that follows is what the row needs
-                self.io.sleep(.fromMilliseconds(50), .awake) catch {};
+                self.io.sleep(.fromMilliseconds(50), .awake) catch |err| switch (err) {
+                    // The cancel stays asked for, at the thread's next cancelation point; the task is let go either way.
+                    error.Canceled => self.io.recancel(),
+                };
                 self.go.store(true, .release);
             }
         };
@@ -222,8 +228,10 @@ const Claims = struct {
             io: Io,
             watcher: *Watcher,
             fn run(self: *@This()) void {
-                // glint-ignore: Z026 -- a cancelled sleep only shortens the delay; the release that follows is what the row needs
-                self.io.sleep(.fromMilliseconds(100), .awake) catch {};
+                self.io.sleep(.fromMilliseconds(100), .awake) catch |err| switch (err) {
+                    // The cancel stays asked for, at the thread's next cancelation point; the watcher is woken either way.
+                    error.Canceled => self.io.recancel(),
+                };
                 self.watcher.wake();
             }
         };
@@ -273,8 +281,10 @@ const Claims = struct {
             // No second task to stop: there is nothing to claim.
             error.ConcurrencyUnavailable => return true,
         };
-        // glint-ignore: Z026 -- a cancelled sleep only shortens the settling pause; the row's own clock starts after it
-        io.sleep(.fromMilliseconds(50), .awake) catch {};
+        io.sleep(.fromMilliseconds(50), .awake) catch |err| switch (err) {
+            // The cancel stays asked for, at the await below: the task is stopped and awaited first.
+            error.Canceled => io.recancel(),
+        };
 
         const started: Io.Timestamp = .now(io, .awake);
         task.stopping.store(true, .release);

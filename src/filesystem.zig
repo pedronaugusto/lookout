@@ -29,7 +29,7 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Kind {
         // statfs writes a native-word structure; its first word is f_type.
         // This storage exceeds every Linux ABI's statfs structure.
         var storage: [64]usize = undefined;
-        // aegis: boundary(A019): statfs(2) writes its structure, the first word f_type, where it succeeds
+        // statfs(2) writes its structure, the first word f_type, where it succeeds
         const rc = std.os.linux.syscall2(.statfs, @intFromPtr(name.ptr), @intFromPtr(&storage)); // safe: the syscall borrows the terminated name and writable aligned statfs storage
         if (std.os.linux.errno(rc) != .SUCCESS) return .unknown;
         return linuxType(storage[0]);

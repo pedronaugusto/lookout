@@ -248,7 +248,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
 /// left thrown away. What a test drains after this is what it delivered.
 fn stopDeliveries(f: *FsEvents, stream: anytype) void {
     f.core_services.FSEventStreamStop(stream.ref);
-    c.dispatch_sync_f(f.queue, null, settled);
+    std.c.dispatch.sync_f(f.queue, null, settled);
     {
         var held = f.sink.delivery.acquire();
         defer held.deinit();

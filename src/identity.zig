@@ -46,7 +46,7 @@ pub fn read(io: std.Io, path: []const u8) Capabilities {
         var name_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
         const name = nativeName(path, &name_buffer) orelse return .{};
         var storage: [256]usize = undefined;
-        // aegis: boundary(A019): statfs(2) writes its structure where it succeeds
+        // statfs(2) writes its structure where it succeeds
         const rc = std.os.linux.syscall2(.statfs, @intFromPtr(name.ptr), @intFromPtr(&storage)); // safe: the syscall borrows the terminated name and aligned writable statfs buffer
         if (std.os.linux.errno(rc) != .SUCCESS) return .{};
         switch (storage[0]) {
@@ -96,14 +96,12 @@ pub fn canonical(gpa: std.mem.Allocator, io: std.Io, requested: []const u8) Cano
         };
         defer file.close(io);
         var buffer: [std.Io.Dir.max_path_bytes]u8 = @splat(0);
-        if (fcntl(file.handle, 50, &buffer) != 0) return gpa.dupe(u8, real); // F_GETPATH
+        if (std.c.fcntl(file.handle, std.c.F.GETPATH, &buffer) != 0) return gpa.dupe(u8, real);
         const spelling = std.mem.sliceTo(&buffer, 0);
         return gpa.dupe(u8, spelling);
     }
     return gpa.dupe(u8, real);
 }
-// aegis: boundary(A019): libc's fcntl, declared as the system documents it, called only from this file
-extern "c" fn fcntl(c_int, c_int, ...) c_int;
 
 /// Nothing established by a look that failed with `err`.
 fn unmeasured(io: std.Io, err: std.Io.Dir.OpenError) Capabilities {

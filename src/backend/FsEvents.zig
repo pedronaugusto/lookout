@@ -432,10 +432,10 @@ pub fn init(gpa: Allocator, io: Io, options: Options) contract.InitError!FsEvent
         .arrival = wake,
     };
 
-    const queue = c.dispatch_queue_create("dev.lookout.fsevents", null) orelse
+    const queue = std.c.dispatch.queue_create("dev.lookout.fsevents", null) orelse
         return error.SystemResources;
 
-    errdefer c.dispatch_release(queue);
+    errdefer std.c.dispatch.release(queue.as_object());
     var restarting: ?Checkpoint = if (options.checkpoint) |checkpoint|
         .{ .state = try checkpoint_format.copy(gpa, checkpoint.state.value) }
     else
@@ -481,7 +481,7 @@ pub fn deinit(f: *FsEvents, io: Io) void {
     f.known.deinit(f.gpa);
     f.paths.release();
     if (f.pairing.held) |half| f.gpa.free(half.path);
-    c.dispatch_release(f.queue);
+    std.c.dispatch.release(f.queue.as_object());
     // Through `io`: a reactor runtime keeps what it knows of a descriptor
     // it has waited on until it is told the descriptor is gone.
     f.sink.arrival.deinit(io);
@@ -963,7 +963,7 @@ fn destroy(f: *FsEvents, stream: *Stream) void {
     // holds a pointer to. The queue is serial, so an empty block run
     // synchronously on it returns only once everything accepted before it
     // has finished.
-    c.dispatch_sync_f(f.queue, null, settled);
+    std.c.dispatch.sync_f(f.queue, null, settled);
     stream.volume.deinit(f.gpa);
     if (stream.before) |*before| before.deinit(f.gpa);
     f.gpa.free(stream.root);
@@ -2273,7 +2273,7 @@ test "removing an FSEvents stream releases its unreported delivery state" {
     // callbacks before constructing that exact delivery.
     f.core_services.FSEventStreamStop(f.streams.get(gone).?.ref);
     f.core_services.FSEventStreamStop(f.streams.get(kept).?.ref);
-    c.dispatch_sync_f(f.queue, null, settled);
+    std.c.dispatch.sync_f(f.queue, null, settled);
     {
         var held = f.sink.delivery.acquire();
         defer held.deinit();
@@ -2399,22 +2399,22 @@ fn synthesize(gpa: Allocator, stream: *Stream, items: []const Synthetic) !void {
         ids[filled] = item.event orelse cs.FSEventsGetCurrentEventId();
         filled += 1;
     }
-    // aegis: boundary(A019): FSEvents' callback takes its paths as `void *`: the same C array of C strings FSEvents hands it
-    deliver(stream.ref, stream, filled, @ptrCast(&paths), &flags, &ids);
+    // The callback takes its paths as `void *`: the same C array of C strings FSEvents hands it.
+    deliver(stream.ref, stream, filled, &paths, &flags, &ids);
 }
 
-/// The libdispatch surface lookout uses, which is libSystem's and so linked
-/// into every Apple program, and the constants FSEvents and `fcntl` take.
-/// The CoreFoundation and CoreServices functions are `CoreServices`, opened
-/// at run time.
+/// The constants FSEvents and `fcntl` take; libdispatch, libSystem's and so
+/// linked into every Apple program, is std's (`std.c.dispatch`). The
+/// CoreFoundation and CoreServices functions are `CoreServices`, opened at
+/// run time.
 ///
-/// Hand-written rather than `@cImport`ed: a handful of functions and
-/// constants against a stable system ABI, and declaring them here keeps the
-/// package free of a C compilation step.
+/// Hand-written rather than `@cImport`ed: a handful of constants against a
+/// stable system ABI, and declaring them here keeps the package free of a C
+/// compilation step.
 const c = struct {
     // Apple's names, in Zig's casing: `kFSEventStreamCreateFlagNoDefer` is
     // `stream_create_flag_no_defer`. Functions keep their symbol names.
-    const dispatch_queue_t = *anyopaque;
+    const dispatch_queue_t = std.c.dispatch.queue_t;
 
     const cf_string_encoding_utf8: u32 = 0x0800_0100;
 
@@ -2425,17 +2425,6 @@ const c = struct {
     /// Darwin's `fcntl` commands and flags, for the delivery pipe.
     const f_getfd: c_int = 1;
     const fd_cloexec: c_int = 1;
-
-    // aegis: boundary(A019): libc's dispatch_queue_create, declared as the system documents it, called only from this file
-    extern "c" fn dispatch_queue_create(label: ?[*:0]const u8, attr: ?*anyopaque) ?dispatch_queue_t;
-    // aegis: boundary(A019): libc's dispatch_release, declared as the system documents it, called only from this file
-    extern "c" fn dispatch_release(object: *anyopaque) void;
-    // aegis: boundary(A019): libc's dispatch_sync_f, declared as the system documents it, called only from this file
-    pub extern "c" fn dispatch_sync_f(
-        queue: dispatch_queue_t,
-        context: ?*anyopaque,
-        work: *const fn (?*anyopaque) callconv(.c) void,
-    ) void;
 };
 
 test "a failed FSEvents rekey keeps every remembered name" {

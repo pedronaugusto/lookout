@@ -267,7 +267,7 @@ pub fn add(
     errdefer w.gpa.free(root);
 
     const handle = try open(w.gpa, dir_path);
-    errdefer _ = c.CloseHandle(handle);
+    errdefer windows.CloseHandle(handle);
 
     var filter = try CompiledFilter.compilePolicy(w.gpa, options.filter, identity.read(io, abs_path).policy(options.identity));
     errdefer filter.deinit();
@@ -330,10 +330,10 @@ fn open(gpa: Allocator, path: []const u8) contract.AddError!windows.HANDLE {
         c.file_flag_backup_semantics | c.file_flag_overlapped,
         null,
     );
-    if (handle == windows.INVALID_HANDLE_VALUE) return switch (c.GetLastError()) {
-        c.error_file_not_found, c.error_path_not_found => error.FileNotFound,
-        c.error_access_denied => error.AccessDenied,
-        c.error_too_many_open_files => error.ProcessFdQuotaExceeded,
+    if (handle == windows.INVALID_HANDLE_VALUE) return switch (windows.GetLastError()) {
+        .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
+        .ACCESS_DENIED => error.AccessDenied,
+        .TOO_MANY_OPEN_FILES => error.ProcessFdQuotaExceeded,
         else => error.Unexpected,
     };
     return handle;
@@ -403,7 +403,7 @@ pub fn remove(w: *Windows, io: Io, id: WatchId) void {
     w.budget.release(*const Windows, stillCounted, watch.root, w);
     // A retained completion has already ended the kernel's ownership.
     if (!watch.request.outstanding) {
-        _ = c.CloseHandle(watch.handle);
+        windows.CloseHandle(watch.handle);
         w.free(watch);
         return;
     }
@@ -445,7 +445,7 @@ fn retireEnded(w: *Windows) void {
         }
         if (watch.request.outstanding) _ = watch.request.take();
         link.* = watch.retiring_next;
-        _ = c.CloseHandle(watch.handle);
+        windows.CloseHandle(watch.handle);
         w.free(watch);
     }
 }
@@ -711,7 +711,7 @@ fn rearm(w: *Windows, io: Io, watch: *Watch, batch: *Batch) contract.PollError!b
 /// at the buffer and it can be freed here rather than retired.
 fn discard(w: *Windows, id: WatchId) void {
     const entry = w.watches.fetchSwapRemove(id) orelse return;
-    _ = c.CloseHandle(entry.value.handle);
+    windows.CloseHandle(entry.value.handle);
     w.free(entry.value);
 }
 
@@ -988,15 +988,10 @@ const Change = struct {
 /// `NtNotifyChangeDirectoryFile`, so they are written out here. Hand-written rather than `@cImport`ed, for the same
 /// reason as everywhere else in this package: no C compilation step.
 const c = struct {
-    // Win32's names, in Zig's casing: `ERROR_ACCESS_DENIED` is
-    // `error_access_denied`. Functions keep
+    // Win32's names, in Zig's casing: `FILE_SHARE_READ` is
+    // `file_share_read`. Functions keep
     // their symbol names and parameters their documented ones.
     const Bool = c_int;
-
-    const error_file_not_found: windows.DWORD = 2;
-    const error_path_not_found: windows.DWORD = 3;
-    const error_access_denied: windows.DWORD = 5;
-    const error_too_many_open_files: windows.DWORD = 4;
 
     const file_list_directory: windows.DWORD = 0x0001;
     const file_share_read: windows.DWORD = 0x0001;
@@ -1036,10 +1031,6 @@ const c = struct {
         dwFlagsAndAttributes: windows.DWORD,
         hTemplateFile: ?windows.HANDLE,
     ) callconv(.winapi) windows.HANDLE;
-    // aegis: boundary(A019): kernel32's CloseHandle, declared as the system documents it, called only from this file
-    extern "kernel32" fn CloseHandle(hObject: windows.HANDLE) callconv(.winapi) Bool;
-    // aegis: boundary(A019): kernel32's GetLastError, declared as the system documents it, called only from this file
-    extern "kernel32" fn GetLastError() callconv(.winapi) windows.DWORD;
     /// What `ReadDirectoryChangesW` calls, which takes the event a
     /// reactor call signals and its status block as they are.
     // aegis: boundary(A019): ntdll's NtNotifyChangeDirectoryFile, declared as the system documents it, called only from this file
