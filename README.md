@@ -14,6 +14,12 @@ git+https://github.com/pedronaugusto/lookout`, then obtain the `lookout` module 
 `b.dependency` and add it to your executable's imports. Forward your target and optimize
 settings.
 
+## Stability
+
+lookout is 0.x and tracks Zig 0.17.x. A breaking change comes only in a minor release
+(0.7 to 0.8), with a CHANGELOG entry saying what changed and what to write instead; a
+patch release never breaks.
+
 ## Usage
 
 [examples/usage.zig](examples/usage.zig) watches an absolute `dir_path`, writes
