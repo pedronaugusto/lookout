@@ -21,6 +21,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Pins aegis c8982a8, still 0.2.4: six additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`), the aegis the development build's preflight selects. Nothing lookout calls changed.
+- Pins airlock 55f0265, the commit the development build's preflight selects (bay tidy), where it pinned f0b59c4.
 - aegis 0.3: the change log waits on its guard (`guard.wait(&condition, io, deadline)`) and a listing's budget is `assert.invariant`, where it was `assert.post`. Pins aegis breaking-0.3 (a34e694), and on it airlock (f0b59c4), reactor main (c6921bd), strand (cc6918d) and shakedown main (4979fa9), the commits relic main pins.
 - On the aegis 0.2 line: aegis 0.2.3, airlock 0.6.0, sweep 0.3.0, strand 0.15.0, reactor 0.9.0. A capture's racy rule is the same rule in aegis units: the tick before `taken`'s, floored to the two-second timestamp tick, where it divided raw nanoseconds.
 - Checkpoint tokens and baseline files are read and written through strand (a new dependency), the family's one JSON, in place of `std.json`: bounded by their own size, with the same bytes as before, so a token or a baseline already written reads as it did. A name or a filter pattern that is not UTF-8 is written as its byte values, as `std.json` wrote it. On strand 0.14.0, airlock 0.5.5 and aegis 0.1.18.

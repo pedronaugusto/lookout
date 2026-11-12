@@ -13,8 +13,8 @@
     },
     .dependencies = .{
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock#f0b59c41348ad772c984753ea819f9345a37130d",
-            .hash = "airlock-0.6.0-rfvu6PdDCAChN1RPjYEz_v65zNQ-wOiR6ANrRrxzIWLH",
+            .url = "git+https://github.com/pedronaugusto/airlock#55f0265ad74ceff3ea14a1fca316f82aa3f45ae8",
+            .hash = "airlock-0.6.0-rfvu6DdECADPsZW3JjI6jPRt-hpplrgrRaA4M4Ey7e8W",
         },
 
         .sweep = .{
@@ -23,8 +23,8 @@
         },
 
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#3c0b13e5fc25797b5fbcc25fec48b0a8411cc668",
-            .hash = "aegis-0.2.4-rsxoug3uCwBiVYRBbQolOSbqdOEzmmUeaj19tWOo2rmc",
+            .url = "git+https://github.com/pedronaugusto/aegis#c8982a86cbd8a85ac9941df59b6c36a10a252355",
+            .hash = "aegis-0.2.4-rsxouvwTDACNY2hXYVwyUefGiHkfV4nV6HBftNXJRliQ",
         },
 
         .reactor = .{
@@ -39,8 +39,8 @@
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.18.4#97f57ab595ee3377407f4d964082f75777a66075",
-            .hash = "preflight-0.18.4-LX1ZwvHdEwDVGneNwhBt6jTgfbp21v_20tqaq2BytiD6",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=ci-standard#454b12e663bf57993890ba18a06f33df619a659e",
+            .hash = "preflight-0.18.6-LX1ZwhfdGABszxizm4q2gQoTUwWG3UbYWnTZlnuZIxg5",
         },
 
         .shakedown = .{

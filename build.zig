@@ -166,7 +166,7 @@ pub fn dev(b: *std.Build, tools: type) void {
                 .{ .name = "lookout-bench", .source = "bench/speed_claims.zig" },
                 .{ .name = "lookout-filter-bench", .source = "bench/filter.zig" },
             },
-            .imports = benchImports,
+            .imports = tools.preflight.Bench.importsFrom(benchImports),
             .target = target,
             .optimize = optimize,
             .link_libc = darwin,
