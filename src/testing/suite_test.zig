@@ -30,7 +30,6 @@ const timeout_ms = wait.event_ms;
 /// cancellation cuts a sleep short, and nothing cancels these threads; a
 /// nap cut short would only make its loop look at its condition sooner.
 fn nap(millis: i64) void {
-    // glint-ignore: Z026 -- a nap cut short only makes its loop look at its condition sooner
     std.testing.io.sleep(.fromMilliseconds(millis), .awake) catch |err| switch (err) {
         error.Canceled => {},
     };
@@ -2849,7 +2848,6 @@ test "a watch that cannot cover a subtree says so instead of going quiet" {
         const io = std.testing.io;
         try f.tmp.dir.createDir(io, "closed", @fromBackingInt(@intCast(0o000)));
         // Put it back before the fixture tries to delete the tree.
-        // glint-ignore: Z026 -- the fixture's tree delete reports a directory that stayed closed
         defer f.tmp.dir.setFilePermissions(io, "closed", .default_dir, .{}) catch {};
 
         _ = try wait.add(&f.watcher, f.io, f.root, .{ .recursive = true });

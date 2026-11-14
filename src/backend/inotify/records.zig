@@ -13,15 +13,16 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const assert = std.debug.assert;
+const aegis = @import("aegis");
+const assert = aegis.assert.invariant;
 
 /// `wd`, `mask`, `cookie` and `len`, in the kernel's own byte order. The
 /// name follows.
 pub const header_len = 16;
 
 comptime {
-    assert(header_len == 4 * @sizeOf(u32));
-    if (builtin.target.os.tag == .linux) assert(header_len == @sizeOf(std.os.linux.inotify_event));
+    assert(header_len == 4 * @sizeOf(u32), "header_len == 4 * @sizeOf(u32)");
+    if (builtin.target.os.tag == .linux) assert(header_len == @sizeOf(std.os.linux.inotify_event), "header_len == @sizeOf(std.os.linux.inotify_event)");
 }
 
 /// One kernel event.
@@ -62,7 +63,7 @@ pub const Iterator = struct {
 
         const padded = rest[header_len..][0..len];
         it.offset += header_len + len;
-        assert(it.offset <= it.bytes.len);
+        assert(it.offset <= it.bytes.len, "it.offset <= it.bytes.len");
         const name = std.mem.sliceTo(padded, 0);
         return .{
             .wd = std.mem.readInt(i32, rest[0..4], endian),
@@ -82,7 +83,7 @@ pub fn iterate(bytes: []const u8) Iterator {
 /// and for the fuzz properties.
 pub fn encode(out: []u8, record: Record) usize {
     const name = record.name orelse "";
-    assert(out.len >= header_len + name.len);
+    assert(out.len >= header_len + name.len, "out.len >= header_len + name.len");
     const endian = builtin.target.cpu.arch.endian();
     std.mem.writeInt(i32, out[0..4], record.wd, endian);
     std.mem.writeInt(u32, out[4..8], record.mask, endian);

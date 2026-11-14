@@ -89,9 +89,9 @@ const mount = switch (builtin.target.os.tag) {
         // x86_64 keeps the 32-bit inode layout under the plain name.
         const stat = if (builtin.target.cpu.arch == .x86_64) externs.@"statfs$INODE64" else externs.statfs;
         const externs = struct {
-            // aegis: boundary(A019): libc's statfs, declared as the system documents it, called only from this file
+            // glint-ignore: P007 -- boundary: libc's statfs, declared as the system documents it, called only from this file
             extern "c" fn statfs(path: [*:0]const u8, buf: *Stat) c_int;
-            // aegis: boundary(A019): libc's statfs$INODE64, declared as the system documents it, called only from this file
+            // glint-ignore: P007 -- boundary: libc's statfs$INODE64, declared as the system documents it, called only from this file
             extern "c" fn @"statfs$INODE64"(path: [*:0]const u8, buf: *Stat) c_int;
         };
     },
@@ -118,7 +118,7 @@ const mount = switch (builtin.target.os.tag) {
         const local = 0x1000; // MNT_LOCAL
         const stat = externs.statfs;
         const externs = struct {
-            // aegis: boundary(A019): libc's statfs, declared as the system documents it, called only from this file
+            // glint-ignore: P007 -- boundary: libc's statfs, declared as the system documents it, called only from this file
             extern "c" fn statfs(path: [*:0]const u8, buf: *Stat) c_int;
         };
     },
@@ -144,7 +144,7 @@ const mount = switch (builtin.target.os.tag) {
         const local = 0x1000; // MNT_LOCAL
         const stat = externs.statfs;
         const externs = struct {
-            // aegis: boundary(A019): libc's statfs, declared as the system documents it, called only from this file
+            // glint-ignore: P007 -- boundary: libc's statfs, declared as the system documents it, called only from this file
             extern "c" fn statfs(path: [*:0]const u8, buf: *Stat) c_int;
         };
     },
@@ -169,7 +169,7 @@ const mount = switch (builtin.target.os.tag) {
         // The header renames statvfs; the plain name is the old ABI.
         const stat = externs.__statvfs90;
         const externs = struct {
-            // aegis: boundary(A019): libc's __statvfs90, declared as the system documents it, called only from this file
+            // glint-ignore: P007 -- boundary: libc's __statvfs90, declared as the system documents it, called only from this file
             extern "c" fn __statvfs90(path: [*:0]const u8, buf: *Stat) c_int;
         };
     },
@@ -242,13 +242,13 @@ const DragonflyStatfs = extern struct {
     spare: [2]c_long,
 };
 const dragonfly = struct {
-    // aegis: boundary(A019): libc's statfs, declared as the system documents it, called only from this file
+    // glint-ignore: P007 -- boundary: libc's statfs, declared as the system documents it, called only from this file
     extern "c" fn statfs([*:0]const u8, *DragonflyStatfs) c_int;
 };
 
-// aegis: boundary(A019): kernel32's GetVolumePathNameW, declared as the system documents it, called only from this file
+// glint-ignore: P007 -- boundary: kernel32's GetVolumePathNameW, declared as the system documents it, called only from this file
 extern "kernel32" fn GetVolumePathNameW([*:0]const u16, [*]u16, u32) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary(A019): kernel32's GetDriveTypeW, declared as the system documents it, called only from this file
+// glint-ignore: P007 -- boundary: kernel32's GetDriveTypeW, declared as the system documents it, called only from this file
 extern "kernel32" fn GetDriveTypeW([*:0]const u16) callconv(.winapi) u32;
 
 test "filesystem types select network and FUSE without misclassifying tmpfs" {

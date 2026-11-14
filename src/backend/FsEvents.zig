@@ -30,7 +30,7 @@
 //!   and the two dropped-event flags all become `lookout.Kind.overflow`.
 
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const posix = std.posix;
@@ -216,7 +216,7 @@ const Delivery = struct {
             return;
         }
         d.len += records.encode(d.buffer[d.len..], id, flags, event, subject);
-        assert(d.len <= d.buffer.len);
+        assert(d.len <= d.buffer.len, "d.len <= d.buffer.len");
     }
 
     /// The same record for a path held as a volume prefix and the rest,
@@ -229,7 +229,7 @@ const Delivery = struct {
             return;
         }
         d.len += records.encodeVolumePath(d.buffer[d.len..], id, flags, event, prefix, tail);
-        assert(d.len <= d.buffer.len);
+        assert(d.len <= d.buffer.len, "d.len <= d.buffer.len");
     }
 };
 
@@ -876,7 +876,7 @@ fn withoutStream(bytes: []u8, id: WatchId) usize {
     var kept: usize = 0;
     while (true) {
         const start = it.offset;
-        // unreachable: Sink appends only whole records, under the lock its callers hold
+        // glint-ignore: Z026 -- Sink appends only whole records, under the lock its callers hold
         const record = (it.next() catch unreachable) orelse break;
         if (record.id == id) continue;
         const len = it.offset - start;
@@ -986,9 +986,9 @@ fn deliver(
     ids: [*]const u64,
 ) callconv(.c) void {
     _ = ref;
-    // aegis: boundary(A019): FSEvents' callback context, the `info` FSEventStreamCreate took: the Stream, alive until the stream is invalidated
+    // glint-ignore: P007 -- boundary: FSEvents' callback context, the `info` FSEventStreamCreate took: the Stream, alive until the stream is invalidated
     const stream: *Stream = @ptrCast(@alignCast(info.?));
-    // aegis: boundary(A019): FSEvents' callback paths: without kFSEventStreamCreateFlagUseCFTypes, a C array of C strings, count long
+    // glint-ignore: P007 -- boundary: FSEvents' callback paths: without kFSEventStreamCreateFlagUseCFTypes, a C array of C strings, count long
     const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?));
     // the handoff from `add`, made visible (`Stream.published`); a stream
     // is published before it is started, so this never drops a delivery
@@ -1974,7 +1974,7 @@ fn seedSlice(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!bool {
 /// many slices as it takes.
 pub fn seedWhole(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!void {
     const left = try f.seed(io, batch, true);
-    assert(!left);
+    assert(!left, "!left");
 }
 
 fn seed(f: *FsEvents, io: Io, batch: *Batch, whole: bool) contract.PollError!bool {

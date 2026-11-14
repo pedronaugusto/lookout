@@ -1,12 +1,13 @@
 //! Portable baseline storage. The checksum is checked before JSON is read.
 const std = @import("std");
 const strand = @import("strand");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const builtin = @import("builtin");
 const Snapshot = @import("../Snapshot.zig");
 const identity = @import("../identity.zig");
 const sweep = @import("sweep");
 const path = @import("../path.zig");
+const aegis = @import("aegis");
 
 pub const State = struct {
     platform: []const u8,
@@ -68,7 +69,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const header_size = 44;
 
 comptime {
-    assert(header_size == digest_at + Sha256.digest_length);
+    assert(header_size == digest_at + Sha256.digest_length, "header_size == digest_at + Sha256.digest_length");
 }
 pub const platform = @tagName(builtin.target.os.tag);
 pub const file_limit = 256 * 1024 * 1024;

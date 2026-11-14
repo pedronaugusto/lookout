@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const aegis = @import("aegis");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 
 /// A size in bytes: the one kind of number a buffer's size is, kept from
 /// meeting the counts of events and entries beside it in `Options`.
@@ -47,16 +47,16 @@ pub fn clamp(asked: Bytes, bounds: Bounds) Bytes {
     const min = bounds.min.raw();
     const max = bounds.max.raw();
     const default = bounds.default.raw();
-    assert(min <= default);
-    assert(default <= max);
+    assert(min <= default, "min <= default");
+    assert(default <= max, "default <= max");
     // A whole number of words at the floor, so rounding down never
     // takes a size below it.
-    assert(min % @alignOf(u32) == 0);
+    assert(min % @alignOf(u32) == 0, "min % @alignOf(u32) == 0");
     const wanted = if (asked == unset) default else asked.raw();
     const bounded = std.math.clamp(wanted, min, max);
     const size = bounded - bounded % @alignOf(u32);
-    assert(size >= min);
-    assert(size <= max);
+    assert(size >= min, "size >= min");
+    assert(size <= max, "size <= max");
     return .fromRaw(size);
 }
 

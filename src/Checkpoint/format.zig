@@ -88,6 +88,7 @@ const std = @import("std");
 const strand = @import("strand");
 const Allocator = std.mem.Allocator;
 const path_cmp = @import("../path.zig");
+const aegis = @import("aegis");
 const Paths = @import("History.zig").Paths;
 pub const ParseError = error{ OutOfMemory, InvalidCheckpoint };
 
@@ -230,7 +231,7 @@ pub fn copy(gpa: Allocator, state: State) Allocator.Error!Owned {
         };
         copied += 1;
     }
-    std.debug.assert(copied == state.watches.len);
+    aegis.assert.invariant(copied == state.watches.len, "copied == state.watches.len");
     return .{ .arena = arena, .value = .{ .version = state.version, .backend = state.backend, .watches = watches } };
 }
 

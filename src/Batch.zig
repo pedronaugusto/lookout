@@ -17,7 +17,7 @@ const std = @import("std");
 const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 
 const lookout = @import("types.zig");
@@ -382,7 +382,7 @@ fn noteOne(b: *Batch, gpa: Allocator, id: WatchId, subject: []const u8, kind: Ki
         gpa.free(owned);
         b.notes_lost = true;
     };
-    assert(b.notes.items.len <= notes_limit);
+    assert(b.notes.items.len <= notes_limit, "b.notes.items.len <= notes_limit");
 }
 
 /// Hands the notes over to the caller and starts again with none.
@@ -612,7 +612,7 @@ fn rebuildIndex(b: *Batch) void {
     for (b.events.items, 0..) |event, at| {
         b.index.putAssumeCapacity(.{ .id = event.id, .path = event.path }, @intCast(at));
     }
-    assert(b.index.count() == b.events.items.len);
+    assert(b.index.count() == b.events.items.len, "b.index.count() == b.events.items.len");
 }
 
 /// Records that `subject` could not be watched, for the next `poll` to
@@ -775,7 +775,7 @@ fn record(
     if (b.index.get(.{ .id = id, .path = subject })) |i| {
         const existing = &b.events.items[i];
         // The index names the event recorded for this watch and path.
-        assert(existing.id == id);
+        assert(existing.id == id, "existing.id == id");
         if (existing.target == .unknown) existing.target = target;
         if (b.hold_all and !isLoss(kind) and !isLoss(existing.kind)) {
             // Debouncing already decided what the window says: the kind
@@ -822,7 +822,7 @@ fn record(
     });
     errdefer _ = b.events.pop();
     try b.index.put(gpa, .{ .id = id, .path = owned_path }, @intCast(b.events.items.len - 1));
-    assert(b.index.count() == b.events.items.len);
+    assert(b.index.count() == b.events.items.len, "b.index.count() == b.events.items.len");
 }
 
 fn isLoss(kind: Kind) bool {
@@ -853,8 +853,8 @@ comptime {
     // The precedence `lookout.Kind` documents: each kind a rank of its
     // own, and the two loss notices above every ordinary change.
     for (std.enums.values(Kind)) |a| {
-        for (std.enums.values(Kind)) |b| assert(a == b or rank(a) != rank(b));
-        assert(isLoss(a) == (rank(a) >= rank(.overflow)));
+        for (std.enums.values(Kind)) |b| assert(a == b or rank(a) != rank(b), "a == b or rank(a) != rank(b)");
+        assert(isLoss(a) == (rank(a) >= rank(.overflow)), "isLoss(a) == (rank(a) >= rank(.overflow))");
     }
 }
 

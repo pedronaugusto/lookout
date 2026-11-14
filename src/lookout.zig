@@ -23,7 +23,7 @@ const builtin = @import("builtin");
 const reactor = @import("reactor");
 
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 
 const Batch = @import("Batch.zig");
@@ -573,7 +573,7 @@ pub const Watcher = struct {
                 return err;
             };
         }
-        assert(w.table.contains(id));
+        assert(w.table.contains(id), "w.table.contains(id)");
         return id;
     }
 
@@ -682,8 +682,8 @@ pub const Watcher = struct {
         try w.anchorPending(io, p);
         w.ids = ids;
         owns_target = false;
-        assert(w.table.contains(id));
-        assert(w.waiting(id));
+        assert(w.table.contains(id), "w.table.contains(id)");
+        assert(w.waiting(id), "w.waiting(id)");
         return id;
     }
 
@@ -747,9 +747,9 @@ pub const Watcher = struct {
         if (present.len == p.target.len) return;
         // The ancestor and the one step down from it are both the start
         // of the path the watch waits for, the step the longer.
-        assert(std.mem.startsWith(u8, p.target, present));
+        assert(std.mem.startsWith(u8, p.target, present), "std.mem.startsWith(u8, p.target, present)");
         p.next = p.target[0..nextStep(p.target, present.len)];
-        assert(p.next.len > present.len);
+        assert(p.next.len > present.len, "p.next.len > present.len");
         const mirror = try w.gpa.dupe(u8, present);
         w.addBackend(io, p.id, present, p.target, .{
             .filter = .{ .allow = &p.allowing },
@@ -810,7 +810,7 @@ pub const Watcher = struct {
 
     /// Where the component after the prefix of length `at` ends.
     fn nextStep(target: []const u8, at: usize) usize {
-        assert(at <= target.len);
+        assert(at <= target.len, "at <= target.len");
         var i = at;
         while (i < target.len and std.Io.Dir.path.isSep(target[i])) i += 1;
         while (i < target.len and !std.Io.Dir.path.isSep(target[i])) i += 1;
@@ -1028,9 +1028,9 @@ pub const Watcher = struct {
             break;
         }
         w.batch.discardFuture(w.gpa, id);
-        assert(!w.table.contains(id));
-        assert(!w.waiting(id));
-        assert(w.followingOf(id) == null);
+        assert(!w.table.contains(id), "!w.table.contains(id)");
+        assert(!w.waiting(id), "!w.waiting(id)");
+        assert(w.followingOf(id) == null, "w.followingOf(id) == null");
     }
 
     /// Replaces the filter of a live watch without changing its id, root or
@@ -1759,12 +1759,10 @@ test "a pending watch whose way down cannot be watched says so" {
     const target = try std.Io.Dir.path.join(gpa, &.{ locked, "later" });
     defer gpa.free(target);
     try tmp.dir.setFilePermissions(io, "locked", .fromMode(0o300), .{});
-    // glint-ignore: Z026 -- the permissions go back so the tmp dir can be deleted; a failure shows there
     defer tmp.dir.setFilePermissions(io, "locked", .fromMode(0o755), .{}) catch {};
     // Searchable, so the path resolves as absent rather than refused,
     // and not readable, so the folder cannot be listed or opened for
     // events. A user the permissions do not stop has nothing to show.
-    // glint-ignore: Z026 -- a folder that cannot be opened is the refusal the test needs: it goes on
     if (tmp.dir.openDir(io, "locked", .{ .iterate = true })) |opened| {
         opened.close(io);
         return error.SkipZigTest;

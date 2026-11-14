@@ -99,7 +99,7 @@ const Claims = struct {
                 var name: [32]u8 = undefined;
                 self.stamped = .now(self.io, .awake);
                 self.dir.writeFile(self.io, .{
-                    // unreachable: "w" and a usize's digits fit in 32 bytes
+                    // glint-ignore: Z026 -- "w" and a usize's digits fit in 32 bytes
                     .sub_path = std.mem.print(&name, "w{d}.txt", .{self.round}) catch unreachable,
                     .data = "x",
                 }) catch |err| {

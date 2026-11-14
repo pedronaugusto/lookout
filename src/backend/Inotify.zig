@@ -23,7 +23,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const posix = std.posix;
 const linux = std.os.linux;
@@ -42,6 +42,7 @@ const Options = @import("../options.zig").Options;
 const contract = @import("../watch_contract.zig");
 const AddOptions = @import("../options.zig").AddOptions;
 const builtin = @import("builtin");
+const aegis = @import("aegis");
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
 
@@ -425,8 +426,8 @@ fn read(n: *Inotify, io: Io, batch: *Batch) contract.PollError!bool {
         if (n.read_len == 0) return false;
     }
     // A read held across calls is resumed where its walk stopped.
-    assert(n.read_len <= n.read_buffer.len);
-    assert(n.read_offset <= n.read_len);
+    assert(n.read_len <= n.read_buffer.len, "n.read_len <= n.read_buffer.len");
+    assert(n.read_offset <= n.read_len, "n.read_offset <= n.read_len");
     try n.consume(io, n.read_buffer[0..n.read_len], &n.read_offset, batch);
     n.read_len = 0;
     return true;
@@ -446,7 +447,7 @@ fn handleRead(n: *Inotify, io: Io, bytes: []const u8, batch: *Batch) contract.Po
 }
 
 fn consume(n: *Inotify, io: Io, bytes: []const u8, offset: *usize, batch: *Batch) contract.PollError!void {
-    assert(offset.* <= bytes.len);
+    assert(offset.* <= bytes.len, "offset.* <= bytes.len");
     // Partial bookkeeping can no longer supply reliable entry counts.
     errdefer n.budget.reread(void, everyDirectory, io, {});
     var lost = false;

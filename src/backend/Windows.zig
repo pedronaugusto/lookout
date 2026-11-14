@@ -29,7 +29,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const windows = std.os.windows;
 const reactor = @import("reactor");
@@ -46,6 +46,7 @@ const timing = @import("../timing.zig");
 const trace = @import("../trace.zig");
 const Options = @import("../options.zig").Options;
 const contract = @import("../watch_contract.zig");
+const aegis = @import("aegis");
 const AddOptions = @import("../options.zig").AddOptions;
 const Target = lookout.Target;
 const WatchId = lookout.WatchId;
@@ -345,7 +346,7 @@ fn open(gpa: Allocator, path: []const u8) contract.AddError!windows.HANDLE {
 /// watch's completion, which the next `take` reports.
 fn arm(w: *Windows, watch: *Watch) contract.AddError!void {
     // The kernel is offered at most the buffer it writes into.
-    assert(watch.accepted_len <= watch.buffer.len);
+    assert(watch.accepted_len <= watch.buffer.len, "watch.accepted_len <= watch.buffer.len");
     const ended = watch.request.start(notify, watch.handle, watch) orelse return;
     switch (severity(ended.u.Status)) {
         .success, .warning => watch.completion = .of(ended),
@@ -718,7 +719,7 @@ fn discard(w: *Windows, id: WatchId) void {
 /// Turns one completed read into events.
 fn report(w: *Windows, io: Io, watch: *Watch, transferred: u32, batch: *Batch) contract.PollError!void {
     // A completed read wrote no more than `arm` offered.
-    assert(transferred <= watch.accepted_len);
+    assert(transferred <= watch.accepted_len, "transferred <= watch.accepted_len");
     const dir = watch.dir();
 
     if (watch.cursor == null) {
@@ -1021,7 +1022,7 @@ const c = struct {
         bInheritHandle: Bool,
     };
 
-    // aegis: boundary(A019): kernel32's CreateFileW, declared as the system documents it, called only from this file
+    // glint-ignore: P007 -- boundary: kernel32's CreateFileW, declared as the system documents it, called only from this file
     extern "kernel32" fn CreateFileW(
         lpFileName: [*:0]const windows.WCHAR,
         dwDesiredAccess: windows.DWORD,
@@ -1033,7 +1034,7 @@ const c = struct {
     ) callconv(.winapi) windows.HANDLE;
     /// What `ReadDirectoryChangesW` calls, which takes the event a
     /// reactor call signals and its status block as they are.
-    // aegis: boundary(A019): ntdll's NtNotifyChangeDirectoryFile, declared as the system documents it, called only from this file
+    // glint-ignore: P007 -- boundary: ntdll's NtNotifyChangeDirectoryFile, declared as the system documents it, called only from this file
     extern "ntdll" fn NtNotifyChangeDirectoryFile(
         FileHandle: windows.HANDLE,
         Event: ?windows.HANDLE,

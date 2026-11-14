@@ -18,6 +18,7 @@ pub const Windows = @import("backend/Windows.zig");
 /// The backend every target has, so every shape of `Impl` holds it, and a
 /// watcher keeps one beside its native backend for the watches it polls.
 pub const Poll = @import("backend/Poll.zig");
+const aegis = @import("aegis");
 
 /// Every backend this target was built with, one of which a watcher
 /// chose. The tag names match `Backend`'s, which is what lets
@@ -51,7 +52,7 @@ pub const Impl = switch (builtin.target.os.tag) {
 comptime {
     for (std.enums.values(Backend)) |backend| {
         if (backend == .auto) continue;
-        std.debug.assert(@hasField(Impl, @tagName(backend)) == types.supported(backend));
+        aegis.assert.invariant(@hasField(Impl, @tagName(backend)) == types.supported(backend), "@hasField(Impl, @tagName(backend)) == types.supported(backend)");
     }
 }
 

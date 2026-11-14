@@ -14,14 +14,15 @@
 //! whose host is a CI runner, would be nowhere a change is written.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 
 /// `NextEntryOffset`, `Action` and `FileNameLength`. The name follows.
 pub const header_len = 12;
 
 comptime {
-    assert(header_len == 3 * @sizeOf(u32));
+    assert(header_len == 3 * @sizeOf(u32), "header_len == 3 * @sizeOf(u32)");
 }
 
 /// The `FILE_ACTION_*` numbers a record carries, as winnt.h spells them.
@@ -94,7 +95,7 @@ pub const Iterator = struct {
         if (next_offset >= rest.len) return error.TruncatedRecord;
         it.offset += next_offset;
         // A chain that goes on goes on inside the read.
-        assert(it.offset < it.bytes.len);
+        assert(it.offset < it.bytes.len, "it.offset < it.bytes.len");
         return record;
     }
 };
@@ -149,8 +150,8 @@ pub fn arrival(rest: Iterator) Arrival {
 pub fn encode(out: []u8, action: u32, name: []const u8, last: bool) usize {
     const len = header_len + name.len;
     // A name is UTF-16 code units, which `Iterator.next` insists on.
-    assert(out.len >= len);
-    assert(name.len % 2 == 0);
+    assert(out.len >= len, "out.len >= len");
+    assert(name.len % 2 == 0, "name.len % 2 == 0");
     std.mem.writeInt(u32, out[0..4], if (last) 0 else @intCast(len), .little);
     std.mem.writeInt(u32, out[4..8], action, .little);
     std.mem.writeInt(u32, out[8..12], @intCast(name.len), .little);

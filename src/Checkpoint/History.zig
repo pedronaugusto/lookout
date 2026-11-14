@@ -15,7 +15,7 @@ const aegis = @import("aegis");
 const path = @import("../path.zig");
 const WatchId = @import("../types.zig").WatchId;
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const builtin = @import("builtin");
 const History = @This();
 
@@ -55,7 +55,7 @@ const State = struct {
     /// the lock is released. Rare, so kept out of line: `publish` and
     /// `remove` stay small.
     noinline fn compact(s: *State) ?*Node {
-        assert(s.compact_due);
+        assert(s.compact_due, "s.compact_due");
         s.compact_due = false;
         if (s.tombstones == 0) return null;
         var oldest = s.revision;
@@ -127,10 +127,10 @@ pub fn discard(h: *History, node: *Node) void {
 
 pub fn publish(h: *History, node: *Node) void {
     // A prepared node is published once, and not linked before.
-    assert(node.born == none);
-    assert(node.removed == none);
-    assert(node.prev == null);
-    assert(node.next == null);
+    assert(node.born == none, "node.born == none");
+    assert(node.removed == none, "node.removed == none");
+    assert(node.prev == null, "node.prev == null");
+    assert(node.next == null, "node.next == null");
     var gone: ?*Node = null;
     {
         var held = h.state.acquire();
@@ -139,7 +139,7 @@ pub fn publish(h: *History, node: *Node) void {
         node.born = s.advance();
         // The list is in order of birth, which is what lets an iterator stop
         // at the first node born after its lease.
-        if (s.last) |last| assert(last.born.compare(node.born) == .lt);
+        if (s.last) |last| assert(last.born.compare(node.born) == .lt, "last.born.compare(node.born) == .lt");
         node.prev = s.last;
         if (s.last) |last| last.next = node else s.first = node;
         s.last = node;
@@ -155,8 +155,8 @@ pub fn remove(h: *History, node: *Node) void {
         var held = h.state.acquire();
         defer held.deinit();
         const s = held.value();
-        assert(node.born != none);
-        assert(node.removed == none);
+        assert(node.born != none, "node.born != none");
+        assert(node.removed == none, "node.removed == none");
         node.removed = s.advance();
         if (s.leases == null) {
             s.detach(node);
@@ -183,7 +183,7 @@ pub fn release(h: *History) void {
         var held = h.state.acquire();
         defer held.deinit();
         const s = held.value();
-        assert(s.refs != 0);
+        assert(s.refs != 0, "s.refs != 0");
         s.refs -= 1;
         if (s.refs != 0) return;
         first = s.first;
@@ -205,7 +205,7 @@ pub fn snapshot(h: *History, gpa: Allocator, id: WatchId, root: []const u8) Allo
     const s = held.value();
     // Leases are kept newest first: only the last one can hold the oldest
     // revision, which is what `Lease.release` compacts on.
-    if (s.leases) |newest| assert(newest.revision.compare(s.revision) != .gt);
+    if (s.leases) |newest| assert(newest.revision.compare(s.revision) != .gt, "newest.revision.compare(s.revision) != .gt");
     lease.* = .{ .history = h, .gpa = gpa, .id = id, .root = owned, .revision = s.revision, .next = s.leases };
     if (s.leases) |first| first.prev = lease;
     s.leases = lease;
@@ -226,7 +226,7 @@ const Lease = struct {
     fn retain(l: *Lease) void {
         var held = l.history.state.acquire();
         defer held.deinit();
-        assert(l.refs != 0);
+        assert(l.refs != 0, "l.refs != 0");
         l.refs += 1;
     }
 
@@ -236,7 +236,7 @@ const Lease = struct {
             var held = h.state.acquire();
             defer held.deinit();
             const s = held.value();
-            assert(l.refs != 0);
+            assert(l.refs != 0, "l.refs != 0");
             l.refs -= 1;
             if (l.refs != 0) return;
             if (l.prev) |prev| prev.next = l.next else s.leases = l.next;

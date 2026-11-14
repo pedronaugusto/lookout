@@ -12,7 +12,7 @@
 const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 
 const lookout = @import("types.zig");
@@ -403,7 +403,7 @@ fn createFile(t: *Tree, io: Io, watch: WatchId, parent: ?NodeId, path: []u8, met
 /// and goes first, with everything below it.
 fn insert(t: *Tree, io: Io, id: NodeId, node: Node) Allocator.Error!void {
     // Node ids are never reused.
-    assert(!t.nodes.contains(id));
+    assert(!t.nodes.contains(id), "!t.nodes.contains(id)");
     // A directory node arrives owning its handle, unused yet: it is closed
     // here if the node cannot be put anywhere.
     var unplaced = node;
@@ -419,7 +419,7 @@ fn insert(t: *Tree, io: Io, id: NodeId, node: Node) Allocator.Error!void {
     t.nodes.putAssumeCapacity(id, slot);
     t.index.putAssumeCapacity(key, id);
     // One index entry per node: a node made where another was replaced it.
-    assert(t.index.count() == t.nodes.count());
+    assert(t.index.count() == t.nodes.count(), "t.index.count() == t.nodes.count()");
 }
 
 /// Takes the node `id` out of the index and out of its parent's
@@ -448,7 +448,7 @@ fn dropAt(t: *Tree, io: Io, at: usize) void {
     t.destroy(io, node);
     t.nodes.swapRemoveAt(at);
     t.noteDropped(id);
-    assert(t.index.count() == t.nodes.count());
+    assert(t.index.count() == t.nodes.count(), "t.index.count() == t.nodes.count()");
 }
 
 /// Drops `top` and every node below it, deepest first, at the cost of
@@ -516,7 +516,7 @@ pub fn removeWatch(t: *Tree, io: Io, id: WatchId) void {
             i += 1;
         }
     }
-    assert(t.index.count() == t.nodes.count());
+    assert(t.index.count() == t.nodes.count(), "t.index.count() == t.nodes.count()");
 }
 
 /// Reconciles the nodes of one watch with a new filter. The root remains

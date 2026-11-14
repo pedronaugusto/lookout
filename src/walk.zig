@@ -18,7 +18,7 @@ const std = @import("std");
 const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const stamp = @import("stamp.zig");
 const shakedown = @import("shakedown");
@@ -310,7 +310,7 @@ const Bulk = struct {
     const file_datalength = 0x0000_0200;
     const meta_common = objtype | modtime | chgtime | fileid;
 
-    // aegis: boundary(A019): libc's getattrlistbulk, declared as the system documents it, called only from this file
+    // glint-ignore: P007 -- boundary: libc's getattrlistbulk, declared as the system documents it, called only from this file
     extern "c" fn getattrlistbulk(c_int, *AttrList, *anyopaque, usize, u64) c_int;
 
     fn init(dir: Io.Dir) Bulk {
