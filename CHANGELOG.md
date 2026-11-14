@@ -9,6 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking
 
 - `Filter.allow` is a `*const Filter.Allow`, an interface the caller embeds in whatever answers: its `allowFn` is given the `Allow` it was asked through and finds its owner from it with `@fieldParentPtr`. `Filter.context` is gone. Before: `.filter = .{ .allow = rule, .context = &state }` with `fn rule(context: ?*anyopaque, path: []const u8) bool`. After: a struct holding `allowing: Filter.Allow = .{ .allowFn = rule }` beside its state, `.filter = .{ .allow = &owner.allowing }`, with `fn rule(allow: *const Filter.Allow, path: []const u8) bool`.
+- `Baseline.LoadError` takes the file's read errors from aegis's `own.ReadFileError` in place of std's `Io.Dir.ReadFileAllocError`, which adds `Io.File.StatError`'s: the length's read, a cancel there among them, is returned. A `switch` over every member names those too.
+- `Watcher.Stats` has a field without a default, `overflows` (below, Added): a `Stats` a caller builds itself names it.
+- `Watcher.woken` is an `aegis.Atomic` of a two-state enum (`quiet`, `woken`) where it was a `std.atomic.Value(bool)`. It is the watcher's own flag, set by `wake` and cleared by `poll`; call those, not the field.
 
 ### Added
 
@@ -21,7 +24,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Pins aegis c8982a8, still 0.2.4: six additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`), the aegis the development build's preflight selects. Nothing lookout calls changed.
+- Pins aegis dc3ed602, still 0.2.4: additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`; `eql` and `compare` on the checked integers; Duration's ratio, mod, negate and abs), the aegis the development build's preflight selects. Nothing lookout calls changed.
 - Pins airlock 55f0265, the commit the development build's preflight selects (bay tidy), where it pinned f0b59c4.
 - aegis 0.3: the change log waits on its guard (`guard.wait(&condition, io, deadline)`) and a listing's budget is `assert.invariant`, where it was `assert.post`. Pins aegis breaking-0.3 (a34e694), and on it airlock (f0b59c4), reactor main (c6921bd), strand (cc6918d) and shakedown main (4979fa9), the commits relic main pins.
 - On the aegis 0.2 line: aegis 0.2.3, airlock 0.6.0, sweep 0.3.0, strand 0.15.0, reactor 0.9.0. A capture's racy rule is the same rule in aegis units: the tick before `taken`'s, floored to the two-second timestamp tick, where it divided raw nanoseconds.
