@@ -124,7 +124,7 @@ seed_slice_dirs: ?usize = null,
 /// for a delivery again, so a change made while a large tree is walked
 /// waits no longer than this, and the walk costs no more than one listing
 /// call per directory more than it did in one piece.
-const seed_slice = aegis.units.Duration(.millisecond, i96).fromRaw(2).convert(.nanosecond, i96, .exact);
+const seed_slice = aegis.units.Duration(.millisecond, u32).fromRaw(2).convert(.nanosecond, i96, .exact);
 
 /// A reading of the awake clock, which a seeding slice is measured on.
 const Awake = aegis.units.Instant(.awake, .nanosecond, i96);
