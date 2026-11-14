@@ -1,0 +1,39 @@
+{
+  "seams": [
+    {
+      "file": "src/intake.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "where bytes from outside enter lookout: a baseline file read whole and marked untrusted for its parser, a watched file's contents read to hash, and inotify's event records"
+    },
+    {
+      "module": "src/backend/",
+      "rules": [
+        "P007"
+      ],
+      "reason": "the backends are lookout's OS seam: each declares and calls its system's notification interface (FSEvents, inotify, kqueue, ReadDirectoryChangesW) and reads the records it hands back"
+    },
+    {
+      "file": "src/filesystem.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "asks each system what filesystem a path is on (statfs and its variants, GetVolumePathNameW and GetDriveTypeW), declared as the systems document them"
+    },
+    {
+      "file": "src/identity.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "asks each system how a directory names its files (getattrlist, the Linux casefold flag, GetFileInformationByHandleEx) and where a path really is (F_GETPATH)"
+    },
+    {
+      "file": "src/trace.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "reads LOOKOUT_TRACE from the environment without an allocator: libc's getenv, or the Windows environment block the process parameters point at"
+    }
+  ]
+}

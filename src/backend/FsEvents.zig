@@ -124,7 +124,10 @@ seed_slice_dirs: ?usize = null,
 /// for a delivery again, so a change made while a large tree is walked
 /// waits no longer than this, and the walk costs no more than one listing
 /// call per directory more than it did in one piece.
-const seed_slice: Io.Duration = .fromMilliseconds(2);
+const seed_slice = aegis.units.Duration(.millisecond, i96).fromRaw(2).convert(.nanosecond, i96, .exact);
+
+/// A reading of the awake clock, which a seeding slice is measured on.
+const Awake = aegis.units.Instant(.awake, .nanosecond, i96);
 
 /// A watch's seeding walk, while it is under way.
 const Seeding = struct {
@@ -986,9 +989,9 @@ fn deliver(
     ids: [*]const u64,
 ) callconv(.c) void {
     _ = ref;
-    // glint-ignore: P007 -- boundary: FSEvents' callback context, the `info` FSEventStreamCreate took: the Stream, alive until the stream is invalidated
+    // FSEvents' callback context, the `info` FSEventStreamCreate took: the Stream, alive until the stream is invalidated
     const stream: *Stream = @ptrCast(@alignCast(info.?));
-    // glint-ignore: P007 -- boundary: FSEvents' callback paths: without kFSEventStreamCreateFlagUseCFTypes, a C array of C strings, count long
+    // FSEvents' callback paths: without kFSEventStreamCreateFlagUseCFTypes, a C array of C strings, count long
     const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?));
     // the handoff from `add`, made visible (`Stream.published`); a stream
     // is published before it is started, so this never drops a delivery
@@ -1979,7 +1982,7 @@ pub fn seedWhole(f: *FsEvents, io: Io, batch: *Batch) contract.PollError!void {
 
 fn seed(f: *FsEvents, io: Io, batch: *Batch, whole: bool) contract.PollError!bool {
     if (f.seeding.count() == 0) return false;
-    const until = Io.Timestamp.now(io, .awake).addDuration(seed_slice);
+    const until = Awake.fromTimestamp(Io.Timestamp.now(io, .awake), .exact).saturatingAdd(seed_slice);
     var dirs: usize = 0;
     while (f.seeding.count() != 0) {
         const id = f.seeding.keys()[0];
@@ -2010,7 +2013,7 @@ fn seed(f: *FsEvents, io: Io, batch: *Batch, whole: bool) contract.PollError!boo
         if (whole) continue;
         if (f.seed_slice_dirs) |limit| {
             if (dirs >= limit) break;
-        } else if (Io.Timestamp.now(io, .awake).nanoseconds >= until.nanoseconds) break;
+        } else if (Awake.fromTimestamp(Io.Timestamp.now(io, .awake), .exact).compare(until) != .lt) break;
     }
     return f.seeding.count() != 0;
 }

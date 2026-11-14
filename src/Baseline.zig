@@ -21,6 +21,7 @@ const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const airlock = @import("airlock");
+const intake = @import("intake.zig");
 
 const lookout = @import("types.zig");
 const Filter = @import("Filter.zig");
@@ -221,10 +222,11 @@ pub fn save(b: *const Baseline, io: Io, filename: []const u8, options: SaveOptio
 /// `gpa` is kept until `deinit`, as by `seed`.
 pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, options: Options) Baseline.LoadError!Baseline {
     if (options.filter.allow != null) return error.UnsupportedBaselineFilter;
-    const bytes = aegis.own.readFile(io, .cwd(), filename, gpa, .fromRaw(format.file_limit)) catch |err| switch (err) {
+    const read = intake.readFile(io, .cwd(), filename, gpa, .fromRaw(format.file_limit)) catch |err| switch (err) {
         error.StreamTooLong => return error.InvalidBaseline,
         else => return err,
     };
+    const bytes = read.readForParse();
     defer gpa.free(bytes);
     var parsed = try format.parse(gpa, bytes);
     defer parsed.deinit();

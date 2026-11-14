@@ -95,6 +95,7 @@ const Claims = struct {
             fn run(self: *@This()) void {
                 // Long enough that the main thread is certainly blocked
                 // in the backend's wait rather than on its way there.
+                // glint-ignore: Z026 -- a cancel ends this writer before its write; the round it served is over
                 self.io.sleep(.fromMilliseconds(150), .awake) catch return;
                 var name: [32]u8 = undefined;
                 self.stamped = .now(self.io, .awake);

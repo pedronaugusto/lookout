@@ -27,15 +27,18 @@ pub fn within(ms: u32) Io.Timeout {
 /// non-blocking check: waits check before they give up.
 pub fn expired(io: Io, timeout: Io.Timeout) bool {
     const left = timeout.toDurationFromNow(io) orelse return false;
-    return left.raw.nanoseconds <= 0;
+    return Span.fromIoDuration(left.raw, .exact).compare(.fromRaw(0)) != .gt;
 }
 
 /// Whichever of the two timeouts ends first.
 pub fn soonest(io: Io, a: Io.Timeout, b: Io.Timeout) Io.Timeout {
     const left_a = a.toDurationFromNow(io) orelse return b;
     const left_b = b.toDurationFromNow(io) orelse return a;
-    return if (left_a.raw.nanoseconds <= left_b.raw.nanoseconds) a else b;
+    return if (Span.fromIoDuration(left_a.raw, .exact).compare(.fromIoDuration(left_b.raw, .exact)) != .gt) a else b;
 }
+
+/// A span of std's clock, in aegis's units.
+const Span = aegis.units.Duration(.nanosecond, i96);
 
 /// Milliseconds left of `timeout`, rounded up so a wait never ends before
 /// it, or null when it never runs out. Zero means it has. For the waits

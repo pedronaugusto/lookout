@@ -72,9 +72,9 @@ fn nativeName(path: []const u8, buffer: *[std.Io.Dir.max_path_bytes + 1]u8) ?[:0
     return buffer[0..path.len :0];
 }
 
-// glint-ignore: P007 -- boundary: libc's getattrlist, declared as the system documents it, called only from this file
+// libc's getattrlist, declared as the system documents it, called only from this file
 extern "c" fn getattrlist([*:0]const u8, *const anyopaque, *anyopaque, usize, c_ulong) c_int;
-// glint-ignore: P007 -- boundary: kernel32's GetFileInformationByHandleEx, declared as the system documents it, called only from this file
+// kernel32's GetFileInformationByHandleEx, declared as the system documents it, called only from this file
 extern "kernel32" fn GetFileInformationByHandleEx(std.os.windows.HANDLE, c_int, *anyopaque, u32) callconv(.winapi) std.os.windows.BOOL;
 
 test "unknown filesystem facts keep exact policy and explicit override independent" {

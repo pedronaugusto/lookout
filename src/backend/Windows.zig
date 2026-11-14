@@ -306,7 +306,7 @@ pub fn add(
 pub fn overflowForTest(w: *Windows, io: Io, id: WatchId) !void {
     const watch = w.watches.get(id).?;
     watch.request.cancel();
-    while (!watch.request.ended()) try w.changes.wait(io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
+    while (!watch.request.ended()) try w.changes.wait(io, .{ .duration = .{ .raw = aegis.units.Duration(.second, u32).fromRaw(10).toIoDuration(), .clock = .awake } });
     _ = watch.request.take();
     watch.completion = .{ .transferred = 0, .failure = null };
 }
@@ -1022,7 +1022,7 @@ const c = struct {
         bInheritHandle: Bool,
     };
 
-    // glint-ignore: P007 -- boundary: kernel32's CreateFileW, declared as the system documents it, called only from this file
+    // kernel32's CreateFileW, declared as the system documents it, called only from this file
     extern "kernel32" fn CreateFileW(
         lpFileName: [*:0]const windows.WCHAR,
         dwDesiredAccess: windows.DWORD,
@@ -1034,7 +1034,7 @@ const c = struct {
     ) callconv(.winapi) windows.HANDLE;
     /// What `ReadDirectoryChangesW` calls, which takes the event a
     /// reactor call signals and its status block as they are.
-    // glint-ignore: P007 -- boundary: ntdll's NtNotifyChangeDirectoryFile, declared as the system documents it, called only from this file
+    // ntdll's NtNotifyChangeDirectoryFile, declared as the system documents it, called only from this file
     extern "ntdll" fn NtNotifyChangeDirectoryFile(
         FileHandle: windows.HANDLE,
         Event: ?windows.HANDLE,

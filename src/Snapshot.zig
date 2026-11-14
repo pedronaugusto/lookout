@@ -9,6 +9,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const aegis = @import("aegis");
+const intake = @import("intake.zig");
 const Stamp = stamp.Stamp;
 const stamp = @import("stamp.zig");
 
@@ -99,7 +100,7 @@ fn hashContent(io: Io, dir: Io.Dir, path: []const u8, stat: Io.File.Stat) Io.Can
     var offset: u64 = 0;
     while (offset < stat.size) {
         const count: usize = @intCast(@min(buffer.len, stat.size - offset));
-        const n = file.readPositionalAll(io, buffer[0..count], offset) catch |err| switch (err) {
+        const n = intake.readPositionalAll(file, io, buffer[0..count], offset) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return null,
         };

@@ -7,6 +7,7 @@ const types = @import("types.zig");
 const Backend = types.Backend;
 const std = @import("std");
 const Io = std.Io;
+const aegis = @import("aegis");
 
 /// How a `Watcher` behaves, fixed for its lifetime.
 ///
@@ -19,7 +20,7 @@ pub const Options = struct {
     /// How long the `poll` backend waits between scans. Ignored by every
     /// other backend. Zero is clamped to one millisecond so a quiet
     /// indefinite poll still blocks instead of scanning in a busy loop.
-    poll_interval: Io.Duration = .fromMilliseconds(500),
+    poll_interval: Io.Duration = aegis.units.Duration(.millisecond, u32).fromRaw(500).toIoDuration(),
     /// How long `Watcher.poll` keeps collecting after the first event of a
     /// batch arrives. Everything that lands on one path inside that window
     /// becomes a single `Event`, so a program is not woken once per write
@@ -29,7 +30,7 @@ pub const Options = struct {
     /// of the window. Zero asks the system for no additional delay; on
     /// macOS the measured system-delivery floor is still roughly ten
     /// milliseconds.
-    latency: Io.Duration = .fromMilliseconds(50),
+    latency: Io.Duration = aegis.units.Duration(.millisecond, u32).fromRaw(50).toIoDuration(),
     /// How long a file must stop changing before its `Kind.modified` is
     /// reported. Zero, the default, reports it as soon as it is seen.
     ///

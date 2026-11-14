@@ -33,6 +33,7 @@ const lookout = @import("../types.zig");
 const Batch = @import("../Batch.zig");
 const Budget = @import("../Budget.zig");
 const identity = @import("../identity.zig");
+const intake = @import("../intake.zig");
 const CompiledFilter = @import("../CompiledFilter.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("inotify/records.zig");
@@ -418,7 +419,7 @@ fn collect(n: *Inotify, io: Io, batch: *Batch, wakeup: *reactor.Wake, until: Io.
 /// `false` when there was nothing to read.
 fn read(n: *Inotify, io: Io, batch: *Batch) contract.PollError!bool {
     if (n.read_len == 0) {
-        n.read_len = posix.read(n.ifd, &n.read_buffer) catch |err| switch (err) {
+        n.read_len = intake.readDescriptor(n.ifd, &n.read_buffer) catch |err| switch (err) {
             error.WouldBlock => return false,
             else => return error.Unexpected,
         };
@@ -460,6 +461,7 @@ fn consume(n: *Inotify, io: Io, bytes: []const u8, offset: *usize, batch: *Batch
         // not something it produced. What has been decoded is already
         // reported; the rest of the buffer says nothing that can be
         // acted on.
+        // glint-ignore: Z026 -- a tail the kernel did not write says nothing to act on; what was decoded is reported
         const event = (it.next() catch |err| switch (err) {
             error.TruncatedRecord => return,
         }) orelse return;
