@@ -24,7 +24,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Pins aegis dc3ed602, still 0.2.4: additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`; `eql` and `compare` on the checked integers; Duration's ratio, mod, negate and abs), the aegis the development build's preflight selects. Nothing lookout calls changed.
+- Pins aegis dc3ed602, still 0.2.4: additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`; `eql` and `compare` on the checked integers; Duration's ratio, mod, negate and abs), the aegis reactor, airlock and the packages built with them pin, so a plain build holds one aegis. Nothing this package calls changed.
 - glint 0.8: bytes from outside enter through `src/intake.zig`, lookout's one input seam (a baseline file, marked untrusted for its parser; a watched file's contents read to hash; inotify's records). The backends and the files that ask the system about a path (`filesystem`, `identity`, `trace`) are its declared seams for operations Zig leaves unchecked, in `glint.json`. std's assert is aegis's `assert.invariant`, and the seeding slice, the option defaults and the timeout comparisons are aegis spans and instants.
 - Pins airlock 55f0265, the commit the development build's preflight selects (bay tidy), where it pinned f0b59c4.
 - aegis 0.3: the change log waits on its guard (`guard.wait(&condition, io, deadline)`) and a listing's budget is `assert.invariant`, where it was `assert.post`. Pins aegis breaking-0.3 (a34e694), and on it airlock (f0b59c4), reactor main (c6921bd), strand (cc6918d) and shakedown main (4979fa9), the commits relic main pins.
