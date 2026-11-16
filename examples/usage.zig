@@ -22,8 +22,15 @@ pub fn main() !void {
     // A scratch directory beside the executable, remade on every run.
     const cwd = std.Io.Dir.cwd();
     try cwd.deleteTree(io, "lookout-example");
-    // glint-ignore: Z026 -- scratch beside the executable; the next run remakes it first
-    defer cwd.deleteTree(io, "lookout-example") catch {};
+    // The scratch goes when the example ends, however it ends; one that cannot be removed is
+    // the example's failure too.
+    const ran = inScratch(gpa, io, output, cwd);
+    const removed = cwd.deleteTree(io, "lookout-example");
+    try ran;
+    try removed;
+}
+
+fn inScratch(gpa: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, cwd: std.Io.Dir) !void {
     var scratch = try cwd.createDirPathOpen(io, "lookout-example", .{});
     defer scratch.close(io);
     const dir_path = try scratch.realPathFileAlloc(io, ".", gpa);

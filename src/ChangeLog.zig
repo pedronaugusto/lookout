@@ -190,7 +190,7 @@ pub fn refiltered(h: *ChangeLog, io: Io, id: WatchId) void {
 
 /// The name of every file `sync` writes, before its number.
 fn cookiePrefix(h: *const ChangeLog, buffer: *[32]u8) []const u8 {
-    return std.mem.print(buffer, ".lookout-sync-{x:0>16}-", .{h.epoch}) catch unreachable; // glint-ignore: Z026 -- 30 bytes fit in 32
+    return std.mem.print(buffer, ".lookout-sync-{x:0>16}-", .{h.epoch}) catch aegis.assert.never("the prefix is 30 bytes, which fit in 32");
 }
 
 /// Whether `event` is about one of `sync`'s files, whatever became of its
@@ -320,7 +320,7 @@ pub fn sync(h: *ChangeLog, io: Io, dir: []const u8, timeout: Io.Timeout) SyncErr
         const number = state.next_cookie;
         state.next_cookie += 1;
         var name_buffer: [64]u8 = undefined;
-        const name = std.mem.print(&name_buffer, "{s}{d}", .{ prefix, number }) catch unreachable; // glint-ignore: Z026 -- 30 + 20 bytes fit in 64
+        const name = std.mem.print(&name_buffer, "{s}{d}", .{ prefix, number }) catch aegis.assert.never("the 30-byte prefix and a u64's 20 digits fit in 64 bytes");
         const owned = try std.fs.path.join(h.gpa, &.{ dir, name });
         errdefer h.gpa.free(owned);
         try state.cookies.put(h.gpa, owned, 0);
@@ -334,11 +334,12 @@ pub fn sync(h: *ChangeLog, io: Io, dir: []const u8, timeout: Io.Timeout) SyncErr
     }
     const file = try Io.Dir.cwd().createFile(io, path, .{ .exclusive = true });
     file.close(io);
-    var present = true;
-    defer if (present) Io.Dir.cwd().deleteFile(io, path) catch {}; // glint-ignore: Z026 -- a file left by a failed wait is never handed out, and the next sync writes another
-    try h.waitFor(io, path, 1, deadline);
-    try Io.Dir.cwd().deleteFile(io, path);
-    present = false;
+    // The cookie is deleted whether its creation was seen or not; a wait that failed is
+    // returned before a delete that failed.
+    const created = h.waitFor(io, path, 1, deadline);
+    const deleted = Io.Dir.cwd().deleteFile(io, path);
+    try created;
+    try deleted;
     try h.waitFor(io, path, 2, deadline);
 }
 

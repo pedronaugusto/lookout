@@ -252,8 +252,7 @@ pub fn misread(b: *Budget, dir: []const u8, forget_real: bool, made_up: usize) A
     var buf: [32]u8 = undefined;
     comptime aegis.assert.invariant(prefix.len + std.fmt.count("{d}", .{std.math.maxInt(usize)}) <= buf.len, "prefix.len + std.fmt.count(\"{d}\", .{std.math.maxInt(usize)}) <= buf.len");
     for (0..made_up) |k| {
-        // glint-ignore: Z026 -- the assertion above sizes the buffer for the prefix and any usize
-        const name = std.mem.print(&buf, prefix ++ "{d}", .{k}) catch unreachable;
+        const name = std.mem.print(&buf, prefix ++ "{d}", .{k}) catch aegis.assert.never("the assertion above sizes the buffer for the prefix and any usize");
         try addName(b.gpa, names, name);
     }
 }

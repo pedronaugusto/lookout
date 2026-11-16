@@ -219,10 +219,7 @@ pub fn deinit(w: *Windows, io: Io) void {
     while (w.retiring != null) {
         w.retireEnded();
         if (w.retiring == null) break;
-        // glint-ignore: Z026 -- blocked: neither a timeout nor a cancel comes to an unbounded wait here
-        w.changes.wait(io, .none) catch |err| switch (err) {
-            error.Timeout, error.Canceled => {},
-        };
+        w.changes.wait(io, .none) catch aegis.assert.never("an unbounded wait under blocked cancelation has neither a timeout nor a cancel");
     }
     w.changes.deinit(io);
     w.* = undefined;

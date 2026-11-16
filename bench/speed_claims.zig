@@ -49,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
         for (backends) |backend| kept = try claim(&claims, backend) and kept;
     }
     try stdout.interface.flush();
+    if (claims.left_behind) |err| return err;
     if (!kept) return error.OverBudget;
 }
 
@@ -58,6 +59,8 @@ const Claims = struct {
     /// Each claim once, judged against no ceiling.
     smoke: bool,
     out: *Io.Writer = undefined,
+    /// The first fixture's scratch that could not be removed, which the run returns at its end.
+    left_behind: ?Io.Dir.DeleteTreeError = null,
 
     /// The longest a backend may take to come back with a change that
     /// happened while `poll` was already blocked, in milliseconds.
@@ -89,19 +92,21 @@ const Claims = struct {
             dir: Io.Dir,
             round: usize = 0,
             stamped: Io.Timestamp = .zero,
-            /// The write's failure, which the round returns after the join.
-            failed: ?Io.Dir.WriteFileError = null,
+            /// The write's failure, or the cancel that ended the writer before it, which the
+            /// round returns after the join.
+            failed: ?(Io.Dir.WriteFileError || Io.Cancelable) = null,
 
             fn run(self: *@This()) void {
                 // Long enough that the main thread is certainly blocked
                 // in the backend's wait rather than on its way there.
-                // glint-ignore: Z026 -- a cancel ends this writer before its write; the round it served is over
-                self.io.sleep(.fromMilliseconds(150), .awake) catch return;
+                self.io.sleep(.fromMilliseconds(150), .awake) catch |err| {
+                    self.failed = err;
+                    return;
+                };
                 var name: [32]u8 = undefined;
                 self.stamped = .now(self.io, .awake);
                 self.dir.writeFile(self.io, .{
-                    // glint-ignore: Z026 -- "w" and a usize's digits fit in 32 bytes
-                    .sub_path = std.mem.print(&name, "w{d}.txt", .{self.round}) catch unreachable,
+                    .sub_path = std.mem.print(&name, "w{d}.txt", .{self.round}) catch |err| std.debug.panic("\"w\", a usize's digits and \".txt\" fit in 32 bytes: {t}", .{err}),
                     .data = "x",
                 }) catch |err| {
                     self.failed = err;
@@ -323,6 +328,7 @@ const Fixture = struct {
     root: [:0]u8,
     watcher: Watcher,
     name: []u8,
+    claims: *Claims,
 
     fn init(c: *Claims, options: Watcher.Options) !Fixture {
         const cwd = Io.Dir.cwd();
@@ -334,15 +340,17 @@ const Fixture = struct {
         errdefer dir.close(c.io);
         const root = try dir.realPathFileAlloc(c.io, ".", c.gpa);
         errdefer c.gpa.free(root);
-        return .{ .io = c.io, .gpa = c.gpa, .dir = dir, .root = root, .watcher = try Watcher.init(c.gpa, c.io, options), .name = name };
+        return .{ .io = c.io, .gpa = c.gpa, .dir = dir, .root = root, .watcher = try Watcher.init(c.gpa, c.io, options), .name = name, .claims = c };
     }
 
     fn deinit(f: *Fixture) void {
         f.watcher.deinit(f.io);
         f.gpa.free(f.root);
         f.dir.close(f.io);
-        // glint-ignore: Z026 -- scratch under the cache; the next run names its own tree and the cache clean removes this one
-        Io.Dir.cwd().deleteTree(f.io, f.name) catch {};
+        // Scratch under the cache: the first one left behind fails the run when it ends.
+        Io.Dir.cwd().deleteTree(f.io, f.name) catch |err| {
+            if (f.claims.left_behind == null) f.claims.left_behind = err;
+        };
         f.gpa.free(f.name);
     }
 

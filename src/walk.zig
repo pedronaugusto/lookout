@@ -21,6 +21,7 @@ const Allocator = std.mem.Allocator;
 const assert = aegis.assert.invariant;
 const Io = std.Io;
 const stamp = @import("stamp.zig");
+const bulk = @import("bulk.zig");
 const shakedown = @import("shakedown");
 
 /// The metadata `treeWithMeta` reads with each name: what a later `lstat`
@@ -289,15 +290,6 @@ const Bulk = struct {
 
     const Listed = struct { name: []const u8, kind: Io.File.Kind, meta: ?Meta };
 
-    const AttrList = extern struct {
-        count: u16 = 5,
-        reserved: u16 = 0,
-        common: u32 = 0,
-        volume: u32 = 0,
-        directory: u32 = 0,
-        file: u32 = 0,
-        fork: u32 = 0,
-    };
     /// What each entry carries, in the order the buffer holds it.
     const name = 0x0000_0001;
     const objtype = 0x0000_0008;
@@ -310,21 +302,18 @@ const Bulk = struct {
     const file_datalength = 0x0000_0200;
     const meta_common = objtype | modtime | chgtime | fileid;
 
-    // glint-ignore: P007 -- boundary: libc's getattrlistbulk, declared as the system documents it, called only from this file
-    extern "c" fn getattrlistbulk(c_int, *AttrList, *anyopaque, usize, u64) c_int;
-
     fn init(dir: Io.Dir) Bulk {
         return .{ .fd = dir.handle };
     }
 
     fn next(b: *Bulk, _: Io) error{Unexpected}!?Listed {
         while (b.left == 0) {
-            var attrs: AttrList = .{
+            var attrs: bulk.AttrList = .{
                 .common = returned | err | name | meta_common,
                 .directory = dir_datalength,
                 .file = file_datalength,
             };
-            const count = getattrlistbulk(b.fd, &attrs, &b.buffer, b.buffer.len, 0);
+            const count = bulk.list(b.fd, &attrs, &b.buffer);
             if (count == 0) return null;
             if (count < 0) return error.Unexpected;
             b.left = @intCast(count);

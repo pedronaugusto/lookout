@@ -879,8 +879,7 @@ fn withoutStream(bytes: []u8, id: WatchId) usize {
     var kept: usize = 0;
     while (true) {
         const start = it.offset;
-        // glint-ignore: Z026 -- Sink appends only whole records, under the lock its callers hold
-        const record = (it.next() catch unreachable) orelse break;
+        const record = (it.next() catch aegis.assert.never("Sink appends only whole records, under the lock its callers hold")) orelse break;
         if (record.id == id) continue;
         const len = it.offset - start;
         @memmove(bytes[kept..][0..len], bytes[start..it.offset]);

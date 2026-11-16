@@ -29,6 +29,13 @@
       "reason": "asks each system how a directory names its files (getattrlist, the Linux casefold flag, GetFileInformationByHandleEx) and where a path really is (F_GETPATH)"
     },
     {
+      "file": "src/bulk.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "reads a directory's entries with their attributes in one call on macOS (getattrlistbulk), declared as the system documents it"
+    },
+    {
       "file": "src/trace.zig",
       "rules": [
         "P007"

@@ -459,11 +459,13 @@ fn consume(n: *Inotify, io: Io, bytes: []const u8, offset: *usize, batch: *Batch
         // The kernel refuses a read smaller than the next record rather
         // than returning half of one, so a tail this cannot decode is
         // not something it produced. What has been decoded is already
-        // reported; the rest of the buffer says nothing that can be
-        // acted on.
-        // glint-ignore: Z026 -- a tail the kernel did not write says nothing to act on; what was decoded is reported
+        // reported; whatever the tail held is taken as lost, so every
+        // directory is read again.
         const event = (it.next() catch |err| switch (err) {
-            error.TruncatedRecord => return,
+            error.TruncatedRecord => {
+                lost = true;
+                return;
+            },
         }) orelse return;
         if (event.mask & linux.IN.Q_OVERFLOW != 0) lost = true;
         try n.handle(io, event, batch);
