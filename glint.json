@@ -34,13 +34,6 @@
         "P007"
       ],
       "reason": "reads a directory's entries with their attributes in one call on macOS (getattrlistbulk), declared as the system documents it"
-    },
-    {
-      "file": "src/trace.zig",
-      "rules": [
-        "P007"
-      ],
-      "reason": "reads LOOKOUT_TRACE from the environment without an allocator: libc's getenv, or the Windows environment block the process parameters point at"
     }
   ]
 }

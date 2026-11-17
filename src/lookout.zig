@@ -962,7 +962,7 @@ pub const Watcher = struct {
 
             const Self = @This();
 
-            fn visit(m: Self, entry: walk.Entry) anyerror!walk.Step {
+            fn visit(m: Self, entry: walk.Entry) !walk.Step {
                 const parent = Io.Dir.path.dirname(entry.path) orelse m.p.target;
                 const policy = if (m.p.filter.isEmpty()) m.p.filter.policy else identity.read(m.io, parent).policy(m.p.identity_override);
                 if (m.p.filter.prunesPolicy(policy, m.p.target, entry.path)) return .over;

@@ -4,7 +4,7 @@ const wait = @import("../testing/timeout.zig");
 const Io = std.Io;
 const lookout = @import("../lookout.zig");
 const ms = @import("../testing/timeout.zig").ms;
-const LockProbe = @import("../testing/LockProbe.zig");
+const LockProbe = @import("shakedown").alloc.LockProbe;
 const checkpoint_format = @import("../Checkpoint/format.zig");
 const path_cmp = @import("../path.zig");
 const records = @import("fsevents/records.zig");
@@ -1090,7 +1090,7 @@ test "the polling thread never allocates while the delivery thread's lock is hel
     var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents });
     defer watcher.deinit(io);
     const f = &watcher.impl.fsevents;
-    var probe: LockProbe = .init(gpa, &f.sink.delivery);
+    var probe: LockProbe = .init(gpa, .guarded(&f.sink.delivery));
     f.gpa = probe.allocator();
     defer f.gpa = gpa;
     const id: WatchId = .fromRaw(7);
@@ -1106,6 +1106,6 @@ test "the polling thread never allocates while the delivery thread's lock is hel
     defer f.gpa.free(copy.bytes);
     try testing.expect(copy.bytes.len > 0);
     try access.drain(f, io, &watcher.batch);
-    try testing.expect(probe.calls > 0);
-    try testing.expectEqual(@as(usize, 0), probe.under_lock);
+    try testing.expect(probe.calls() > 0);
+    try testing.expectEqual(@as(usize, 0), probe.underLock());
 }

@@ -65,16 +65,17 @@ pub const Step = enum {
 
 /// Lists `root` and everything the visitor steps into, breadth first.
 ///
-/// `visit` is called once per entry and says whether to go in. The root
-/// itself is not visited: the caller already has it, and what it wants
-/// done with it differs at all three call sites.
+/// `visit`, a `fn (Context, Entry) E!Step`, is called once per entry and
+/// says whether to go in; the walk returns its errors, `E`, as they are,
+/// beside its own. The root itself is not visited: the caller already has
+/// it, and what it wants done with it differs at all three call sites.
 ///
 /// A directory that cannot be opened is skipped rather than failing the
 /// walk: it has gone again, or it is not ours to read, and either way
 /// its parent has already reported what it could.
 pub fn tree(
     comptime Context: type,
-    comptime visit: fn (Context, Entry) anyerror!Step,
+    comptime visit: anytype,
     gpa: Allocator,
     io: Io,
     root: []const u8,
@@ -91,7 +92,7 @@ pub fn tree(
 /// Elsewhere each entry is `lstat`ed.
 pub fn treeWithMeta(
     comptime Context: type,
-    comptime visit: fn (Context, Entry) anyerror!Step,
+    comptime visit: anytype,
     gpa: Allocator,
     io: Io,
     root: []const u8,
@@ -103,7 +104,7 @@ pub fn treeWithMeta(
 fn whole(
     comptime Context: type,
     comptime with_meta: bool,
-    comptime visit: fn (Context, Entry) anyerror!Step,
+    comptime visit: anytype,
     gpa: Allocator,
     io: Io,
     root: []const u8,
@@ -214,7 +215,7 @@ pub const Walker = struct {
         w: *Walker,
         comptime Context: type,
         comptime with_meta: bool,
-        comptime visit: fn (Context, Entry) anyerror!Step,
+        comptime visit: anytype,
         gpa: Allocator,
         io: Io,
         context: Context,
@@ -402,7 +403,7 @@ test "a walk visits every entry it is let into, and nothing below one it is not"
 
         const Self = @This();
 
-        fn visit(s: *Self, entry: Entry) anyerror!Step {
+        fn visit(s: *Self, entry: Entry) !Step {
             try s.names.append(s.gpa, try s.gpa.dupe(u8, entry.name));
             if (std.mem.eql(u8, entry.name, "skip")) return .over;
             return .into;
@@ -441,7 +442,7 @@ test "a walk of an empty or unreadable tree visits nothing and does not fail" {
         seen: usize = 0,
         const Self = @This();
 
-        fn visit(c: *Self, _: Entry) anyerror!Step {
+        fn visit(c: *Self, _: Entry) !Step {
             c.seen += 1;
             return .into;
         }
@@ -454,6 +455,27 @@ test "a walk of an empty or unreadable tree visits nothing and does not fail" {
     defer gpa.free(absent);
     try tree(*Count, Count.visit, gpa, io, absent, &count);
     try testing.expectEqual(@as(usize, 0), count.seen);
+}
+
+test "a walk fails with its visitor's own errors, as they are, never anyerror" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const Stopping = struct {
+        fn visit(_: void, _: Entry) error{Stopped}!Step {
+            return error.Stopped;
+        }
+    };
+    const Failed = @typeInfo(@TypeOf(tree(void, Stopping.visit, gpa, io, root, {}))).error_union.error_set;
+    const named = comptime for (@typeInfo(Failed).error_set.error_names orelse &.{}) |name| {
+        if (std.mem.eql(u8, name, "Stopped")) break true;
+    } else false;
+    try testing.expect(named);
+    try testing.expectError(error.Stopped, tree(void, Stopping.visit, gpa, io, root, {}));
 }
 
 test "a walk with metadata reads what lstat reads, across listing batches" {
@@ -477,7 +499,7 @@ test "a walk with metadata reads what lstat reads, across listing batches" {
         seen: usize = 0,
         const Self = @This();
 
-        fn visit(c: *Self, entry: Entry) anyerror!Step {
+        fn visit(c: *Self, entry: Entry) !Step {
             c.seen += 1;
             const stat = try Io.Dir.cwd().statFile(testing.io, entry.path, .{ .follow_symlinks = false });
             try testing.expectEqual(stat.kind, entry.kind);
@@ -493,7 +515,7 @@ test "a walk with metadata reads what lstat reads, across listing batches" {
 
 test "a failed walk frontier allocation releases its root" {
     const Visitor = struct {
-        fn visit(_: void, _: Entry) anyerror!Step {
+        fn visit(_: void, _: Entry) !Step {
             return .over;
         }
     };
@@ -518,7 +540,7 @@ test "a walker lists one directory a step, and says what it has yet to reach" {
 
     const Count = struct {
         seen: usize = 0,
-        fn visit(c: *@This(), _: Entry) anyerror!Step {
+        fn visit(c: *@This(), _: Entry) !Step {
             c.seen += 1;
             return .into;
         }
@@ -554,7 +576,7 @@ test "a directory not ours to read is skipped; a cancel, or a listing that fails
 
     const Count = struct {
         seen: usize = 0,
-        fn visit(c: *@This(), _: Entry) anyerror!Step {
+        fn visit(c: *@This(), _: Entry) !Step {
             c.seen += 1;
             return .into;
         }

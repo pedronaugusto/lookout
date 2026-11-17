@@ -131,9 +131,9 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "kqueue backend", .tokens = &.{"kevent"}, .owners = &.{"src/backend/Kqueue.zig"} },
     .{ .name = "windows backend", .tokens = &.{ "ReadDirectoryChangesW", "CreateFileW" }, .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**" } },
     .{ .name = "windows backend", .kind = .string, .tokens = &.{"kernel32"}, .owners = &.{ "src/backend/Windows.zig", "src/backend/windows/**", "src/filesystem.zig", "src/identity.zig" } },
-    // A test double is a shakedown `Clock`, `FaultIo` or `Layer`, never a
-    // copied `Io` vtable with a slot replaced: such a copy keeps its state in
-    // globals and cannot be stacked. The one exception is an allocator that
-    // looks at a lock when it is called, which shakedown's do not offer.
-    .{ .name = "test doubles on shakedown", .tokens = &.{ "vtable", "VTable" }, .owners = &.{"src/testing/LockProbe.zig"} },
+    // A test double is a shakedown `Clock`, `FaultIo`, `Layer` or allocator
+    // (`alloc.LockProbe` looks at a lock when it is called), never a copied
+    // vtable with a slot replaced: such a copy keeps its state in globals and
+    // cannot be stacked.
+    .{ .name = "test doubles on shakedown", .tokens = &.{ "vtable", "VTable" }, .owners = &.{} },
 };

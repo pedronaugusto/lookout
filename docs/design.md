@@ -322,8 +322,9 @@ that the loop absorbs.
   poll, a wake from a thread, stopping by flag) to its ceiling on every backend
   the target has, in ReleaseFast, on a quiet machine. CI runs each once with
   `--smoke` and judges nothing.
-- **Environment is read once, for a trace.** `LOOKOUT_TRACE` turns on one log
-  line per backend decision; unset, the cost is one relaxed load.
+- **No environment is read.** A program that names the `lookout` scope at the
+  debug level in `std_options.log_scope_levels` gets one `std.log` line per
+  backend decision; one that does not compiles them out.
 
 ## Left out, and why
 

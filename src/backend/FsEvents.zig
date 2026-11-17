@@ -1623,7 +1623,7 @@ fn adopt(
 
         const Self = @This();
 
-        fn visit(a: *Self, entry: walk.Entry) anyerror!walk.Step {
+        fn visit(a: *Self, entry: walk.Entry) !walk.Step {
             try a.f.budget.found(entry.dir, entry.name);
             if (a.stream.filter.prunes(a.stream.root, entry.path)) return .over;
             // Counted again from this walk only where the walk goes in.
@@ -1858,7 +1858,7 @@ fn refreshKnown(
 
         const Self = @This();
 
-        fn visit(r: *Self, entry: walk.Entry) anyerror!walk.Step {
+        fn visit(r: *Self, entry: walk.Entry) !walk.Step {
             if (r.stream.filter.prunes(r.stream.root, entry.path)) return .over;
             try r.f.remember(r.id, entry.path);
             return .into;
@@ -1928,7 +1928,7 @@ fn seedStep(f: *FsEvents, io: Io, id: WatchId) !bool {
 
         const Self = @This();
 
-        fn visit(s: *const Self, entry: walk.Entry) anyerror!walk.Step {
+        fn visit(s: *const Self, entry: walk.Entry) !walk.Step {
             try s.f.budget.found(entry.dir, entry.name);
             if (s.stream.filter.prunes(s.stream.root, entry.path)) {
                 trace.log("fsevents seed filtered {s}", .{entry.path});

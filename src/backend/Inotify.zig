@@ -228,7 +228,7 @@ pub fn add(
 
         const Self = @This();
 
-        fn visit(r: *Self, entry: walk.Entry) anyerror!walk.Step {
+        fn visit(r: *Self, entry: walk.Entry) !walk.Step {
             if (entry.kind != .directory) return .over;
             // An excluded directory costs no kernel watch and is not
             // descended into, so its whole tree costs nothing.
@@ -304,7 +304,7 @@ pub fn refilter(n: *Inotify, io: Io, id: WatchId, next: lookout.Filter, batch: *
 
             const Self = @This();
 
-            fn visit(r: *Self, entry: walk.Entry) anyerror!walk.Step {
+            fn visit(r: *Self, entry: walk.Entry) !walk.Step {
                 if (entry.kind != .directory or r.n.pruned(r.io, r.id, entry.path)) return .over;
                 if (!r.n.ownsPath(r.id, entry.path)) {
                     r.n.register(r.id, try r.n.gpa.dupe(u8, entry.path)) catch |err| switch (err) {
@@ -767,7 +767,7 @@ fn adopt(n: *Inotify, io: Io, id: WatchId, root: []const u8, batch: *Batch) cont
 
         const Self = @This();
 
-        fn visit(a: *Self, entry: walk.Entry) anyerror!walk.Step {
+        fn visit(a: *Self, entry: walk.Entry) !walk.Step {
             if (a.n.pruned(a.io, a.id, entry.path)) return .over;
             if (!a.n.excluded(a.io, a.id, entry.path)) {
                 try a.batch.push(a.n.gpa, a.io, a.id, entry.path, .created, .of(entry.kind));

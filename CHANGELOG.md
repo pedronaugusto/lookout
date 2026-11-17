@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `LOOKOUT_TRACE` is gone: lookout reads no environment. A program that wants a line per backend decision names the `lookout` scope at the debug level in `std_options.log_scope_levels` (`.{ .scope = .lookout, .level = .debug }`), and the lines go to `std.log` under it; a program that does not compiles them out, whatever its log level. The variable was read with libc's `getenv` or from the Windows environment block, a library reaching into the process for a switch that is the program's.
 - `Filter.allow` is a `*const Filter.Allow`, an interface the caller embeds in whatever answers: its `allowFn` is given the `Allow` it was asked through and finds its owner from it with `@fieldParentPtr`. `Filter.context` is gone. Before: `.filter = .{ .allow = rule, .context = &state }` with `fn rule(context: ?*anyopaque, path: []const u8) bool`. After: a struct holding `allowing: Filter.Allow = .{ .allowFn = rule }` beside its state, `.filter = .{ .allow = &owner.allowing }`, with `fn rule(allow: *const Filter.Allow, path: []const u8) bool`.
 - `Baseline.LoadError` takes the file's read errors from aegis's `own.ReadFileError` in place of std's `Io.Dir.ReadFileAllocError`, which adds `Io.File.StatError`'s: the length's read, a cancel there among them, is returned. A `switch` over every member names those too.
 - `Watcher.Stats` has a field without a default, `overflows` (below, Added): a `Stats` a caller builds itself names it.

@@ -284,7 +284,7 @@ fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8
 
         const Self = @This();
 
-        fn visit(f: Self, entry: walk.Entry) anyerror!walk.Step {
+        fn visit(f: Self, entry: walk.Entry) !walk.Step {
             if (f.l.prunes(f.io, entry.path)) return .over;
             switch (entry.kind) {
                 .directory => return .into,

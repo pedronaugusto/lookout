@@ -146,10 +146,9 @@ pub fn dev(b: *std.Build, tools: type) void {
     // CI wiring
     //=====================================================================
 
-    // What `LOOKOUT_TRACE` prints is at the info level. `bay bench` holds
-    // lookout's speed claims to their ceilings, on every backend the target
-    // has, in ReleaseFast on a quiet machine; `bay test` runs each once with
-    // `--smoke`, judging nothing.
+    // `bay bench` holds lookout's speed claims to their ceilings, on every
+    // backend the target has, in ReleaseFast on a quiet machine; `bay test`
+    // runs each once with `--smoke`, judging nothing.
     preflight.addCi(b, p, .{
         .tests = test_step,
         // The release tier fuzzes the readers' properties and runs the suite
