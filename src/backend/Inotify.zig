@@ -250,6 +250,7 @@ pub fn add(
     var registering: Registering = .{ .n = n, .io = io, .id = id, .batch = batch };
     walk.tree(*Registering, Registering.visit, n.gpa, io, abs_path, &registering) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
 }
@@ -322,6 +323,7 @@ pub fn refilter(n: *Inotify, io: Io, id: WatchId, next: lookout.Filter, batch: *
         var registering: Registering = .{ .n = n, .io = io, .id = id, .batch = batch };
         walk.tree(*Registering, Registering.visit, n.gpa, io, watch.root, &registering) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
             else => return error.Unexpected,
         };
     }
@@ -787,6 +789,7 @@ fn adopt(n: *Inotify, io: Io, id: WatchId, root: []const u8, batch: *Batch) cont
     var adopting: Adopting = .{ .n = n, .io = io, .id = id, .batch = batch };
     walk.tree(*Adopting, Adopting.visit, n.gpa, io, root, &adopting) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
 }

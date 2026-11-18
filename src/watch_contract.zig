@@ -2,6 +2,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Tree = @import("Tree.zig");
+const Links = @import("Links.zig");
 const types = @import("types.zig");
 const WatchId = types.WatchId;
 
@@ -52,8 +53,10 @@ pub const RefilterError = AddError || error{UnknownWatch};
 /// watcher is made, not when the program is compiled, so a set per
 /// backend would be a set per value of `Options.backend` — and every
 /// backend re-reads directories through `std.Io`, whose file-system
-/// errors carry `error.Canceled` anyway.
-pub const PollError = Tree.ScanError || Io.Cancelable || UnexpectedError;
+/// errors carry `error.Canceled` anyway. A followed link's errors are
+/// `Links.Error`: what looking at a link or where it leads failed with,
+/// past the link not being there.
+pub const PollError = Tree.ScanError || Io.Cancelable || Links.Error || UnexpectedError;
 
 /// A system call failed with a code lookout does not model. This is
 /// the escape hatch every backend shares, so that an error set is a

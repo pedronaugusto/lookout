@@ -133,6 +133,21 @@ pub const Link = struct {
     }
 };
 
+/// What a look at a link, or at where it leads, fails with past the
+/// link's absence: a cancel, a system fault, a refusal of another kind.
+/// Absence (`absent`) is handled where it is met.
+pub const Error = Allocator.Error || Io.Dir.StatFileError || names.CanonicalError || Identity.PathError;
+
+/// Whether `err` says what was looked at is not there to look at: gone,
+/// a step on the way not a directory, not this process's to read, a loop
+/// of links, a name too long.
+fn absent(err: Error) bool {
+    return switch (err) {
+        error.FileNotFound, error.NotDir, error.AccessDenied, error.SymLinkLoop, error.NameTooLong => true,
+        else => false,
+    };
+}
+
 fn prunes(l: *const Links, io: Io, subject: []const u8) bool {
     if (l.filter.isEmpty()) return false;
     const parent = std.Io.Dir.path.dirname(subject) orelse l.root;
@@ -142,8 +157,8 @@ fn prunes(l: *const Links, io: Io, subject: []const u8) bool {
 /// The links of the watch `owner`, of which none are followed yet. Null
 /// when the root's identity cannot be read: without it no link can be
 /// shown not to lead back.
-pub fn create(gpa: Allocator, io: Io, owner: WatchId, root: []const u8, filter: Filter, policy: names.Policy, identity_override: ?names.Policy, max: usize) Allocator.Error!?*Links {
-    const identity = identityOf(io, root) orelse return null;
+pub fn create(gpa: Allocator, io: Io, owner: WatchId, root: []const u8, filter: Filter, policy: names.Policy, identity_override: ?names.Policy, max: usize) Error!?*Links {
+    const identity = (try identityOf(io, root)) orelse return null;
     const l = try gpa.create(Links);
     errdefer gpa.destroy(l);
     const owned = try gpa.dupe(u8, root);
@@ -189,20 +204,20 @@ pub const Verdict = union(enum) {
 };
 
 /// Whether the link at `subject` leads somewhere this watch should follow.
-pub fn consider(l: *const Links, io: Io, subject: []const u8) Allocator.Error!Verdict {
-    const named = Io.Dir.cwd().statFile(io, subject, .{ .follow_symlinks = false }) catch return .none;
+pub fn consider(l: *const Links, io: Io, subject: []const u8) Error!Verdict {
+    const named = Io.Dir.cwd().statFile(io, subject, .{ .follow_symlinks = false }) catch |err| return if (absent(err)) .none else err;
     if (named.kind != .sym_link) return .none;
     if (l.find(subject)) |link| return .{ .followed = link };
     const real = names.canonical(l.gpa, io, subject) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // Leads nowhere, or nowhere this process may look.
-        else => return .idle,
+        else => return if (absent(err)) .idle else err,
     };
     defer l.gpa.free(real);
-    const reached = Io.Dir.cwd().statFile(io, real, .{}) catch return .idle;
+    const reached = Io.Dir.cwd().statFile(io, real, .{}) catch |err| return if (absent(err)) .idle else err;
     if (reached.kind != .directory) return .idle;
-    const identity = identityOf(io, real) orelse return .idle;
-    if (l.reaches(io, real, identity)) return .reached;
+    const identity = (try identityOf(io, real)) orelse return .idle;
+    if (try l.reaches(io, real, identity)) return .reached;
     if (l.full()) return .full;
     return .{ .follow = .{ .target = try l.gpa.dupe(u8, real), .identity = identity } };
 }
@@ -216,14 +231,14 @@ fn full(l: *const Links) bool {
 /// Whether the watch reaches the directory `target`, which is `identity`,
 /// already: it is the root or a followed link's target, it is below one
 /// of them, or it holds one of them -- a link back to an ancestor.
-fn reaches(l: *const Links, io: Io, target: []const u8, identity: Identity) bool {
+fn reaches(l: *const Links, io: Io, target: []const u8, identity: Identity) Error!bool {
     if (l.holds(identity)) return true;
     var above = std.Io.Dir.path.dirname(target);
     while (above) |dir| : (above = std.Io.Dir.path.dirname(dir)) {
-        if (l.holds(identityOf(io, dir) orelse continue)) return true;
+        if (l.holds((try identityOf(io, dir)) orelse continue)) return true;
     }
-    if (isAbove(io, identity, l.root)) return true;
-    for (l.followed.items) |link| if (isAbove(io, identity, link.target)) return true;
+    if (try isAbove(io, identity, l.root)) return true;
+    for (l.followed.items) |link| if (try isAbove(io, identity, link.target)) return true;
     return false;
 }
 
@@ -235,16 +250,16 @@ fn holds(l: *const Links, identity: Identity) bool {
 }
 
 /// The identity of what `path` names, symbolic links followed: device and
-/// inode, or volume and file id. Null when it cannot be read.
-fn identityOf(io: Io, path: []const u8) ?Identity {
-    return Identity.ofPath(io, Io.Dir.cwd(), path, .{}) catch null;
+/// inode, or volume and file id. Null when it is not there to read.
+fn identityOf(io: Io, path: []const u8) Error!?Identity {
+    return Identity.ofPath(io, Io.Dir.cwd(), path, .{}) catch |err| return if (absent(err)) null else err;
 }
 
 /// Whether the directory that is `identity` is a proper ancestor of `inner`.
-fn isAbove(io: Io, identity: Identity, inner: []const u8) bool {
+fn isAbove(io: Io, identity: Identity, inner: []const u8) Error!bool {
     var above = std.Io.Dir.path.dirname(inner);
     while (above) |dir| : (above = std.Io.Dir.path.dirname(dir)) {
-        const there = identityOf(io, dir) orelse continue;
+        const there = (try identityOf(io, dir)) orelse continue;
         if (there.eql(identity)) return true;
     }
     return false;
@@ -259,7 +274,7 @@ pub fn find(l: *const Links, subject: []const u8) ?*Link {
 /// Follows every link below `dir` that leads somewhere new, and every
 /// link below the directories those lead to. `dir` is spelled as the
 /// watch reaches it.
-pub fn followBelow(l: *Links, io: Io, host: *Host, batch: *Batch, dir: []const u8) Allocator.Error!void {
+pub fn followBelow(l: *Links, io: Io, host: *Host, batch: *Batch, dir: []const u8) Error!void {
     var found: std.ArrayList([]u8) = .empty;
     defer {
         for (found.items) |item| l.gpa.free(item);
@@ -276,7 +291,7 @@ pub fn followBelow(l: *Links, io: Io, host: *Host, batch: *Batch, dir: []const u
 /// Appends every link below `dir` to `found`, leaving out what the filter
 /// prunes. Links are listed, not walked through: `followBelow` decides
 /// which to go into.
-fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8)) Allocator.Error!void {
+fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8)) Error!void {
     const Finding = struct {
         l: *const Links,
         found: *std.ArrayList([]u8),
@@ -300,6 +315,7 @@ fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8
     };
     walk.tree(Finding, Finding.visit, l.gpa, io, dir, Finding{ .l = l, .found = found, .io = io }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         // gone again, or not ours to read: nothing to follow there
         else => {},
     };
@@ -313,7 +329,7 @@ fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8
 /// is a hole in the watch and is reported `Kind.unwatched`. A link that
 /// leads to no directory, or to one the watch reaches another way, is
 /// remembered as idle.
-pub fn follow(l: *Links, io: Io, host: *Host, batch: *Batch, subject: []const u8) Allocator.Error!?*Link {
+pub fn follow(l: *Links, io: Io, host: *Host, batch: *Batch, subject: []const u8) Error!?*Link {
     if (l.prunes(io, subject)) return null;
     switch (try l.consider(io, subject)) {
         .none => return null,
@@ -421,24 +437,24 @@ fn wake(l: *Links, subject: []const u8, below: bool) void {
 
 /// Whether a followed link still leads where it was followed to, and is
 /// still something the watch is about.
-fn stands(l: *const Links, io: Io, link: *const Link) bool {
+fn stands(l: *const Links, io: Io, link: *const Link) Error!bool {
     if (l.prunes(io, link.path)) return false;
-    const named = Io.Dir.cwd().statFile(io, link.path, .{ .follow_symlinks = false }) catch return false;
+    const named = Io.Dir.cwd().statFile(io, link.path, .{ .follow_symlinks = false }) catch |err| return if (absent(err)) false else err;
     if (named.kind != .sym_link) return false;
-    const now = identityOf(io, link.path) orelse return false;
+    const now = (try identityOf(io, link.path)) orelse return false;
     return now.eql(link.identity);
 }
 
 /// Looks again at the followed links at `subject`, or at and below it:
 /// one that is gone, or leads somewhere else now, is let go with what it
 /// led to, and followed again where it leads now. Whether any went.
-fn recheck(l: *Links, io: Io, host: *Host, batch: *Batch, subject: []const u8, below: bool) Allocator.Error!bool {
+fn recheck(l: *Links, io: Io, host: *Host, batch: *Batch, subject: []const u8, below: bool) Error!bool {
     var went = false;
     var i: usize = 0;
     while (i < l.followed.items.len) {
         const link = l.followed.items[i];
         const named = if (below) path_cmp.within(subject, link.path) else path_cmp.eql(subject, link.path);
-        if (!named or l.stands(io, link)) {
+        if (!named or try l.stands(io, link)) {
             i += 1;
             continue;
         }
@@ -455,7 +471,7 @@ fn recheck(l: *Links, io: Io, host: *Host, batch: *Batch, subject: []const u8, b
 }
 
 /// Follows, where they can be now, the idle links.
-fn retry(l: *Links, io: Io, host: *Host, batch: *Batch) Allocator.Error!void {
+fn retry(l: *Links, io: Io, host: *Host, batch: *Batch) Error!void {
     var waited = l.idle;
     l.idle = .empty;
     defer {
@@ -471,7 +487,7 @@ fn retry(l: *Links, io: Io, host: *Host, batch: *Batch) Allocator.Error!void {
 /// appeared, links that changed or went, and directories that arrived
 /// with links in them. `notes` may hold other watches' notes, which are
 /// passed over.
-pub fn settle(l: *Links, io: Io, host: *Host, batch: *Batch, notes: []const Batch.Note) Allocator.Error!void {
+pub fn settle(l: *Links, io: Io, host: *Host, batch: *Batch, notes: []const Batch.Note) Error!void {
     errdefer l.stale = true;
     if (l.stale) {
         l.stale = false;
@@ -487,7 +503,7 @@ pub fn settle(l: *Links, io: Io, host: *Host, batch: *Batch, notes: []const Batc
 
 /// Looks at every link again: the ones followed, the idle ones, and
 /// every link anywhere under the root.
-pub fn refresh(l: *Links, io: Io, host: *Host, batch: *Batch) Allocator.Error!void {
+pub fn refresh(l: *Links, io: Io, host: *Host, batch: *Batch) Error!void {
     errdefer l.stale = true;
     _ = try l.recheck(io, host, batch, l.root, true);
     try l.retry(io, host, batch);
@@ -495,7 +511,7 @@ pub fn refresh(l: *Links, io: Io, host: *Host, batch: *Batch) Allocator.Error!vo
 }
 
 /// What one change means for the links. Whether a followed link went.
-fn noted(l: *Links, io: Io, host: *Host, batch: *Batch, item: Batch.Note) Allocator.Error!bool {
+fn noted(l: *Links, io: Io, host: *Host, batch: *Batch, item: Batch.Note) Error!bool {
     switch (item.kind) {
         // Retargeting a link in place shows as a change to its metadata
         // on the backends that compare listings.
@@ -511,7 +527,7 @@ fn noted(l: *Links, io: Io, host: *Host, batch: *Batch, item: Batch.Note) Alloca
         .removed, .created, .renamed => {
             l.wake(item.path, true);
             const went = try l.recheck(io, host, batch, item.path, true);
-            const named = Io.Dir.cwd().statFile(io, item.path, .{ .follow_symlinks = false }) catch return went;
+            const named = Io.Dir.cwd().statFile(io, item.path, .{ .follow_symlinks = false }) catch |err| return if (absent(err)) went else err;
             switch (named.kind) {
                 .sym_link => if (try l.follow(io, host, batch, item.path)) |link| try l.followBelow(io, host, batch, link.path),
                 .directory => try l.followBelow(io, host, batch, item.path),
@@ -616,8 +632,8 @@ test "one directory has one identity by every name, and another has its own" {
     const missing = try std.Io.Dir.path.join(gpa, &.{ root, "missing" });
     defer gpa.free(missing);
 
-    const first = identityOf(io, one).?;
-    try std.testing.expect(first.eql(identityOf(io, again).?));
-    try std.testing.expect(!first.eql(identityOf(io, two).?));
-    try std.testing.expect(identityOf(io, missing) == null);
+    const first = (try identityOf(io, one)).?;
+    try std.testing.expect(first.eql((try identityOf(io, again)).?));
+    try std.testing.expect(!first.eql((try identityOf(io, two)).?));
+    try std.testing.expect(try identityOf(io, missing) == null);
 }

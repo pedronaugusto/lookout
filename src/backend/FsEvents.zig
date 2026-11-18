@@ -1639,6 +1639,7 @@ fn adopt(
     var adopting: Adopting = .{ .f = f, .io = io, .batch = batch, .id = id, .stream = stream };
     walk.tree(*Adopting, Adopting.visit, f.gpa, io, root, &adopting) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
 }
@@ -1867,6 +1868,7 @@ fn refreshKnown(
     var refreshing: Refreshing = .{ .f = f, .id = id, .stream = stream };
     walk.tree(*Refreshing, Refreshing.visit, f.gpa, io, root, &refreshing) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     };
 }
