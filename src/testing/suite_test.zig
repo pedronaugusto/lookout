@@ -2846,7 +2846,11 @@ test "a watch that cannot cover a subtree says so instead of going quiet" {
         var f = try Fixture.init(backend);
         defer f.deinit();
         const io = std.testing.io;
-        try f.tmp.dir.createDir(io, "closed", @fromBackingInt(@intCast(0o000)));
+        // Made open, then closed: a directory created with no permissions
+        // at all is one a filesystem that looks at what it made (FreeBSD's
+        // 9p client on a host's share) may refuse to have created.
+        try f.tmp.dir.createDir(io, "closed", .default_dir);
+        try f.tmp.dir.setFilePermissions(io, "closed", .fromMode(0o000), .{});
         // Put it back before the fixture tries to delete the tree.
         defer f.tmp.dir.setFilePermissions(io, "closed", .default_dir, .{}) catch {};
 
