@@ -53,7 +53,7 @@ test "FSEvents access failures preserve known paths and report an incomplete ans
     try seeded(&watcher, io);
     const f = &watcher.impl.fsevents;
     const stream = f.streams.get(id).?;
-    inline for (.{ error.AccessDenied, error.Canceled, error.SystemResources }) |failure| {
+    inline for (.{ error.AccessDenied, error.SystemResources }) |failure| {
         const fio = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{.{
             .at = .{ .nth = .{ .call = .dirStatFile, .n = 1, .path = .{ .suffix = "kept" } } },
             .fault = .{ .fail = failure },
@@ -61,7 +61,7 @@ test "FSEvents access failures preserve known paths and report an incomplete ans
         }} });
         defer fio.deinit();
         const failing = fio.io();
-        try testing.expect(!records.pairs(
+        try testing.expect(!try records.pairs(
             .{ .id = id, .path = kept, .flags = flag.item_renamed, .event = 0 },
             .{ .id = id, .path = root, .flags = flag.item_renamed, .event = 0 },
             Asking{ .f = f, .io = failing },
@@ -73,6 +73,23 @@ test "FSEvents access failures preserve known paths and report an incomplete ans
         try testing.expect(f.known.contains(.{ .id = id, .path = kept }));
         watcher.batch.reset(gpa);
     }
+    // A cancel is no answer about the path: it reaches the caller, and
+    // nothing is reported or forgotten.
+    const fio = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{.{
+        .at = .{ .nth = .{ .call = .dirStatFile, .n = 1, .path = .{ .suffix = "kept" } } },
+        .fault = .{ .fail = error.Canceled },
+        .times = 0,
+    }} });
+    defer fio.deinit();
+    const canceling = fio.io();
+    try testing.expectError(error.Canceled, records.pairs(
+        .{ .id = id, .path = kept, .flags = flag.item_renamed, .event = 0 },
+        .{ .id = id, .path = root, .flags = flag.item_renamed, .event = 0 },
+        Asking{ .f = f, .io = canceling },
+    ));
+    try testing.expectError(error.Canceled, access.reportPlain(f, canceling, &watcher.batch, .{ .id = id, .path = kept, .flags = flag.item_removed, .event = 0 }, stream));
+    try testing.expectEqual(@as(usize, 0), watcher.batch.events.items.len);
+    try testing.expect(f.known.contains(.{ .id = id, .path = kept }));
 }
 
 test "the flags that say the system lost track are one overflow, and the watch goes on" {

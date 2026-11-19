@@ -221,16 +221,16 @@ fn fuzzDelivery(_: void, c: *Case) !void {
             // The matching is a relation between two records and not a
             // question one of them answers about the other.
             try testing.expectEqual(
-                fsevents_records.pairs(a, b, fake),
-                fsevents_records.pairs(b, a, fake),
+                try fsevents_records.pairs(a, b, fake),
+                try fsevents_records.pairs(b, a, fake),
             );
         }
     }
     for (delivered.items, 0..) |record, at| {
-        const partner = fsevents_records.partnerOf(record, delivered.items, used, at + 1, fake) orelse
+        const partner = (try fsevents_records.partnerOf(record, delivered.items, used, at + 1, fake)) orelse
             continue;
         try testing.expect(partner > at);
-        try testing.expect(fsevents_records.pairs(record, delivered.items[partner], fake));
+        try testing.expect(try fsevents_records.pairs(record, delivered.items[partner], fake));
     }
 }
 
@@ -273,14 +273,14 @@ fn fuzzCarry(_: void, c: *Case) !void {
         defer gpa.free(used);
         @memset(used, false);
 
-        if (pairing.take(delivered.items, used, fake)) |taken| {
+        if (try pairing.take(delivered.items, used, fake)) |taken| {
             defer gpa.free(taken.half.path);
             try testing.expectEqual(@as(?fsevents_records.Half, null), pairing.held);
             if (taken.partner) |at| {
                 try testing.expect(at < delivered.items.len);
                 try testing.expect(used[at]);
-                try testing.expect(fsevents_records.pairs(taken.half.record(), delivered.items[at], fake));
-                try testing.expect(fsevents_records.pairs(delivered.items[at], taken.half.record(), fake));
+                try testing.expect(try fsevents_records.pairs(taken.half.record(), delivered.items[at], fake));
+                try testing.expect(try fsevents_records.pairs(delivered.items[at], taken.half.record(), fake));
                 joined += 1;
             } else {
                 alone += 1;
@@ -290,7 +290,7 @@ fn fuzzCarry(_: void, c: *Case) !void {
         for (delivered.items, 0..) |record, at| {
             if (used[at]) continue;
             if (!record.renamed() or !fake.wanted(record.id, record.path)) continue;
-            if (fsevents_records.partnerOf(record, delivered.items, used, at + 1, fake)) |partner| {
+            if ((try fsevents_records.partnerOf(record, delivered.items, used, at + 1, fake))) |partner| {
                 used[partner] = true;
                 continue;
             }
@@ -328,7 +328,7 @@ pub const Fake = struct {
         return f.bit(subject, 1) != 0;
     }
 
-    pub fn exists(f: Fake, subject: []const u8) bool {
+    pub fn exists(f: Fake, subject: []const u8) std.Io.Cancelable!?bool {
         @disableInstrumentation();
         return f.bit(subject, 2) != 0;
     }

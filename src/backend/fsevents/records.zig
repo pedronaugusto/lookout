@@ -14,6 +14,7 @@
 //! a decoder that exists only on macOS can only be fuzzed there.
 
 const std = @import("std");
+const Io = std.Io;
 const assert = aegis.assert.invariant;
 
 const lookout = @import("../../types.zig");
@@ -168,22 +169,23 @@ fn encodeHeader(out: []u8, id: WatchId, flags: u32, event: u64, length: usize) v
 /// the filter excludes is still the other half of a rename, and which
 /// half the caller hears about is decided on the pair.
 ///
-/// Symmetric: every test it makes is made of both records.
-pub fn pairs(a: Record, b: Record, ctx: anytype) bool {
-    return pairsKnowing(a, ctx.exists(a.path), b, ctx);
+/// Symmetric: every test it makes is made of both records. A cancel while
+/// asking is the caller's, not an answer.
+pub fn pairs(a: Record, b: Record, ctx: anytype) Io.Cancelable!bool {
+    return pairsKnowing(a, try ctx.exists(a.path), b, ctx);
 }
 
 /// `pairs`, for a caller that already knows whether `a` is there.
 ///
 /// The answer costs a `stat`, and `partnerOf` asks it of one record
 /// against many.
-fn pairsKnowing(a: Record, a_exists: ?bool, b: Record, ctx: anytype) bool {
+fn pairsKnowing(a: Record, a_exists: ?bool, b: Record, ctx: anytype) Io.Cancelable!bool {
     if (a.id != b.id) return false;
     if (!a.renamed() or !b.renamed()) return false;
     if (path_cmp.eql(a.path, b.path)) return false;
     if (!ctx.wanted(a.id, a.path) or !ctx.wanted(b.id, b.path)) return false;
     const there = a_exists orelse return false;
-    const other: ?bool = ctx.exists(b.path);
+    const other: ?bool = try ctx.exists(b.path);
     return (other orelse return false) != there;
 }
 
@@ -198,13 +200,13 @@ pub fn partnerOf(
     used: []const bool,
     from: usize,
     ctx: anytype,
-) ?usize {
+) Io.Cancelable!?usize {
     assert(used.len == records.len, "used.len == records.len");
     assert(from <= records.len, "from <= records.len");
-    const subject_exists = ctx.exists(subject.path);
+    const subject_exists = try ctx.exists(subject.path);
     for (records[from..], from..) |record, at| {
         if (used[at]) continue;
-        if (pairsKnowing(subject, subject_exists, record, ctx)) return at;
+        if (try pairsKnowing(subject, subject_exists, record, ctx)) return at;
     }
     return null;
 }
@@ -250,12 +252,13 @@ pub const Pairing = struct {
     /// held.
     ///
     /// The half comes back either way, because the caller has it to
-    /// report and its path to free.
-    pub fn take(p: *Pairing, records: []const Record, used: []bool, ctx: anytype) ?Taken {
+    /// report and its path to free. A cancel while looking leaves the half
+    /// held and nothing struck off.
+    pub fn take(p: *Pairing, records: []const Record, used: []bool, ctx: anytype) Io.Cancelable!?Taken {
         const half = p.held orelse return null;
+        const partner = try partnerOf(half.record(), records, used, 0, ctx);
         p.held = null;
-        const at = partnerOf(half.record(), records, used, 0, ctx) orelse
-            return .{ .half = half, .partner = null };
+        const at = partner orelse return .{ .half = half, .partner = null };
         used[at] = true;
         return .{ .half = half, .partner = at };
     }
@@ -274,12 +277,15 @@ const testing = std.testing;
 /// A file system and a scope, answered from a list.
 const Fake = struct {
     present: []const []const u8,
+    /// Whether every question is canceled.
+    canceled: bool = false,
 
     fn wanted(_: Fake, _: WatchId, subject: []const u8) bool {
         return !std.mem.startsWith(u8, subject, "!");
     }
 
-    fn exists(f: Fake, subject: []const u8) bool {
+    fn exists(f: Fake, subject: []const u8) Io.Cancelable!?bool {
+        if (f.canceled) return error.Canceled;
         for (f.present) |p| if (std.mem.eql(u8, p, subject)) return true;
         return false;
     }
@@ -318,16 +324,16 @@ test "the halves of a rename are the two that disagree about existing" {
     const old = made(1, flag.item_renamed, "/a/old");
     const new = made(1, flag.item_renamed, "/a/new");
 
-    try testing.expect(pairs(old, new, fake));
-    try testing.expect(pairs(new, old, fake));
+    try testing.expect(try pairs(old, new, fake));
+    try testing.expect(try pairs(new, old, fake));
 
     // Both gone: renamed and then deleted, and there is nothing to pair.
     const gone = made(1, flag.item_renamed, "/a/gone");
-    try testing.expect(!pairs(old, gone, fake));
+    try testing.expect(!try pairs(old, gone, fake));
     // A different watch's record is not this watch's other half.
-    try testing.expect(!pairs(made(2, flag.item_renamed, "/a/new"), old, fake));
+    try testing.expect(!try pairs(made(2, flag.item_renamed, "/a/new"), old, fake));
     // Neither is a record that is not a rename at all.
-    try testing.expect(!pairs(made(1, flag.item_created, "/a/new"), old, fake));
+    try testing.expect(!try pairs(made(1, flag.item_created, "/a/new"), old, fake));
 }
 
 test "a half waits for the delivery that brings its partner" {
@@ -344,11 +350,24 @@ test "a half waits for the delivery that brings its partner" {
 
     const records: []const Record = &.{made(1, flag.item_renamed, "/a/new")};
     var used = [_]bool{false};
-    const taken = pairing.take(records, &used, fake).?;
+    const taken = (try pairing.take(records, &used, fake)).?;
     try testing.expectEqual(@as(?usize, 0), taken.partner);
     try testing.expect(used[0]);
     try testing.expectEqual(@as(?Half, null), pairing.held);
-    try testing.expectEqual(@as(?Pairing.Taken, null), pairing.take(records, &used, fake));
+    try testing.expectEqual(@as(?Pairing.Taken, null), try pairing.take(records, &used, fake));
+}
+
+test "a cancel while looking for a held half's partner leaves it held" {
+    var pairing: Pairing = .{};
+    var old: [6]u8 = "/a/old".*;
+    _ = pairing.carry(.{ .id = .fromRaw(1), .path = &old, .flags = flag.item_renamed, .event = 1 });
+
+    const records: []const Record = &.{made(1, flag.item_renamed, "/a/new")};
+    var used = [_]bool{false};
+    try testing.expectError(error.Canceled, pairing.take(records, &used, Fake{ .present = &.{"/a/new"}, .canceled = true }));
+    try testing.expectEqualStrings("/a/old", pairing.held.?.path);
+    try testing.expect(!used[0]);
+    try testing.expectError(error.Canceled, pairs(made(1, flag.item_renamed, "/a/old"), records[0], Fake{ .present = &.{}, .canceled = true }));
 }
 
 test "a half whose partner never comes is given back alone" {
@@ -360,7 +379,7 @@ test "a half whose partner never comes is given back alone" {
 
     const records: []const Record = &.{made(1, flag.item_modified, "/a/other")};
     var used = [_]bool{false};
-    const taken = pairing.take(records, &used, fake).?;
+    const taken = (try pairing.take(records, &used, fake)).?;
     try testing.expectEqual(@as(?usize, null), taken.partner);
     try testing.expectEqualStrings("/a/old", taken.half.path);
 }

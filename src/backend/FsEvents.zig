@@ -663,7 +663,7 @@ pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested
             try before.put(f.gpa, subject, {});
             if (!stream.keeps(subject)) continue;
             if (f.known.contains(.{ .id = id, .path = subject })) continue;
-            const there = pathExists(io, subject) orelse {
+            const there = (try pathExists(io, subject)) orelse {
                 try batch.deferChange(f.gpa, io, id, stream.root, .overflow, null, stream.rootTarget());
                 continue;
             };
@@ -1232,7 +1232,7 @@ fn everyDirectory(_: void, _: []const u8) bool {
 /// Joins the half held from the last drain to its partner in this one,
 /// or gives up on it.
 fn rejoin(f: *FsEvents, io: Io, batch: *Batch, delivered: []const Record, used: []bool) contract.PollError!void {
-    const taken = f.pairing.take(delivered, used, Asking{ .f = f, .io = io }) orelse return;
+    const taken = (try f.pairing.take(delivered, used, Asking{ .f = f, .io = io })) orelse return;
     errdefer {
         f.pairing.held = taken.half;
         if (taken.partner) |at| used[at] = false;
@@ -1247,7 +1247,7 @@ fn reportTaken(f: *FsEvents, io: Io, batch: *Batch, delivered: []const Record, t
     const stream = f.streams.get(taken.half.id) orelse return f.reportHalf(io, batch, taken.half);
 
     const partner = delivered[at];
-    const there = pathExists(io, partner.path) orelse return f.incomplete(io, batch, stream);
+    const there = (try pathExists(io, partner.path)) orelse return f.incomplete(io, batch, stream);
     if (there) {
         try f.joined(io, batch, stream, partner.path, taken.half.path, partner.target());
     } else {
@@ -1276,7 +1276,7 @@ pub const Asking = struct {
         return stream.wants(subject);
     }
 
-    pub fn exists(a: Asking, subject: []const u8) ?bool {
+    pub fn exists(a: Asking, subject: []const u8) Io.Cancelable!?bool {
         return pathExists(a.io, subject);
     }
 };
@@ -1340,15 +1340,15 @@ fn report(
         return;
     }
 
-    if (f.unchangedInitial(io, record) orelse return f.incomplete(io, batch, stream)) return;
+    if ((try f.unchangedInitial(io, record)) orelse return f.incomplete(io, batch, stream)) return;
 
     // A rename is paired before the filter is asked, because the filter
     // is about the two names and the pair is one change: see `joined`.
     if (record.renamed()) {
-        if (records.partnerOf(record, delivered, used, at + 1, Asking{ .f = f, .io = io })) |partner_at| {
+        if (try records.partnerOf(record, delivered, used, at + 1, Asking{ .f = f, .io = io })) |partner_at| {
             used[partner_at] = true;
             const partner = delivered[partner_at];
-            const there = pathExists(io, partner.path) orelse return f.incomplete(io, batch, stream);
+            const there = (try pathExists(io, partner.path)) orelse return f.incomplete(io, batch, stream);
             if (there) {
                 try f.joined(io, batch, stream, partner.path, record.path, partner.target());
             } else {
@@ -1418,7 +1418,7 @@ fn reportPlain(
     const there = if (gone)
         false
     else if (needsExistenceCheck(record.flags, seen))
-        pathExists(io, record.path) orelse return f.incomplete(io, batch, stream)
+        (try pathExists(io, record.path)) orelse return f.incomplete(io, batch, stream)
     else
         true;
 
@@ -1794,7 +1794,9 @@ fn rememberInitial(f: *FsEvents, io: Io, stream: *const Stream, subject: []const
 
 /// Old replay flags on an unchanged seeded path say nothing new. A missing
 /// path or changed inode, contents or metadata still goes through reporting.
-fn unchangedInitial(f: *FsEvents, io: Io, record: Record) ?bool {
+/// Null when the path cannot be looked at; a cancel is the caller's, not an
+/// answer about the path.
+fn unchangedInitial(f: *FsEvents, io: Io, record: Record) Io.Cancelable!?bool {
     const entry = f.known.getPtr(.{ .id = record.id, .path = record.path }) orelse return false;
     const initial = entry.* orelse return false;
     const stat = Io.Dir.cwd().statFile(io, record.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
@@ -1802,6 +1804,7 @@ fn unchangedInitial(f: *FsEvents, io: Io, record: Record) ?bool {
             entry.* = null;
             return false;
         },
+        error.Canceled => return error.Canceled,
         else => return null,
     };
     if (std.meta.eql(initial, Initial.of(stat))) return true;
@@ -2027,10 +2030,12 @@ fn realNow() stamp.Stamp {
     return stampOf(now);
 }
 
-/// Unknown is distinct from absent: it cannot decide a rename or removal.
-fn pathExists(io: Io, subject: []const u8) ?bool {
+/// Unknown is distinct from absent: it cannot decide a rename or removal. A
+/// cancel is neither: it is the caller's.
+fn pathExists(io: Io, subject: []const u8) Io.Cancelable!?bool {
     _ = Io.Dir.cwd().statFile(io, subject, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return false,
+        error.Canceled => return error.Canceled,
         else => return null,
     };
     return true;
