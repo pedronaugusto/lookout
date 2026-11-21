@@ -142,11 +142,7 @@ pub const Node = struct {
 };
 
 /// A directory handle with one owner, closed once.
-pub const OwnedDir = aegis.own.OwnedIo(Io.Dir, closeDir);
-
-fn closeDir(handle: *Io.Dir, io: Io) void {
-    handle.close(io);
-}
+pub const OwnedDir = aegis.own.Dir;
 
 /// Errors adding a watch can return.
 pub const AddError = Allocator.Error || Io.Dir.OpenError || Io.Dir.StatFileError ||
