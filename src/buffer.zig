@@ -41,23 +41,24 @@ pub const Bounds = struct {
 /// of four, because both kernels align the records they write to a
 /// 32-bit word and measure the buffer in whole ones.
 pub fn clamp(asked: Bytes, bounds: Bounds) Bytes {
-    // Clamping and rounding are one expression on a single kind of number,
-    // checked against the bounds on both sides: the units have no minimum,
-    // maximum or remainder to offer, so the arithmetic reads the raw sizes.
-    const min = bounds.min.raw();
-    const max = bounds.max.raw();
-    const default = bounds.default.raw();
-    assert(min <= default, "min <= default");
-    assert(default <= max, "default <= max");
+    assert(bounds.min.compare(bounds.default) != .gt, "min <= default");
+    assert(bounds.default.compare(bounds.max) != .gt, "default <= max");
     // A whole number of words at the floor, so rounding down never
     // takes a size below it.
-    assert(min % @alignOf(u32) == 0, "min % @alignOf(u32) == 0");
-    const wanted = if (asked == unset) default else asked.raw();
-    const bounded = std.math.clamp(wanted, min, max);
-    const size = bounded - bounded % @alignOf(u32);
-    assert(size >= min, "size >= min");
-    assert(size <= max, "size <= max");
-    return .fromRaw(size);
+    assert(wholeWords(bounds.min).eql(bounds.min), "min is whole words");
+    const wanted = if (asked.eql(unset)) bounds.default else asked;
+    const bounded = if (wanted.compare(bounds.min) == .lt) bounds.min else if (wanted.compare(bounds.max) == .gt) bounds.max else wanted;
+    const size = wholeWords(bounded);
+    assert(size.compare(bounds.min) != .lt, "size >= min");
+    assert(size.compare(bounds.max) != .gt, "size <= max");
+    return size;
+}
+
+/// `size` rounded down to a whole number of 32-bit words.
+fn wholeWords(size: Bytes) Bytes {
+    const word = @alignOf(u32);
+    const words = size.divTrunc(word) catch aegis.assert.never("a word is not zero bytes");
+    return words.mul(word) catch aegis.assert.never("the whole words of a size are no more than it");
 }
 
 const testing = std.testing;

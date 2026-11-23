@@ -1109,14 +1109,14 @@ fn expectLinked(tree: *const Tree) !void {
     const testing = std.testing;
     try testing.expectEqual(tree.nodes.count(), tree.index.count());
     for (tree.nodes.keys(), tree.nodes.values()) |id, node| {
-        try testing.expectEqual(id, tree.index.get(.{ .watch = node.watch, .path = node.path }).?);
+        try testing.expect(id.eql(tree.index.get(.{ .watch = node.watch, .path = node.path }).?));
         if (node.parent) |parent| {
             try testing.expect(tree.nodes.get(parent).?.children.contains(id));
             try testing.expect(path_cmp.eql(std.Io.Dir.path.dirname(node.path).?, tree.nodes.get(parent).?.path));
         } else {
             try testing.expect(path_cmp.eql(node.path, tree.watchRoot(node.watch)));
         }
-        for (node.children.keys()) |child| try testing.expectEqual(id, tree.nodes.get(child).?.parent.?);
+        for (node.children.keys()) |child| try testing.expect(id.eql(tree.nodes.get(child).?.parent.?));
     }
 }
 
