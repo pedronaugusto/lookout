@@ -28,7 +28,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .windows });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
     const w = &watcher.impl.windows;
 
     // The read that is outstanding is taken back first, so that the
@@ -38,8 +38,9 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     try w.overflowForTest(io, id);
 
     var overflows: usize = 0;
-    var deadline: wait.Deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and overflows == 0) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running() and overflows == 0) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind != .overflow) continue;
             try testing.expectEqual(id, event.id);
@@ -48,7 +49,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
             overflows += 1;
         }
     }
-    if (overflows == 0) return wait.missed(io, &watcher);
+    if (overflows == 0) return wait.missed(&watcher);
     try testing.expectEqual(@as(usize, 1), overflows);
 
     // Re-armed: the watch is still held, and the next change is read.
@@ -57,13 +58,14 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     const after = try std.Io.Dir.path.join(gpa, &.{ root, "after.txt" });
     defer gpa.free(after);
     var found = false;
-    deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and !found) {
+    pace.end();
+    pace = try .start(&watcher);
+    while (try pace.running() and !found) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
     }
-    try wait.seen(io, &watcher, found);
+    try wait.seen(&watcher, found);
 }
 
 test "a lost read reads the entry counts again, so the budget holds after it" {
@@ -86,46 +88,49 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .windows, .max_dir_entries = 3 });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
     const w = &watcher.impl.windows;
 
     for ([_][]const u8{ "a", "b", "c" }) |name| {
         try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
     }
     var created: usize = 0;
-    var deadline: wait.Deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and created < 3) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running() and created < 3) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created) created += 1;
         }
     }
-    if (created < 3) return wait.missed(io, &watcher);
+    if (created < 3) return wait.missed(&watcher);
     try testing.expectEqual(@as(usize, 3), created);
     try w.budget.misread(root, true, 0);
 
     try w.overflowForTest(io, id);
 
     var overflowed = false;
-    deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and !overflowed) {
+    pace.end();
+    pace = try .start(&watcher);
+    while (try pace.running() and !overflowed) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow) overflowed = true;
         }
     }
-    try wait.seen(io, &watcher, overflowed);
+    try wait.seen(&watcher, overflowed);
     // Three entries: at the budget, as the folder is.
     try testing.expectEqual(@as(usize, 3), w.budget.count(root).?);
 
     // So the fourth is past it, and the watch is told.
     try tmp.dir.writeFile(io, .{ .sub_path = "d", .data = "x" });
     overflowed = false;
-    deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and !overflowed) {
+    pace.end();
+    pace = try .start(&watcher);
+    while (try pace.running() and !overflowed) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
     }
-    try wait.seen(io, &watcher, overflowed);
+    try wait.seen(&watcher, overflowed);
 }
 
 test "allocation failure during delivery releases a removed Windows completion" {

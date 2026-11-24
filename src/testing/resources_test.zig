@@ -1,9 +1,11 @@
 //! Delivery completeness and allocator costs, counted without speed limits.
-//! Poll timeouts bound a missing event; allocation budgets count bytes.
+//! A wait ends on the delivery, or once the system is past it (`wait.Pace`);
+//! allocation budgets count bytes.
 
 const std = @import("std");
 const lookout = @import("../lookout.zig");
-const ms = @import("timeout.zig").ms;
+const wait = @import("timeout.zig");
+const ms = wait.ms;
 const shakedown = @import("shakedown");
 const Watcher = lookout.Watcher;
 
@@ -41,16 +43,18 @@ test "poll reports each change from another thread" {
         });
         defer watcher.deinit(io);
         _ = try watcher.add(io, root, .{});
-        while ((try watcher.poll(io, ms(200))).len != 0) {}
+        try wait.drain(&watcher, io);
 
         const Toucher = struct {
             dir: std.Io.Dir,
             round: usize = 0,
             failed: ?std.Io.Dir.WriteFileError = null,
+            done: std.atomic.Value(bool) = .init(false),
 
             const Self = @This();
 
             fn run(self: *Self) void {
+                defer self.done.store(true, .release);
                 const w_io = std.testing.io;
                 // The writer runs independently of the polling thread.
                 w_io.sleep(.fromMilliseconds(150), .awake) catch return;
@@ -71,17 +75,24 @@ test "poll reports each change from another thread" {
             var name: [32]u8 = undefined;
             const expected = try std.Io.Dir.path.join(gpa, &.{ root, try std.mem.print(&name, "w{d}.txt", .{round}) });
             defer gpa.free(expected);
+            // The writer sleeps before it writes, so the wait is paced
+            // only once it has written.
             var seen = false;
-            while (!seen) {
-                const events = try watcher.poll(io, ms(5_000));
-                if (events.len == 0) break;
-                for (events) |event| {
+            while (!seen and !toucher.done.load(.acquire)) {
+                for (try watcher.poll(io, ms(200))) |event| {
                     if (event.kind == .created and std.mem.eql(u8, event.path, expected)) seen = true;
                 }
             }
             thread.join();
             if (toucher.failed) |err| return err;
-            try std.testing.expect(seen);
+            var pace: wait.Pace = try .start(&watcher);
+            defer pace.end();
+            while (!seen and try pace.running()) {
+                for (try watcher.poll(io, ms(200))) |event| {
+                    if (event.kind == .created and std.mem.eql(u8, event.path, expected)) seen = true;
+                }
+            }
+            try wait.seen(&watcher, seen);
             observed += 1;
         }
         try std.testing.expectEqual(rounds, observed);
@@ -118,15 +129,15 @@ test "a burst arrives whole, or says what it lost" {
         // Waited for arrival, not for silence: on a machine whose event
         // daemon is busy elsewhere a burst can pause for more than a second
         // and still arrive whole, and a pause is not a loss. What decides
-        // is the count, or an overflow, or the deadline -- and a burst that
-        // is short at the deadline with no overflow is exactly the failure
-        // this test exists to catch.
+        // is the count, or an overflow, or the system being past the burst
+        // (`wait.Pace`) -- and a burst that is short then with no overflow
+        // is exactly the failure this test exists to catch.
         var created: usize = 0;
         var overflow: usize = 0;
-        var waited_ms: u32 = 0;
-        while (created < burst and overflow == 0 and waited_ms < 30_000) {
+        var pace: wait.Pace = try .start(&watcher);
+        defer pace.end();
+        while (created < burst and overflow == 0 and try pace.running()) {
             const events = try watcher.poll(io, ms(200));
-            if (events.len == 0) waited_ms += 200;
             for (events) |event| switch (event.kind) {
                 .created => created += 1,
                 .overflow => overflow += 1,

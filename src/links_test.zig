@@ -31,10 +31,6 @@ const backends: []const lookout.Backend = all: {
     break :all &final;
 };
 
-const timeout_ms = wait.event_ms;
-/// How long a scenario listens for something that must not arrive.
-const quiet_ms = 600;
-
 const Fixture = struct {
     tmp: testing.TmpDir,
     root: [:0]u8,
@@ -107,9 +103,9 @@ const Fixture = struct {
         try f.tmp.dir.deleteFile(io, at);
     }
 
-    /// Drains whatever is pending.
+    /// Drains whatever is pending (`wait.Pace`).
     fn settle(f: *Fixture) !void {
-        while ((try f.watcher.poll(f.io, ms(150))).len != 0) {}
+        try wait.drain(&f.watcher, f.io);
     }
 
     /// Polls until `sub_path` is reported -- as `kind`, or as anything
@@ -118,8 +114,9 @@ const Fixture = struct {
     fn expect(f: *Fixture, sub_path: []const u8, kind: ?Kind, forbidden: []const []const u8) !void {
         const want = try f.path(sub_path);
         defer gpa.free(want);
-        const deadline: wait.Deadline = .after(io, timeout_ms);
-        while (deadline.running(io)) {
+        var pace: wait.Pace = try .start(&f.watcher);
+        defer pace.end();
+        while (try pace.running()) {
             for (try f.watcher.poll(f.io, ms(100))) |event| {
                 try f.allowed(event, forbidden);
                 if (!path_cmp.eql(event.path, want)) continue;
@@ -127,7 +124,7 @@ const Fixture = struct {
             }
         }
         std.debug.print("{s}: no {s} event for {s}\n", .{ @tagName(f.watcher.backend()), if (kind) |k| @tagName(k) else "", want });
-        return wait.missed(f.io, &f.watcher);
+        return wait.missed(&f.watcher);
     }
 
     /// Polls until the watcher holds `wanted` registrations, or more than
@@ -135,20 +132,23 @@ const Fixture = struct {
     /// events in two polls, and what is written below it is only seen
     /// once it is followed again.
     fn await(f: *Fixture, wanted: usize, above: bool) !void {
-        const deadline: wait.Deadline = .after(io, timeout_ms);
-        while (deadline.running(io)) {
+        var pace: wait.Pace = try .start(&f.watcher);
+        defer pace.end();
+        while (try pace.running()) {
             const held = f.watcher.stats().registrations;
             if (if (above) held > wanted else held == wanted) return;
             _ = try f.watcher.poll(f.io, ms(100));
         }
         std.debug.print("{s}: {d} registrations, wanted {s}{d}\n", .{ @tagName(f.watcher.backend()), f.watcher.stats().registrations, if (above) "more than " else "", wanted });
-        return wait.missed(f.io, &f.watcher);
+        return wait.missed(&f.watcher);
     }
 
-    /// Listens for a while, failing on any event at or below `forbidden`.
+    /// Listens until the system is past what came before (`wait.Pace`),
+    /// failing on any event at or below `forbidden`.
     fn quiet(f: *Fixture, forbidden: []const []const u8) !void {
-        const deadline: wait.Deadline = .after(io, quiet_ms);
-        while (deadline.running(io)) {
+        var pace: wait.Pace = try .start(&f.watcher);
+        defer pace.end();
+        while (try pace.running()) {
             for (try f.watcher.poll(f.io, ms(100))) |event| try f.allowed(event, forbidden);
         }
     }
@@ -394,15 +394,16 @@ test "a link past the most a watch follows is reported unwatched" {
         defer gpa.free(root);
         _ = try wait.add(&f.watcher, f.io, root, .{ .recursive = true, .follow_symlinks = true, .max_followed_links = 1 });
 
-        const deadline: wait.Deadline = .after(io, timeout_ms);
+        var pace: wait.Pace = try .start(&f.watcher);
+        defer pace.end();
         var unwatched: ?[]u8 = null;
         defer if (unwatched) |p| gpa.free(p);
-        while (unwatched == null and deadline.running(io)) {
+        while (unwatched == null and try pace.running()) {
             for (try f.watcher.poll(f.io, ms(100))) |event| {
                 if (event.kind == .unwatched) unwatched = try gpa.dupe(u8, event.path);
             }
         }
-        const hole = unwatched orelse return wait.missed(f.io, &f.watcher);
+        const hole = unwatched orelse return wait.missed(&f.watcher);
         // Which of the two is listed first is the file system's to say;
         // the other one is followed.
         const first = try f.path("watched/first");

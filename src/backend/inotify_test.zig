@@ -34,7 +34,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     defer watcher.deinit(io);
     const dir = try watcher.add(io, root, .{ .recursive = true });
     const single = try watcher.add(io, file, .{});
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
 
     var bytes: [records.header_len]u8 = undefined;
     const len = records.encode(&bytes, .{ .wd = -1, .mask = linux.IN.Q_OVERFLOW, .cookie = 0, .name = null });
@@ -70,15 +70,16 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one and two" });
     var saw_dir = false;
     var saw_file = false;
-    const deadline: wait.Deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and !(saw_dir and saw_file)) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running() and !(saw_dir and saw_file)) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind != .modified or !std.mem.eql(u8, event.path, file)) continue;
             if (event.id == dir) saw_dir = true;
             if (event.id == single) saw_file = true;
         }
     }
-    if (!(saw_dir and saw_file)) return wait.missed(io, &watcher);
+    if (!(saw_dir and saw_file)) return wait.missed(&watcher);
     try testing.expect(saw_dir);
     try testing.expect(saw_file);
 }
@@ -102,7 +103,7 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
     var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .inotify, .max_dir_entries = 3 });
     defer watcher.deinit(io);
     const id = try watcher.add(io, root, .{});
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
     const n = &watcher.impl.inotify;
 
     for ([_][]const u8{ "a", "b", "c" }) |name| {
@@ -131,13 +132,14 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
     _ = try watcher.poll(io, ms(0));
     try tmp.dir.writeFile(io, .{ .sub_path = "d", .data = "x" });
     var overflowed = false;
-    const deadline: wait.Deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and !overflowed) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running() and !overflowed) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
     }
-    try wait.seen(io, &watcher, overflowed);
+    try wait.seen(&watcher, overflowed);
 }
 
 test "a watch on a file keeps no count keyed by the file" {
@@ -160,15 +162,16 @@ test "a watch on a file keeps no count keyed by the file" {
     var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .inotify });
     defer watcher.deinit(io);
     const id = try watcher.add(io, file, .{});
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
     try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "y" });
     var modified = false;
-    const deadline: wait.Deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and !modified) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running() and !modified) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .modified and event.id == id) modified = true;
         }
     }
-    try wait.seen(io, &watcher, modified);
+    try wait.seen(&watcher, modified);
     try testing.expect(watcher.impl.inotify.budget.count(file) == null);
 }

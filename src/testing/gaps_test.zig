@@ -16,8 +16,6 @@ const records = @import("../backend/fsevents/records.zig");
 const Kind = lookout.Kind;
 const Watcher = lookout.Watcher;
 
-const timeout_ms = wait.event_ms;
-
 /// Every backend this target was built with.
 const backends: []const lookout.Backend = all: {
     const values = std.enums.values(lookout.Backend);
@@ -49,7 +47,7 @@ const Tally = struct {
     modified: usize = 0,
 
     fn count(t: *Tally, events: []const lookout.Event) void {
-        for (events) |event| switch (event.kind) {
+        for (events) |event| if (!std.mem.eql(u8, std.Io.Dir.path.basename(event.path), Held.sentinel)) switch (event.kind) {
             .created => t.created += 1,
             .overflow => t.overflow += 1,
             .modified => t.modified += 1,
@@ -57,22 +55,10 @@ const Tally = struct {
         };
     }
 
-    fn drain(t: *Tally, io: std.Io, watcher: *Watcher, quiet_ms: u32) !void {
-        var idle: u32 = 0;
-        while (idle < quiet_ms) {
-            const events = try watcher.poll(io, ms(200));
-            if (events.len == 0) {
-                idle += 200;
-                continue;
-            }
-            idle = 0;
-            for (events) |event| switch (event.kind) {
-                .created => t.created += 1,
-                .overflow => t.overflow += 1,
-                .modified => t.modified += 1,
-                else => {},
-            };
-        }
+    fn drain(t: *Tally, io: std.Io, watcher: *Watcher) !void {
+        var pace: wait.Pace = try .start(watcher);
+        defer pace.end();
+        while (try pace.running()) t.count(try watcher.poll(io, ms(200)));
     }
 };
 
@@ -99,7 +85,7 @@ test "a change inside a renamed directory is not a creation" {
         });
         defer watcher.deinit(io);
         _ = try wait.add(&watcher, io, root, .{ .recursive = true });
-        while ((try watcher.poll(io, ms(200))).len != 0) {}
+        try wait.drain(&watcher, io);
 
         const moved = try std.Io.Dir.path.join(gpa, &.{ root, "sub2" });
         defer gpa.free(moved);
@@ -111,18 +97,19 @@ test "a change inside a renamed directory is not a creation" {
         // reports is a race and not a rule.
         var lost = false;
         var settled = false;
-        var deadline: wait.Deadline = .after(io, timeout_ms);
-        while (deadline.running(io) and !settled) {
+        var pace: wait.Pace = try .start(&watcher);
+        defer pace.end();
+        while (try pace.running() and !settled) {
             for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow) lost = true;
                 if (std.mem.startsWith(u8, event.path, moved)) settled = true;
             }
         }
         try std.testing.expect(settled or lost);
-        while (true) {
-            const events = try watcher.poll(io, ms(400));
-            if (events.len == 0) break;
-            for (events) |event| {
+        var drained: wait.Pace = try .start(&watcher);
+        defer drained.end();
+        while (try drained.running()) {
+            for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow) lost = true;
             }
         }
@@ -138,8 +125,9 @@ test "a change inside a renamed directory is not a creation" {
 
         var saw_created = false;
         var saw_modified = false;
-        deadline = .after(io, timeout_ms);
-        while (deadline.running(io) and !saw_modified) {
+        pace.end();
+        pace = try .start(&watcher);
+        while (try pace.running() and !saw_modified) {
             for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow) lost = true;
                 if (!std.mem.eql(u8, event.path, wanted)) continue;
@@ -159,7 +147,7 @@ test "a change inside a renamed directory is not a creation" {
             });
         }
         try std.testing.expect(!saw_created);
-        try wait.seen(io, &watcher, saw_modified);
+        try wait.seen(&watcher, saw_modified);
     }
 }
 
@@ -196,27 +184,29 @@ test "a watch spelled in another case than the disk still reports" {
 
         // Promotion adopts the actual kernel spelling and keeps the request.
         var promoted = false;
-        var deadline: wait.Deadline = .after(io, timeout_ms);
-        while (deadline.running(io) and !promoted) {
+        var pace: wait.Pace = try .start(&watcher);
+        defer pace.end();
+        while (try pace.running() and !promoted) {
             for (try watcher.poll(io, ms(200))) |event| {
                 if (event.kind == .created and std.mem.endsWith(u8, event.path, "target")) promoted = true;
             }
         }
         if (!promoted) std.debug.print("{s}: {s} never appeared\n", .{ @tagName(backend), asked });
-        try wait.seen(io, &watcher, promoted);
+        try wait.seen(&watcher, promoted);
 
         // And the watch on it is a real watch: what happens inside is
         // reported, though the kernel spells the path the other way.
         try tmp.dir.writeFile(io, .{ .sub_path = "target/a.txt", .data = "one" });
         var found = false;
-        deadline = .after(io, timeout_ms);
-        while (deadline.running(io) and !found) {
+        pace.end();
+        pace = try .start(&watcher);
+        while (try pace.running() and !found) {
             for (try watcher.poll(io, ms(200))) |event| {
                 if (std.mem.endsWith(u8, event.path, "a.txt")) found = true;
             }
         }
         if (!found) std.debug.print("{s}: nothing under {s}\n", .{ @tagName(backend), asked });
-        try wait.seen(io, &watcher, found);
+        try wait.seen(&watcher, found);
     }
 }
 
@@ -241,7 +231,7 @@ test "explicit case insensitive filtering excludes across filesystem policies" {
             .recursive = true,
             .filter = .{ .ignore = &.{"SKIP"}, .case = .unicode },
         });
-        while ((try watcher.poll(io, ms(200))).len != 0) {}
+        try wait.drain(&watcher, io);
 
         const ignored = try std.Io.Dir.path.join(gpa, &.{ root, "skip" });
         defer gpa.free(ignored);
@@ -252,14 +242,15 @@ test "explicit case insensitive filtering excludes across filesystem policies" {
         try tmp.dir.writeFile(io, .{ .sub_path = "kept.txt", .data = "two" });
 
         var found = false;
-        const deadline: wait.Deadline = .after(io, timeout_ms);
-        while (deadline.running(io) and !found) {
+        var pace: wait.Pace = try .start(&watcher);
+        defer pace.end();
+        while (try pace.running() and !found) {
             for (try watcher.poll(io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, ignored));
                 if (std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
-        try wait.seen(io, &watcher, found);
+        try wait.seen(&watcher, found);
     }
 }
 
@@ -287,7 +278,7 @@ test "a slow write is one event, and it arrives after the writing stops" {
     defer watcher.deinit(io);
     try tmp.dir.writeFile(io, .{ .sub_path = "big.bin", .data = "" });
     _ = try wait.add(&watcher, io, root, .{});
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
 
     const wanted = try std.Io.Dir.path.join(gpa, &.{ root, "big.bin" });
     defer gpa.free(wanted);
@@ -317,19 +308,23 @@ test "a slow write is one event, and it arrives after the writing stops" {
     const thread = try std.Thread.spawn(.{}, Writer.run, .{&writer});
     defer thread.join();
 
+    // Nothing is reported while the file is still being written to.
+    while (!writer.done.load(.acquire)) {
+        for (try watcher.poll(io, ms(100))) |event| try std.testing.expect(!std.mem.eql(u8, event.path, wanted));
+    }
+    // Then once, the writes settled: paced from the last write on.
     var seen: usize = 0;
-    const deadline: wait.Deadline = .after(io, timeout_ms);
-    while (deadline.running(io) and seen == 0) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running()) {
         for (try watcher.poll(io, ms(100))) |event| {
             if (!std.mem.eql(u8, event.path, wanted)) continue;
             try std.testing.expectEqual(Kind.modified, event.kind);
             seen += 1;
         }
     }
-    if (seen == 0) return wait.missed(io, &watcher);
+    if (seen == 0) return wait.missed(&watcher);
     try std.testing.expectEqual(@as(usize, 1), seen);
-    // Nothing was reported while the file was still being written to.
-    try std.testing.expect(writer.done.load(.acquire));
 }
 
 test "a burst of renames is paired across the reads it is split over" {
@@ -381,7 +376,7 @@ test "a burst of renames is paired across the reads it is split over" {
     });
     defer watcher.deinit(io);
     _ = try wait.add(&watcher, io, root, .{});
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
 
     for (0..pairs) |i| {
         var from: [64]u8 = undefined;
@@ -397,15 +392,10 @@ test "a burst of renames is paired across the reads it is split over" {
     var renamed: usize = 0;
     var unpaired: usize = 0;
     var overflow: usize = 0;
-    var idle: u32 = 0;
-    while (idle < 1_000) {
-        const events = try watcher.poll(io, ms(200));
-        if (events.len == 0) {
-            idle += 200;
-            continue;
-        }
-        idle = 0;
-        for (events) |event| switch (event.kind) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running()) {
+        for (try watcher.poll(io, ms(200))) |event| switch (event.kind) {
             .renamed => {
                 const from = event.from orelse {
                     unpaired += 1;
@@ -471,7 +461,7 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
         });
         defer watcher.deinit(io);
         _ = try wait.add(&watcher, io, root, .{ .recursive = true });
-        while ((try watcher.poll(io, ms(200))).len != 0) {}
+        try wait.drain(&watcher, io);
 
         // Drained as it goes, so that what is being measured is the
         // budget and not the kernel's own patience with a burst.
@@ -484,9 +474,9 @@ test "the entry budget is one directory's, not a whole recursive watch's" {
                     .data = "x",
                 });
             }
-            try tally.drain(io, &watcher, 200);
+            try tally.drain(io, &watcher);
         }
-        try tally.drain(io, &watcher, 400);
+        try tally.drain(io, &watcher);
         if (tally.overflow != 0) {
             std.debug.print("{s}: {d} overflow for 12 x 150 under a 512 budget\n", .{
                 @tagName(backend), tally.overflow,
@@ -529,13 +519,14 @@ test "a root deleted and recreated inside one window is not a move" {
         });
         defer watcher.deinit(io);
         _ = try wait.add(&watcher, io, target, .{});
-        while ((try watcher.poll(io, ms(200))).len != 0) {}
+        try wait.drain(&watcher, io);
 
         try tmp.dir.deleteDir(io, "target");
         try tmp.dir.createDirPath(io, "target");
 
-        const deadline: wait.Deadline = .after(io, wait.quiet_ms);
-        while (deadline.running(io)) {
+        var pace: wait.Pace = try .start(&watcher);
+        defer pace.end();
+        while (try pace.running()) {
             for (try watcher.poll(io, ms(200))) |event| {
                 if (!std.mem.eql(u8, event.path, target)) continue;
                 if (event.kind != .renamed) continue;
@@ -584,14 +575,14 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
     });
     defer watcher.deinit(io);
     _ = try wait.add(&watcher, io, root, .{});
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
 
     try writeBurst(tmp.dir, limit + 1);
 
     // The kernel keeps one overflow record and queues it once, however
     // much was dropped while it sat there.
     var tally: Tally = .{};
-    try tally.drain(io, &watcher, 1_000);
+    try tally.drain(io, &watcher);
     try std.testing.expectEqual(@as(usize, 1), tally.overflow);
     try std.testing.expect(tally.created <= limit);
 
@@ -600,13 +591,14 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
     const after = try std.Io.Dir.path.join(gpa, &.{ root, "after.txt" });
     defer gpa.free(after);
     var found = false;
-    const deadline: wait.Deadline = .after(io, timeout_ms);
-    while (deadline.running(io) and !found) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running() and !found) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
     }
-    try wait.seen(io, &watcher, found);
+    try wait.seen(&watcher, found);
 }
 
 // Last in the file on purpose. Ten thousand files created and then
@@ -651,7 +643,7 @@ test "the delivery buffer is the size the caller asked for" {
         _ = try wait.add(&watcher, io, root, .{});
         try writeBurst(tmp.dir, burst);
 
-        const held = try Held.await(&watcher, burst, .overflowed);
+        const held = try Held.await(&watcher, tmp.dir, burst, .overflowed);
         try std.testing.expect(held.overflowed);
 
         var tally: Tally = .{};
@@ -680,7 +672,7 @@ test "the delivery buffer is the size the caller asked for" {
         _ = try wait.add(&watcher, io, root, .{});
         try writeBurst(tmp.dir, burst);
 
-        const held = try Held.await(&watcher, burst, .delivered);
+        const held = try Held.await(&watcher, tmp.dir, burst, .delivered);
         try std.testing.expect(!held.overflowed);
 
         var tally: Tally = .{};
@@ -716,23 +708,26 @@ const Held = struct {
         delivered,
     };
 
-    /// How long the system is given to deliver the burst before the test
-    /// fails. A bound on a failure, not the end of the wait: the wait
-    /// ends on the delivery. The slowest whole delivery measured was
-    /// under ten seconds.
-    const budget_ms = 60_000;
+    /// A file written in the watched directory once the burst is: FSEvents
+    /// delivers one stream in order, so its creation arrives after every
+    /// burst file the system has not lost track of. Another stream's
+    /// delivery says nothing of this one's: under load fseventsd was seen
+    /// delivering a control watcher's sentinels while this stream's backlog
+    /// waited, 4153 of the 10 000 in.
+    const sentinel = "burst-sentinel.txt";
 
-    fn await(watcher: *Watcher, burst: usize, until: Until) !Held {
+    fn await(watcher: *Watcher, dir: std.Io.Dir, burst: usize, until: Until) !Held {
         const gpa = std.testing.allocator;
         const io = std.testing.io;
         var seen = try std.bit_set.Dynamic.initEmpty(gpa, burst);
         defer seen.deinit(gpa);
 
-        const deadline: wait.Deadline = .after(io, budget_ms);
+        try dir.writeFile(io, .{ .sub_path = sentinel, .data = "" });
         while (true) {
             const copy = try watcher.impl.fsevents.copyHeld(gpa);
             defer gpa.free(copy.bytes);
             var held: Held = .{ .created = 0, .lost_track = false, .overflowed = copy.overflowed };
+            var past = false;
             seen.unsetAll();
             var it = records.iterate(copy.bytes);
             while (try it.next()) |record| {
@@ -740,6 +735,7 @@ const Held = struct {
                 if (record.flags & lost != 0) held.lost_track = true;
                 if (record.flags & records.flag.item_created == 0) continue;
                 const name = std.Io.Dir.path.basename(record.path);
+                if (std.mem.eql(u8, name, sentinel)) past = true;
                 if (!std.mem.startsWith(u8, name, "burst-entry-")) continue;
                 const number = name["burst-entry-".len .. name.len - ".txt".len];
                 const i = std.fmt.parseInt(usize, number, 10) catch continue;
@@ -753,8 +749,8 @@ const Held = struct {
                 .delivered => held.overflowed or held.lost_track or held.created == burst,
             };
             if (done) return held;
-            if (!deadline.running(io)) {
-                std.debug.print("fsevents: {d}/{d} delivered in {d} ms, and no loss reported\n", .{ held.created, burst, budget_ms });
+            if (past) {
+                std.debug.print("fsevents: {d}/{d} delivered before the file written after them, and no loss reported\n", .{ held.created, burst });
                 return error.TestBurstNotDelivered;
             }
             try std.Io.sleep(io, .fromMilliseconds(20), .awake);
@@ -811,7 +807,7 @@ fn deliveryFailure(io: std.Io, backend: lookout.Backend) !void {
             });
             defer watcher.deinit(io);
             const id = try wait.add(&watcher, io, root, .{ .recursive = true });
-            while ((try watcher.poll(io, ms(0))).len != 0) {}
+            try wait.drain(&watcher, io);
             switch (scenario) {
                 .create, .modify => {
                     try tmp.dir.writeFile(testing.io, .{ .sub_path = "first", .data = "one more" });
@@ -832,7 +828,8 @@ fn deliveryFailure(io: std.Io, backend: lookout.Backend) !void {
                 },
             }
             failing.fail_index = failing.alloc_index + fail_index;
-            const answer = watcher.poll(io, ms(timeout_ms));
+            // No timeout: the poll returns with the delivery or its failure, however late.
+            const answer = watcher.poll(io, .none);
             failing.fail_index = std.math.maxInt(usize);
             if (answer) |events| {
                 try testing.expect(events.len != 0);
@@ -859,8 +856,9 @@ fn deliveryFailure(io: std.Io, backend: lookout.Backend) !void {
             // Finishing the retained delivery must also rearm the backend.
             try tmp.dir.writeFile(testing.io, .{ .sub_path = "after", .data = "three" });
             var saw_after = false;
-            const deadline: wait.Deadline = .after(io, timeout_ms);
-            while (!saw_after and deadline.running(io)) {
+            var pace: wait.Pace = try .start(&watcher);
+            defer pace.end();
+            while (!saw_after and try pace.running()) {
                 for (try watcher.poll(io, ms(200))) |event| {
                     if (event.kind == .created and std.mem.endsWith(u8, event.path, "after")) saw_after = true;
                 }
@@ -966,15 +964,16 @@ test "filesystem identity reports two native case-distinct entries on sensitive 
         try tmp.dir.writeFile(io, .{ .sub_path = "case", .data = "two" });
         var upper = false;
         var lower = false;
-        const deadline: wait.Deadline = .after(io, timeout_ms);
-        while (deadline.running(io) and !(upper and lower)) {
+        var pace: wait.Pace = try .start(&watcher);
+        defer pace.end();
+        while (try pace.running() and !(upper and lower)) {
             for (try watcher.poll(io, ms(100))) |event| {
                 if (event.id != id or event.kind != .created) continue;
                 upper = upper or std.mem.endsWith(u8, event.path, "Case");
                 lower = lower or std.mem.endsWith(u8, event.path, "case");
             }
         }
-        if (!(upper and lower)) return wait.missed(io, &watcher);
+        if (!(upper and lower)) return wait.missed(&watcher);
         try std.testing.expect(upper and lower);
     }
 }
@@ -994,12 +993,11 @@ test "normalized filtering composes native names and keeps plain e and kernel sp
         try tmp.dir.writeFile(io, .{ .sub_path = "e\u{301}", .data = "two" });
         try tmp.dir.writeFile(io, .{ .sub_path = "e", .data = "plain" });
         var plain = false;
-        // A second at least, for an excluded name reported late to show; then
-        // until the plain name is, or the deadline.
-        const window: wait.Deadline = .after(io, 1_000);
-        const deadline: wait.Deadline = .after(io, timeout_ms);
-        while (window.running(io) or !plain) {
-            if (!deadline.running(io)) break;
+        // The whole pace, past the plain name too: an excluded name reported
+        // late shows within it.
+        var pace: wait.Pace = try .start(&watcher);
+        defer pace.end();
+        while (try pace.running()) {
             for (try watcher.poll(io, ms(100))) |event| {
                 if (event.id != id) continue;
                 try std.testing.expect(!std.mem.endsWith(u8, event.path, "é"));
@@ -1007,7 +1005,7 @@ test "normalized filtering composes native names and keeps plain e and kernel sp
                 if (std.mem.endsWith(u8, event.path, std.Io.Dir.path.sep_str ++ "e")) plain = true;
             }
         }
-        try std.testing.expect(plain);
+        try wait.seen(&watcher, plain);
     }
 }
 

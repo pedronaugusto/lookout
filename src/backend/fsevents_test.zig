@@ -126,7 +126,7 @@ test "the flags that say the system lost track are one overflow, and the watch g
     defer watcher.deinit(io);
     const tree = try wait.add(&watcher, io, root, .{ .recursive = true });
     const single = try wait.add(&watcher, io, file, .{});
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
     const f = &watcher.impl.fsevents;
 
     // What the lost events would have carried.
@@ -169,14 +169,15 @@ test "the flags that say the system lost track are one overflow, and the watch g
     defer gpa.free(after);
     var saw_after = false;
     var saw_file = false;
-    const deadline: wait.Deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and !(saw_after and saw_file)) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running() and !(saw_after and saw_file)) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.id == tree and event.kind == .created and std.mem.eql(u8, event.path, after)) saw_after = true;
             if (event.id == single and event.kind == .modified and std.mem.eql(u8, event.path, file)) saw_file = true;
         }
     }
-    if (!(saw_after and saw_file)) return wait.missed(io, &watcher);
+    if (!(saw_after and saw_file)) return wait.missed(&watcher);
     try testing.expect(saw_after);
     try testing.expect(saw_file);
 }
@@ -203,20 +204,21 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     var watcher: lookout.Watcher = try .init(gpa, std.testing.io, .{ .backend = .fsevents, .max_dir_entries = 3 });
     defer watcher.deinit(io);
     const tree = try wait.add(&watcher, io, root, .{ .recursive = true });
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
     const f = &watcher.impl.fsevents;
 
     for ([_][]const u8{ "sub/a", "sub/b", "sub/c" }) |name| try tmp.dir.createDirPath(io, name);
     var created: usize = 0;
-    var deadline: wait.Deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and created < 3) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running() and created < 3) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .created) created += 1;
         }
     }
-    if (created < 3) return wait.missed(io, &watcher);
+    if (created < 3) return wait.missed(&watcher);
     try testing.expectEqual(@as(usize, 3), created);
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
     try testing.expectEqual(@as(usize, 3), f.budget.count(sub).?);
     const root_count = f.budget.count(root).?;
 
@@ -234,16 +236,17 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     // So the fourth is past it, and the watch is told.
     try tmp.dir.createDirPath(io, "sub/d");
     var overflowed = false;
-    deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and !overflowed) {
+    pace.end();
+    pace = try .start(&watcher);
+    while (try pace.running() and !overflowed) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == tree) overflowed = true;
         }
     }
-    try wait.seen(io, &watcher, overflowed);
+    try wait.seen(&watcher, overflowed);
     // `sub` is past the budget now, so each record left of `sub/d` says
     // so again; they are read out before the next loss is made.
-    while ((try watcher.poll(io, ms(200))).len != 0) {}
+    try wait.drain(&watcher, io);
 
     // A delivery that did not fit: every watch lost it, so every count
     // is read again.
@@ -655,13 +658,14 @@ test "a recursive mount keeps live coverage and refuses a single-device checkpoi
     defer gpa.free(wanted);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "live", .data = "x" });
     var saw = false;
-    const deadline: wait.Deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and !saw) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running() and !saw) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (std.mem.eql(u8, event.path, wanted) and event.kind == .created) saw = true;
         }
     }
-    try wait.seen(io, &watcher, saw);
+    try wait.seen(&watcher, saw);
 }
 
 test "an absent pending root refuses a checkpoint from another volume" {
@@ -745,8 +749,9 @@ test "fresh FSEvents replay reports no pre-add state or sibling paths" {
     try tmp.dir.writeFile(io, .{ .sub_path = "sibling.txt", .data = "after" });
     const stream = watcher.impl.fsevents.streams.get(id).?;
     var found = false;
-    const deadline: wait.Deadline = .after(io, 5_000);
-    while (deadline.running(io)) {
+    var pace: wait.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running()) {
         for (try watcher.poll(io, ms(100))) |event| {
             try testing.expectEqual(id, event.id);
             try testing.expect(path_cmp.within(root, event.path));
@@ -763,8 +768,9 @@ test "fresh FSEvents replay reports no pre-add state or sibling paths" {
 
 fn expectOneOverflow(io: Io, watcher: *lookout.Watcher, id: WatchId, root: []const u8, target: Target) !void {
     var overflows: usize = 0;
-    const deadline: wait.Deadline = .after(io, wait.event_ms);
-    while (deadline.running(io) and overflows == 0) {
+    var pace: wait.Pace = try .start(watcher);
+    defer pace.end();
+    while (try pace.running() and overflows == 0) {
         for (try watcher.poll(io, ms(200))) |event| {
             if (event.kind != .overflow) continue;
             try std.testing.expectEqual(id, event.id);
@@ -773,7 +779,7 @@ fn expectOneOverflow(io: Io, watcher: *lookout.Watcher, id: WatchId, root: []con
             overflows += 1;
         }
     }
-    if (overflows == 0) return wait.missed(io, watcher);
+    if (overflows == 0) return wait.missed(watcher);
     try std.testing.expectEqual(@as(usize, 1), overflows);
     while (true) {
         const events = try watcher.poll(io, ms(200));
