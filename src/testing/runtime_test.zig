@@ -104,14 +104,14 @@ test "a poll parked on a runtime is fed by a change made on another thread" {
         }
 
         var seen = false;
-        const deadline = std.Io.Timeout.toDeadline(ms(5_000), io);
-        while (!seen) {
-            for (try f.watcher.poll(io, deadline)) |event| {
+        var pace: timeout.Pace = try .start(&f.watcher);
+        defer pace.end();
+        while (!seen and try pace.running()) {
+            for (try f.watcher.poll(io, ms(200))) |event| {
                 if (std.mem.endsWith(u8, event.path, "fed.txt")) seen = true;
             }
-            if (!seen and deadline.toDurationFromNow(io).?.raw.nanoseconds <= 0) break;
         }
-        try std.testing.expect(seen);
+        try timeout.seen(&f.watcher, seen);
         if (writer.failed) |err| return err;
         // Every wait was the runtime's own.
         try std.testing.expectEqual(before, reactor.fallbacks());
@@ -138,14 +138,14 @@ test "a poll parked on a runtime is canceled while it waits" {
         // Nothing was lost to it: the watcher goes on.
         try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "after.txt", .data = "x" });
         var seen = false;
-        const deadline = std.Io.Timeout.toDeadline(ms(5_000), io);
-        while (!seen) {
-            for (try f.watcher.poll(io, deadline)) |event| {
+        var pace: timeout.Pace = try .start(&f.watcher);
+        defer pace.end();
+        while (!seen and try pace.running()) {
+            for (try f.watcher.poll(io, ms(200))) |event| {
                 if (std.mem.endsWith(u8, event.path, "after.txt")) seen = true;
             }
-            if (!seen and deadline.toDurationFromNow(io).?.raw.nanoseconds <= 0) break;
         }
-        try std.testing.expect(seen);
+        try timeout.seen(&f.watcher, seen);
     }
 }
 

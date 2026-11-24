@@ -61,7 +61,7 @@ test "since answers what changed after a clock, and sync makes it reach a write 
         });
         defer watcher.deinit(io);
         const id = try watcher.add(io, root, .{ .recursive = true });
-        while ((try watcher.poll(io, ms(100))).len != 0) {}
+        try shared.drain(&watcher, io);
         const start = watcher.clock(io).?;
 
         var poller: Poller = .{ .watcher = &watcher };
@@ -74,13 +74,13 @@ test "since answers what changed after a clock, and sync makes it reach a write 
         const arena = arena_state.allocator();
 
         try tmp.dir.writeFile(io, .{ .sub_path = "sub/a.txt", .data = "a" });
-        try watcher.sync(io, root, ms(10_000));
+        try watcher.sync(io, root, .none);
         const first = (try watcher.since(io, arena, id, start)).?;
         const a = try Io.Dir.path.join(arena, &.{ root, "sub", "a.txt" });
         try testing.expect(holds(first, a));
 
         try tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "b" });
-        try watcher.sync(io, root, ms(10_000));
+        try watcher.sync(io, root, .none);
         const second = (try watcher.since(io, arena, id, first.clock)).?;
         const b = try Io.Dir.path.join(arena, &.{ root, "b.txt" });
         try testing.expect(holds(second, b));
@@ -120,10 +120,10 @@ test "a sync no poll answers times out and leaves no file behind" {
     try testing.expect(try it.next(io) == null);
     try testing.expectError(error.RelativePath, watcher.sync(io, "relative", ms(20)));
     // What the timed-out sync wrote and removed is never handed out.
-    while (true) {
-        const events = try watcher.poll(io, ms(200));
-        if (events.len == 0) break;
-        for (events) |event| try testing.expect(std.mem.find(u8, event.path, ".lookout-sync-") == null);
+    var pace: shared.Pace = try .start(&watcher);
+    defer pace.end();
+    while (try pace.running()) {
+        for (try watcher.poll(io, ms(200))) |event| try testing.expect(std.mem.find(u8, event.path, ".lookout-sync-") == null);
     }
 }
 
