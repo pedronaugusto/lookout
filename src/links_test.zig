@@ -117,7 +117,7 @@ const Fixture = struct {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            for (try f.watcher.poll(f.io, ms(100))) |event| {
+            for (try pace.poll(f.io, ms(100))) |event| {
                 try f.allowed(event, forbidden);
                 if (!path_cmp.eql(event.path, want)) continue;
                 if (kind == null or kind.? == event.kind) return;
@@ -137,7 +137,7 @@ const Fixture = struct {
         while (try pace.running()) {
             const held = f.watcher.stats().registrations;
             if (if (above) held > wanted else held == wanted) return;
-            _ = try f.watcher.poll(f.io, ms(100));
+            _ = try pace.poll(f.io, ms(100));
         }
         std.debug.print("{s}: {d} registrations, wanted {s}{d}\n", .{ @tagName(f.watcher.backend()), f.watcher.stats().registrations, if (above) "more than " else "", wanted });
         return wait.missed(&f.watcher);
@@ -149,7 +149,7 @@ const Fixture = struct {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            for (try f.watcher.poll(f.io, ms(100))) |event| try f.allowed(event, forbidden);
+            for (try pace.poll(f.io, ms(100))) |event| try f.allowed(event, forbidden);
         }
     }
 
@@ -399,7 +399,7 @@ test "a link past the most a watch follows is reported unwatched" {
         var unwatched: ?[]u8 = null;
         defer if (unwatched) |p| gpa.free(p);
         while (unwatched == null and try pace.running()) {
-            for (try f.watcher.poll(f.io, ms(100))) |event| {
+            for (try pace.poll(f.io, ms(100))) |event| {
                 if (event.kind == .unwatched) unwatched = try gpa.dupe(u8, event.path);
             }
         }

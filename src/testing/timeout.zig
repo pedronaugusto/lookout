@@ -16,48 +16,76 @@ pub fn ms(n: i64) Io.Timeout {
     return .{ .duration = .{ .raw = .fromMilliseconds(n), .clock = .awake } };
 }
 
+/// The name of every control sentinel: an event naming one is the wait's.
+const sentinel_prefix = "lookout-pace-";
+
 /// How many control rounds, each with the watched watcher quiet at its end,
-/// end a wait.
+/// end a wait on a backend whose watchers share one order (`Pace`).
 const quiet_rounds = 2;
 
-/// A wait for what a watcher reports, paced by the system's own deliveries.
-/// A control watcher of the same backend and pacing, on a directory of its
-/// own, writes a sentinel there, and the next once the last is reported. The
-/// wait runs while the watched watcher may still report what it waits for:
-/// it ends after `quiet_rounds` sentinels in a row each found the watched
-/// watcher quiet through their round (no poll in it reported anything,
-/// nothing held at its end, no progress the caller noted with `moved`),
-/// all written after the wait began. What the test caused before it began is then past in the
-/// system's own order, whatever the load: a late machine is late for the
-/// control too. A wait for an event that must not come ends the same way,
-/// and so does a drain.
+/// A wait for what a watcher reports, paced by deliveries, never by the
+/// clock. What says the watched watcher is past everything the test caused
+/// before the wait began depends on what order its backend promises:
 ///
-/// A sentinel is delivered by any event naming it: with
-/// `Options.debounce` a path reports the kind seen last, so its creation
-/// may come as the close that followed it. A control that loses track
-/// (`Kind.overflow`) reports no event for the sentinel at all; its round
-/// is not counted, and the next sentinel is written.
+/// * `inotify`, `kqueue` and Windows notify during the call that made the
+///   change: the kernel queues the event before that call returns, for
+///   every watcher at once. A control watcher of the same backend, on a
+///   directory of its own, is given a sentinel, and the next once the last
+///   is reported; the wait ends after `quiet_rounds` sentinels in a row
+///   each found the watched watcher quiet through their round. What was
+///   queued before the sentinel was written is in the watched watcher's
+///   queue by then.
+/// * FSEvents promises an order within one stream and none between two,
+///   and each watch is a stream of its own, so a control's sentinel alone
+///   says nothing of the watched streams. It does say fseventsd has read
+///   the change: fseventsd reads the kernel's queue in order and numbers
+///   what it reads in that order, so a sentinel written after the change
+///   is read after it. The control is the same as above, and each
+///   sentinel's delivery is followed by `FSEventStreamFlushSync` on every
+///   watched stream, which delivers every event fseventsd holds for it,
+///   the change among them. The flush alone is no bound: it returns
+///   without an event fseventsd has not read yet.
+/// * Polling has no events and promises no order between directories, on
+///   a network share none at all; what it has is the scan. A `poll` that
+///   returns nothing has scanned the whole watch since the wait began and
+///   found nothing new, so the wait ends at the first such `poll` with
+///   nothing held.
 ///
-/// No clock gives a wait up. A system that delivers nothing at all, the
-/// control's sentinels as well, holds the test, and the run's watchdog
-/// names it.
+/// The loop calls `poll` here, not on the watcher, so the wait sees what is
+/// delivered. No clock gives a wait up. A watcher that delivers nothing at
+/// all holds the test, and the run's watchdog names it.
 pub const Pace = struct {
-    watched: *const lookout.Watcher,
-    control: lookout.Watcher,
-    tmp: std.testing.TmpDir,
-    /// Sentinels written so far; the last is the one awaited while `pending`.
-    sent: u32 = 0,
-    pending: bool = false,
-    /// Rounds in a row that found the watched watcher quiet.
-    quiet: u8 = 0,
-    /// The watched watcher reported, held or (`moved`) progressed during
-    /// the current round.
-    busy: bool = false,
+    watched: *lookout.Watcher,
+    how: How,
     /// Set by the round that ends the wait: one more look at the watched
-    /// watcher, after the system is past, before `running` says no.
+    /// watcher, then `running` says no.
     last: bool = false,
 
-    pub fn start(watched: *const lookout.Watcher) !Pace {
+    const How = union(enum) {
+        control: Control,
+        /// The bound is the scan inside each `poll`.
+        empty_poll,
+    };
+
+    const Control = struct {
+        watcher: lookout.Watcher,
+        tmp: std.testing.TmpDir,
+        sent: u32 = 0,
+        pending: bool = false,
+        quiet: u8 = 0,
+        /// The watched watcher reported or held something this round.
+        busy: bool = false,
+    };
+
+    /// A wait over every watch `watched` holds.
+    pub fn start(watched: *lookout.Watcher) !Pace {
+        return switch (watched.backend()) {
+            .poll => .{ .watched = watched, .how = .empty_poll },
+            else => startControl(watched),
+        };
+    }
+
+    fn startControl(watched: *lookout.Watcher) !Pace {
         const io = std.testing.io;
         const gpa = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{});
@@ -74,67 +102,92 @@ pub const Pace = struct {
         });
         errdefer control.deinit(io);
         _ = try add(&control, io, root, .{});
-        return .{ .watched = watched, .control = control, .tmp = tmp };
+        return .{ .watched = watched, .how = .{ .control = .{ .watcher = control, .tmp = tmp } } };
     }
 
     pub fn end(p: *Pace) void {
-        p.control.deinit(std.testing.io);
-        p.tmp.cleanup();
+        switch (p.how) {
+            .control => |*c| {
+                c.watcher.deinit(std.testing.io);
+                c.tmp.cleanup();
+            },
+            .empty_poll => {},
+        }
         p.* = undefined;
     }
 
     /// Whether the watched watcher may still report something caused before
-    /// the wait began: true until the control's rounds say the system is past
-    /// it, and once more after, for the look that follows.
+    /// the wait began: true until the backend's bound says it is past it.
     pub fn running(p: *Pace) !bool {
         if (p.last) return false;
+        switch (p.how) {
+            .control => |*c| try p.controlRound(c),
+            .empty_poll => {},
+        }
+        return true;
+    }
+
+    fn controlRound(p: *Pace, c: *Control) !void {
         const io = std.testing.io;
         var buffer: [32]u8 = undefined;
-        if (!p.pending) {
-            p.sent += 1;
-            try p.tmp.dir.writeFile(io, .{ .sub_path = try sentinel(&buffer, p.sent), .data = "" });
-            p.pending = true;
+        if (!c.pending) {
+            c.sent += 1;
+            try c.tmp.dir.writeFile(io, .{ .sub_path = try std.mem.print(&buffer, sentinel_prefix ++ "{d}", .{c.sent}), .data = "" });
+            c.pending = true;
         }
-        const stats = p.watched.stats();
-        if (stats.events != 0 or stats.held != 0) p.busy = true;
-        const awaited = try sentinel(&buffer, p.sent);
+        if (p.watched.stats().held != 0) c.busy = true;
+        const awaited = try std.mem.print(&buffer, sentinel_prefix ++ "{d}", .{c.sent});
         var delivered = false;
         var lost = false;
-        for (try p.control.poll(io, ms(0))) |event| switch (event.kind) {
+        for (try c.watcher.poll(io, ms(0))) |event| switch (event.kind) {
             .overflow, .unwatched => lost = true,
             else => if (std.mem.eql(u8, std.Io.Dir.path.basename(event.path), awaited)) {
                 delivered = true;
             },
         };
         if (lost) {
-            p.pending = false;
+            c.pending = false;
         } else if (delivered) {
-            p.pending = false;
-            p.quiet = if (p.busy) 0 else p.quiet + 1;
-            p.busy = false;
-            if (p.quiet == quiet_rounds) p.last = true;
+            // What fseventsd read before the sentinel reaches the watched
+            // streams' queue; the next `poll` reads it.
+            flush(p.watched);
+            c.pending = false;
+            c.quiet = if (c.busy) 0 else c.quiet + 1;
+            c.busy = false;
+            if (c.quiet == quiet_rounds) p.last = true;
         }
-        return true;
     }
 
-    /// Notes progress the watched watcher made that its `stats` do not show,
-    /// such as deliveries a test reads before `poll`: the round does not
-    /// count as quiet.
-    pub fn moved(p: *Pace) void {
-        p.busy = true;
-    }
-
-    fn sentinel(buffer: []u8, n: u32) ![]const u8 {
-        return std.mem.print(buffer, "control-sentinel-{d}", .{n});
+    /// `Watcher.poll` on the watched watcher. Valid until the next call, as
+    /// `poll`'s slice is.
+    pub fn poll(p: *Pace, io: Io, timeout: Io.Timeout) ![]const lookout.Event {
+        const events = try p.watched.poll(io, timeout);
+        switch (p.how) {
+            .control => |*c| if (events.len != 0) {
+                c.busy = true;
+            },
+            .empty_poll => if (events.len == 0 and p.watched.stats().held == 0) {
+                p.last = true;
+            },
+        }
+        return events;
     }
 };
 
-/// Polls until the system is past everything caused before (`Pace`),
+/// Every event fseventsd holds for the watcher's streams in its queue, on
+/// FSEvents (`Pace`); every other backend has nothing to flush.
+fn flush(w: *lookout.Watcher) void {
+    if (comptime @hasField(@TypeOf(w.impl), "fsevents")) {
+        if (w.impl == .fsevents) w.impl.fsevents.flush();
+    }
+}
+
+/// Polls until the watcher is past everything caused before (`Pace`),
 /// dropping what is reported: the next assertion starts clean.
 pub fn drain(w: *lookout.Watcher, io: Io) !void {
     var pace: Pace = try .start(w);
     defer pace.end();
-    while (try pace.running()) _ = try w.poll(io, ms(20));
+    while (try pace.running()) _ = try pace.poll(io, ms(20));
 }
 
 /// What a wait for an event that ended without it fails with: the event was
@@ -142,23 +195,43 @@ pub fn drain(w: *lookout.Watcher, io: Io) !void {
 /// or, on FSEvents, refused a stream, a control watcher's own as well.
 pub const Missed = error{ EventNotObserved, EventsDropped, FsEventsRefused };
 
-/// The failure of a wait that ended without its event: the control's
-/// sentinels came, so the system was delivering, and the event did not. A
+/// The failure of a wait that ended without its event: the backend's bound
+/// (`Pace`) says the watcher is past it, and the event did not come. A
 /// watcher that handed out an overflow notice first was told the system lost
 /// track, and says so. Never a pass.
 pub fn missed(w: *const lookout.Watcher) Missed {
     const overflows = w.stats().overflows;
     if (overflows != 0) {
-        std.debug.print("the system lost track before the wait ended: the watcher handed out {d} overflow notice(s); the event was not reported\n", .{overflows});
+        std.debug.print("{t}: the system lost track before the wait ended: the watcher handed out {d} overflow notice(s); the event was not reported\n", .{ w.backend(), overflows });
         return error.EventsDropped;
     }
-    std.debug.print("the control's sentinels were reported after it, and the event was not\n", .{});
+    std.debug.print("{t}: the watcher is past the change by its backend's bound (wait.Pace), and did not report it\n", .{w.backend()});
     return error.EventNotObserved;
 }
 
 /// `found`, or the failure of the wait that looked for it (`missed`).
 pub fn seen(w: *const lookout.Watcher, found: bool) Missed!void {
     if (!found) return missed(w);
+}
+
+/// `seen`, for an event naming the entry `name` of `dir`: a wait that
+/// ended without it also says whether a listing of `dir` shows the entry
+/// now. Shown, the watcher did not report what the system holds; not
+/// shown, the system had not made it visible by the time the backend's
+/// bound (`Pace`) said the watcher was past it.
+pub fn seenIn(w: *const lookout.Watcher, found: bool, dir: Io.Dir, name: []const u8) Missed!void {
+    if (found) return;
+    const shown: []const u8 = if (listed(dir, name)) |is| (if (is) "shows" else "does not show") else |_| "could not be read for";
+    std.debug.print("{t}: a listing of the directory now {s} {s}, with {d} registration(s)\n", .{ w.backend(), shown, name, w.stats().registrations });
+    return missed(w);
+}
+
+fn listed(dir: Io.Dir, name: []const u8) !bool {
+    var it = dir.iterate();
+    while (try it.next(std.testing.io)) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return true;
+    }
+    return false;
 }
 
 /// `Watcher.add`, whose `WatchLimitReached` on FSEvents asks the system

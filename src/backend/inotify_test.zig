@@ -73,7 +73,7 @@ test "the kernel's queue overflow record is an overflow against every watch" {
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running() and !(saw_dir and saw_file)) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind != .modified or !std.mem.eql(u8, event.path, file)) continue;
             if (event.id == dir) saw_dir = true;
             if (event.id == single) saw_file = true;
@@ -135,7 +135,7 @@ test "a queue overflow reads the entry counts again, so the budget holds after i
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running() and !overflowed) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
     }
@@ -168,7 +168,7 @@ test "a watch on a file keeps no count keyed by the file" {
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running() and !modified) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind == .modified and event.id == id) modified = true;
         }
     }

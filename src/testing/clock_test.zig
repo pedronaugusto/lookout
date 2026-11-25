@@ -123,7 +123,7 @@ test "a sync no poll answers times out and leaves no file behind" {
     var pace: shared.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running()) {
-        for (try watcher.poll(io, ms(200))) |event| try testing.expect(std.mem.find(u8, event.path, ".lookout-sync-") == null);
+        for (try pace.poll(io, ms(200))) |event| try testing.expect(std.mem.find(u8, event.path, ".lookout-sync-") == null);
     }
 }
 

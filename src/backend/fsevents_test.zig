@@ -172,7 +172,7 @@ test "the flags that say the system lost track are one overflow, and the watch g
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running() and !(saw_after and saw_file)) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.id == tree and event.kind == .created and std.mem.eql(u8, event.path, after)) saw_after = true;
             if (event.id == single and event.kind == .modified and std.mem.eql(u8, event.path, file)) saw_file = true;
         }
@@ -212,7 +212,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running() and created < 3) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind == .created) created += 1;
         }
     }
@@ -239,7 +239,7 @@ test "a loss the system reports reads the entry counts again, so the budget hold
     pace.end();
     pace = try .start(&watcher);
     while (try pace.running() and !overflowed) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == tree) overflowed = true;
         }
     }
@@ -661,7 +661,7 @@ test "a recursive mount keeps live coverage and refuses a single-device checkpoi
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running() and !saw) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (std.mem.eql(u8, event.path, wanted) and event.kind == .created) saw = true;
         }
     }
@@ -752,7 +752,7 @@ test "fresh FSEvents replay reports no pre-add state or sibling paths" {
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running()) {
-        for (try watcher.poll(io, ms(100))) |event| {
+        for (try pace.poll(io, ms(100))) |event| {
             try testing.expectEqual(id, event.id);
             try testing.expect(path_cmp.within(root, event.path));
             try testing.expect(!path_cmp.eql(old, event.path));
@@ -771,7 +771,7 @@ fn expectOneOverflow(io: Io, watcher: *lookout.Watcher, id: WatchId, root: []con
     var pace: wait.Pace = try .start(watcher);
     defer pace.end();
     while (try pace.running() and overflows == 0) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind != .overflow) continue;
             try std.testing.expectEqual(id, event.id);
             try std.testing.expectEqualStrings(root, event.path);
@@ -782,7 +782,7 @@ fn expectOneOverflow(io: Io, watcher: *lookout.Watcher, id: WatchId, root: []con
     if (overflows == 0) return wait.missed(watcher);
     try std.testing.expectEqual(@as(usize, 1), overflows);
     while (true) {
-        const events = try watcher.poll(io, ms(200));
+        const events = try pace.poll(io, ms(200));
         if (events.len == 0) return;
         for (events) |event| try std.testing.expect(event.kind != .overflow);
     }
