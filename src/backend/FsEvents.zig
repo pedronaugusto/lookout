@@ -844,6 +844,16 @@ fn useLiveStream(f: *FsEvents, io: Io, id: WatchId) contract.AddError!void {
     f.destroy(old);
 }
 
+/// Hands the delivery thread every event fseventsd holds for any stream,
+/// its latency window notwithstanding: `FSEventStreamFlushSync` returns only
+/// once the callback has run for each. The next drain reads them. An event
+/// fseventsd has not yet read from the kernel is not among them; one it has
+/// is, and it has read everything before an event any stream was given,
+/// since it reads the kernel's queue in order.
+pub fn flush(f: *FsEvents) void {
+    for (f.streams.values()) |stream| f.core_services.FSEventStreamFlushSync(stream.ref);
+}
+
 /// Stops watching `id`.
 pub fn remove(f: *FsEvents, io: Io, id: WatchId) void {
     _ = io; // Every backend takes it; this one closes nothing through it.

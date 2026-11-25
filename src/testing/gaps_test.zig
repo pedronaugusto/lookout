@@ -58,7 +58,7 @@ const Tally = struct {
     fn drain(t: *Tally, io: std.Io, watcher: *Watcher) !void {
         var pace: wait.Pace = try .start(watcher);
         defer pace.end();
-        while (try pace.running()) t.count(try watcher.poll(io, ms(200)));
+        while (try pace.running()) t.count(try pace.poll(io, ms(200)));
     }
 };
 
@@ -100,7 +100,7 @@ test "a change inside a renamed directory is not a creation" {
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (try pace.running() and !settled) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow) lost = true;
                 if (std.mem.startsWith(u8, event.path, moved)) settled = true;
             }
@@ -109,7 +109,7 @@ test "a change inside a renamed directory is not a creation" {
         var drained: wait.Pace = try .start(&watcher);
         defer drained.end();
         while (try drained.running()) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try drained.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow) lost = true;
             }
         }
@@ -128,7 +128,7 @@ test "a change inside a renamed directory is not a creation" {
         pace.end();
         pace = try .start(&watcher);
         while (try pace.running() and !saw_modified) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow) lost = true;
                 if (!std.mem.eql(u8, event.path, wanted)) continue;
                 if (event.kind == .created) saw_created = true;
@@ -187,7 +187,7 @@ test "a watch spelled in another case than the disk still reports" {
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (try pace.running() and !promoted) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (event.kind == .created and std.mem.endsWith(u8, event.path, "target")) promoted = true;
             }
         }
@@ -201,7 +201,7 @@ test "a watch spelled in another case than the disk still reports" {
         pace.end();
         pace = try .start(&watcher);
         while (try pace.running() and !found) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (std.mem.endsWith(u8, event.path, "a.txt")) found = true;
             }
         }
@@ -245,7 +245,7 @@ test "explicit case insensitive filtering excludes across filesystem policies" {
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, ignored));
                 if (std.mem.eql(u8, event.path, wanted)) found = true;
             }
@@ -317,7 +317,7 @@ test "a slow write is one event, and it arrives after the writing stops" {
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running()) {
-        for (try watcher.poll(io, ms(100))) |event| {
+        for (try pace.poll(io, ms(100))) |event| {
             if (!std.mem.eql(u8, event.path, wanted)) continue;
             try std.testing.expectEqual(Kind.modified, event.kind);
             seen += 1;
@@ -395,7 +395,7 @@ test "a burst of renames is paired across the reads it is split over" {
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running()) {
-        for (try watcher.poll(io, ms(200))) |event| switch (event.kind) {
+        for (try pace.poll(io, ms(200))) |event| switch (event.kind) {
             .renamed => {
                 const from = event.from orelse {
                     unpaired += 1;
@@ -527,7 +527,7 @@ test "a root deleted and recreated inside one window is not a move" {
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (try pace.running()) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (!std.mem.eql(u8, event.path, target)) continue;
                 if (event.kind != .renamed) continue;
                 try std.testing.expectEqual(
@@ -594,7 +594,7 @@ test "the inotify queue filled past its limit is one overflow, and the watch goe
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running() and !found) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
     }
@@ -859,7 +859,7 @@ fn deliveryFailure(io: std.Io, backend: lookout.Backend) !void {
             var pace: wait.Pace = try .start(&watcher);
             defer pace.end();
             while (!saw_after and try pace.running()) {
-                for (try watcher.poll(io, ms(200))) |event| {
+                for (try pace.poll(io, ms(200))) |event| {
                     if (event.kind == .created and std.mem.endsWith(u8, event.path, "after")) saw_after = true;
                 }
             }
@@ -967,7 +967,7 @@ test "filesystem identity reports two native case-distinct entries on sensitive 
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (try pace.running() and !(upper and lower)) {
-            for (try watcher.poll(io, ms(100))) |event| {
+            for (try pace.poll(io, ms(100))) |event| {
                 if (event.id != id or event.kind != .created) continue;
                 upper = upper or std.mem.endsWith(u8, event.path, "Case");
                 lower = lower or std.mem.endsWith(u8, event.path, "case");
@@ -998,7 +998,7 @@ test "normalized filtering composes native names and keeps plain e and kernel sp
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (try pace.running()) {
-            for (try watcher.poll(io, ms(100))) |event| {
+            for (try pace.poll(io, ms(100))) |event| {
                 if (event.id != id) continue;
                 try std.testing.expect(!std.mem.endsWith(u8, event.path, "é"));
                 try std.testing.expect(!std.mem.endsWith(u8, event.path, "e\u{301}"));

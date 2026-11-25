@@ -142,7 +142,7 @@ const Fixture = struct {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 trace.log("suite saw {s} {s}", .{ @tagName(event.kind), event.path });
                 for (wants, paths, seen) |want, p, *hit| {
                     if (event.kind != want.kind or !std.mem.eql(u8, event.path, p)) continue;
@@ -174,7 +174,7 @@ const Fixture = struct {
     fn expectQuiet(f: *Fixture) !void {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
-        while (try pace.running()) try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(200))).len);
+        while (try pace.running()) try std.testing.expectEqual(@as(usize, 0), (try pace.poll(f.io, ms(200))).len);
     }
 };
 
@@ -223,7 +223,7 @@ test "a fresh watch reports nothing that was already there as new" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(event.kind != .created);
                 try std.testing.expect(!std.mem.eql(u8, event.path, f.root));
             }
@@ -328,7 +328,7 @@ test "a file saved by a rename and then deleted is reported gone at once, in a l
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (!seen and try pace.running()) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 if (std.mem.eql(u8, event.path, gone) and (event.kind == .removed or event.kind == .renamed)) seen = true;
             }
         }
@@ -360,7 +360,7 @@ fn expectWithout(f: *Fixture, sub_path: []const u8, kind: ?Kind, never: []const 
     var pace: wait.Pace = try .start(&f.watcher);
     defer pace.end();
     while (try pace.running()) {
-        for (try f.watcher.poll(f.io, ms(200))) |event| {
+        for (try pace.poll(f.io, ms(200))) |event| {
             trace.log("suite saw {s} {s}", .{ @tagName(event.kind), event.path });
             try std.testing.expect(!std.mem.eql(u8, event.path, excluded));
             if (event.from) |from| try std.testing.expect(!std.mem.eql(u8, from, excluded));
@@ -484,7 +484,7 @@ test "inotify does not pair a move across separate watches" {
     var pace: wait.Pace = try .start(&f.watcher);
     defer pace.end();
     while (try pace.running() and !(removed and created)) {
-        for (try f.watcher.poll(f.io, ms(200))) |event| {
+        for (try pace.poll(f.io, ms(200))) |event| {
             try std.testing.expect(event.kind != .renamed);
             if (event.id == a_id and event.kind == .removed and std.mem.eql(u8, event.path, old)) {
                 removed = true;
@@ -585,7 +585,7 @@ test "removing a directly watched file reports a file target" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 if (event.id != id or event.kind != .removed or
                     !std.mem.eql(u8, event.path, target)) continue;
                 try std.testing.expectEqual(lookout.Target.file, event.target);
@@ -616,7 +616,7 @@ test "a watch on a file that is already there does not call it new" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 if (!std.mem.eql(u8, event.path, target)) continue;
                 try std.testing.expect(event.kind != .created);
                 found = true;
@@ -648,7 +648,7 @@ test "a burst of writes on one path is one event" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            const events = try f.watcher.poll(f.io, ms(200));
+            const events = try pace.poll(f.io, ms(200));
             for (events) |event| {
                 if (std.mem.eql(u8, event.path, wanted)) seen += 1;
             }
@@ -736,7 +736,7 @@ test "a non-recursive watch ignores what happens below it" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, wanted));
             }
         }
@@ -776,7 +776,7 @@ test "an ignored subtree is watched by nobody" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, ignored));
                 try std.testing.expect(!std.mem.eql(u8, event.path, scratch));
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
@@ -818,7 +818,7 @@ test "refilter changes a live watch's admitted paths and registrations" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, excluded));
                 if (event.id == id and event.kind == .created and
                     std.mem.eql(u8, event.path, admitted)) saw = true;
@@ -865,7 +865,7 @@ test "refilter seeds the entry budget of newly admitted directories" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !overflowed) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 if (event.id == id and event.kind == .overflow and
                     std.mem.eql(u8, event.path, f.root)) overflowed = true;
             }
@@ -903,7 +903,7 @@ test "refilter does not count a queued creation twice" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !saw) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(event.id != id or event.kind != .overflow);
                 if (event.id == id and std.mem.eql(u8, event.path, subject) and
                     (event.kind == .created or event.kind == .modified)) saw = true;
@@ -1002,7 +1002,7 @@ test "writes after refilter are reported while a writer runs through the change"
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !std.mem.allEqual(bool, &seen, true)) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!lookout.path.within(excluded, event.path));
                 if (event.id != id or event.kind != .created) continue;
                 for (wanted, &seen) |path, *hit| {
@@ -1073,7 +1073,7 @@ test "refilter drops held events that the new filter excludes" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !saw) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, old));
                 if (event.id == id and event.kind == .modified and
                     std.mem.eql(u8, event.path, new)) saw = true;
@@ -1190,7 +1190,7 @@ test "a caller predicate excludes what a pattern cannot say" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, hidden));
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
             }
@@ -1315,13 +1315,13 @@ test "a tree the filter ignores gets no registration however it grows" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 for (roots) |r| try std.testing.expect(!std.mem.startsWith(u8, event.path, r));
                 if (event.kind == .modified and std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
         try wait.seen(&f.watcher, found);
-        for (try f.watcher.poll(f.io, ms(200))) |event| {
+        for (try pace.poll(f.io, ms(200))) |event| {
             for (roots) |r| try std.testing.expect(!std.mem.startsWith(u8, event.path, r));
         }
         try std.testing.expectEqual(before, f.watcher.stats().registrations);
@@ -1357,7 +1357,7 @@ test "a directory past the entry limit reports overflow against the watch root" 
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) found = true;
             }
         }
@@ -1423,7 +1423,7 @@ test "what an overflow lost can be read back from a baseline" {
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (try pace.running() and !overflowed) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
             }
         }
@@ -1464,7 +1464,7 @@ test "a finished write is reported where the backend is told about it" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !(closed or otherwise)) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 if (!std.mem.eql(u8, event.path, wanted)) continue;
                 if (event.kind == .closed) closed = true else otherwise = true;
             }
@@ -1504,7 +1504,7 @@ test "closes are not reported unless they are asked for" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(event.kind != .closed);
                 if (event.kind == .modified and std.mem.eql(u8, event.path, wanted)) found = true;
             }
@@ -1558,7 +1558,7 @@ test "the Windows read buffer is the size the caller asked for" {
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (try pace.running() and !overflowed) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
             }
         }
@@ -1586,7 +1586,7 @@ test "the Windows read buffer is the size the caller asked for" {
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (try pace.running()) {
-            for (try watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (event.kind == .overflow and std.mem.eql(u8, event.path, root)) overflowed = true;
                 if (event.kind == .created) created += 1;
             }
@@ -1660,7 +1660,7 @@ test "overlapping watches report the same path under both ids" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !(parent_seen and child_seen)) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 if (event.kind != .created or !std.mem.eql(u8, event.path, changed)) continue;
                 if (event.id == parent_id) parent_seen = true;
                 if (event.id == child_id) child_seen = true;
@@ -1694,7 +1694,7 @@ test "removing a watch discards events held for a quiet window" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (f.watcher.stats().held == 0 and try pace.running()) {
-            _ = try f.watcher.poll(f.io, ms(0));
+            _ = try pace.poll(f.io, ms(0));
             if (f.watcher.stats().held == 0) {
                 try std.testing.io.sleep(.fromMilliseconds(20), .awake);
             }
@@ -1730,7 +1730,7 @@ test "a zero timeout is one check, not a refusal to look" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (!found and try pace.running()) {
-            for (try f.watcher.poll(f.io, ms(0))) |event| {
+            for (try pace.poll(f.io, ms(0))) |event| {
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
             }
         }
@@ -1789,7 +1789,7 @@ test "a path that does not exist yet can be watched" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, ignored));
                 if (event.kind == .created and std.mem.eql(u8, event.path, wanted)) found = true;
             }
@@ -1829,7 +1829,7 @@ test "what is made in a pending path as it appears is reported by the watch it b
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            const events = try f.watcher.poll(f.io, ms(200));
+            const events = try pace.poll(f.io, ms(200));
             try ledger.note(events);
         }
         for ([_][]const u8{ "later/a.txt", "later/sub/b.txt" }) |sub_path| {
@@ -1858,7 +1858,7 @@ test "a pending file is promoted with its file target" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 if (event.id != id or event.kind != .created or
                     !std.mem.eql(u8, event.path, target)) continue;
                 try std.testing.expectEqual(lookout.Target.file, event.target);
@@ -1888,7 +1888,7 @@ test "what happens to the ancestor of a pending watch is not reported" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            try std.testing.expectEqual(@as(usize, 0), (try f.watcher.poll(f.io, ms(200))).len);
+            try std.testing.expectEqual(@as(usize, 0), (try pace.poll(f.io, ms(200))).len);
         }
 
         try f.tmp.dir.createDirPath(std.testing.io, "later");
@@ -1982,7 +1982,7 @@ const Ledger = struct {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            try l.note(try f.watcher.poll(f.io, ms(200)));
+            try l.note(try pace.poll(f.io, ms(200)));
             var all = true;
             for (wants) |want| {
                 const p = try f.path(want.sub_path);
@@ -2012,7 +2012,7 @@ const Ledger = struct {
     fn drain(l: *Ledger, f: *Fixture) !void {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
-        while (try pace.running()) try l.note(try f.watcher.poll(f.io, ms(200)));
+        while (try pace.running()) try l.note(try pace.poll(f.io, ms(200)));
     }
 
     const Want = struct { id: lookout.WatchId, sub_path: []const u8, kind: Kind };
@@ -2251,7 +2251,7 @@ test "a folder shared with a pending watch keeps its entry budget" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and ledger.count(folder, .overflow, f.root) == 0) {
-            try ledger.note(try f.watcher.poll(f.io, ms(200)));
+            try ledger.note(try pace.poll(f.io, ms(200)));
         }
         if (ledger.count(folder, .overflow, f.root) == 0) return wait.missed(&f.watcher);
         try std.testing.expect(ledger.count(folder, .overflow, f.root) > 0);
@@ -2292,7 +2292,7 @@ test "a folder a pending watch alone held is counted true for the watch taken th
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and ledger.count(folder, .overflow, f.root) == 0) {
-            try ledger.note(try f.watcher.poll(f.io, ms(200)));
+            try ledger.note(try pace.poll(f.io, ms(200)));
         }
         if (ledger.count(folder, .overflow, f.root) == 0) return wait.missed(&f.watcher);
         try std.testing.expect(ledger.count(folder, .overflow, f.root) > 0);
@@ -2341,7 +2341,7 @@ test "a watch that does not walk into a folder leaves the folder's count to the 
             var pace: wait.Pace = try .start(&f.watcher);
             defer pace.end();
             while (try pace.running() and ledger.count(tree, .overflow, f.root) + ledger.count(tree, .overflow, sub) == 0) {
-                try ledger.note(try f.watcher.poll(f.io, ms(200)));
+                try ledger.note(try pace.poll(f.io, ms(200)));
             }
             if (ledger.count(tree, .overflow, f.root) + ledger.count(tree, .overflow, sub) == 0) return wait.missed(&f.watcher);
             std.testing.expect(ledger.count(tree, .overflow, f.root) + ledger.count(tree, .overflow, sub) > 0) catch |err| {
@@ -2386,7 +2386,7 @@ test "a count a parked watch held past the folder's own watch is not taken up st
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and ledger.count(again, .overflow, f.root) == 0) {
-            try ledger.note(try f.watcher.poll(f.io, ms(200)));
+            try ledger.note(try pace.poll(f.io, ms(200)));
         }
         if (ledger.count(again, .overflow, f.root) == 0) return wait.missed(&f.watcher);
         std.testing.expect(ledger.count(again, .overflow, f.root) > 0) catch |err| {
@@ -2581,7 +2581,7 @@ test "the watched path's own move is reported in the shape the backend documents
                 var pace: wait.Pace = try .start(&f.watcher);
                 defer pace.end();
                 while (try pace.running()) {
-                    for (try f.watcher.poll(f.io, ms(200))) |event| {
+                    for (try pace.poll(f.io, ms(200))) |event| {
                         try std.testing.expect(!std.mem.eql(u8, event.path, target));
                     }
                 }
@@ -2608,7 +2608,7 @@ test "Windows retires a renamed root before reporting stale child paths" {
     var pace: wait.Pace = try .start(&f.watcher);
     defer pace.end();
     while (try pace.running() and !unwatched) {
-        for (try f.watcher.poll(f.io, ms(200))) |event| {
+        for (try pace.poll(f.io, ms(200))) |event| {
             if (event.kind == .unwatched and std.mem.eql(u8, event.path, target)) {
                 unwatched = true;
             } else {
@@ -2694,7 +2694,7 @@ test "a symbolic link is an entry, not a doorway" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running()) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.startsWith(u8, event.path, through_link) or
                     event.path.len == through_link.len);
             }
@@ -2731,7 +2731,7 @@ test "debouncing reports one event per path carrying the kind seen last" {
     var pace: wait.Pace = try .start(&f.watcher);
     defer pace.end();
     while (try pace.running() and seen == 0) {
-        for (try f.watcher.poll(f.io, ms(100))) |event| {
+        for (try pace.poll(f.io, ms(100))) |event| {
             if (!std.mem.eql(u8, event.path, wanted)) continue;
             kind = event.kind;
             seen += 1;
@@ -2804,7 +2804,7 @@ test "watches taken and dropped in quick succession keep working" {
             var pace: wait.Pace = try .start(&watcher);
             defer pace.end();
             while (try pace.running() and !found) {
-                for (try watcher.poll(io, ms(100))) |event| {
+                for (try pace.poll(io, ms(100))) |event| {
                     if (std.mem.eql(u8, event.path, wanted)) found = true;
                 }
             }
@@ -2849,7 +2849,7 @@ test "an event says whether the path is a file or a directory" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and (dir_target == null or file_target == null)) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 if (std.mem.eql(u8, event.path, dir_path)) dir_target = event.target;
                 if (std.mem.eql(u8, event.path, file_path)) file_target = event.target;
             }
@@ -3289,7 +3289,7 @@ test "two watchers in one process do not disturb each other" {
         var pace: wait.Pace = try .start(&first);
         defer pace.end();
         while (try pace.running() and !(saw_first and saw_second)) {
-            for (try first.poll(io, ms(100))) |event| {
+            for (try pace.poll(io, ms(100))) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, wanted_second));
                 if (std.mem.eql(u8, event.path, wanted_first)) saw_first = true;
             }
@@ -3332,7 +3332,7 @@ test "a watch can be removed from inside a poll loop" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !removed) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 if (event.id == first) {
                     f.watcher.remove(io, first);
                     removed = true;
@@ -3409,7 +3409,7 @@ test "what changed while nothing was watching is reported on resuming" {
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running() and !(saw_appeared and saw_changed and saw_deleted)) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (std.mem.eql(u8, event.path, appeared)) saw_appeared = true;
             if (std.mem.eql(u8, event.path, changed)) saw_changed = true;
             if (std.mem.eql(u8, event.path, deleted) and event.kind == .removed) saw_deleted = true;
@@ -3452,7 +3452,7 @@ test "an include list reports what it names and nothing else" {
         var pace: wait.Pace = try .start(&f.watcher);
         defer pace.end();
         while (try pace.running() and !found) {
-            for (try f.watcher.poll(f.io, ms(200))) |event| {
+            for (try pace.poll(f.io, ms(200))) |event| {
                 try std.testing.expect(!std.mem.eql(u8, event.path, unwanted));
                 if (std.mem.eql(u8, event.path, wanted)) found = true;
             }
@@ -3497,7 +3497,7 @@ test "resuming retains a debounced change that poll has not handed out" {
     var pace: wait.Pace = try .start(&resumed);
     defer pace.end();
     while (!saw and try pace.running()) {
-        for (try resumed.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (std.mem.eql(u8, event.path, wanted)) saw = true;
         }
     }
@@ -3619,7 +3619,7 @@ test "a crash before checkpoint persistence replays the uncommitted delivery" {
         var pace: wait.Pace = try .start(&resumed);
         defer pace.end();
         while (try pace.running()) {
-            for (try resumed.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (std.mem.eql(u8, event.path, wanted)) saw = true;
             }
             if (saw and should_replay) break;
