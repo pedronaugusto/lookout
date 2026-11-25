@@ -73,7 +73,8 @@ test "poll reports each change from another thread" {
             var toucher: Toucher = .{ .dir = tmp.dir, .round = round };
             const thread = try std.Thread.spawn(.{}, Toucher.run, .{&toucher});
             var name: [32]u8 = undefined;
-            const expected = try std.Io.Dir.path.join(gpa, &.{ root, try std.mem.print(&name, "w{d}.txt", .{round}) });
+            const written = try std.mem.print(&name, "w{d}.txt", .{round});
+            const expected = try std.Io.Dir.path.join(gpa, &.{ root, written });
             defer gpa.free(expected);
             // The writer sleeps before it writes, so the wait is paced
             // only once it has written.
@@ -92,7 +93,7 @@ test "poll reports each change from another thread" {
                     if (event.kind == .created and std.mem.eql(u8, event.path, expected)) seen = true;
                 }
             }
-            try wait.seen(&watcher, seen);
+            try wait.seenIn(&watcher, seen, tmp.dir, written);
             observed += 1;
         }
         try std.testing.expectEqual(rounds, observed);

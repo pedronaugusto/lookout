@@ -161,6 +161,26 @@ pub fn seen(w: *const lookout.Watcher, found: bool) Missed!void {
     if (!found) return missed(w);
 }
 
+/// `seen`, for an event naming the entry `name` of `dir`: a wait that
+/// ended without it also says whether a listing of `dir` shows the entry
+/// now. Shown, the watcher did not report what the system holds; not
+/// shown, the system had not made it visible by the time the control's
+/// sentinels, written after it, were reported.
+pub fn seenIn(w: *const lookout.Watcher, found: bool, dir: Io.Dir, name: []const u8) Missed!void {
+    if (found) return;
+    const shown: []const u8 = if (listed(dir, name)) |is| (if (is) "shows" else "does not show") else |_| "could not be read for";
+    std.debug.print("{t}: a listing of the directory now {s} {s}, with {d} registration(s)\n", .{ w.backend(), shown, name, w.stats().registrations });
+    return missed(w);
+}
+
+fn listed(dir: Io.Dir, name: []const u8) !bool {
+    var it = dir.iterate();
+    while (try it.next(std.testing.io)) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return true;
+    }
+    return false;
+}
+
 /// `Watcher.add`, whose `WatchLimitReached` on FSEvents asks the system
 /// first: fseventsd refusing a control watcher's stream as well is
 /// `FsEventsRefused`, the machine's red, not the watcher's.
