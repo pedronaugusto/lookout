@@ -19,11 +19,21 @@ fn reported(w: *Watcher, io: std.Io, expected: []const u8) !bool {
     var pace: wait.Pace = try .start(w);
     defer pace.end();
     while (try pace.running()) {
-        for (try w.poll(io, ms(50))) |event| {
+        for (try pace.poll(io, ms(50))) |event| {
             if (std.mem.eql(u8, event.path, expected)) seen = true;
         }
     }
     return seen;
+}
+
+/// Writes `name` under `dir` and fails unless the watch reported it exactly
+/// when `wanted` says it should, naming the backend and the stage.
+fn expectWrite(w: *Watcher, io: std.Io, dir: std.Io.Dir, root: []const u8, stage: []const u8, name: []const u8, wanted: bool) !void {
+    const got = try writeReported(w, io, dir, root, name);
+    if (got == wanted) return;
+    std.debug.print("{t}: with the ignore file {s}, {s} was {s}\n", .{ w.backend(), stage, name, if (got) "reported, and the ignore file excludes it" else "not reported, and nothing excludes it" });
+    if (!got) return wait.missed(w);
+    return error.TestUnexpectedResult;
 }
 
 /// Writes `name` under `dir` and says whether the watch reported it.
@@ -50,31 +60,31 @@ test "a .gitignore added, changed and removed under a live watch admits and drop
 
         var watcher: Watcher = try .init(gpa, io, .{ .backend = backend, .poll_interval = .fromMilliseconds(20) });
         defer watcher.deinit(io);
-        const id = try wait.add(&watcher, io, root, .{ .filter = .{ .ignore_files = .{} } });
+        const id = try wait.add(&watcher, io, root, .{ .recursive = true, .filter = .{ .ignore_files = .{} } });
         try wait.drain(&watcher, io);
 
         // No ignore file: every tree is the watch's.
-        try testing.expect(try writeReported(&watcher, io, tmp.dir, root, "build/a.txt"));
-        try testing.expect(try writeReported(&watcher, io, tmp.dir, root, "kept/a.txt"));
+        try expectWrite(&watcher, io, tmp.dir, root, "absent", "build/a.txt", true);
+        try expectWrite(&watcher, io, tmp.dir, root, "absent", "kept/a.txt", true);
 
         // Added: what it names is dropped, what it does not is kept.
         try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "build/\n" });
         try wait.drain(&watcher, io);
-        try testing.expect(!try writeReported(&watcher, io, tmp.dir, root, "build/b.txt"));
-        try testing.expect(try writeReported(&watcher, io, tmp.dir, root, "kept/b.txt"));
+        try expectWrite(&watcher, io, tmp.dir, root, "added", "build/b.txt", false);
+        try expectWrite(&watcher, io, tmp.dir, root, "added", "kept/b.txt", true);
 
         // Changed: the tree it named is admitted again, and the one it
         // names now is dropped.
         try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "kept/\n" });
         try wait.drain(&watcher, io);
-        try testing.expect(try writeReported(&watcher, io, tmp.dir, root, "build/c.txt"));
-        try testing.expect(!try writeReported(&watcher, io, tmp.dir, root, "kept/c.txt"));
+        try expectWrite(&watcher, io, tmp.dir, root, "changed", "build/c.txt", true);
+        try expectWrite(&watcher, io, tmp.dir, root, "changed", "kept/c.txt", false);
 
         // Removed: every tree is the watch's again.
         try tmp.dir.deleteFile(io, ".gitignore");
         try wait.drain(&watcher, io);
-        try testing.expect(try writeReported(&watcher, io, tmp.dir, root, "build/d.txt"));
-        try testing.expect(try writeReported(&watcher, io, tmp.dir, root, "kept/d.txt"));
+        try expectWrite(&watcher, io, tmp.dir, root, "removed", "build/d.txt", true);
+        try expectWrite(&watcher, io, tmp.dir, root, "removed", "kept/d.txt", true);
         try testing.expectEqual(@as(usize, 0), watcher.unreadIgnoreFiles(id).len);
     }
 }
