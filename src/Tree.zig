@@ -146,10 +146,10 @@ pub const OwnedDir = aegis.own.Dir;
 
 /// Errors adding a watch can return.
 pub const AddError = Allocator.Error || Io.Dir.OpenError || Io.Dir.StatFileError ||
-    Io.Dir.RealPathFileAllocError || Snapshot.RefreshError || CompiledFilter.Error;
+    Io.Dir.RealPathFileAllocError || Snapshot.RefreshError || CompiledFilter.Error || CompiledFilter.QueryError;
 
 /// Errors rescanning a watch can return.
-pub const ScanError = Allocator.Error || Snapshot.RefreshError;
+pub const ScanError = Allocator.Error || Snapshot.RefreshError || CompiledFilter.QueryError;
 
 /// A tree that holds nothing.
 pub fn init(gpa: Allocator, max_dir_entries: usize, track_entries: bool) Tree {
@@ -269,7 +269,7 @@ fn descend(t: *Tree, io: Io, parent_id: NodeId, added: *std.ArrayList(NodeId), b
         // An excluded directory is not opened and not registered, which
         // is the whole point of filtering here rather than on the way
         // out: the tree below it costs nothing.
-        if (t.pruned(watch, child_path)) {
+        if (try t.pruned(io, watch, child_path)) {
             t.gpa.free(child_path);
             continue;
         }
@@ -359,7 +359,7 @@ fn trackEntries(t: *Tree, io: Io, dir_id: NodeId, added: *std.ArrayList(NodeId))
         const name = dir_node.snapshot.entries.keys()[i];
         const child = try std.Io.Dir.path.join(t.gpa, &.{ dir_node.path, name });
         errdefer t.gpa.free(child);
-        if (t.excluded(dir_node.watch, child)) {
+        if (try t.excluded(io, dir_node.watch, child)) {
             t.gpa.free(child);
             continue;
         }
@@ -537,7 +537,7 @@ pub fn refilter(t: *Tree, io: Io, id: WatchId, next: Filter, added: *std.ArrayLi
         defer dirs.deinit(t.gpa);
         for (t.nodes.keys(), t.nodes.values()) |node_id, node| {
             if (node.watch == id and node.role == .directory and
-                (path_cmp.eql(node.path, watch.root) or !t.pruned(id, node.path)))
+                (path_cmp.eql(node.path, watch.root) or !try t.pruned(io, id, node.path)))
                 try dirs.append(t.gpa, node_id);
         }
         while (frontier < dirs.items.len) : (frontier += 1) {
@@ -553,18 +553,20 @@ pub fn refilter(t: *Tree, io: Io, id: WatchId, next: Filter, added: *std.ArrayLi
 
     // Keep the root even when a predicate rejects its spelling: the root
     // is the watch's anchor, and filters apply to entries beneath it.
-    var i: usize = 0;
-    while (i < t.nodes.count()) {
-        const node = t.nodes.values()[i];
-        if (node.watch != id or path_cmp.eql(node.path, watch.root)) {
-            i += 1;
-            continue;
-        }
-        const rejected = switch (node.role) {
-            .directory => t.pruned(id, node.path),
-            .file => t.excluded(id, node.path),
+    // Every node is decided before any is dropped: a question that fails
+    // (an ignore file read out of memory) leaves the watch as it was.
+    var rejected: std.ArrayList(NodeId) = .empty;
+    defer rejected.deinit(t.gpa);
+    for (t.nodes.keys(), t.nodes.values()) |node_id, node| {
+        if (node.watch != id or path_cmp.eql(node.path, watch.root)) continue;
+        const out = switch (node.role) {
+            .directory => try t.pruned(io, id, node.path),
+            .file => try t.excluded(io, id, node.path),
         };
-        if (rejected) t.dropAt(io, i) else i += 1;
+        if (out) try rejected.append(t.gpa, node_id);
+    }
+    for (rejected.items) |node_id| {
+        if (t.nodes.getIndex(node_id)) |at| t.dropAt(io, at);
     }
     previous.deinit();
 }
@@ -640,18 +642,27 @@ fn parentPolicy(t: *const Tree, id: WatchId, subject: []const u8) identity.Polic
     return watch.filter.policy;
 }
 
+/// Notes an event for `subject` under the watch `id` with its filter
+/// (`CompiledFilter.noticeEvent`): one naming an ignore file is a change to
+/// the rules. A backend calls it for each event it reads, before it asks
+/// whether to report it.
+pub fn noticeEvent(t: *const Tree, id: WatchId, subject: []const u8) void {
+    const watch = t.watches.get(id) orelse return;
+    watch.filter.noticeEvent(watch.root, subject);
+}
+
 /// Whether `subject` is outside what the watch `id` is about, so no
 /// event for it is reported. See `@import("options.zig").AddOptions.filter`.
-fn excluded(t: *const Tree, id: WatchId, subject: []const u8) bool {
+fn excluded(t: *const Tree, io: Io, id: WatchId, subject: []const u8) CompiledFilter.QueryError!bool {
     const watch = t.watches.get(id) orelse return false;
-    return watch.filter.excludesPolicy(t.parentPolicy(id, subject), watch.root, subject);
+    return watch.filter.excludesPolicy(io, t.parentPolicy(id, subject), watch.root, subject);
 }
 
 /// Whether a directory is so far outside the watch that it need not be
 /// registered at all. See `CompiledFilter.prunes`.
-fn pruned(t: *const Tree, id: WatchId, subject: []const u8) bool {
+fn pruned(t: *const Tree, io: Io, id: WatchId, subject: []const u8) CompiledFilter.QueryError!bool {
     const watch = t.watches.get(id) orelse return false;
-    return watch.filter.prunesPolicy(t.parentPolicy(id, subject), watch.root, subject);
+    return watch.filter.prunesPolicy(io, t.parentPolicy(id, subject), watch.root, subject);
 }
 
 /// Re-lists the directory node `id`, pushes what changed into `batch`, and
@@ -716,10 +727,13 @@ pub fn rescanDirectory(
 
         const child = try std.Io.Dir.path.join(t.gpa, &.{ dir_path, change.name });
         defer t.gpa.free(child);
+        // An ignore file changed is a change to the rules, whether or not
+        // the file itself is reported.
+        registration.filter.noticeEvent(registration.root, child);
         // Excluded before it is reported and before a node is made for
         // it, so an excluded directory never becomes a registration.
-        const pruned_here = t.pruned(watch, child);
-        if (!t.excluded(watch, child)) {
+        const pruned_here = try t.pruned(io, watch, child);
+        if (!try t.excluded(io, watch, child)) {
             try batch.push(t.gpa, io, watch, child, change.kind, .of(change.file_kind));
         }
         if (pruned_here) continue;
@@ -815,11 +829,11 @@ fn adopt(
 
             const entry = try std.Io.Dir.path.join(t.gpa, &.{ current, name });
             errdefer t.gpa.free(entry);
-            if (t.pruned(watch, entry)) {
+            if (try t.pruned(io, watch, entry)) {
                 t.gpa.free(entry);
                 continue;
             }
-            if (!t.excluded(watch, entry)) {
+            if (!try t.excluded(io, watch, entry)) {
                 try batch.push(t.gpa, io, watch, entry, .created, .of(file_kind));
             }
             if (file_kind == .directory) {
@@ -836,6 +850,7 @@ fn adopt(
 pub fn rescanFile(t: *Tree, io: Io, id: NodeId, batch: *Batch) Tree.ScanError!void {
     const node = t.nodes.get(id) orelse return;
     if (node.role != .file) return;
+    t.noticeEvent(node.watch, node.path);
 
     const taken = stamp.now(io);
     const stat = Io.Dir.cwd().statFile(io, node.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
@@ -1260,8 +1275,8 @@ test "filesystem identity chooses each parent directory policy across mixed root
         defer gpa.free(direct);
         const nested = try std.Io.Dir.path.join(gpa, &.{ sub, "foo" });
         defer gpa.free(nested);
-        try std.testing.expectEqual(i == 0, t.excluded(id, direct));
-        try std.testing.expectEqual(i != 0, t.excluded(id, nested));
+        try std.testing.expectEqual(i == 0, try t.excluded(io, id, direct));
+        try std.testing.expectEqual(i != 0, try t.excluded(io, id, nested));
     }
 }
 

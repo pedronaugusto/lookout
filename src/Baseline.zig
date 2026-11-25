@@ -103,7 +103,11 @@ pub const Change = struct {
 /// Errors `seed` can return, on top of the file-system errors of reading
 /// the tree.
 /// `InvalidPattern` and `PatternTooLong` name a filter pattern refused.
-pub const SeedError = DiffError || CompiledFilter.Error;
+pub const SeedError = DiffError || CompiledFilter.Error || error{
+    /// The filter reads ignore files (`Filter.ignore_files`), which a
+    /// baseline does not: their rules change with the tree it compares.
+    UnsupportedBaselineFilter,
+};
 
 /// Errors `diff` can return: the reads `seed` makes, made again.
 pub const DiffError = Allocator.Error || Io.Dir.OpenError ||
@@ -118,6 +122,7 @@ pub const DiffError = Allocator.Error || Io.Dir.OpenError ||
 ///
 /// `gpa` is kept until `deinit`; `io` is used here and not kept.
 pub fn seed(gpa: Allocator, io: Io, path: []const u8, options: Options) Baseline.SeedError!Baseline {
+    if (options.filter.ignore_files != null) return error.UnsupportedBaselineFilter;
     const real = try identity.canonical(gpa, io, path);
     defer gpa.free(real);
 
@@ -220,7 +225,7 @@ pub fn save(b: *const Baseline, io: Io, filename: []const u8, options: SaveOptio
 /// UnsupportedBaselineVersion respectively. A later diff costs one walk.
 /// `gpa` is kept until `deinit`, as by `seed`.
 pub fn load(gpa: Allocator, io: Io, filename: []const u8, root: []const u8, options: Options) Baseline.LoadError!Baseline {
-    if (options.filter.allow != null) return error.UnsupportedBaselineFilter;
+    if (options.filter.allow != null or options.filter.ignore_files != null) return error.UnsupportedBaselineFilter;
     const read = intake.readFile(io, .cwd(), filename, gpa, .fromRaw(format.file_limit)) catch |err| switch (err) {
         error.StreamTooLong => return error.InvalidBaseline,
         else => return err,
@@ -265,6 +270,15 @@ fn samePatterns(a: []const []const u8, b: []const []const u8) bool {
 /// Walks the tree, refreshing every directory's listing. With `report`
 /// set, every difference found becomes a `Change`; without it the walk is
 /// only there to take the listings, which is what `seed` wants.
+/// A baseline's filter reads no ignore files (`seed` and `load` refuse
+/// one that does), and only an ignore file's read fails a question.
+fn unanswered(err: CompiledFilter.QueryError) noreturn {
+    switch (err) {
+        // unreachable: a baseline's filter has no ignore files to read
+        error.OutOfMemory, error.Canceled => unreachable,
+    }
+}
+
 fn scan(b: *Baseline, gpa: Allocator, io: Io, report: bool) DiffError!void {
     // The scan owns new listings and paths until all traversal and reporting
     // have succeeded. The remembered tree stays available for comparison
@@ -345,7 +359,7 @@ const Scan = struct {
 
             if (report) {
                 try s.dirs.values()[index].snapshot.compare(gpa, before, &s.scratch);
-                try s.reportChanges(gpa, path, index);
+                try s.reportChanges(gpa, io, path, index);
             }
             if (!b.recursive) continue;
 
@@ -356,7 +370,7 @@ const Scan = struct {
                 if (meta.file_kind != .directory) continue;
                 const child = try std.Io.Dir.path.join(gpa, &.{ path, name });
                 errdefer gpa.free(child);
-                if (b.filter.prunesPolicy(policy, b.root, child)) {
+                if (b.filter.prunesPolicy(io, policy, b.root, child) catch |err| unanswered(err)) {
                     gpa.free(child);
                     continue;
                 }
@@ -364,11 +378,11 @@ const Scan = struct {
             }
         }
 
-        if (report) try s.reportLost(gpa);
+        if (report) try s.reportLost(gpa, io);
     }
 
     /// Turns one directory's comparison into changes.
-    fn reportChanges(s: *Scan, gpa: Allocator, path: []const u8, index: usize) DiffError!void {
+    fn reportChanges(s: *Scan, gpa: Allocator, io: Io, path: []const u8, index: usize) DiffError!void {
         const b = s.baseline;
         if (s.dirs.values()[index].snapshot.truncated) {
             try s.record(gpa, b.root, .overflow, .directory);
@@ -383,7 +397,7 @@ const Scan = struct {
 
             const child = try std.Io.Dir.path.join(gpa, &.{ path, change.name });
             defer gpa.free(child);
-            if (b.filter.excludesPolicy(s.dirs.values()[index].policy, b.root, child)) continue;
+            if (b.filter.excludesPolicy(io, s.dirs.values()[index].policy, b.root, child) catch |err| unanswered(err)) continue;
             try s.record(gpa, child, change.kind, .of(change.file_kind));
         }
     }
@@ -391,14 +405,14 @@ const Scan = struct {
     /// Reports the contents of directories the scan did not reach. Their
     /// listings still belong to the previous baseline until the scan commits.
     /// The directory itself is reported by its parent's comparison.
-    fn reportLost(s: *Scan, gpa: Allocator) DiffError!void {
+    fn reportLost(s: *Scan, gpa: Allocator, io: Io) DiffError!void {
         const b = s.baseline;
         for (b.dirs.keys(), b.dirs.values()) |path, remembered| {
             if (s.dirs.contains(path)) continue;
             for (remembered.snapshot.entries.keys(), remembered.snapshot.entries.values()) |name, meta| {
                 const child = try std.Io.Dir.path.join(gpa, &.{ path, name });
                 defer gpa.free(child);
-                if (b.filter.excludesPolicy(remembered.policy, b.root, child)) continue;
+                if (b.filter.excludesPolicy(io, remembered.policy, b.root, child) catch |err| unanswered(err)) continue;
                 try s.record(gpa, child, .removed, .of(meta.file_kind));
             }
         }

@@ -27,6 +27,7 @@
 
 const sweep = @import("sweep");
 const identity = @import("identity.zig");
+const IgnoreState = @import("ignore_state.zig");
 const Filter = @This();
 
 /// Explicit filter preference; null follows the directory policy.
@@ -96,6 +97,31 @@ only: []const []const u8 = &.{},
 /// life of the watch is the caller's too.
 allow: ?*const Allow = null,
 
+/// The ignore files under the watch, read as git reads a repository's
+/// `.gitignore` files: each directory's file speaks for the paths below
+/// it, a deeper one overrides a shallower one, and a `!` line brings back
+/// what an earlier line left out -- except below a directory already left
+/// out, where git reads nothing and neither does lookout. Null, the
+/// default, reads none.
+///
+/// A path the files exclude is excluded as an `ignore` pattern excludes
+/// it, ancestors included, so where lookout does the recursion an ignored
+/// tree is never opened or registered. `ignore`, `only` and `allow` are
+/// asked first and win: a `!` line cannot bring back what `ignore`
+/// excludes.
+///
+/// The files are read when a path below them is first asked about, and
+/// read again when an event names one of them anywhere under the watch:
+/// the watch is then refiltered (`lookout.Watcher.refilter`) against
+/// what they now say. A file that is there and cannot be read counts as
+/// absent, as git warns and goes on, and is listed by
+/// `lookout.Watcher.unreadIgnoreFiles`. A read that runs out of memory is
+/// the failure of the `poll`, `add` or `refilter` that asked.
+///
+/// `lookout.Baseline` reads no ignore files: a filter with them is
+/// `error.UnsupportedBaselineFilter` there, as one with `allow` is.
+ignore_files: ?IgnoreFiles = null,
+
 /// A predicate on paths, embedded in what answers it: `allowFn` is given
 /// the `Allow` it was asked through, and finds its owner from it with
 /// `@fieldParentPtr`.
@@ -106,6 +132,18 @@ pub const Allow = struct {
     pub fn admits(a: *const Allow, path: []const u8) bool {
         return a.allowFn(a, path);
     }
+};
+
+/// Which files hold a watch's ignore rules (`ignore_files`).
+pub const IgnoreFiles = struct {
+    /// The names of a directory's ignore files, read in order: a later
+    /// name's lines win over an earlier one's in the same directory.
+    /// Borrowed only for the duration of `lookout.Watcher.add` or
+    /// `refilter`, which copy them.
+    names: []const []const u8 = &.{".gitignore"},
+    /// Private: the watch's reading of the files, which the watcher sets
+    /// on the copy it hands its backends. Null in a filter a caller makes.
+    state: ?*IgnoreState = null,
 };
 
 /// A filter that excludes nothing, which is what a watch has unless the

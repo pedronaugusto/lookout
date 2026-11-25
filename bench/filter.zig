@@ -37,12 +37,13 @@ const shakedown = @import("shakedown");
 const Context = struct {
     filter: CompiledFilter,
     subjects: [][]u8,
-    fn run(c: *Context, n: u64) error{}!void {
+    io: std.Io,
+    fn run(c: *Context, n: u64) CompiledFilter.QueryError!void {
         var kept: usize = 0;
         for (0..n) |i| {
             const subject = c.subjects[i % c.subjects.len];
-            kept += @intFromBool(!c.filter.excludes(root, subject));
-            kept += @intFromBool(!c.filter.prunes(root, subject));
+            kept += @intFromBool(!try c.filter.excludes(c.io, root, subject));
+            kept += @intFromBool(!try c.filter.prunes(c.io, root, subject));
         }
         std.mem.doNotOptimizeAway(kept);
     }
@@ -69,9 +70,9 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "ignore_20_only_3", .ignore = &ignore, .only = &only },
     };
     for (cases) |case| {
-        var c: Context = .{ .filter = try .compilePolicy(init.gpa, .{ .ignore = case.ignore, .only = case.only }, .{ .case_sensitive = !folded, .normalization = if (nfc) .nfc else .exact }), .subjects = subjects };
+        var c: Context = .{ .filter = try .compilePolicy(init.gpa, .{ .ignore = case.ignore, .only = case.only }, .{ .case_sensitive = !folded, .normalization = if (nfc) .nfc else .exact }), .subjects = subjects, .io = init.io };
         defer c.filter.deinit();
-        try shakedown.bench.run(error{}, init.gpa, init.io, &stdout.interface, &c, &.{.{ .name = case.name, .unit = "two-questions", .initial = 20_000, .run = Context.run }}, .{ .commit = "filesystem-policy" }, .{ .smoke = smoke });
+        try shakedown.bench.run(CompiledFilter.QueryError, init.gpa, init.io, &stdout.interface, &c, &.{.{ .name = case.name, .unit = "two-questions", .initial = 20_000, .run = Context.run }}, .{ .commit = "filesystem-policy" }, .{ .smoke = smoke });
     }
     try stdout.interface.flush();
 }

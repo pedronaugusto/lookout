@@ -121,7 +121,9 @@ pub const Link = struct {
         // Too long to spell here: let it through, the report decides.
         const spelled = link.alias.spell(&buffer, subject) orelse return true;
         const l = link.links;
-        if (l.identity_override != null or l.filter.case != null) return !l.filter.prunes(l.root, spelled);
+        // Patterns only: this predicate has no `Io` to read ignore files
+        // with, and cannot fail. They still decide what is reported.
+        if (l.identity_override != null or l.filter.case != null) return !l.filter.prunesWithoutReading(l.filter.policy, l.root, spelled);
         // This pure callback has no directory facts. Admit a directory
         // possible under either case policy; reporting applies its actual
         // parent policy using the current operation's Io.
@@ -129,14 +131,14 @@ pub const Link = struct {
         sensitive.case_sensitive = true;
         var folded = sensitive;
         folded.case_sensitive = false;
-        return !(l.filter.prunesPolicy(sensitive, l.root, spelled) and l.filter.prunesPolicy(folded, l.root, spelled));
+        return !(l.filter.prunesWithoutReading(sensitive, l.root, spelled) and l.filter.prunesWithoutReading(folded, l.root, spelled));
     }
 };
 
 /// What a look at a link, or at where it leads, fails with past the
 /// link's absence: a cancel, a system fault, a refusal of another kind.
 /// Absence (`absent`) is handled where it is met.
-pub const Error = Allocator.Error || Io.Dir.StatFileError || names.CanonicalError || Identity.PathError;
+pub const Error = Allocator.Error || Io.Dir.StatFileError || names.CanonicalError || Identity.PathError || CompiledFilter.QueryError;
 
 /// Whether `err` says what was looked at is not there to look at: gone,
 /// a step on the way not a directory, not this process's to read, a loop
@@ -148,10 +150,10 @@ fn absent(err: Error) bool {
     };
 }
 
-fn prunes(l: *const Links, io: Io, subject: []const u8) bool {
+fn prunes(l: *const Links, io: Io, subject: []const u8) CompiledFilter.QueryError!bool {
     if (l.filter.isEmpty()) return false;
     const parent = std.Io.Dir.path.dirname(subject) orelse l.root;
-    return l.filter.prunesPolicy(names.read(io, parent).policy(l.identity_override), l.root, subject);
+    return l.filter.prunesPolicy(io, names.read(io, parent).policy(l.identity_override), l.root, subject);
 }
 
 /// The links of the watch `owner`, of which none are followed yet. Null
@@ -300,7 +302,7 @@ fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8
         const Self = @This();
 
         fn visit(f: Self, entry: walk.Entry) !walk.Step {
-            if (f.l.prunes(f.io, entry.path)) return .over;
+            if (try f.l.prunes(f.io, entry.path)) return .over;
             switch (entry.kind) {
                 .directory => return .into,
                 .sym_link => {
@@ -330,7 +332,7 @@ fn discover(l: *const Links, io: Io, dir: []const u8, found: *std.ArrayList([]u8
 /// leads to no directory, or to one the watch reaches another way, is
 /// remembered as idle.
 pub fn follow(l: *Links, io: Io, host: *Host, batch: *Batch, subject: []const u8) Error!?*Link {
-    if (l.prunes(io, subject)) return null;
+    if (try l.prunes(io, subject)) return null;
     switch (try l.consider(io, subject)) {
         .none => return null,
         .followed => |link| return link,
@@ -438,7 +440,7 @@ fn wake(l: *Links, subject: []const u8, below: bool) void {
 /// Whether a followed link still leads where it was followed to, and is
 /// still something the watch is about.
 fn stands(l: *const Links, io: Io, link: *const Link) Error!bool {
-    if (l.prunes(io, link.path)) return false;
+    if (try l.prunes(io, link.path)) return false;
     const named = Io.Dir.cwd().statFile(io, link.path, .{ .follow_symlinks = false }) catch |err| return if (absent(err)) false else err;
     if (named.kind != .sym_link) return false;
     const now = (try identityOf(io, link.path)) orelse return false;

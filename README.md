@@ -71,7 +71,10 @@ in a `.gitignore` line: `*`, `?` and brackets within a component, `**` as a whol
 component across components, `\` escapes (a separator on Windows), and a pattern
 with no separator matching a name at any depth. A pattern git refuses is
 `InvalidPattern`. Each path is matched against all of a watch's patterns in one
-pass over it, compared as the file system compares names. Excluded directories are
+pass over it, compared as the file system compares names. A filter can also read the
+ignore files under the watch (`ignore_files`, `.gitignore` by default) as git reads them,
+negation, directory-only lines and precedence included; an event naming one refilters the
+watch, and one that cannot be read is listed by `unreadIgnoreFiles`. Excluded directories are
 pruned where the backend supports it; other backends discard their events.
 
 Every change within a watch's scope and filters made after `add` returns is reported, subject to coalescing.
@@ -195,7 +198,6 @@ retain matching preferences and refuse older formats.
 - It does not guarantee delivery of every intermediate write or rename.
 - It does not turn overflow recovery into a complete history of transient changes.
 - It does not follow symbolic links during recursive tree walks unless `follow_symlinks` asks for it, and never into a directory the watch already reaches: loops and overlapping paths would produce duplicate reports.
-- It does not read ignore files: a pattern is one line of gitignore syntax, and negation (`!`), directory-only rules (a trailing `/`), files and their precedence are a predicate's, backed by the repository's own matcher.
 - It does not recover transient history on backends without a persistent log.
 - It does not supply an application event loop or rebuild policy.
 

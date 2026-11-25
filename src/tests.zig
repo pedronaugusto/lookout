@@ -10,6 +10,7 @@ test {
     _ = @import("testing/runtime_test.zig");
     _ = @import("testing/gaps_test.zig");
     _ = @import("testing/fuzz_test.zig");
+    _ = @import("testing/ignore_files_test.zig");
     _ = @import("links_test.zig");
     _ = @import("Baseline_test.zig");
     _ = @import("ChangeLog.zig");

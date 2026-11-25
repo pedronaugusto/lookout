@@ -240,9 +240,20 @@ that the loop absorbs.
   construction and `a**/c` means what git means. A pattern git refuses is
   `InvalidPattern`. A watch's patterns are compiled into sets that answer for a
   path in one pass over it, whatever their number. lookout keeps the
-  include/exclude policy and the predicate; it does not read ignore files,
-  because negation, directory-only rules and precedence belong to a
-  repository's own matcher, which a caller backs a predicate with.
+  include/exclude policy and the predicate.
+- **Ignore files are read as git reads them, by sweep.** `Filter.ignore_files`
+  stacks a watch's `.gitignore` files with sweep's `ignore.Checker`: the files
+  above a path read when it is first asked about, none inside an excluded
+  directory, a deeper file over a shallower one. One reading per watch, which
+  the watcher owns and every filter compiled for the watch shares. The caller's
+  patterns and predicate are asked first and win. An event naming an ignore
+  file is the signal it changed: it is noticed where each backend turns kernel
+  output into an event, before the filter drops anything, never by a walk, and
+  the watch is refiltered against what the files now say. A file that cannot be
+  read counts as absent and is listed; a read that runs out of memory fails the
+  operation that asked, never answering kept. Below a followed link the files
+  decide what is reported, not what is walked: the link's walk filter is a
+  predicate with no `Io`. Baselines read none, as they store no predicate.
 - **Excluded directories are pruned where lookout recurses** (`inotify`,
   `kqueue`, polling): never opened, never registered. Where the kernel recurses
   (FSEvents, Windows) the filter can only drop the events; `prunesIgnored` is
@@ -332,8 +343,6 @@ that the loop absorbs.
   coalesce and drop; lookout reports the end state and says when it lost track.
 - **A history of transient changes** after an overflow, or on a backend with no
   persistent log.
-- **Reading ignore files.** See above: a pattern is one line, the rest is a
-  predicate's.
 - **An application event loop or a rebuild policy.** `fd` hands out a pollable
   descriptor where the backend has one, and `wake` and `poll`'s timeout cover the
   rest; what to do with an event is the program's.

@@ -23,6 +23,11 @@ const Io = std.Io;
 const lookout = @import("types.zig");
 const path_cmp = @import("path.zig");
 const CompiledFilter = @import("CompiledFilter.zig");
+
+/// Why a change could not be recorded: memory, or a question the watch's
+/// filter could not answer for a change spelled under a followed link
+/// (`CompiledFilter.QueryError`).
+pub const PushError = Allocator.Error || CompiledFilter.QueryError;
 const identity = @import("identity.zig");
 const Options = @import("options.zig").Options;
 const milliseconds = @import("options.zig").milliseconds;
@@ -150,11 +155,11 @@ pub const Alias = struct {
         return spelled;
     }
 
-    fn keeps(alias: *const Alias, io: Io, subject: []const u8) bool {
+    fn keeps(alias: *const Alias, io: Io, subject: []const u8) CompiledFilter.QueryError!bool {
         if (alias.filter.isEmpty()) return true;
         const parent = std.Io.Dir.path.dirname(subject) orelse alias.root;
         const policy = alias.identity_override orelse identity.read(io, parent).policy(null);
-        return !alias.filter.excludesPolicy(policy, alias.root, subject);
+        return !try alias.filter.excludesPolicy(io, policy, alias.root, subject);
     }
 };
 
@@ -290,7 +295,7 @@ pub fn push(
     subject: []const u8,
     kind: Kind,
     target: Target,
-) Allocator.Error!void {
+) PushError!void {
     return b.pushDetail(gpa, io, id, subject, kind, null, target);
 }
 
@@ -305,7 +310,7 @@ pub fn pushRename(
     subject: []const u8,
     from: []const u8,
     target: Target,
-) Allocator.Error!void {
+) PushError!void {
     return b.pushDetail(gpa, io, id, subject, .renamed, from, target);
 }
 
@@ -318,7 +323,7 @@ pub fn pushDetail(
     kind: Kind,
     from: ?[]const u8,
     target: Target,
-) Allocator.Error!void {
+) PushError!void {
     // Only a paired rename says where it came from.
     aegis.assert.invariant(from == null or kind == .renamed, "from == null or kind == .renamed");
     if (b.aliases.get(id)) |alias| return b.pushAliased(gpa, io, alias, subject, kind, from, target);
@@ -335,15 +340,18 @@ pub fn pushDetail(
 /// change it is to the watch the link is in: spelled under the link, and
 /// kept or dropped by that watch's filter, a rename half outside it being
 /// what it is everywhere else. See `pairsRenames`.
-fn pushAliased(b: *Batch, gpa: Allocator, io: Io, alias: *const Alias, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) Allocator.Error!void {
+fn pushAliased(b: *Batch, gpa: Allocator, io: Io, alias: *const Alias, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) PushError!void {
     if (kind == .overflow) return b.pushDetail(gpa, io, alias.owner, alias.root, .overflow, null, .directory);
     const here = try alias.spellAlloc(gpa, subject) orelse return;
     defer gpa.free(here);
     const there = if (from) |source| try alias.spellAlloc(gpa, source) else null;
     defer if (there) |spelled| gpa.free(spelled);
-    const keeps = alias.keeps(io, here);
+    // An ignore file changed is a change to the rules, kept or not.
+    alias.filter.noticeEvent(alias.root, here);
+    if (there) |spelled| alias.filter.noticeEvent(alias.root, spelled);
+    const keeps = try alias.keeps(io, here);
     if (kind == .renamed and there != null) {
-        const keeps_from = alias.keeps(io, there.?);
+        const keeps_from = try alias.keeps(io, there.?);
         if (keeps and keeps_from) return b.pushDetail(gpa, io, alias.owner, here, .renamed, there, target);
         if (keeps) return b.pushDetail(gpa, io, alias.owner, here, .created, null, target);
         if (keeps_from) return b.pushDetail(gpa, io, alias.owner, there.?, .removed, null, target);
@@ -505,22 +513,46 @@ pub fn refilter(
     root: []const u8,
     filter: anytype,
     handed_out: bool,
-) void {
+) CompiledFilter.QueryError!void {
+    // Every change is judged before any is touched: a question that fails
+    // leaves the batch as it was.
+    var verdicts: std.ArrayList(Verdict) = .empty;
+    defer verdicts.deinit(gpa);
+    for (b.deferred.items) |pending| {
+        if (pending.id != id) continue;
+        try verdicts.append(gpa, try judge(filter, root, pending.path, pending.kind, pending.from));
+    }
+    for (b.held.keys(), b.held.values()) |key, entry| {
+        if (key.id != id) continue;
+        try verdicts.append(gpa, try judge(filter, root, key.path, entry.kind, entry.from));
+    }
+    if (!handed_out) for (b.events.items) |event| {
+        if (event.id != id) continue;
+        try verdicts.append(gpa, try judge(filter, root, event.path, event.kind, event.from));
+    };
+
+    var next: usize = 0;
     var t: usize = 0;
     while (t < b.deferred.items.len) {
         const pending = b.deferred.items[t];
-        if (pending.id == id and filter.excludes(root, pending.path)) {
+        if (pending.id != id) {
+            t += 1;
+            continue;
+        }
+        const verdict = verdicts.items[next];
+        next += 1;
+        if (verdict == .drop) {
             const removed = b.deferred.orderedRemove(t);
             gpa.free(removed.path);
             if (removed.from) |from| gpa.free(from);
-        } else {
-            if (pending.id == id and pending.kind == .renamed and pending.from != null and filter.excludes(root, pending.from.?)) {
-                gpa.free(pending.from.?);
-                b.deferred.items[t].from = null;
-                b.deferred.items[t].kind = .created;
-            }
-            t += 1;
+            continue;
         }
+        if (verdict == .created) {
+            gpa.free(pending.from.?);
+            b.deferred.items[t].from = null;
+            b.deferred.items[t].kind = .created;
+        }
+        t += 1;
     }
     var h: usize = 0;
     while (h < b.held.count()) {
@@ -528,20 +560,23 @@ pub fn refilter(
         const entry = b.held.values()[h];
         if (key.id != id) {
             h += 1;
-        } else if (filter.excludes(root, key.path)) {
-            b.held.swapRemoveAt(h);
+            continue;
+        }
+        const verdict = verdicts.items[next];
+        next += 1;
+        if (verdict == .drop) {
+            // Removed in place, not swapped: the verdicts are in key order.
+            b.held.orderedRemoveAt(h);
             gpa.free(key.path);
             if (entry.from) |from| gpa.free(from);
-        } else {
-            if (entry.kind == .renamed and entry.from != null and
-                filter.excludes(root, entry.from.?))
-            {
-                gpa.free(entry.from.?);
-                b.held.values()[h].from = null;
-                b.held.values()[h].kind = .created;
-            }
-            h += 1;
+            continue;
         }
+        if (verdict == .created) {
+            gpa.free(entry.from.?);
+            b.held.values()[h].from = null;
+            b.held.values()[h].kind = .created;
+        }
+        h += 1;
     }
     if (handed_out) return;
     var removed = false;
@@ -550,23 +585,35 @@ pub fn refilter(
         const event = &b.events.items[i];
         if (event.id != id) {
             i += 1;
-        } else if (filter.excludes(root, event.path)) {
+            continue;
+        }
+        const verdict = verdicts.items[next];
+        next += 1;
+        if (verdict == .drop) {
             const gone = b.events.orderedRemove(i);
             gpa.free(gone.path);
             if (gone.from) |from| gpa.free(from);
             removed = true;
-        } else {
-            if (event.kind == .renamed and event.from != null and
-                filter.excludes(root, event.from.?))
-            {
-                gpa.free(event.from.?);
-                event.from = null;
-                event.kind = .created;
-            }
-            i += 1;
+            continue;
         }
+        if (verdict == .created) {
+            gpa.free(event.from.?);
+            event.from = null;
+            event.kind = .created;
+        }
+        i += 1;
     }
     if (removed) b.rebuildIndex();
+}
+
+/// What a refilter does with one change: drop it, keep it, or keep a
+/// rename whose source the filter now excludes as the creation it is.
+const Verdict = enum(u8) { keep, drop, created };
+
+fn judge(filter: anytype, root: []const u8, subject: []const u8, kind: Kind, from: ?[]const u8) CompiledFilter.QueryError!Verdict {
+    if (try filter.excludes(root, subject)) return .drop;
+    if (kind == .renamed and from != null and try filter.excludes(root, from.?)) return .created;
+    return .keep;
 }
 
 fn discardEvents(b: *Batch, gpa: Allocator, id: WatchId) void {
@@ -624,13 +671,13 @@ pub fn trouble(
     id: WatchId,
     subject: []const u8,
     target: Target,
-) Allocator.Error!void {
+) PushError!void {
     try b.deferChange(gpa, io, id, subject, .unwatched, null, target);
 }
 
 /// Queues a change produced while add runs. It cannot join a slice the
 /// previous poll already handed out; flush transfers it after poll resets.
-pub fn deferChange(b: *Batch, gpa: Allocator, io: Io, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) Allocator.Error!void {
+pub fn deferChange(b: *Batch, gpa: Allocator, io: Io, id: WatchId, subject: []const u8, kind: Kind, from: ?[]const u8, target: Target) PushError!void {
     aegis.assert.invariant(from == null or kind == .renamed, "from == null or kind == .renamed");
     if (b.aliases.get(id)) |alias| {
         if (kind == .overflow) return b.deferChange(gpa, io, alias.owner, alias.root, .overflow, null, .directory);
@@ -638,7 +685,7 @@ pub fn deferChange(b: *Batch, gpa: Allocator, io: Io, id: WatchId, subject: []co
         defer gpa.free(here);
         const there = if (from) |source| try alias.spellAlloc(gpa, source) else null;
         defer if (there) |spelled| gpa.free(spelled);
-        if (!alias.keeps(io, here)) return;
+        if (!try alias.keeps(io, here)) return;
         return b.deferChange(gpa, io, alias.owner, here, kind, there, target);
     }
     const owned = try gpa.dupe(u8, subject);
@@ -651,7 +698,7 @@ pub fn deferChange(b: *Batch, gpa: Allocator, io: Io, id: WatchId, subject: []co
 
 /// Transfers deferred changes after poll has reset the previous delivery.
 /// A failed transfer keeps the source for retry.
-pub fn flush(b: *Batch, gpa: Allocator, io: Io) Allocator.Error!void {
+pub fn flush(b: *Batch, gpa: Allocator, io: Io) PushError!void {
     while (b.deferred.items.len != 0) {
         const t = b.deferred.items[0];
         try b.pushDetail(gpa, io, t.id, t.path, t.kind, t.from, t.target);
@@ -1504,11 +1551,11 @@ test "filesystem identity refilters held events with each parent policy" {
     const Query = struct {
         filter: *const CompiledFilter,
         pub const Self = @This();
-        pub fn excludes(q: Self, root: []const u8, subject: []const u8) bool {
-            return q.filter.excludesPolicy(.{ .case_sensitive = !std.mem.startsWith(u8, subject, "/w/folded/") }, root, subject);
+        pub fn excludes(q: Self, root: []const u8, subject: []const u8) CompiledFilter.QueryError!bool {
+            return q.filter.excludesPolicy(testing.io, .{ .case_sensitive = !std.mem.startsWith(u8, subject, "/w/folded/") }, root, subject);
         }
     };
-    b.refilter(gpa, id, "/w", Query{ .filter = &filter }, false);
+    try b.refilter(gpa, id, "/w", Query{ .filter = &filter }, false);
     try testing.expectEqual(@as(usize, 1), b.events.items.len);
     try testing.expectEqualStrings("/w/sensitive/Foo", b.events.items[0].path);
 }

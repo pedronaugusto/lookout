@@ -481,7 +481,7 @@ pub fn wait(w: *Windows, io: Io, batch: *Batch, wakeup: *reactor.Wake, timeout: 
 fn flushRenames(w: *Windows, io: Io, batch: *Batch) contract.PollError!void {
     for (w.watches.values()) |watch| {
         const old = watch.pending_rename orelse continue;
-        if (wants(io, watch, old))
+        if (try wants(io, watch, old))
             try batch.push(w.gpa, io, watch.id, old, .removed, watch.goneTarget());
         watch.pending_rename = null;
         w.gpa.free(old);
@@ -760,6 +760,8 @@ fn report(w: *Windows, io: Io, watch: *Watch, transferred: u32, batch: *Batch) c
             watch.id.raw(), actionName(record.action), path,
         });
 
+        // An ignore file changed is a change to the rules, reported or not.
+        watch.filter.noticeEvent(watch.root, path);
         // The kernel walked the tree whatever the filter says; what the
         // filter can still do is keep the event from the caller. The two
         // names of a rename are the exception: they are paired first and
@@ -768,10 +770,10 @@ fn report(w: *Windows, io: Io, watch: *Watch, transferred: u32, batch: *Batch) c
             c.file_action_renamed_old_name, c.file_action_renamed_new_name => {
                 try w.reportRename(io, watch, record.action, path, batch);
             },
-            c.file_action_removed => if (wants(io, watch, path)) {
+            c.file_action_removed => if (try wants(io, watch, path)) {
                 try w.reportRemoval(io, watch, it, dir, path, batch);
             },
-            else => if (wants(io, watch, path)) {
+            else => if (try wants(io, watch, path)) {
                 try w.reportOne(io, watch, record.action, path, batch);
             },
         }
@@ -841,11 +843,11 @@ fn actionName(action: u32) []const u8 {
 /// Whether an event for `subject` is reported against `watch`: it is the
 /// watched file, for a watch on one, and it is not excluded by the
 /// filter.
-fn wants(io: Io, watch: *const Watch, subject: []const u8) bool {
+fn wants(io: Io, watch: *const Watch, subject: []const u8) CompiledFilter.QueryError!bool {
     if (watch.only != null) return path_cmp.eql(subject, watch.root);
     const parent = std.Io.Dir.path.dirname(subject) orelse watch.root;
     const policy = identity.read(io, parent).policy(watch.identity_override);
-    return !watch.filter.excludesPolicy(policy, watch.root, subject);
+    return !try watch.filter.excludesPolicy(io, policy, watch.root, subject);
 }
 
 /// Holds an old name, or joins a new name to the old one held.
@@ -857,7 +859,7 @@ fn wants(io: Io, watch: *const Watch, subject: []const u8) bool {
 /// one wanted is `removed` there, as a rename out would be; neither is
 /// nothing.
 fn reportRename(w: *Windows, io: Io, watch: *Watch, action: u32, subject: []const u8, batch: *Batch) contract.PollError!void {
-    const wanted = wants(io, watch, subject);
+    const wanted = try wants(io, watch, subject);
     if (action == c.file_action_renamed_old_name) {
         // Copied before the one it replaces is freed, so a copy that
         // fails leaves the watch holding what it held.
@@ -873,7 +875,7 @@ fn reportRename(w: *Windows, io: Io, watch: *Watch, action: u32, subject: []cons
         watch.pending_rename = null;
         if (from) |old| w.gpa.free(old);
     };
-    const keeps_from = if (from) |old| wants(io, watch, old) else false;
+    const keeps_from = if (from) |old| try wants(io, watch, old) else false;
     // The new name is where the entry is now, so it can be asked what the
     // entry is, whichever name is reported.
     const target = targetOf(io, subject);
@@ -956,10 +958,24 @@ fn recount(w: *Windows, io: Io, watch: *Watch, subject: []const u8, move: Budget
         .subject = subject,
         .io = io,
     };
-    if (Budget.counter(*Watch, Change, Change.reaches, w.watches.values(), change) != watch) return;
+    // Which watches the change reaches, asked first: a filter's question
+    // can fail, and the budget's choice cannot.
+    const watches = w.watches.values();
+    const reached = try w.gpa.alloc(bool, watches.len);
+    defer w.gpa.free(reached);
+    for (watches, reached) |other, *slot| slot.* = try change.reaches(other);
+    const Reached = struct {
+        watches: []const *Watch,
+        reached: []const bool,
+        fn reads(r: @This(), other: *Watch) bool {
+            const at = std.mem.findScalar(*Watch, r.watches, other) orelse return false;
+            return r.reached[at];
+        }
+    };
+    if (Budget.counter(*Watch, Reached, Reached.reads, watches, .{ .watches = watches, .reached = reached }) != watch) return;
     if (!try w.budget.note(io, change.dir, std.Io.Dir.path.basename(subject), move)) return;
-    for (w.watches.values()) |other| {
-        if (!change.reaches(other)) continue;
+    for (watches, reached) |other, reaches| {
+        if (!reaches) continue;
         try batch.push(w.gpa, io, other.id, other.root, .overflow, .directory);
     }
 }
@@ -973,9 +989,9 @@ const Change = struct {
 
     /// Whether `watch` read a copy of this change and keeps it, as one
     /// of the entries of a directory it reports. See `Watch.reach`.
-    fn reaches(change: Change, watch: *Watch) bool {
+    fn reaches(change: Change, watch: *Watch) CompiledFilter.QueryError!bool {
         const reach = watch.reach() orelse return false;
-        return reach.covers(change.dir) and wants(change.io, watch, change.subject);
+        return reach.covers(change.dir) and try wants(change.io, watch, change.subject);
     }
 };
 

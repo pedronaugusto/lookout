@@ -89,6 +89,7 @@ test "failed overflow reporting leaves the lost watch queued for retry" {
 /// Which paths under a watch the caller wants. See `Watcher.AddOptions.filter`.
 pub const Filter = @import("Filter.zig");
 const CompiledFilter = @import("CompiledFilter.zig");
+const IgnoreState = @import("ignore_state.zig");
 
 /// What a tree looked like, and what has changed in it since. This is
 /// what `Kind.overflow` asks a caller to work out, made answerable:
@@ -335,7 +336,22 @@ pub const Watcher = struct {
         /// An allocation failure may have interrupted this watch's delivery.
         /// Set without allocation and cleared only after its notice is handed out.
         incomplete: bool = false,
+        /// The reading of `Filter.ignore_files`, for a watch that has them.
+        ignore: ?Ignore = null,
         capabilities: Capabilities = .{ .backend = .auto, .filesystem = .unknown },
+    };
+
+    /// A watch's ignore files: the reading its filters share, and the
+    /// filter it was given, kept to refilter it with when one changes.
+    const Ignore = struct {
+        state: *IgnoreState,
+        spec: CompiledFilter,
+
+        fn deinit(i: *Ignore, io: Io) void {
+            i.spec.deinit();
+            i.state.destroy(io);
+            i.* = undefined;
+        }
     };
 
     /// Facts for one watch; use the backend with the global capability queries.
@@ -491,7 +507,7 @@ pub const Watcher = struct {
         w.wakeup.deinit(io);
         for (w.pending.items) |p| w.destroyPending(p);
         w.pending.deinit(w.gpa);
-        for (w.table.values()) |*held| w.release(held);
+        for (w.table.values()) |*held| w.release(io, held);
         w.table.deinit(w.gpa);
         w.batch.deinit(w.gpa);
         if (w.history) |h| h.destroy();
@@ -536,11 +552,30 @@ pub const Watcher = struct {
         w.table.getPtr(id).?.identity_override = options.identity;
         return id;
     }
-    fn addResolved(w: *Watcher, io: Io, requested: []const u8, options: AddOptions) AddError!WatchId {
+    fn addResolved(w: *Watcher, io: Io, requested: []const u8, given: AddOptions) AddError!WatchId {
         try io.checkCancel();
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
 
+        // A watch that reads ignore files has one reading of them, which
+        // every filter compiled for it shares: its backends', its followed
+        // links', and the copy kept here to refilter it when one changes.
+        var options = given;
+        var ignore: ?Ignore = null;
+        errdefer if (ignore) |*taken| taken.deinit(io);
+        if (given.filter.ignore_files) |files| {
+            const state = try IgnoreState.create(w.gpa);
+            errdefer state.destroy(io);
+            options.filter.ignore_files = .{ .names = files.names, .state = state };
+            ignore = .{ .state = state, .spec = try .compile(w.gpa, options.filter) };
+        }
+        const id = try w.addRegistered(io, requested, options);
+        if (ignore) |taken| w.table.getPtr(id).?.ignore = taken;
+        ignore = null;
+        return id;
+    }
+
+    fn addRegistered(w: *Watcher, io: Io, requested: []const u8, options: AddOptions) AddError!WatchId {
         // The backend copies what it keeps, so this resolution is scratch
         // and a failed `add` leaves nothing behind.
         const abs = identity.canonical(w.gpa, io, requested) catch |err| switch (err) {
@@ -646,7 +681,8 @@ pub const Watcher = struct {
         return false;
     }
 
-    fn release(w: *Watcher, held: *Held) void {
+    fn release(w: *Watcher, io: Io, held: *Held) void {
+        if (held.ignore) |*ignore| ignore.deinit(io);
         w.gpa.free(held.path);
         if (held.requested) |requested| w.gpa.free(requested);
         if (held.registered) |registered| w.gpa.free(registered);
@@ -851,12 +887,12 @@ pub const Watcher = struct {
     }
 
     /// Stops waiting for a path whose way down could not be watched.
-    fn abandonPending(w: *Watcher, io: Io, p: *Pending) Allocator.Error!bool {
+    fn abandonPending(w: *Watcher, io: Io, p: *Pending) Batch.PushError!bool {
         try w.batch.pushDetail(w.gpa, io, p.id, p.target, .unwatched, null, .unknown);
         return false;
     }
 
-    fn resetCheckpoint(w: *Watcher, io: Io, p: *Pending) Allocator.Error!void {
+    fn resetCheckpoint(w: *Watcher, io: Io, p: *Pending) Batch.PushError!void {
         if (comptime @hasField(Impl, "fsevents")) {
             if (w.impl == .fsevents) w.impl.fsevents.discardCheckpoint(p.target);
         }
@@ -1055,8 +1091,8 @@ pub const Watcher = struct {
             fn visit(m: Self, entry: walk.Entry) !walk.Step {
                 const parent = Io.Dir.path.dirname(entry.path) orelse m.p.target;
                 const policy = if (m.p.filter.isEmpty()) m.p.filter.policy else identity.read(m.io, parent).policy(m.p.identity_override);
-                if (m.p.filter.prunesPolicy(policy, m.p.target, entry.path)) return .over;
-                if (!m.p.filter.excludesPolicy(policy, m.p.target, entry.path)) {
+                if (try m.p.filter.prunesPolicy(m.io, policy, m.p.target, entry.path)) return .over;
+                if (!try m.p.filter.excludesPolicy(m.io, policy, m.p.target, entry.path)) {
                     try m.w.batch.pushDetail(m.w.gpa, m.io, m.p.id, entry.path, .created, null, Target.of(entry.kind));
                 }
                 return if (entry.kind == .directory and m.p.recursive) .into else .over;
@@ -1095,10 +1131,7 @@ pub const Watcher = struct {
         w.removeBackend(io, id);
         // Ordered, so that `watches` lists what is left in the order it
         // was added.
-        if (w.table.fetchOrderedRemove(id)) |entry| {
-            var held = entry.value;
-            w.release(&held);
-        }
+        var removed = w.table.fetchOrderedRemove(id);
         for (w.pending.items, 0..) |p, i| {
             if (p.id != id) continue;
             _ = w.pending.orderedRemove(i);
@@ -1106,6 +1139,9 @@ pub const Watcher = struct {
             w.destroyPending(p);
             break;
         }
+        // Last: the pending watch's filter shares the watch's reading of
+        // its ignore files.
+        if (removed) |*entry| w.release(io, &entry.value);
         w.batch.discardFuture(w.gpa, id);
         assert(!w.table.contains(id), "!w.table.contains(id)");
         assert(!w.waiting(id), "!w.waiting(id)");
@@ -1130,9 +1166,39 @@ pub const Watcher = struct {
     /// Existing newly admitted directories are registered before return
     /// where the backend registers directories individually. A pending
     /// watch keeps the replacement filter for its eventual promotion.
-    pub fn refilter(w: *Watcher, io: Io, id: WatchId, filter: Filter) RefilterError!void {
+    pub fn refilter(w: *Watcher, io: Io, id: WatchId, given: Filter) RefilterError!void {
         if (!w.table.contains(id)) return error.UnknownWatch;
         try io.checkCancel();
+        var filter = given;
+        if (given.ignore_files) |files| {
+            // The watch keeps one reading for life: a filter that may still
+            // hold it after a refilter that failed half way never outlives it.
+            const held = w.table.getPtr(id).?;
+            if (held.ignore == null) {
+                const state = try IgnoreState.create(w.gpa);
+                errdefer state.destroy(io);
+                filter.ignore_files = .{ .names = files.names, .state = state };
+                held.ignore = .{ .state = state, .spec = try .compile(w.gpa, filter) };
+            }
+            filter.ignore_files = .{ .names = files.names, .state = held.ignore.?.state };
+        }
+        var spec: ?CompiledFilter = if (filter.ignore_files != null) try .compile(w.gpa, filter) else null;
+        defer if (spec) |*unused| unused.deinit();
+        try w.refilterWith(io, id, filter);
+        const held = w.table.getPtr(id).?;
+        if (held.ignore) |*ignore| {
+            if (spec) |*kept| {
+                std.mem.swap(CompiledFilter, &ignore.spec, kept);
+            } else {
+                // No filter holds the reading now.
+                ignore.deinit(io);
+                held.ignore = null;
+            }
+        }
+    }
+
+    /// `refilter`, its filter's ignore files already the watch's reading.
+    fn refilterWith(w: *Watcher, io: Io, id: WatchId, filter: Filter) RefilterError!void {
         // What the new filter admits had no changes kept; forgetting before
         // a refusal too only asks the caller to look again.
         if (w.history) |h| h.refiltered(io, id);
@@ -1160,15 +1226,15 @@ pub const Watcher = struct {
             filter: *const CompiledFilter,
             override: ?NamePolicy,
             pub const Self = @This();
-            pub fn excludes(q: Self, root: []const u8, subject: []const u8) bool {
+            pub fn excludes(q: Self, root: []const u8, subject: []const u8) CompiledFilter.QueryError!bool {
                 if (q.filter.isEmpty()) return false;
                 const parent = Io.Dir.path.dirname(subject) orelse root;
                 const policy = identity.read(q.io, parent).policy(q.override);
-                return q.filter.excludesPolicy(policy, root, subject);
+                return q.filter.excludesPolicy(q.io, policy, root, subject);
             }
         };
         const held = w.table.get(id).?;
-        w.batch.refilter(w.gpa, id, held.path, Query{ .watcher = w, .io = io, .filter = &compiled, .override = held.identity_override }, w.handed_out);
+        try w.batch.refilter(w.gpa, id, held.path, Query{ .watcher = w, .io = io, .filter = &compiled, .override = held.identity_override }, w.handed_out);
     }
 
     /// Waits for something to happen and returns what did.
@@ -1258,7 +1324,7 @@ pub const Watcher = struct {
         return w.batch.events.items;
     }
 
-    fn recover(w: *Watcher, io: Io) Allocator.Error!void {
+    fn recover(w: *Watcher, io: Io) Batch.PushError!void {
         for (w.table.keys(), w.table.values()) |id, held| {
             if (!held.incomplete) continue;
             try w.batch.push(w.gpa, io, id, held.path, .overflow, held.target);
@@ -1361,7 +1427,35 @@ pub const Watcher = struct {
             try w.batch.push(w.gpa, io, id, root, .overflow, w.rootTarget(id));
             w.batch.dropped.swapRemoveAt(0);
         }
+        try w.rereadIgnoreFiles(io);
         w.uncollected = false;
+    }
+
+    /// Refilters each watch an event said one of its ignore files changed
+    /// in, against what the files say now: every reading is dropped, and
+    /// the refilter reads them again.
+    fn rereadIgnoreFiles(w: *Watcher, io: Io) PollError!void {
+        var i: usize = 0;
+        while (i < w.table.count()) : (i += 1) {
+            const held = &w.table.values()[i];
+            const ignore = if (held.ignore) |*taken| taken else continue;
+            if (!ignore.state.changed) continue;
+            ignore.state.reset(io);
+            w.refilterWith(io, w.table.keys()[i], ignore.spec.spec()) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
+                // unreachable: the patterns compiled when the watch took them
+                error.InvalidPattern, error.PatternTooLong => unreachable,
+                // unreachable: a refilter takes no new watch
+                error.UnknownWatch, error.PathAlreadyWatched, error.InvalidCheckpoint => unreachable,
+                // The watch could not take on what its files now say, and
+                // keeps its registrations as they were: what it reports
+                // until the next change to them may miss paths the files
+                // now admit, and the caller rescans the watch.
+                error.WatchLimitReached, error.IdExhausted => try w.batch.push(w.gpa, io, w.table.keys()[i], held.path, .overflow, held.target),
+                else => |e| return e,
+            };
+        }
     }
 
     /// Makes a `poll` blocked on this watcher come back, from another
@@ -1673,6 +1767,21 @@ pub const Watcher = struct {
             .events = w.batch.events.items.len,
             .overflows = w.overflows,
         };
+    }
+
+    /// The ignore files of the watch `id` (`Filter.ignore_files`) that are
+    /// there and could not be read, and so count as absent, as git warns
+    /// and goes on: absolute paths, oldest first. A directory under the
+    /// watch that could not be opened to read them is listed as itself.
+    ///
+    /// Owned by the watcher and valid until the next `poll`, `refilter` or
+    /// `remove`. The list starts again when the files are read again,
+    /// after an event names one of them. Empty for a watch without ignore
+    /// files and for an id not watched.
+    pub fn unreadIgnoreFiles(w: *const Watcher, id: WatchId) []const []const u8 {
+        const held = w.table.get(id) orelse return &.{};
+        const ignore = held.ignore orelse return &.{};
+        return ignore.state.unread.items;
     }
 
     /// The descriptor the watcher waits on, for a program that runs a
@@ -2091,7 +2200,7 @@ test "normalized pending refilter retains explicit policy before promotion" {
     try testing.expectEqual(NamePolicy.Normalization.nfc, pending.filter.policy.normalization);
     const composed = try Io.Dir.path.join(testing.allocator, &.{ missing, "e\u{301}" });
     defer testing.allocator.free(composed);
-    try testing.expect(pending.filter.excludes(missing, composed));
+    try testing.expect(try pending.filter.excludes(io, missing, composed));
 }
 
 /// What a watcher holds, as the cancel sweep compares it: every watch and

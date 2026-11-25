@@ -13,10 +13,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Baseline.LoadError` takes the file's read errors from aegis's `own.ReadFileError` in place of std's `Io.Dir.ReadFileAllocError`, which adds `Io.File.StatError`'s: the length's read, a cancel there among them, is returned. A `switch` over every member names those too.
 - `Watcher.Stats` has a field without a default, `overflows` (below, Added): a `Stats` a caller builds itself names it.
 - `Watcher.PollError`, and so `Watcher.poll`'s error set, takes what looking at a followed link, or at where it leads, failed with past the link not being there (a cancel, an I/O error, a filesystem the system cannot name). It adds `FileSystem`, `InputOutput`, `OperationUnsupported` and `UnrecognizedVolume`; a `switch` over every member of `poll`'s errors names them too. Before, such a failure was taken for the link leading nowhere and the link was left idle.
+- `Baseline.SeedError` holds `UnsupportedBaselineFilter`: `Baseline.seed` and `Baseline.load` refuse a filter with `Filter.ignore_files` (below, Added), as `save` and `load` refuse one with `allow`. A baseline stores what it compares, and rules read from the tree it compares are not that.
 - `Watcher.woken` is an `aegis.Atomic` of a two-state enum (`quiet`, `woken`) where it was a `std.atomic.Value(bool)`. It is the watcher's own flag, set by `wake` and cleared by `poll`; call those, not the field.
 
 ### Added
 
+- `Filter.ignore_files` (`Filter.IgnoreFiles`, `.gitignore` by default): the ignore files under a watch, read as git reads them by sweep's `ignore.Checker`, negation, directory-only lines and a deeper file over a shallower one included. What they exclude is excluded as an `ignore` pattern excludes it, an ignored tree never opened or registered where lookout recurses; `ignore`, `only` and `allow` are asked first and win. An event naming one of the files anywhere under the watch refilters the watch against what they now say. A file that is there and cannot be read counts as absent, as git warns and goes on, and is listed by `Watcher.unreadIgnoreFiles`; a read that runs out of memory fails the `poll`, `add` or `refilter` that asked. The ignore files a watch cannot take on after they change are an `overflow` of its root.
+- `Watcher.unreadIgnoreFiles(id)`: the ignore files of a watch that could not be read, as absolute paths.
 - `Watcher.Stats.overflows`: the overflow notices `poll` has handed out since `init`, each one the system saying it lost track of a tree (a kernel queue that overflowed, FSEvents' dropped or must-rescan flags, a delivery lost to allocation failure). A program that logs losses reads it there, as does a test asking why an event it waited for never came.
 
 ### Fixed
@@ -29,6 +32,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A cancel that lands while a baseline measures its root's names is the baseline's `Canceled`, where `Baseline.seed`, `load` and `diff` took it for a filesystem that says nothing and went on with exact-spelling rules: the kernel's spelling of the root (macOS) returns it, and a look at a directory's naming flags (Linux on ext4 or f2fs, Windows) puts it back for the next cancellation point, the facts left unknown.
 
 ### Changed
+
+- Develops on sweep 20b1442 (main past 0.4.1, the ignore stack's out-of-memory fix) and airlock 0.7.0.
 
 - lookout's own development holds it to the family's policy: `"policy": "family"` in ci/preflight.json, beside the hardened profile ci/workflow.json declares; the hardened and hardened-tsan legs pass.
 - The family move: aegis f52eabe, the one aegis the family moves to, with the dependencies on it moved (airlock 3ef2f54, reactor 2d72792, strand 8155bf9, sweep 66e3941), and preflight ci-standard 158c176 and shakedown c29751d in the development build; ci.yml regenerated. No glint-ignore is left in lookout: getattrlistbulk is declared in a seam of its own (`src/bulk.zig`); an inotify tail that does not decode is taken as lost, so every directory is read again; a sync's cookie is deleted whether its creation was seen or not, a failed wait returned before a failed delete; an error held impossible is an `aegis.assert.never` with its reason; the examples remove their scratch when they end, however they end, and a scratch they cannot remove is their failure too; the speed claims return a cancel that ended a round's writer, and a fixture's scratch they could not remove when the run ends.

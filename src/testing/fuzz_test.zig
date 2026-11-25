@@ -666,7 +666,7 @@ test "an ignore list agrees with the reference over every short pattern and path
             }
             if (!valid or end == root.len + 1 or subject_buf[end - 1] == std.Io.Dir.path.sep) continue;
             const subject = subject_buf[0..end];
-            testing.expectEqual(try referenceExcludes(gpa, root, pattern, subject), ignore.excludes(root, subject)) catch |err| {
+            testing.expectEqual(try referenceExcludes(gpa, root, pattern, subject), try ignore.excludes(testing.io, root, subject)) catch |err| {
                 std.debug.print("pattern '{s}' subject '{s}'\n", .{ pattern, subject });
                 return err;
             };
@@ -743,30 +743,30 @@ fn fuzzFilter(_: void, c: *Case) !void {
 
     // An ignore list excludes exactly what the reference names, on the
     // path or on any directory above it.
-    try testing.expectEqual(try referenceExcludes(gpa, root, pattern, subject), ignore.excludes(root, subject));
+    try testing.expectEqual(try referenceExcludes(gpa, root, pattern, subject), try ignore.excludes(testing.io, root, subject));
 
     // The root is what was asked for, whatever the patterns say.
-    try testing.expect(!ignore.excludes(root, root));
-    try testing.expect(!only.excludes(root, root));
-    try testing.expect(!only.prunes(root, root));
+    try testing.expect(!try ignore.excludes(testing.io, root, root));
+    try testing.expect(!try only.excludes(testing.io, root, root));
+    try testing.expect(!try only.prunes(testing.io, root, root));
 
     // A path a pattern names is left out by `ignore` and kept by `only`;
     // and kept means reachable: no directory on the way to it is pruned.
     if (named) {
-        try testing.expect(ignore.excludes(root, subject));
-        try testing.expect(!only.excludes(root, subject));
+        try testing.expect(try ignore.excludes(testing.io, root, subject));
+        try testing.expect(!try only.excludes(testing.io, root, subject));
     }
     var end: usize = root.len + 1;
     while (std.mem.findAnyPos(u8, subject, end, path_cmp.separators)) |at| : (end = at + 1) {
         const ancestor = subject[0..at];
         // An excluded directory takes everything below it.
-        if (ignore.excludes(root, ancestor)) try testing.expect(ignore.excludes(root, subject));
-        if (only.prunes(root, ancestor)) try testing.expect(only.excludes(root, subject));
-        if (named) try testing.expect(!only.prunes(root, ancestor));
+        if (try ignore.excludes(testing.io, root, ancestor)) try testing.expect(try ignore.excludes(testing.io, root, subject));
+        if (try only.prunes(testing.io, root, ancestor)) try testing.expect(try only.excludes(testing.io, root, subject));
+        if (named) try testing.expect(!try only.prunes(testing.io, root, ancestor));
     }
     // Pruning a directory is a stronger claim than not reporting it.
-    if (only.prunes(root, subject)) try testing.expect(only.excludes(root, subject));
-    if (ignore.prunes(root, subject)) try testing.expect(ignore.excludes(root, subject));
+    if (try only.prunes(testing.io, root, subject)) try testing.expect(try only.excludes(testing.io, root, subject));
+    if (try ignore.prunes(testing.io, root, subject)) try testing.expect(try ignore.excludes(testing.io, root, subject));
 }
 
 test "a baseline of an arbitrary tree diffs to what changed in it" {

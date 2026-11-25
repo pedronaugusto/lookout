@@ -219,6 +219,8 @@ fn handle(k: *Kqueue, io: Io, event: posix.Kevent, batch: *Batch) contract.PollE
         if (flags & std.c.NOTE.RENAME != 0) break :gone .renamed;
         break :gone null;
     };
+    // An ignore file written, replaced or removed is a change to the rules.
+    k.tree.noticeEvent(watch, path);
     if (gone) |kind| {
         try batch.push(k.gpa, io, watch, path, kind, target);
         k.tree.removeSubtree(io, watch, path);

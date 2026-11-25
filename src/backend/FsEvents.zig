@@ -354,8 +354,8 @@ pub const Stream = struct {
 
     /// Whether an event at `subject` is one this watch reports: in its
     /// scope, and not excluded by its filter.
-    fn keeps(st: *const Stream, subject: []const u8) bool {
-        return st.wants(subject) and !st.filter.excludes(st.root, subject);
+    fn keeps(st: *const Stream, io: Io, subject: []const u8) CompiledFilter.QueryError!bool {
+        return st.wants(subject) and !try st.filter.excludes(io, st.root, subject);
     }
 
     /// The earliest file time that may stamp a change made after the
@@ -641,6 +641,7 @@ pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested
     }
     while (f.seedStep(io, id) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         else => return error.Unexpected,
     }) {}
     if (f.seeding.fetchOrderedRemove(id)) |seeding| {
@@ -661,7 +662,7 @@ pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested
         defer saved_paths.deinit();
         while (saved_paths.next()) |subject| {
             try before.put(f.gpa, subject, {});
-            if (!stream.keeps(subject)) continue;
+            if (!try stream.keeps(io, subject)) continue;
             if (f.known.contains(.{ .id = id, .path = subject })) continue;
             const there = (try pathExists(io, subject)) orelse {
                 try batch.deferChange(f.gpa, io, id, stream.root, .overflow, null, stream.rootTarget());
@@ -670,7 +671,7 @@ pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested
             if (!there) try batch.deferChange(f.gpa, io, id, subject, .removed, null, .unknown);
         }
         for (saved.changes) |change| try restoreChange(f.gpa, io, batch, stream, change);
-        if (saved.half) |half| if (stream.keeps(half.path)) {
+        if (saved.half) |half| if (try stream.keeps(io, half.path)) {
             try f.resolveHeld(io, batch);
             const owned = try f.gpa.dupe(u8, half.path);
             f.pairing.held = .{ .id = id, .path = owned, .flags = half.flags, .event = half.event };
@@ -686,10 +687,10 @@ pub fn addFor(f: *FsEvents, io: Io, id: WatchId, abs_path: []const u8, requested
 /// is left out, and a rename with one side left out is the creation or
 /// removal of the other, as in live pairing. A token is a file anyone may
 /// have edited, and its patterns may not be the ones this watch has.
-fn restoreChange(gpa: Allocator, io: Io, batch: *Batch, stream: *const Stream, change: checkpoint_format.Change) Allocator.Error!void {
-    const keeps = stream.keeps(change.path);
+fn restoreChange(gpa: Allocator, io: Io, batch: *Batch, stream: *const Stream, change: checkpoint_format.Change) Batch.PushError!void {
+    const keeps = try stream.keeps(io, change.path);
     if (change.from) |from| {
-        const keeps_from = stream.keeps(from);
+        const keeps_from = try stream.keeps(io, from);
         if (keeps and keeps_from) return batch.deferChange(gpa, io, stream.id, change.path, .renamed, from, change.target);
         if (keeps) return batch.deferChange(gpa, io, stream.id, change.path, .created, null, change.target);
         if (keeps_from) return batch.deferChange(gpa, io, stream.id, from, .removed, null, change.target);
@@ -904,26 +905,36 @@ pub fn refilter(f: *FsEvents, io: Io, id: WatchId, next: lookout.Filter, batch: 
     if (stream.scope != .file) try f.seeding.ensureUnusedCapacity(f.gpa, 1);
     var walker: ?walk.Walker = if (stream.scope != .file) try .init(f.gpa, stream.root) else null;
     errdefer if (walker) |*w| w.deinit(f.gpa);
-    var i: usize = 0;
-    while (i < f.known.count()) {
-        const key = f.known.keys()[i];
-        if (key.id == id and stream.filter.prunes(stream.root, key.path)) {
-            f.paths.remove(key.history.?);
-            f.known.swapRemoveAt(i);
-        } else i += 1;
+    // Every question is asked before anything changes: one that fails (an
+    // ignore file read out of memory) leaves the watch as it was.
+    var pruned: std.ArrayList(bool) = .empty;
+    defer pruned.deinit(f.gpa);
+    try pruned.ensureTotalCapacity(f.gpa, f.known.count());
+    for (f.known.keys()) |key| pruned.appendAssumeCapacity(key.id == id and try stream.filter.prunes(io, stream.root, key.path));
+    var reached: path_cmp.Set(void) = .empty;
+    defer reached.deinit(f.gpa);
+    for (f.budget.counts.keys()) |dir| {
+        if (try previous.prunes(io, stream.root, dir) and !try stream.filter.prunes(io, stream.root, dir))
+            try reached.put(f.gpa, dir, {});
+    }
+    // From the last, so a swap brings in only an entry already decided.
+    var i: usize = f.known.count();
+    while (i > 0) {
+        i -= 1;
+        if (!pruned.items[i]) continue;
+        f.paths.remove(f.known.keys()[i].history.?);
+        f.known.swapRemoveAt(i);
     }
     const NewlyReached = struct {
-        stream: *const Stream,
-        old: CompiledFilter,
+        reached: *const path_cmp.Set(void),
 
         const Self = @This();
 
         fn includes(r: Self, dir: []const u8) bool {
-            return r.old.prunes(r.stream.root, dir) and
-                !r.stream.filter.prunes(r.stream.root, dir);
+            return r.reached.contains(dir);
         }
     };
-    f.budget.reread(NewlyReached, NewlyReached.includes, io, .{ .stream = stream, .old = previous });
+    f.budget.reread(NewlyReached, NewlyReached.includes, io, .{ .reached = &reached });
     if (walker) |fresh| {
         if (f.seeding.fetchOrderedRemove(id)) |old| {
             var stale = old.value.walker;
@@ -1323,6 +1334,8 @@ fn report(
         trace.log("fsevents drop out-of-scope root={s} path={s}", .{ stream.root, record.path });
         return;
     }
+    // An ignore file changed is a change to the rules, reported or not.
+    stream.filter.noticeEvent(stream.root, record.path);
     // The watched path itself moved or vanished. FSEvents reports both
     // against the root with one flag and does not say which, and
     // `lookout.reportsRootMove` is what a caller switches on: it answers
@@ -1363,7 +1376,7 @@ fn report(
         // in the next delivery, that half would be read alone as the
         // rename in or out it would have been paired into. It is not
         // held, where it would push out a half that is worth waiting on.
-        if (stream.filter.excludes(stream.root, record.path)) {
+        if (try stream.filter.excludes(io, stream.root, record.path)) {
             trace.log("fsevents drop filtered unpaired path={s}", .{record.path});
             return;
         }
@@ -1376,7 +1389,7 @@ fn report(
 
     // The kernel walked the tree whatever the filter says; what the
     // filter can still do is keep the event from the caller.
-    if (stream.filter.excludes(stream.root, record.path)) {
+    if (try stream.filter.excludes(io, stream.root, record.path)) {
         trace.log("fsevents drop filtered path={s}", .{record.path});
         return;
     }
@@ -1625,11 +1638,11 @@ fn adopt(
 
         fn visit(a: *Self, entry: walk.Entry) !walk.Step {
             try a.f.budget.found(entry.dir, entry.name);
-            if (a.stream.filter.prunes(a.stream.root, entry.path)) return .over;
+            if (try a.stream.filter.prunes(a.io, a.stream.root, entry.path)) return .over;
             // Counted again from this walk only where the walk goes in.
             if (entry.kind == .directory) try a.f.budget.begin(entry.path);
             if (a.f.known.contains(.{ .id = a.id, .path = entry.path })) return .into;
-            if (!a.stream.filter.excludes(a.stream.root, entry.path)) {
+            if (!try a.stream.filter.excludes(a.io, a.stream.root, entry.path)) {
                 try a.batch.push(a.f.gpa, a.io, a.id, entry.path, .created, .of(entry.kind));
             }
             try a.f.remember(a.id, entry.path);
@@ -1669,8 +1682,10 @@ fn joined(
     target: Target,
 ) contract.PollError!void {
     const id = stream.id;
-    const keeps_to = !stream.filter.excludes(stream.root, to);
-    const keeps_from = !stream.filter.excludes(stream.root, from);
+    stream.filter.noticeEvent(stream.root, to);
+    stream.filter.noticeEvent(stream.root, from);
+    const keeps_to = !try stream.filter.excludes(io, stream.root, to);
+    const keeps_from = !try stream.filter.excludes(io, stream.root, from);
     f.budget.forget(from);
     if (keeps_to and keeps_from) {
         trace.log("fsevents push renamed path={s} from={s}", .{ to, from });
@@ -1857,18 +1872,19 @@ fn refreshKnown(
 
     const Refreshing = struct {
         f: *FsEvents,
+        io: Io,
         id: WatchId,
         stream: *const Stream,
 
         const Self = @This();
 
         fn visit(r: *Self, entry: walk.Entry) !walk.Step {
-            if (r.stream.filter.prunes(r.stream.root, entry.path)) return .over;
+            if (try r.stream.filter.prunes(r.io, r.stream.root, entry.path)) return .over;
             try r.f.remember(r.id, entry.path);
             return .into;
         }
     };
-    var refreshing: Refreshing = .{ .f = f, .id = id, .stream = stream };
+    var refreshing: Refreshing = .{ .f = f, .io = io, .id = id, .stream = stream };
     walk.tree(*Refreshing, Refreshing.visit, f.gpa, io, root, &refreshing) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
@@ -1935,7 +1951,7 @@ fn seedStep(f: *FsEvents, io: Io, id: WatchId) !bool {
 
         fn visit(s: *const Self, entry: walk.Entry) !walk.Step {
             try s.f.budget.found(entry.dir, entry.name);
-            if (s.stream.filter.prunes(s.stream.root, entry.path)) {
+            if (try s.stream.filter.prunes(s.io, s.stream.root, entry.path)) {
                 trace.log("fsevents seed filtered {s}", .{entry.path});
                 return .over;
             }
@@ -1992,6 +2008,7 @@ fn seed(f: *FsEvents, io: Io, batch: *Batch, whole: bool) contract.PollError!boo
         const id = f.seeding.keys()[0];
         const more = f.seedStep(io, id) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
             else => fail: {
                 const stream = f.streams.get(id).?;
                 trace.log("fsevents seed failed root={s} err={s}", .{ stream.root, @errorName(err) });
@@ -2041,7 +2058,7 @@ fn pathExists(io: Io, subject: []const u8) Io.Cancelable!?bool {
     return true;
 }
 
-fn incomplete(f: *FsEvents, io: Io, batch: *Batch, stream: *const Stream) Allocator.Error!void {
+fn incomplete(f: *FsEvents, io: Io, batch: *Batch, stream: *const Stream) Batch.PushError!void {
     try batch.push(f.gpa, io, stream.id, stream.root, .overflow, stream.rootTarget());
 }
 
@@ -2334,11 +2351,25 @@ fn recount(
         .dir = std.Io.Dir.path.dirname(subject) orelse return,
         .subject = subject,
     };
-    const counting = Budget.counter(*Stream, Change, Change.reaches, f.streams.values(), change) orelse return;
+    // Which streams the change reaches, asked first: a filter's question
+    // can fail, and the budget's choice cannot.
+    const streams = f.streams.values();
+    const reached = try f.gpa.alloc(bool, streams.len);
+    defer f.gpa.free(reached);
+    for (streams, reached) |other, *slot| slot.* = try change.reaches(io, other);
+    const Reached = struct {
+        streams: []const *Stream,
+        reached: []const bool,
+        fn reads(r: @This(), other: *Stream) bool {
+            const at = std.mem.findScalar(*Stream, r.streams, other) orelse return false;
+            return r.reached[at];
+        }
+    };
+    const counting = Budget.counter(*Stream, Reached, Reached.reads, streams, .{ .streams = streams, .reached = reached }) orelse return;
     if (counting != stream) return;
     if (!try f.budget.note(io, change.dir, std.Io.Dir.path.basename(subject), move)) return;
-    for (f.streams.values()) |other| {
-        if (!change.reaches(other)) continue;
+    for (streams, reached) |other, reaches| {
+        if (!reaches) continue;
         try batch.push(f.gpa, io, other.id, other.root, .overflow, other.rootTarget());
     }
 }
@@ -2355,11 +2386,11 @@ const Change = struct {
     /// its scope, and its filter keeps it. A watch's own root is not an
     /// entry of anything it reports, and neither is a watched file. See
     /// `Stream.reach`.
-    fn reaches(change: Change, stream: *Stream) bool {
+    fn reaches(change: Change, io: Io, stream: *Stream) CompiledFilter.QueryError!bool {
         const reach = stream.reach() orelse return false;
         return reach.covers(change.dir) and
             stream.wants(change.subject) and
-            !stream.filter.excludes(stream.root, change.subject);
+            !try stream.filter.excludes(io, stream.root, change.subject);
     }
 };
 

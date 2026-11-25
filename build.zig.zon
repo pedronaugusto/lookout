@@ -18,8 +18,8 @@
         },
 
         .sweep = .{
-            .url = "git+https://github.com/pedronaugusto/sweep?ref=v0.4.1#171f79acc6ed125b30f9240921ba5506b104ca2c",
-            .hash = "sweep-0.4.1-6ErwafiBCAAC7IVP1Oqpe8mUN9li5lS-UxMtSWYrgv7V",
+            .url = "git+https://github.com/pedronaugusto/sweep#20b14429efbffe8eb1f6b185a85c79fe29939260",
+            .hash = "sweep-0.4.1-6ErwacOHCACjOGrLL7xD_wX8CbOLtowuP5CG1DCGHlfX",
         },
 
         .aegis = .{
