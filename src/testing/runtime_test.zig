@@ -107,7 +107,7 @@ test "a poll parked on a runtime is fed by a change made on another thread" {
         var pace: timeout.Pace = try .start(&f.watcher);
         defer pace.end();
         while (!seen and try pace.running()) {
-            for (try f.watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (std.mem.endsWith(u8, event.path, "fed.txt")) seen = true;
             }
         }
@@ -141,7 +141,7 @@ test "a poll parked on a runtime is canceled while it waits" {
         var pace: timeout.Pace = try .start(&f.watcher);
         defer pace.end();
         while (!seen and try pace.running()) {
-            for (try f.watcher.poll(io, ms(200))) |event| {
+            for (try pace.poll(io, ms(200))) |event| {
                 if (std.mem.endsWith(u8, event.path, "after.txt")) seen = true;
             }
         }

@@ -73,7 +73,8 @@ test "poll reports each change from another thread" {
             var toucher: Toucher = .{ .dir = tmp.dir, .round = round };
             const thread = try std.Thread.spawn(.{}, Toucher.run, .{&toucher});
             var name: [32]u8 = undefined;
-            const expected = try std.Io.Dir.path.join(gpa, &.{ root, try std.mem.print(&name, "w{d}.txt", .{round}) });
+            const written = try std.mem.print(&name, "w{d}.txt", .{round});
+            const expected = try std.Io.Dir.path.join(gpa, &.{ root, written });
             defer gpa.free(expected);
             // The writer sleeps before it writes, so the wait is paced
             // only once it has written.
@@ -88,11 +89,11 @@ test "poll reports each change from another thread" {
             var pace: wait.Pace = try .start(&watcher);
             defer pace.end();
             while (!seen and try pace.running()) {
-                for (try watcher.poll(io, ms(200))) |event| {
+                for (try pace.poll(io, ms(200))) |event| {
                     if (event.kind == .created and std.mem.eql(u8, event.path, expected)) seen = true;
                 }
             }
-            try wait.seen(&watcher, seen);
+            try wait.seenIn(&watcher, seen, tmp.dir, written);
             observed += 1;
         }
         try std.testing.expectEqual(rounds, observed);
@@ -137,7 +138,7 @@ test "a burst arrives whole, or says what it lost" {
         var pace: wait.Pace = try .start(&watcher);
         defer pace.end();
         while (created < burst and overflow == 0 and try pace.running()) {
-            const events = try watcher.poll(io, ms(200));
+            const events = try pace.poll(io, ms(200));
             for (events) |event| switch (event.kind) {
                 .created => created += 1,
                 .overflow => overflow += 1,

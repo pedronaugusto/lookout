@@ -41,7 +41,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running() and overflows == 0) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind != .overflow) continue;
             try testing.expectEqual(id, event.id);
             try testing.expectEqualStrings(root, event.path);
@@ -61,7 +61,7 @@ test "a read that completes with nothing is an overflow, and the watch reads on"
     pace.end();
     pace = try .start(&watcher);
     while (try pace.running() and !found) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind == .created and std.mem.eql(u8, event.path, after)) found = true;
         }
     }
@@ -98,7 +98,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     var pace: wait.Pace = try .start(&watcher);
     defer pace.end();
     while (try pace.running() and created < 3) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind == .created) created += 1;
         }
     }
@@ -112,7 +112,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     pace.end();
     pace = try .start(&watcher);
     while (try pace.running() and !overflowed) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind == .overflow) overflowed = true;
         }
     }
@@ -126,7 +126,7 @@ test "a lost read reads the entry counts again, so the budget holds after it" {
     pace.end();
     pace = try .start(&watcher);
     while (try pace.running() and !overflowed) {
-        for (try watcher.poll(io, ms(200))) |event| {
+        for (try pace.poll(io, ms(200))) |event| {
             if (event.kind == .overflow and event.id == id and std.mem.eql(u8, event.path, root)) overflowed = true;
         }
     }
