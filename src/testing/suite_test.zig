@@ -1998,6 +1998,9 @@ const Ledger = struct {
                 std.debug.print("{s}: no {s} for watch {d} at {s}\n", .{
                     @tagName(f.watcher.backend()), @tagName(want.kind), want.id.raw(), p,
                 });
+                // The directory the change was made in, as the system shows
+                // it now: an overflow is wanted at the directory itself.
+                wait.describe(&f.watcher, if (want.kind == .overflow) p else std.Io.Dir.path.dirname(p) orelse p);
             }
         }
         // What was seen instead says why: a red on a host this suite runs
