@@ -186,6 +186,11 @@ fn linuxType(number: usize) Kind {
 
 fn named(name: []const u8, local: bool) Kind {
     if (std.mem.find(u8, name, "fuse") != null or std.mem.find(u8, name, "puffs") != null) return .fuse;
+    // FreeBSD's 9p client marks its mounts local, and a directory's vnode
+    // there lasts only while the server's version of it (QEMU: its time in
+    // seconds) matches: a lookup after a change in a new second makes
+    // another, and kqueue's notes stay on the one a watch holds.
+    if (std.mem.eql(u8, name, "p9fs")) return .network;
     return if (local) .local else .network;
 }
 
@@ -259,6 +264,8 @@ test "filesystem types select network and FUSE without misclassifying tmpfs" {
     try std.testing.expectEqual(Kind.local, named("apfs", true));
     try std.testing.expectEqual(Kind.network, named("nfs", false));
     try std.testing.expectEqual(Kind.fuse, named("osxfuse", true));
+    // FreeBSD's 9p client marks its mounts local.
+    try std.testing.expectEqual(Kind.network, named("p9fs", true));
 }
 
 test "a real scratch filesystem is local on each supported host" {
