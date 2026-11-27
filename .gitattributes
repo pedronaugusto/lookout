@@ -1,5 +1,8 @@
-# Everything this repository holds is LF on every platform, so no diff and
-# no gate ever reads a line ending as a change.
+# Made by preflight's `generate`, which the lint and the gate hold this file to: the files
+# held as bytes are `binary` in ci/preflight.json.
+
+# Everything this repository holds is LF on every system, so no diff and no gate reads
+# a line ending as a change, and no checkout writes CRLF into a file a test reads.
 * text=auto eol=lf
 
 # Two changes that add lines under one group of CHANGELOG.md both keep them, with no

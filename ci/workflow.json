@@ -10,7 +10,6 @@
     "x86_64-freebsd",
     "x86_64-netbsd"
   ],
-  "compile_once": true,
   "portable_hosts": [
     "windows-latest"
   ],
