@@ -83,14 +83,19 @@ test "a poll parked on a runtime is fed by a change made on another thread" {
         var f = try Fixture.init(io, backend);
         defer f.deinit(io);
 
+        // The write comes after the first poll's wait has run out, so the
+        // poll that is fed is one parked again. It sets `done` once written
+        // or failed.
         const Writer = struct {
             dir: std.Io.Dir,
             failed: ?std.Io.Dir.WriteFileError = null,
+            done: std.atomic.Value(bool) = .init(false),
 
             const Self = @This();
 
             fn run(writer: *Self) void {
-                nap(100);
+                defer writer.done.store(true, .release);
+                nap(300);
                 writer.dir.writeFile(std.testing.io, .{ .sub_path = "fed.txt", .data = "x" }) catch |err| {
                     writer.failed = err;
                 };
@@ -103,7 +108,17 @@ test "a poll parked on a runtime is fed by a change made on another thread" {
             thread.join();
         }
 
+        // Polls until the write is done, which the writer bounds, and only
+        // then by the backend's bound: a Pace counts from a change already
+        // made, and one started before the write ended on poll's first
+        // empty scan, the write still to come (macOS ReleaseSafe, lookout
+        // run 45669860237).
         var seen = false;
+        while (!seen and !writer.done.load(.acquire)) {
+            for (try f.watcher.poll(io, ms(200))) |event| {
+                if (std.mem.endsWith(u8, event.path, "fed.txt")) seen = true;
+            }
+        }
         var pace: timeout.Pace = try .start(&f.watcher);
         defer pace.end();
         while (!seen and try pace.running()) {
