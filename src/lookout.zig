@@ -89,7 +89,7 @@ test "failed overflow reporting leaves the lost watch queued for retry" {
 /// Which paths under a watch the caller wants. See `Watcher.AddOptions.filter`.
 pub const Filter = @import("Filter.zig");
 const CompiledFilter = @import("CompiledFilter.zig");
-const IgnoreState = @import("ignore_state.zig");
+const IgnoreState = @import("IgnoreState.zig");
 
 /// What a tree looked like, and what has changed in it since. This is
 /// what `Kind.overflow` asks a caller to work out, made answerable:

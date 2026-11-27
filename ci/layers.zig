@@ -17,7 +17,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/path.zig",
         "src/trace.zig",
         "src/walk.zig",
-        "src/ignore_state.zig",
+        "src/IgnoreState.zig",
         "src/Filter.zig",
     } },
     .{ .name = "path policy", .patterns = &.{
@@ -97,7 +97,7 @@ pub const required = [_][]const u8{
     "src/trace.zig",
     "src/walk.zig",
     "src/Budget.zig",
-    "src/ignore_state.zig",
+    "src/IgnoreState.zig",
     "src/Filter.zig",
     "src/CompiledFilter.zig",
     "src/types.zig",

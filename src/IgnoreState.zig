@@ -19,6 +19,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const sweep = @import("sweep");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -43,13 +44,14 @@ const Reading = struct {
     /// Null where the root could not be opened: nothing above a path there
     /// is read, and the root is in `unread` unless it is simply gone.
     checker: ?sweep.ignore.Checker,
-    dir: ?Io.Dir,
+    /// The root the checker reads under, closed with the reading.
+    dir: ?aegis.own.Dir,
     /// How many of the checker's skipped files are in `unread`.
     listed: usize = 0,
 
     fn deinit(r: *Reading, gpa: Allocator, io: Io) void {
         if (r.checker) |*c| c.deinit();
-        if (r.dir) |d| d.close(io);
+        if (r.dir) |*d| d.deinit(io);
         for (r.names) |name| gpa.free(name);
         gpa.free(r.names);
         gpa.free(r.root);
@@ -180,7 +182,7 @@ fn reading(s: *State, io: Io, names: []const []const u8, case: sweep.Case, root:
             return &s.readings.items[s.readings.items.len - 1];
         },
     };
-    r.dir = dir;
+    r.dir = .init(dir);
     r.checker = .init(.init(s.gpa, .{ .case = case, .file_names = owned_names, .unreadable = .skip }), dir);
     s.readings.appendAssumeCapacity(r);
     return &s.readings.items[s.readings.items.len - 1];

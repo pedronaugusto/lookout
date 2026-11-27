@@ -144,9 +144,11 @@ pub const Node = struct {
 /// A directory handle with one owner, closed once.
 pub const OwnedDir = aegis.own.Dir;
 
-/// Errors adding a watch can return.
+/// Errors adding a watch can return. A question to the watch's filter that
+/// fails (`CompiledFilter.QueryError`, an ignore file read out of memory or
+/// canceled) is among them already: `OutOfMemory` and `Canceled`.
 pub const AddError = Allocator.Error || Io.Dir.OpenError || Io.Dir.StatFileError ||
-    Io.Dir.RealPathFileAllocError || Snapshot.RefreshError || CompiledFilter.Error || CompiledFilter.QueryError;
+    Io.Dir.RealPathFileAllocError || Snapshot.RefreshError || CompiledFilter.Error;
 
 /// Errors rescanning a watch can return.
 pub const ScanError = Allocator.Error || Snapshot.RefreshError || CompiledFilter.QueryError;

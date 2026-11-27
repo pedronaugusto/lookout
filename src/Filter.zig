@@ -27,7 +27,7 @@
 
 const sweep = @import("sweep");
 const identity = @import("identity.zig");
-const IgnoreState = @import("ignore_state.zig");
+const IgnoreState = @import("IgnoreState.zig");
 const Filter = @This();
 
 /// Explicit filter preference; null follows the directory policy.

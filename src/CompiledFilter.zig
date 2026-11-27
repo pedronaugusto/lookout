@@ -15,7 +15,7 @@ const aegis = @import("aegis");
 const Filter = @import("Filter.zig");
 const path = @import("path.zig");
 const identity = @import("identity.zig");
-const IgnoreState = @import("ignore_state.zig");
+const IgnoreState = @import("IgnoreState.zig");
 
 const CompiledFilter = @This();
 
