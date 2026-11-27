@@ -226,6 +226,36 @@ pub fn seenIn(w: *const lookout.Watcher, found: bool, dir: Io.Dir, name: []const
     return missed(w);
 }
 
+/// Prints what a look of its own finds in the directory `path`: each entry
+/// a listing through a handle opened now names, and what a stat of it by
+/// name says. Beside a miss it tells the watcher's side from the system's:
+/// an entry the fresh listing names and stats, the watcher did not report;
+/// one it does not name, or names and cannot stat, the system was not
+/// showing when the watcher looked either.
+pub fn describe(w: *const lookout.Watcher, path: []const u8) void {
+    const io = std.testing.io;
+    var dir = Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| {
+        std.debug.print("{t}: {s} could not be opened for a fresh listing: {t}\n", .{ w.backend(), path, err });
+        return;
+    };
+    defer dir.close(io);
+    std.debug.print("{t}: a fresh listing of {s}:\n", .{ w.backend(), path });
+    var it = dir.iterate();
+    var names: usize = 0;
+    while (it.next(io) catch |err| {
+        std.debug.print("  the listing failed after {d} entries: {t}\n", .{ names, err });
+        return;
+    }) |entry| {
+        names += 1;
+        if (dir.statFile(io, entry.name, .{ .follow_symlinks = false })) |stat| {
+            std.debug.print("  {s}: {t}\n", .{ entry.name, stat.kind });
+        } else |err| {
+            std.debug.print("  {s}: listed, and its stat by name fails: {t}\n", .{ entry.name, err });
+        }
+    }
+    std.debug.print("  {d} entries\n", .{names});
+}
+
 fn listed(dir: Io.Dir, name: []const u8) !bool {
     var it = dir.iterate();
     while (try it.next(std.testing.io)) |entry| {
