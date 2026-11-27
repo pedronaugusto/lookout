@@ -50,6 +50,36 @@ retry_registration: bool = false,
 delivery: [events_per_call]posix.Kevent = undefined,
 delivery_len: usize = 0,
 delivery_at: usize = 0,
+/// Test builds only: the last events this backend read from the kernel and
+/// what each directory's listing then held, which a wait that missed an
+/// event prints (testing/timeout.zig): a change the kernel never posted shows no
+/// event, one it posted and the listing did not show shows its count.
+log: if (builtin.is_test) Log else void = if (builtin.is_test) .{} else {},
+
+pub const Log = struct {
+    pub const size = 64;
+    lines: [size]Line = undefined,
+    next: usize = 0,
+
+    pub const Line = struct {
+        node: u64,
+        fflags: u32,
+        /// The node's listing after the rescan the event caused; null for
+        /// the event itself, or where no rescan followed.
+        entries: ?usize,
+        truncated: bool,
+        tail: [96]u8,
+        tail_len: usize,
+    };
+
+    fn add(l: *Log, node: u64, fflags: u32, path: []const u8, entries: ?usize, truncated: bool) void {
+        const line = &l.lines[l.next % size];
+        const tail = path[path.len -| line.tail.len..];
+        line.* = .{ .node = node, .fflags = fflags, .entries = entries, .truncated = truncated, .tail = undefined, .tail_len = tail.len };
+        @memcpy(line.tail[0..tail.len], tail);
+        l.next += 1;
+    }
+};
 
 const Registration = struct {
     fd: posix.fd_t,
@@ -115,6 +145,18 @@ pub fn deinit(k: *Kqueue, io: Io) void {
 /// something to report.
 pub fn fd(k: *const Kqueue) ?posix.fd_t {
     return k.kq;
+}
+
+/// Test builds only: takes what the queue holds unread into `out`, for a
+/// wait that missed an event to print beside `log` and the registrations.
+/// How many it took.
+pub fn takeUnread(k: *Kqueue, out: []posix.Kevent) error{Unexpected}!usize {
+    if (!builtin.is_test) @compileError("takeUnread is the tests'");
+    const empty: [0]posix.Kevent = .{};
+    const now: std.c.timespec = .{ .sec = 0, .nsec = 0 };
+    const count = std.c.kevent(k.kq, &empty, 0, out.ptr, @intCast(out.len), &now);
+    if (count < 0) return error.Unexpected;
+    return @intCast(count);
 }
 
 /// How many paths the kernel queue has accepted. Nodes awaiting a retry
@@ -201,8 +243,12 @@ fn drain(k: *Kqueue, io: Io, batch: *Batch) contract.PollError!void {
 fn handle(k: *Kqueue, io: Io, event: posix.Kevent, batch: *Batch) contract.PollError!void {
     // A C/OS boundary: `udata` is the node id given at registration.
     const node_id: Tree.NodeId = .fromRaw(event.udata);
-    const node = k.tree.nodes.get(node_id) orelse return;
+    const node = k.tree.nodes.get(node_id) orelse {
+        if (builtin.is_test) k.log.add(event.udata, event.fflags, "(no such node)", null, false);
+        return;
+    };
     const flags = event.fflags;
+    if (builtin.is_test) k.log.add(event.udata, flags, node.path, null, false);
 
     // The path is copied first: reporting the disappearance of a node is
     // also what frees it.
@@ -232,6 +278,9 @@ fn handle(k: *Kqueue, io: Io, event: posix.Kevent, batch: *Batch) contract.PollE
                 var added: std.ArrayList(Tree.NodeId) = .empty;
                 defer added.deinit(k.gpa);
                 try k.tree.rescanDirectory(io, node_id, batch, &added);
+                if (builtin.is_test) if (k.tree.nodes.get(node_id)) |scanned| {
+                    k.log.add(event.udata, flags, scanned.path, scanned.snapshot.entries.count(), scanned.snapshot.truncated);
+                };
                 k.closeOrphanedRegistrations();
                 k.register(io, added.items, batch) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,

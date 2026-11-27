@@ -200,6 +200,9 @@ pub const Missed = error{ EventNotObserved, EventsDropped, FsEventsRefused };
 /// watcher that handed out an overflow notice first was told the system lost
 /// track, and says so. Never a pass.
 pub fn missed(w: *const lookout.Watcher) Missed {
+    if (comptime @hasField(@TypeOf(w.impl), "kqueue")) {
+        if (w.impl == .kqueue) describeKqueue(@constCast(&w.impl.kqueue));
+    }
     const overflows = w.stats().overflows;
     if (overflows != 0) {
         std.debug.print("{t}: the system lost track before the wait ended: the watcher handed out {d} overflow notice(s); the event was not reported\n", .{ w.backend(), overflows });
@@ -207,6 +210,38 @@ pub fn missed(w: *const lookout.Watcher) Missed {
     }
     std.debug.print("{t}: the watcher is past the change by its backend's bound (wait.Pace), and did not report it\n", .{w.backend()});
     return error.EventNotObserved;
+}
+
+/// Prints what the kqueue backend read last, oldest first, with the listing
+/// each rescan left; the registrations the kernel holds; and what the queue
+/// holds unread. A change the kernel never posted shows no event after it,
+/// one it posted and the listing did not show shows the count, and one
+/// still on the queue shows there.
+fn describeKqueue(k: anytype) void {
+    const Log = @TypeOf(k.log);
+    const first = k.log.next -| Log.size;
+    std.debug.print("kqueue: the last {d} event(s) read, with the listing each rescan left:\n", .{k.log.next - first});
+    for (first..k.log.next) |i| {
+        const line = &k.log.lines[i % Log.size];
+        const tail = line.tail[0..line.tail_len];
+        if (line.entries) |entries| {
+            std.debug.print("  node {d} fflags 0x{x} ...{s}: rescanned, {d} entries{s}\n", .{ line.node, line.fflags, tail, entries, if (line.truncated) ", cut at the budget" else "" });
+        } else {
+            std.debug.print("  node {d} fflags 0x{x} ...{s}\n", .{ line.node, line.fflags, tail });
+        }
+    }
+    std.debug.print("kqueue: {d} registration(s):\n", .{k.registrations.count()});
+    for (k.registrations.keys(), k.registrations.values()) |id, registration| {
+        const path = if (k.tree.nodes.get(id)) |node| node.path else "(no such node)";
+        std.debug.print("  node {d} fd {d} {s}\n", .{ id.raw(), registration.fd, path });
+    }
+    var unread: [64]std.posix.Kevent = undefined;
+    const count = k.takeUnread(&unread) catch |err| {
+        std.debug.print("kqueue: the queue could not be read: {t}\n", .{err});
+        return;
+    };
+    std.debug.print("kqueue: {d} event(s) unread on the queue, {d} read and not yet handled\n", .{ count, k.delivery_len - k.delivery_at });
+    for (unread[0..count]) |event| std.debug.print("  unread: node {d} fflags 0x{x}\n", .{ event.udata, event.fflags });
 }
 
 /// `found`, or the failure of the wait that looked for it (`missed`).
